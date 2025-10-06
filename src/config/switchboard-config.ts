@@ -20,7 +20,7 @@ export function loadSwitchboardConfig(): SwitchboardConfig {
 
   // Return default config if file doesn't exist
   if (!fs.existsSync(configPath)) {
-    return { agents: [] };
+    return switchboardConfigSchema.parse({});
   }
 
   try {
@@ -65,7 +65,9 @@ export function saveSwitchboardConfig(config: SwitchboardConfig): void {
     }
 
     // Stringify to TOML format
-    const content = stringify(validated);
+    const portable = JSON.parse(JSON.stringify(validated));
+    // biome-ignore lint/suspicious/noExplicitAny: TOML stringify requires JsonMap typing
+    const content = stringify(portable as any);
 
     // Write to file
     fs.writeFileSync(configPath, content, 'utf-8');

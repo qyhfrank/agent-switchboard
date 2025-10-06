@@ -43,3 +43,17 @@ export function getMcpConfigPath(): string {
 export function getSwitchboardConfigPath(): string {
   return path.join(getConfigDir(), 'config.toml');
 }
+
+/**
+ * Returns the absolute path to the rule snippets directory
+ */
+export function getRulesDir(): string {
+  return path.join(getConfigDir(), 'rules');
+}
+
+/**
+ * Returns the absolute path to the rule state file
+ */
+export function getRuleStatePath(): string {
+  return path.join(getConfigDir(), 'state.json');
+}
