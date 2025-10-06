@@ -30,8 +30,16 @@ export const mcpConfigSchema = z.object({
 /**
  * Schema for Agent Switchboard configuration file (~/.agent-switchboard/config.toml)
  */
+export const ruleOutputConfigSchema = z
+  .object({
+    includeDelimiters: z.boolean().default(false),
+  })
+  .passthrough()
+  .default({ includeDelimiters: false });
+
 export const switchboardConfigSchema = z.object({
   agents: z.array(z.string()).default([]),
+  rules: ruleOutputConfigSchema.default({ includeDelimiters: false }),
 });
 
 /**
@@ -39,4 +47,5 @@ export const switchboardConfigSchema = z.object({
  */
 export type McpServer = z.infer<typeof mcpServerSchema>;
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
+export type RuleOutputConfig = z.infer<typeof ruleOutputConfigSchema>;
 export type SwitchboardConfig = z.infer<typeof switchboardConfigSchema>;
