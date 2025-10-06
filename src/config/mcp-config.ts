@@ -3,65 +3,83 @@
  * Preserves comments and unknown fields when reading/writing mcp.json
  */
 
-import fs from "node:fs";
-import { parse } from "jsonc-parser";
-import { getConfigDir, getMcpConfigPath } from "./paths.js";
-import { type McpConfig, mcpConfigSchema } from "./schemas.js";
+import fs from 'node:fs';
+import { parse } from 'jsonc-parser';
+import { getConfigDir, getMcpConfigPath } from './paths.js';
+import { type McpConfig, type McpServer, mcpConfigSchema } from './schemas.js';
 
 /**
  * Loads the MCP configuration from ~/.agent-switchboard/mcp.json
  * Parses JSONC (JSON with comments) format
  * Returns default empty config if file doesn't exist
- * Auto-adds missing enable flags and saves the file
+ * Auto-adds missing enabled flags and saves the file
  *
  * @returns {McpConfig} Parsed and validated MCP configuration
  * @throws {Error} If file exists but contains invalid JSON or fails schema validation
  */
 export function loadMcpConfig(): McpConfig {
-	const configPath = getMcpConfigPath();
+  const configPath = getMcpConfigPath();
 
-	// Return default config if file doesn't exist
-	if (!fs.existsSync(configPath)) {
-		return { mcpServers: {} };
-	}
+  // Return default config if file doesn't exist
+  if (!fs.existsSync(configPath)) {
+    return { mcpServers: {} };
+  }
 
-	try {
-		// Read file content
-		const content = fs.readFileSync(configPath, "utf-8");
+  try {
+    // Read file content
+    const content = fs.readFileSync(configPath, 'utf-8');
 
-		// Parse JSONC (preserves comments in the parser's internal state)
-		const parsed = parse(content);
+    // Parse JSONC (preserves comments in the parser's internal state)
+    const parsed = parse(content);
 
-		// Validate against Zod schema (adds default enable: true if missing)
-		const validated = mcpConfigSchema.parse(parsed);
+    // Validate against Zod schema (adds default enabled: true if missing)
+    const validated = mcpConfigSchema.parse(parsed);
 
-		// Check if any server was missing enable flag
-		let needsSave = false;
-		if (parsed.mcpServers) {
-			for (const [_, server] of Object.entries(parsed.mcpServers) as [
-				string,
-				// biome-ignore lint/suspicious/noExplicitAny: parsed JSON can be any shape
-				any,
-			][]) {
-				if (typeof server?.enable === "undefined") {
-					needsSave = true;
-					break;
-				}
-			}
-		}
+    // Ensure defaults: enabled flag and type inference
+    let needsSave = false;
+    if (parsed.mcpServers) {
+      for (const [name, serverData] of Object.entries(parsed.mcpServers)) {
+        const raw = serverData as Partial<McpServer> & Record<string, unknown>;
+        const target: Partial<McpServer> & Record<string, unknown> = {
+          ...(validated.mcpServers[name] ?? {}),
+        };
 
-		// Save back if defaults were added
-		if (needsSave) {
-			saveMcpConfig(validated);
-		}
+        if (typeof raw.enabled === 'undefined') {
+          if (typeof target.enabled === 'undefined') {
+            target.enabled = true;
+          }
+          needsSave = true;
+        }
 
-		return validated;
-	} catch (error) {
-		if (error instanceof Error) {
-			throw new Error(`Failed to load MCP config from ${configPath}: ${error.message}`);
-		}
-		throw error;
-	}
+        if (typeof raw.type === 'undefined') {
+          let inferred: McpServer['type'] | undefined;
+          if (typeof raw.url === 'string' && raw.url.length > 0) {
+            inferred = 'http';
+          } else if (typeof raw.command === 'string' && raw.command.length > 0) {
+            inferred = 'stdio';
+          }
+          if (inferred && target.type !== inferred) {
+            target.type = inferred;
+            needsSave = true;
+          }
+        }
+
+        validated.mcpServers[name] = target as McpServer;
+      }
+    }
+
+    // Save back if defaults were added
+    if (needsSave) {
+      saveMcpConfig(validated);
+    }
+
+    return validated;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Failed to load MCP config from ${configPath}: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -73,43 +91,43 @@ export function loadMcpConfig(): McpConfig {
  * @throws {Error} If config fails schema validation or write operation fails
  */
 export function saveMcpConfig(config: McpConfig): void {
-    const configPath = getMcpConfigPath();
-    const configDir = getConfigDir();
+  const configPath = getMcpConfigPath();
+  const configDir = getConfigDir();
 
-    try {
-        // Validate config against schema before saving
-        const validated = mcpConfigSchema.parse(config);
+  try {
+    // Validate config against schema before saving
+    const validated = mcpConfigSchema.parse(config);
 
-        // Ensure directory exists
-        if (!fs.existsSync(configDir)) {
-            fs.mkdirSync(configDir, { recursive: true });
-        }
-
-        // Pretty print with 4 spaces; do not preserve comments; ensure trailing newline
-        const json = JSON.stringify(validated, null, 4) + "\n";
-        fs.writeFileSync(configPath, json, "utf-8");
-    } catch (error) {
-        if (error instanceof Error) {
-            throw new Error(`Failed to save MCP config to ${configPath}: ${error.message}`);
-        }
-        throw error;
+    // Ensure directory exists
+    if (!fs.existsSync(configDir)) {
+      fs.mkdirSync(configDir, { recursive: true });
     }
+
+    // Pretty print with 4 spaces; do not preserve comments; ensure trailing newline
+    const json = `${JSON.stringify(validated, null, 4)}\n`;
+    fs.writeFileSync(configPath, json, 'utf-8');
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Failed to save MCP config to ${configPath}: ${error.message}`);
+    }
+    throw error;
+  }
 }
 
 /**
- * Updates enable flags for MCP servers based on selection
+ * Updates enabled flags for MCP servers based on selection
  * Preserves comments and unknown fields
  *
- * @param {string[]} enabledServerNames - Array of server names to enable
+ * @param {string[]} enabledServerNames - Array of server names to set enabled=true
  */
-export function updateEnableFlags(enabledServerNames: string[]): void {
-	const config = loadMcpConfig();
-	const enabledSet = new Set(enabledServerNames);
+export function updateEnabledFlags(enabledServerNames: string[]): void {
+  const config = loadMcpConfig();
+  const enabledSet = new Set(enabledServerNames);
 
-	// Update enable flag for each server
-	for (const [name, server] of Object.entries(config.mcpServers)) {
-		server.enable = enabledSet.has(name);
-	}
+  // Update enabled flag for each server
+  for (const [name, server] of Object.entries(config.mcpServers)) {
+    server.enabled = enabledSet.has(name);
+  }
 
-	saveMcpConfig(config);
+  saveMcpConfig(config);
 }

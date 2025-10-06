@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Keep diffs clean and reduce review noise
+pnpm -s format
+pnpm -s lint:fix
+
+# Stage any auto-fixes from Biome
+git add -A
+
+exit 0
+

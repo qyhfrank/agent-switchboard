@@ -2,8 +2,10 @@
 .cursor
 .taskmaster
 .mcp.json
+opencode.json
 CLAUDE.md
 AGENTS.md
+DEV.md
 third_party/
 
 # Created by https://www.toptal.com/developers/gitignore/api/macos,visualstudiocode,python,node

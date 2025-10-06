@@ -1,6 +1,6 @@
 {
   "name": "agent-switchboard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Unified MCP server manager for AI coding agents",
   "type": "module",
   "bin": {
@@ -11,12 +11,21 @@
     "dev": "tsx src/index.ts",
     "build": "tsc && chmod +x dist/index.js",
     "typecheck": "tsc --noEmit",
-    "lint": "biome check src/",
-    "lint:fix": "biome check --write src/",
-    "format": "biome format --write src/",
-    "prepublishOnly": "pnpm run build"
+    "lint": "biome ci .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "test": "tsx --test tests/*.test.ts",
+    "prepublishOnly": "pnpm run build",
+    "git:hooks": "git config core.hooksPath .githooks || true"
   },
-  "keywords": ["mcp", "agent", "claude", "codex", "cursor", "cli"],
+  "keywords": [
+    "mcp",
+    "agent",
+    "claude",
+    "codex",
+    "cursor",
+    "cli"
+  ],
   "author": "",
   "license": "MIT",
   "engines": {
