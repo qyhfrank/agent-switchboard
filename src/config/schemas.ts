@@ -2,7 +2,7 @@
  * Zod schemas for configuration validation
  */
 
-import { z } from "zod";
+import { z } from 'zod';
 
 /**
  * Schema for MCP server configuration
@@ -10,27 +10,28 @@ import { z } from "zod";
  * Preserves unknown fields for forward compatibility
  */
 export const mcpServerSchema = z
-	.object({
-		command: z.string().optional(),
-		args: z.array(z.string()).optional(),
-		env: z.record(z.string()).optional(),
-		url: z.string().url().optional(),
-		enable: z.boolean().default(true),
-	})
-	.passthrough(); // Allow unknown fields
+  .object({
+    command: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string()).optional(),
+    url: z.string().url().optional(),
+    type: z.enum(['stdio', 'http']).optional(),
+    enabled: z.boolean().default(true),
+  })
+  .passthrough(); // Allow unknown fields
 
 /**
  * Schema for MCP configuration file (~/.agent-switchboard/mcp.json)
  */
 export const mcpConfigSchema = z.object({
-	mcpServers: z.record(z.string(), mcpServerSchema).default({}),
+  mcpServers: z.record(z.string(), mcpServerSchema).default({}),
 });
 
 /**
  * Schema for Agent Switchboard configuration file (~/.agent-switchboard/config.toml)
  */
 export const switchboardConfigSchema = z.object({
-	agents: z.array(z.string()).default([]),
+  agents: z.array(z.string()).default([]),
 });
 
 /**

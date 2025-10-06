@@ -1,6 +1,6 @@
 # Agent Switchboard
 
-Manage MCP servers in one place and apply them to local agents (e.g., Codex, Cursor).
+Manage MCP servers in one place and apply them to local agents (Codex, Claude Code/Desktop, Gemini) and opencode.
 
 ## Installation
 
@@ -46,6 +46,7 @@ Supported agent IDs:
 - `claude-code` — Claude Code CLI
 - `claude-desktop` — Claude Desktop app
 - `gemini` — Gemini CLI
+ - `opencode` — opencode global config
 
 Run `agent-switchboard mcp` again after updating the list.
 

@@ -3,7 +3,7 @@
  * Implements the strategy pattern for different agent config formats
  */
 
-import type { McpServer } from "../config/schemas.js";
+import type { McpServer } from '../config/schemas.js';
 
 /**
  * Agent adapter interface
@@ -11,24 +11,24 @@ import type { McpServer } from "../config/schemas.js";
  * to handle its specific configuration format and file location
  */
 export interface AgentAdapter {
-	/**
-	 * Unique identifier for the agent
-	 * @example "claude-code", "codex", "cursor"
-	 */
-	readonly id: string;
+  /**
+   * Unique identifier for the agent
+   * @example "claude-code", "codex", "cursor"
+   */
+  readonly id: string;
 
-	/**
-	 * Returns the absolute path to the agent's config file
-	 * @returns Absolute path to the config file
-	 * @example "/Users/username/.claude.json"
-	 */
-	configPath(): string;
+  /**
+   * Returns the absolute path to the agent's config file
+   * @returns Absolute path to the config file
+   * @example "/Users/username/.claude.json"
+   */
+  configPath(): string;
 
-	/**
-     * Applies MCP config to the agent's config file
-     * - Merges with existing config (preserves unknown fields)
-     * - The 'enable' field is excluded from the input
-     * @param config - MCP servers to apply (without 'enable')
-	 */
-	applyConfig(config: { mcpServers: Record<string, Omit<McpServer, "enable">> }): void;
+  /**
+   * Applies MCP config to the agent's config file
+   * - Merges with existing config (preserves unknown fields)
+   * - The 'enabled' field is excluded from the input
+   * @param config - MCP servers to apply (without 'enabled')
+   */
+  applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void;
 }
