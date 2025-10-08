@@ -130,10 +130,8 @@ program
       // Step 1: Show UI and get selected servers
       const selectedServers = await showMcpServerUI();
 
-      if (selectedServers.length === 0 && loadMcpConfig().mcpServers) {
-        console.log(chalk.yellow('\n⚠ No servers selected. Exiting without changes.'));
-        return;
-      }
+      // Proceed even if no servers are selected: this means disable all.
+      // Previous behavior incorrectly bailed out and prevented users from clearing selections.
 
       // Step 2: Update enabled flags in mcp.json
       const spinner = ora('Updating MCP configuration...').start();
