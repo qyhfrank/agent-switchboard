@@ -4,9 +4,9 @@
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { parse as parseToml, stringify as tomlStringify } from '@iarna/toml';
+import { getCodexConfigPath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
 
@@ -18,11 +18,7 @@ export class CodexAgent implements AgentAdapter {
   readonly id = 'codex' as const;
 
   configPath(): string {
-    const base =
-      process.env.ASB_AGENTS_HOME && process.env.ASB_AGENTS_HOME.trim().length > 0
-        ? (process.env.ASB_AGENTS_HOME as string)
-        : os.homedir();
-    return path.join(base, '.codex', 'config.toml');
+    return getCodexConfigPath();
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {

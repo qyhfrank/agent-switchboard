@@ -5,36 +5,121 @@
  * Unified MCP server manager for AI coding agents
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { Command } from 'commander';
 import ora from 'ora';
+
 import { getAgentById } from './agents/registry.js';
+import type { CommandPlatform as CmdPlatform } from './commands/distribution.js';
+import { distributeCommands } from './commands/distribution.js';
+import { importCommandFromFile } from './commands/importer.js';
+
+import type { CommandInventoryRow } from './commands/inventory.js';
+import { buildCommandInventory } from './commands/inventory.js';
 import { loadMcpConfig, updateEnabledFlags } from './config/mcp-config.js';
+import {
+  getClaudeDir,
+  getCodexDir,
+  getCommandsDir,
+  getGeminiDir,
+  getOpencodePath,
+  getSubagentsDir,
+} from './config/paths.js';
 import type { McpServer } from './config/schemas.js';
 import { loadSwitchboardConfig } from './config/switchboard-config.js';
+import { ensureLibraryDirectories, writeFileSecure } from './library/fs.js';
 import { RULE_SUPPORTED_AGENTS } from './rules/agents.js';
 import { composeActiveRules } from './rules/composer.js';
 import { distributeRules, listUnsupportedAgents } from './rules/distribution.js';
 import { buildRuleInventory } from './rules/inventory.js';
 import { loadRuleLibrary } from './rules/library.js';
 import { loadRuleState, updateRuleState } from './rules/state.js';
+
+import { showCommandSelector } from './ui/command-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
 import { showRuleSelector } from './ui/rule-ui.js';
+import { showSubagentSelector } from './ui/subagent-ui.js';
 
 const program = new Command();
 
 program.name('asb').description('Unified MCP server manager for AI coding agents').version('0.1.0');
 
-function formatSyncTimestamp(value: string | undefined): string {
-  if (!value) return 'no sync recorded';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
+// Initialize library directories for commands/subagents (secure permissions)
+ensureLibraryDirectories();
+
+import type { SubagentPlatform as SubPlatform } from './subagents/distribution.js';
+
+// Subagent library wiring
+import { distributeSubagents } from './subagents/distribution.js';
+import { importSubagentFromFile } from './subagents/importer.js';
+import { buildSubagentInventory } from './subagents/inventory.js';
+// Shared CLI helpers
+import { formatSyncTimestamp, printTable } from './util/cli.js';
+
+function isDir(p: string): boolean {
+  try {
+    return fs.existsSync(p) && fs.statSync(p).isDirectory();
+  } catch {
+    return false;
   }
-  return date
-    .toISOString()
-    .replace('T', ' ')
-    .replace(/\.\d{3}Z$/, 'Z');
+}
+
+function isFile(p: string): boolean {
+  try {
+    return fs.existsSync(p) && fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function defaultCommandSourceDir(platform: CmdPlatform): string {
+  switch (platform) {
+    case 'claude-code':
+      return path.join(getClaudeDir(), 'commands');
+    case 'codex':
+      return path.join(getCodexDir(), 'prompts');
+    case 'gemini':
+      return path.join(getGeminiDir(), 'commands');
+    case 'opencode':
+      return getOpencodePath('command');
+  }
+}
+
+function defaultSubagentSourceDir(platform: SubPlatform): string {
+  switch (platform) {
+    case 'claude-code':
+      return path.join(getClaudeDir(), 'agents');
+    case 'opencode':
+      return getOpencodePath('agent');
+  }
+}
+
+function listFilesRecursively(root: string, filterExts: string[]): string[] {
+  const out: string[] = [];
+  const exts = new Set(filterExts.map((e) => e.toLowerCase()));
+  const walk = (dir: string) => {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(abs);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (exts.has(ext)) out.push(abs);
+      }
+    }
+  };
+  walk(root);
+  return out;
+}
+
+async function confirmOverwrite(filePath: string, force?: boolean): Promise<boolean> {
+  if (!fs.existsSync(filePath)) return true;
+  if (force) return true;
+  return await confirm({ message: `File exists: ${filePath}. Overwrite?`, default: false });
 }
 
 program
@@ -121,25 +206,7 @@ ruleCommand
             { plain: requiresPlain, formatted: requiresPlain },
           ];
         });
-
-        const columnWidths = header.map((col, index) =>
-          Math.max(col.length, ...rows.map((row) => row[index].plain.length))
-        );
-
-        const formatRow = (values: { plain: string; formatted: string }[]): string =>
-          values
-            .map((cell, index) => {
-              const width = columnWidths[index];
-              const padding = ' '.repeat(Math.max(0, width - cell.plain.length));
-              return `${cell.formatted}${padding}`;
-            })
-            .join('  ');
-
-        const headerCells = header.map((col) => ({ plain: col, formatted: chalk.bold(col) }));
-        console.log(formatRow(headerCells));
-        rows.forEach((row) => {
-          console.log(formatRow(row));
-        });
+        printTable(header, rows);
       }
 
       console.log();
@@ -264,6 +331,388 @@ ruleCommand.action(async () => {
     process.exit(1);
   }
 });
+
+// Commands library: manage and distribute commands
+const commandRoot = program.command('command').description('Manage command library');
+
+commandRoot.action(async () => {
+  try {
+    const selection = await showCommandSelector();
+    if (!selection) return;
+    console.log();
+    console.log(chalk.green('✓ Updated active commands:'));
+    if (selection.active.length === 0) {
+      console.log(`  ${chalk.gray('none')}`);
+    } else {
+      for (const id of selection.active) {
+        console.log(`  ${chalk.cyan(id)}`);
+      }
+    }
+
+    const out = distributeCommands();
+    if (out.results.length > 0) {
+      console.log();
+      console.log(chalk.blue('Command distribution:'));
+      for (const r of out.results) {
+        const pathLabel = chalk.dim(r.filePath);
+        if (r.status === 'written') {
+          const reason = r.reason ? chalk.gray(` (${r.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
+        } else if (r.status === 'skipped') {
+          const reason = r.reason ? chalk.gray(` (${r.reason})`) : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
+        } else {
+          const err = r.error ? ` ${chalk.red(r.error)}` : '';
+          console.log(`  ${chalk.red('✗')} ${chalk.cyan(r.platform)} ${pathLabel}${err}`);
+        }
+      }
+    }
+    // Guidance: unsupported platforms for commands
+    console.log();
+    console.log(
+      chalk.gray('Unsupported platforms (manual steps required): Claude Desktop, Cursor')
+    );
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(chalk.red(`\n✗ Error: ${error.message}`));
+    }
+    process.exit(1);
+  }
+});
+
+// (add removed) — commands are created via `load` from platform sources
+
+// Commands library: load (import) existing platform files into library
+commandRoot
+  .command('load')
+  .description('Import existing platform files into the command library')
+  .argument('<platform>', 'claude-code | codex | gemini | opencode')
+  .argument('[path]', 'Source file or directory (defaults by platform)')
+  .option('-r, --recursive', 'When [path] is a directory, import files recursively')
+  .option('-f, --force', 'Overwrite existing library files without confirmation')
+  .action(
+    async (
+      platform: CmdPlatform,
+      srcPath: string | undefined,
+      opts: { recursive?: boolean; force?: boolean }
+    ) => {
+      try {
+        const exts = platform === 'gemini' ? ['.toml'] : ['.md', '.markdown'];
+        const source =
+          srcPath && srcPath.trim().length > 0 ? srcPath : defaultCommandSourceDir(platform);
+        if (!fs.existsSync(source)) {
+          console.error(chalk.red(`\n✗ Source not found: ${source}`));
+          process.exit(1);
+        }
+
+        const inputs: string[] = [];
+        if (isFile(source)) {
+          inputs.push(source);
+        } else if (isDir(source)) {
+          if (!opts.recursive) {
+            console.error(
+              chalk.red('\n✗ Source is a directory. Use -r/--recursive to import recursively.')
+            );
+            process.exit(1);
+          }
+          inputs.push(...listFilesRecursively(source, exts));
+        }
+
+        if (inputs.length === 0) {
+          console.log(chalk.yellow('\n⚠ No files to import.'));
+          return;
+        }
+
+        const outDir = getCommandsDir();
+        let imported = 0;
+        for (const file of inputs) {
+          try {
+            const { slug, content } = importCommandFromFile(platform, file);
+            const target = path.join(outDir, `${slug}.md`);
+            if (!(await confirmOverwrite(target, opts.force))) continue;
+            writeFileSecure(target, content);
+            imported++;
+            console.log(`${chalk.green('✓')} ${chalk.cyan(slug)} → ${chalk.dim(target)}`);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.log(`${chalk.red('✗')} ${chalk.dim(file)} ${chalk.red(msg)}`);
+          }
+        }
+
+        console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into command library.`);
+      } catch (error) {
+        if (error instanceof Error) {
+          console.error(chalk.red(`\n✗ Error: ${error.message}`));
+        }
+        process.exit(1);
+      }
+    }
+  );
+
+// Commands library: list inventory
+commandRoot
+  .command('list')
+  .description('Display command inventory and sync information')
+  .option('--json', 'Output inventory as JSON')
+
+  .action((options: { json?: boolean }) => {
+    try {
+      const inventory = buildCommandInventory();
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              entries: inventory.entries,
+              agentSync: inventory.state.agentSync,
+              active: inventory.state.active,
+            },
+            null,
+            2
+          )
+        );
+        return;
+      }
+
+      if (inventory.entries.length === 0) {
+        console.log(chalk.yellow('⚠ No commands found. Use `asb command load <platform> [path]`.'));
+      } else {
+        console.log(chalk.blue('Commands:'));
+        const header = ['ID', 'Active', 'Title', 'Model', 'Extras'];
+        const rows = inventory.entries.map((row: CommandInventoryRow) => {
+          const activePlain = row.active ? 'yes' : 'no';
+          const titlePlain = row.title ?? '—';
+          const modelPlain = row.model ?? '—';
+          const extrasPlain = row.extrasKeys.length > 0 ? row.extrasKeys.join(', ') : '—';
+          return [
+            { plain: row.id, formatted: row.id },
+            {
+              plain: activePlain,
+              formatted: row.active ? chalk.green(activePlain) : chalk.gray(activePlain),
+            },
+            { plain: titlePlain, formatted: titlePlain },
+            { plain: modelPlain, formatted: modelPlain },
+            { plain: extrasPlain, formatted: extrasPlain },
+          ];
+        });
+        printTable(header, rows);
+      }
+
+      console.log();
+      console.log(chalk.blue('Agent sync status:'));
+      const keys = Object.keys(inventory.state.agentSync);
+      if (keys.length === 0) {
+        console.log(`  ${chalk.gray('no sync recorded')}`);
+      } else {
+        for (const agent of keys) {
+          const sync = inventory.state.agentSync[agent];
+          const stamp = formatSyncTimestamp(sync?.updatedAt);
+          const display = sync?.updatedAt ? stamp : chalk.gray(stamp);
+          console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
+        }
+      }
+
+      // Guidance: unsupported platforms for commands
+      console.log();
+      console.log(
+        chalk.gray('Unsupported platforms (manual steps required): Claude Desktop, Cursor')
+      );
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+// Subagents library: scaffold, load, list, and interactive distribute
+const subagentRoot = program.command('subagent').description('Manage subagent (persona) library');
+
+subagentRoot.action(async () => {
+  try {
+    const selection = await showSubagentSelector();
+    if (!selection) return;
+    console.log();
+    console.log(chalk.green('✓ Updated active subagents:'));
+    if (selection.active.length === 0) {
+      console.log(`  ${chalk.gray('none')}`);
+    } else {
+      for (const id of selection.active) {
+        console.log(`  ${chalk.cyan(id)}`);
+      }
+    }
+
+    const out = distributeSubagents();
+    if (out.results.length > 0) {
+      console.log();
+      console.log(chalk.blue('Subagent distribution:'));
+      for (const r of out.results) {
+        const pathLabel = chalk.dim(r.filePath);
+        if (r.status === 'written') {
+          const reason = r.reason ? chalk.gray(` (${r.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
+        } else if (r.status === 'skipped') {
+          const reason = r.reason ? chalk.gray(` (${r.reason})`) : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
+        } else {
+          const err = r.error ? ` ${chalk.red(r.error)}` : '';
+          console.log(`  ${chalk.red('✗')} ${chalk.cyan(r.platform)} ${pathLabel}${err}`);
+        }
+      }
+    }
+
+    // Guidance: unsupported platforms for subagents
+    console.log();
+    console.log(chalk.gray('Unsupported platforms (manual steps required): Codex, Gemini'));
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(chalk.red(`\n✗ Error: ${error.message}`));
+    }
+    process.exit(1);
+  }
+});
+
+subagentRoot
+  .command('list')
+  .description('Display subagent inventory and sync information')
+  .option('--json', 'Output inventory as JSON')
+  .action((options: { json?: boolean }) => {
+    try {
+      const inventory = buildSubagentInventory();
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              entries: inventory.entries,
+              agentSync: inventory.state.agentSync,
+              activeOrder: inventory.state.active,
+            },
+            null,
+            2
+          )
+        );
+        return;
+      }
+
+      if (inventory.entries.length === 0) {
+        console.log(
+          chalk.yellow('⚠ No subagents found. Use `asb subagent load <platform> [path]`.')
+        );
+      } else {
+        console.log(chalk.blue('Subagents:'));
+        const header = ['ID', 'Active', 'Title', 'Model', 'Tools', 'Extras'];
+        const rows = inventory.entries.map((row) => {
+          const activePlain = row.active ? 'yes' : 'no';
+          const titlePlain = row.title ?? '—';
+          const modelPlain = row.model ?? '—';
+          const toolsPlain = row.tools.length > 0 ? row.tools.join(', ') : '—';
+          const extrasPlain = row.extrasKeys.length > 0 ? row.extrasKeys.join(', ') : '—';
+          return [
+            { plain: row.id, formatted: row.id },
+            {
+              plain: activePlain,
+              formatted: row.active ? chalk.green(activePlain) : chalk.gray(activePlain),
+            },
+            { plain: titlePlain, formatted: titlePlain },
+            { plain: modelPlain, formatted: modelPlain },
+            { plain: toolsPlain, formatted: toolsPlain },
+            { plain: extrasPlain, formatted: extrasPlain },
+          ];
+        });
+        printTable(header, rows);
+      }
+
+      console.log();
+      console.log(chalk.blue('Agent sync status:'));
+      const keys = Object.keys(inventory.state.agentSync);
+      if (keys.length === 0) {
+        console.log(`  ${chalk.gray('no sync recorded')}`);
+      } else {
+        for (const agent of keys) {
+          const sync = inventory.state.agentSync[agent];
+          const stamp = formatSyncTimestamp(sync?.updatedAt);
+          const display = sync?.updatedAt ? stamp : chalk.gray(stamp);
+          console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
+        }
+      }
+
+      // Guidance: unsupported platforms for subagents
+      console.log();
+      console.log(chalk.gray('Unsupported platforms (manual steps required): Codex, Gemini'));
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+subagentRoot
+  .command('load')
+  .description('Import existing platform files into the subagent library')
+  .argument('<platform>', 'claude-code | opencode')
+  .argument('[path]', 'Source file or directory (defaults by platform)')
+  .option('-r, --recursive', 'When [path] is a directory, import files recursively')
+  .option('-f, --force', 'Overwrite existing library files without confirmation')
+  .action(
+    async (
+      platform: SubPlatform,
+      srcPath: string | undefined,
+      opts: { recursive?: boolean; force?: boolean }
+    ) => {
+      try {
+        const exts = ['.md', '.markdown'];
+        const source =
+          srcPath && srcPath.trim().length > 0 ? srcPath : defaultSubagentSourceDir(platform);
+        if (!fs.existsSync(source)) {
+          console.error(chalk.red(`\n✗ Source not found: ${source}`));
+          process.exit(1);
+        }
+
+        const inputs: string[] = [];
+        if (isFile(source)) {
+          inputs.push(source);
+        } else if (isDir(source)) {
+          if (!opts.recursive) {
+            console.error(
+              chalk.red('\n✗ Source is a directory. Use -r/--recursive to import recursively.')
+            );
+            process.exit(1);
+          }
+          inputs.push(...listFilesRecursively(source, exts));
+        }
+
+        if (inputs.length === 0) {
+          console.log(chalk.yellow('\n⚠ No files to import.'));
+          return;
+        }
+
+        const outDir = getSubagentsDir();
+        let imported = 0;
+        for (const file of inputs) {
+          try {
+            const { slug, content } = importSubagentFromFile(platform, file);
+            const target = path.join(outDir, `${slug}.md`);
+            if (!(await confirmOverwrite(target, opts.force))) continue;
+            writeFileSecure(target, content);
+            imported++;
+            console.log(`${chalk.green('✓')} ${chalk.cyan(slug)} → ${chalk.dim(target)}`);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.log(`${chalk.red('✗')} ${chalk.dim(file)} ${chalk.red(msg)}`);
+          }
+        }
+
+        console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into subagent library.`);
+      } catch (error) {
+        if (error instanceof Error) {
+          console.error(chalk.red(`\n✗ Error: ${error.message}`));
+        }
+        process.exit(1);
+      }
+    }
+  );
 
 /**
  * Apply enabled MCP servers to all registered agents

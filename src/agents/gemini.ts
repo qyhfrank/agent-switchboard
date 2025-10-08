@@ -3,8 +3,7 @@
  * Manages MCP server configuration for Gemini CLI
  */
 
-import os from 'node:os';
-import path from 'node:path';
+import { getGeminiSettingsPath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
 import {
@@ -27,11 +26,7 @@ export class GeminiAgent implements AgentAdapter {
   readonly id = 'gemini' as const;
 
   configPath(): string {
-    const base =
-      process.env.ASB_AGENTS_HOME && process.env.ASB_AGENTS_HOME.trim().length > 0
-        ? (process.env.ASB_AGENTS_HOME as string)
-        : os.homedir();
-    return path.join(base, '.gemini', 'settings.json');
+    return getGeminiSettingsPath();
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {

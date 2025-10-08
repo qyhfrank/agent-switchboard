@@ -1,6 +1,12 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import {
+  getAgentsHome,
+  getClaudeDir,
+  getCodexDir,
+  getGeminiDir,
+  getOpencodePath,
+} from '../config/paths.js';
 
 import { RULE_SUPPORTED_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
 import type { ComposedRules } from './composer.js';
@@ -26,28 +32,17 @@ interface DistributionOptions {
   force?: boolean;
 }
 
-function getAgentsHome(): string {
-  const override = process.env.ASB_AGENTS_HOME?.trim();
-  if (override && override.length > 0) {
-    return override;
-  }
-  return os.homedir();
-}
-
 function resolveRuleFile(agent: (typeof RULE_SUPPORTED_AGENTS)[number]): string {
   const home = getAgentsHome();
   switch (agent) {
     case 'claude-code':
-      return path.join(home, '.claude', 'CLAUDE.md');
+      return path.join(getClaudeDir(), 'CLAUDE.md');
     case 'codex':
-      return path.join(home, '.codex', 'AGENTS.md');
+      return path.join(getCodexDir(), 'AGENTS.md');
     case 'gemini':
-      return path.join(home, '.gemini', 'AGENTS.md');
+      return path.join(getGeminiDir(), 'AGENTS.md');
     case 'opencode':
-      if (process.platform === 'win32') {
-        return path.join(home, 'AppData', 'Roaming', 'opencode', 'AGENTS.md');
-      }
-      return path.join(home, '.config', 'opencode', 'AGENTS.md');
+      return getOpencodePath('AGENTS.md');
     default:
       return path.join(home, agent, 'AGENTS.md');
   }
@@ -57,18 +52,6 @@ function ensureDirectory(filePath: string): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
-  }
-}
-
-function backupFile(filePath: string): void {
-  if (!fs.existsSync(filePath)) {
-    return;
-  }
-  const backupPath = `${filePath}.bak`;
-  try {
-    fs.copyFileSync(filePath, backupPath);
-  } catch {
-    // Ignore backup failures; primary write will still proceed
   }
 }
 
@@ -125,9 +108,7 @@ export function distributeRules(
 
     try {
       ensureDirectory(filePath);
-      if (hadExistingFile) {
-        backupFile(filePath);
-      }
+      // No backup; write-through only
       fs.writeFileSync(filePath, document.content, 'utf-8');
       agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       results.push({ agent, filePath, status: 'written', reason });

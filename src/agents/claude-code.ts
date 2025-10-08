@@ -3,8 +3,7 @@
  * Manages MCP server configuration for Claude Code CLI
  */
 
-import os from 'node:os';
-import path from 'node:path';
+import { getClaudeJsonPath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
 
@@ -23,11 +22,7 @@ export class ClaudeCodeAgent implements AgentAdapter {
   readonly id = 'claude-code' as const;
 
   configPath(): string {
-    const base =
-      process.env.ASB_AGENTS_HOME && process.env.ASB_AGENTS_HOME.trim().length > 0
-        ? (process.env.ASB_AGENTS_HOME as string)
-        : os.homedir();
-    return path.join(base, '.claude.json');
+    return getClaudeJsonPath();
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {

@@ -57,3 +57,84 @@ export function getRulesDir(): string {
 export function getRuleStatePath(): string {
   return path.join(getConfigDir(), 'state.json');
 }
+
+/**
+ * Returns the absolute path to the commands library directory
+ */
+export function getCommandsDir(): string {
+  return path.join(getConfigDir(), 'commands');
+}
+
+/**
+ * Returns the absolute path to the subagents library directory
+ */
+export function getSubagentsDir(): string {
+  return path.join(getConfigDir(), 'subagents');
+}
+
+/**
+ * Returns the home directory for installed agent apps (Claude Code, OpenCode, etc.)
+ * Can be overridden via `ASB_AGENTS_HOME`; falls back to the OS user home.
+ */
+export function getAgentsHome(): string {
+  const override = process.env.ASB_AGENTS_HOME?.trim();
+  if (override && override.length > 0) return override;
+  return os.homedir();
+}
+
+/** Platform-specific roots for common agent apps */
+export function getClaudeDir(): string {
+  return path.join(getAgentsHome(), '.claude');
+}
+
+export function getCodexDir(): string {
+  return path.join(getAgentsHome(), '.codex');
+}
+
+export function getGeminiDir(): string {
+  return path.join(getAgentsHome(), '.gemini');
+}
+
+export function getOpencodeRoot(): string {
+  const home = getAgentsHome();
+  return process.platform === 'win32'
+    ? path.join(home, 'AppData', 'Roaming', 'opencode')
+    : path.join(home, '.config', 'opencode');
+}
+
+export function getOpencodePath(...segments: string[]): string {
+  return path.join(getOpencodeRoot(), ...segments);
+}
+
+/** Config file helpers */
+export function getClaudeJsonPath(): string {
+  return path.join(getAgentsHome(), '.claude.json');
+}
+
+export function getCodexConfigPath(): string {
+  return path.join(getCodexDir(), 'config.toml');
+}
+
+export function getGeminiSettingsPath(): string {
+  return path.join(getGeminiDir(), 'settings.json');
+}
+
+export function getClaudeDesktopConfigPath(): string {
+  const home = getAgentsHome();
+  switch (os.platform()) {
+    case 'darwin':
+      return path.join(
+        home,
+        'Library',
+        'Application Support',
+        'Claude',
+        'claude_desktop_config.json'
+      );
+    case 'win32':
+      return path.join(home, 'AppData', 'Roaming', 'Claude', 'claude_desktop_config.json');
+    case 'linux':
+      return path.join(home, '.config', 'Claude', 'claude_desktop_config.json');
+    default:
+      return path.join(home, '.config', 'Claude', 'claude_desktop_config.json');
+  }
+}

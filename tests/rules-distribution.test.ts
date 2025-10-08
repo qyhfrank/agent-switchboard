@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { composeActiveRules } from '../src/rules/composer.js';
@@ -11,24 +10,9 @@ import {
 } from '../src/rules/distribution.js';
 import { ensureRulesDirectory } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, loadRuleState, saveRuleState } from '../src/rules/state.js';
+import { withTempAsbHome } from './helpers/tmp.js';
 
-function withTempAsbHome<T>(fn: (configDir: string) => T): T {
-  const previousAsbHome = process.env.ASB_HOME;
-  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-distribution-test-'));
-  const configDir = path.join(tempRoot, 'config');
-  process.env.ASB_HOME = configDir;
-  process.env.ASB_AGENTS_HOME = configDir;
-  try {
-    return fn(configDir);
-  } finally {
-    process.env.ASB_HOME = previousAsbHome;
-    process.env.ASB_AGENTS_HOME = previousAgentsHome;
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-}
-
-test('distributeRules writes rule document, creates backups, and updates state', () => {
+test('distributeRules writes rule document and updates state', () => {
   withTempAsbHome(() => {
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(
@@ -60,10 +44,8 @@ test('distributeRules writes rule document, creates backups, and updates state',
       assert.notEqual(sync?.updatedAt, undefined);
     }
 
-    // Prepare for second run with modified content to trigger backup
-    const previousContentByAgent = new Map(
-      outcome1.results.map((result) => [result.agent, fs.readFileSync(result.filePath, 'utf-8')])
-    );
+    // Prepare for second run with modified content to trigger rewrite
+    // previous content no longer backed up; rewrite should replace content in-place
 
     fs.writeFileSync(
       path.join(rulesDir, 'alpha.md'),
@@ -76,10 +58,6 @@ test('distributeRules writes rule document, creates backups, and updates state',
       assert.equal(result.status, 'written');
       const current = fs.readFileSync(result.filePath, 'utf-8');
       assert.equal(current, composed2.content);
-      const backupPath = `${result.filePath}.bak`;
-      assert.equal(fs.existsSync(backupPath), true);
-      const backupContent = fs.readFileSync(backupPath, 'utf-8');
-      assert.equal(backupContent, previousContentByAgent.get(result.agent));
     });
 
     const stateAfterSecond = loadRuleState();
@@ -162,8 +140,6 @@ test('distributeRules with force rewrites matching content', () => {
       assert.equal(result.reason, 'refreshed');
       const current = fs.readFileSync(result.filePath, 'utf-8');
       assert.equal(current, composed.content);
-      const backupPath = `${result.filePath}.bak`;
-      assert.equal(fs.existsSync(backupPath), true);
     });
   });
 });

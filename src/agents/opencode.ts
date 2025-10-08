@@ -4,8 +4,8 @@
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { getOpencodePath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
 
@@ -23,15 +23,7 @@ export class OpencodeAgent implements AgentAdapter {
   readonly id = 'opencode' as const;
 
   configPath(): string {
-    const home =
-      process.env.ASB_AGENTS_HOME && process.env.ASB_AGENTS_HOME.trim().length > 0
-        ? (process.env.ASB_AGENTS_HOME as string)
-        : os.homedir();
-
-    if (process.platform === 'win32') {
-      return path.join(home, 'AppData', 'Roaming', 'opencode', 'opencode.json');
-    }
-    return path.join(home, '.config', 'opencode', 'opencode.json');
+    return getOpencodePath('opencode.json');
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
