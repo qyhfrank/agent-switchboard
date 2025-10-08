@@ -8,31 +8,19 @@ import { getConfigDir } from '../src/config/paths.js';
 import { composeActiveRules, composeRules } from '../src/rules/composer.js';
 import { ensureRulesDirectory, type RuleSnippet } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, saveRuleState } from '../src/rules/state.js';
-
-function withTempAsbHome<T>(fn: (configDir: string) => T): T {
-  const previousAsbHome = process.env.ASB_HOME;
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-composer-test-'));
-  const configDir = path.join(tempRoot, 'config');
-  process.env.ASB_HOME = configDir;
-  try {
-    return fn(configDir);
-  } finally {
-    process.env.ASB_HOME = previousAsbHome;
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-}
+import { withTempAsbHome } from './helpers/tmp.js';
 
 test('composeRules merges active snippets without delimiters', () => {
   const rules: RuleSnippet[] = [
     {
       id: 'alpha',
-      filePath: '/tmp/alpha.md',
+      filePath: path.join(os.tmpdir(), 'alpha.md'),
       metadata: { title: 'Alpha', description: undefined, tags: [], requires: [] },
       content: 'Line 1\r\nLine 2\r\n\r\n',
     },
     {
       id: 'beta',
-      filePath: '/tmp/beta.md',
+      filePath: path.join(os.tmpdir(), 'beta.md'),
       metadata: { title: undefined, description: undefined, tags: ['style'], requires: [] },
       content: 'Beta body\n',
     },
@@ -56,7 +44,7 @@ test('composeRules throws when an active rule is missing', () => {
   const rules: RuleSnippet[] = [
     {
       id: 'alpha',
-      filePath: '/tmp/alpha.md',
+      filePath: path.join(os.tmpdir(), 'alpha.md'),
       metadata: { title: undefined, description: undefined, tags: [], requires: [] },
       content: 'Alpha\n',
     },

@@ -1,9 +1,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-
 import { getRuleStatePath } from '../src/config/paths.js';
 import {
   DEFAULT_RULE_STATE,
@@ -11,19 +9,7 @@ import {
   saveRuleState,
   updateRuleState,
 } from '../src/rules/state.js';
-
-function withTempAsbHome<T>(fn: (configDir: string) => T): T {
-  const previousAsbHome = process.env.ASB_HOME;
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-state-test-'));
-  const configDir = path.join(tempRoot, 'config');
-  process.env.ASB_HOME = configDir;
-  try {
-    return fn(configDir);
-  } finally {
-    process.env.ASB_HOME = previousAsbHome;
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-}
+import { withTempAsbHome } from './helpers/tmp.js';
 
 test('loadRuleState returns defaults when file is missing', () => {
   withTempAsbHome(() => {

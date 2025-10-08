@@ -1,16 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { OpencodeAgent } from '../src/agents/opencode.js';
+import { withTempAgentsHome } from './helpers/tmp.js';
 
 test('opencode adapter writes local and remote servers', () => {
-  const prevAgentsHome = process.env.ASB_AGENTS_HOME;
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-agents-'));
-  process.env.ASB_AGENTS_HOME = tmp; // redirect agents home to temp dir
-  try {
+  withTempAgentsHome((_agentsHome) => {
     const agent = new OpencodeAgent();
     const outPath = agent.configPath();
     const outDir = path.dirname(outPath);
@@ -49,8 +46,5 @@ test('opencode adapter writes local and remote servers', () => {
     assert.equal(remote.enabled, true);
     assert.deepEqual(remote.headers, { Authorization: 'Bearer X' });
     assert.equal(remote.command, undefined);
-  } finally {
-    process.env.ASB_AGENTS_HOME = prevAgentsHome;
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+  });
 });

@@ -1,23 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 
 import { ensureRulesDirectory, loadRuleLibrary } from '../src/rules/library.js';
-
-function withTempAsbHome<T>(fn: (configDir: string) => T): T {
-  const previousAsbHome = process.env.ASB_HOME;
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-rules-test-'));
-  const configDir = path.join(tempRoot, 'config');
-  process.env.ASB_HOME = configDir;
-  try {
-    return fn(configDir);
-  } finally {
-    process.env.ASB_HOME = previousAsbHome;
-    fs.rmSync(tempRoot, { recursive: true, force: true });
-  }
-}
+import { withTempAsbHome } from './helpers/tmp.js';
 
 test('loadRuleLibrary ensures directory existence and returns empty list', () => {
   withTempAsbHome((configDir) => {

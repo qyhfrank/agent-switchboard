@@ -1,17 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-
 import { loadMcpConfig, saveMcpConfig } from '../src/config/mcp-config.js';
 import { getMcpConfigPath } from '../src/config/paths.js';
+import { withTempAsbHome } from './helpers/tmp.js';
 
 test('loadMcpConfig infers enabled and type for missing fields', () => {
-  const prevHome = process.env.ASB_HOME;
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-tests-'));
-  process.env.ASB_HOME = tmp; // redirect ~/.agent-switchboard to temp dir
-  try {
+  withTempAsbHome(() => {
     const cfgPath = getMcpConfigPath();
     const initial = {
       mcpServers: {
@@ -33,8 +29,5 @@ test('loadMcpConfig infers enabled and type for missing fields', () => {
 
     // Round-trip consistency
     saveMcpConfig(loaded);
-  } finally {
-    process.env.ASB_HOME = prevHome;
-    fs.rmSync(tmp, { recursive: true, force: true });
-  }
+  });
 });

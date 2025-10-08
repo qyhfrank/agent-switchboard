@@ -2,6 +2,8 @@
 
 Manage MCP servers in one place and apply them to local agents (Codex, Claude Code/Desktop, Gemini) and opencode.
 
+You can run with either `agent-switchboard` or the shorter alias `asb`.
+
 ## Installation
 
 Global install:
@@ -58,7 +60,7 @@ Toggle `rules.includeDelimiters` to `true` if you want each snippet surrounded b
 
 Run `agent-switchboard mcp` again after updating the list.
 
-## Rule Library (v0.1.2)
+## Rule Library
 
 Rule snippets live in `~/.agent-switchboard/rules/` (respects `ASB_HOME`). Each snippet is a Markdown file and can include YAML frontmatter with `title`, `description`, `tags`, and `requires` fields. Example:
 
@@ -87,7 +89,7 @@ Once confirmed, Agent Switchboard composes the merged Markdown, stores the activ
 - `~/.gemini/AGENTS.md`
 - `~/.config/opencode/AGENTS.md` (or `%APPDATA%/opencode/AGENTS.md` on Windows)
 
-Unsupportive agents such as Claude Desktop and Cursor are reported and left untouched. Existing files are backed up to `<name>.bak` before overwriting. If you rerun the selector without changing the order, the tool still refreshes the destination files to overwrite any manual edits.
+Unsupportive agents such as Claude Desktop and Cursor are reported and left untouched. If you rerun the selector without changing the order, the tool refreshes the destination files to overwrite any manual edits.
 
 ### Auditing Rules
 
@@ -95,8 +97,76 @@ See the full inventory, activation state, and per-agent sync timestamps:
 
 ```bash
 agent-switchboard rule list
-agent-switchboard rule list --json
 ```
+
+## Command Library
+
+- Location: `~/.agent-switchboard/commands/<slug>.md` (respects `ASB_HOME`).
+- Frontmatter: only global `description` (optional). Any platform-native options must live under `extras.<platform>` and are written through verbatim. No parsing, no key renaming, no documentation of platform keys here.
+
+### Import
+
+```bash
+# Import an existing platform file or directory into the library
+# Use -r/--recursive to traverse subdirectories when <path> is a directory
+agent-switchboard command load <platform> [path] [-r]
+# <platform>: claude-code | codex | gemini | opencode
+# If [path] is omitted, defaults by platform:
+#   claude-code → ~/.claude/commands
+#   codex       → ~/.codex/prompts
+#   gemini      → ~/.gemini/commands
+#   opencode    → ~/.config/opencode/command (Windows: %APPDATA%/opencode/command)
+```
+
+### Select and Distribute
+
+```bash
+agent-switchboard command
+```
+
+On confirm, adapters write each selected command to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is.
+
+Files are only rewritten when content changes.
+
+### Inventory
+
+```bash
+# Inventory
+agent-switchboard command list
+```
+
+## Subagent Library
+
+- Location: `~/.agent-switchboard/subagents/<slug>.md` (respects `ASB_HOME`).
+- Frontmatter: only global `description` (optional). Any platform-native options must live under `extras.<platform>` and are written through verbatim. We do not parse, validate, or showcase platform key names in this README. Platforms that do not support subagent files are skipped.
+
+### Import
+
+```bash
+agent-switchboard subagent load <platform> [path] [-r]
+# <platform>: claude-code | opencode
+# If [path] is omitted, defaults by platform:
+#   claude-code → ~/.claude/agents
+#   opencode    → ~/.config/opencode/agent (Windows: %APPDATA%/opencode/agent)
+```
+
+### Select and Distribute
+
+```bash
+agent-switchboard subagent
+```
+
+On confirm, adapters write each selected subagent to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is. Platforms that do not accept subagent files are skipped with a hint.
+
+### Inventory
+
+```bash
+agent-switchboard subagent list
+```
+
+## Environment
+
+- `ASB_HOME`: overrides `~/.agent-switchboard` for library/state files.
 
 ## License
 
