@@ -1,6 +1,8 @@
-import { checkbox, confirm, input } from '@inquirer/prompts';
+import { confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
+import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, updateLibraryStateSection } from '../library/state.js';
+import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 
 export interface GenericSelectionResult {
   active: string[];
@@ -16,6 +18,7 @@ export interface LibrarySelectorOptions<TEntry> {
   getModel?: (e: TEntry) => string | undefined;
   noun: string; // e.g. 'command' | 'subagent'
   allowOrdering?: boolean; // default: true. If false, skip reordering prompt
+  scope?: ConfigScope;
 }
 
 function formatOrderList<TEntry>(
@@ -111,20 +114,11 @@ export async function showLibrarySelector<TEntry>(
   }
 
   const map = new Map<string, TEntry>();
-  for (const e of entries) map.set(opts.getId(e), e);
+  for (const entry of entries) map.set(opts.getId(entry), entry);
 
-  const state = loadLibraryStateSection(opts.section);
+  const state = loadLibraryStateSection(opts.section, opts.scope);
 
-  const describeEntry = (e: TEntry) => {
-    const title = opts.getTitle(e).trim();
-    const id = opts.getId(e);
-    const idSuffix = title && title.length > 0 ? chalk.gray(` (${id})`) : '';
-    const modelStr = opts.getModel ? opts.getModel(e) : undefined;
-    const model = modelStr ? chalk.gray(` – ${modelStr}`) : '';
-    return `${chalk.cyan(title || id)}${idSuffix}${model}`.trim();
-  };
-
-  const buildChoices = (activeIds: string[]) => {
+  const buildChoiceList = (activeIds: string[]): FuzzyMultiSelectChoice[] => {
     const activeSet = new Set(activeIds);
     const orderedActive: TEntry[] = [];
     for (const id of activeIds) {
@@ -133,44 +127,69 @@ export async function showLibrarySelector<TEntry>(
     }
 
     const inactive = entries
-      .filter((e) => !activeSet.has(opts.getId(e)))
+      .filter((entry) => !activeSet.has(opts.getId(entry)))
       .sort((a, b) => opts.getTitle(a).localeCompare(opts.getTitle(b)));
 
-    const ordered = [...orderedActive, ...inactive];
-    return ordered.map((e) => ({
-      name: describeEntry(e),
-      value: opts.getId(e),
-      checked: activeSet.has(opts.getId(e)),
-    }));
+    const orderedEntries = [...orderedActive, ...inactive];
+
+    return orderedEntries.map((entry) => {
+      const id = opts.getId(entry);
+      const title = opts.getTitle(entry).trim();
+      const primary = title.length > 0 ? title : id;
+      const model = opts.getModel ? opts.getModel(entry) : undefined;
+      const hintParts = new Set<string>();
+      if (primary !== id) hintParts.add(id);
+      if (model) hintParts.add(model);
+      const hint = hintParts.size > 0 ? Array.from(hintParts).join(' · ') : undefined;
+      const keywordSet = new Set<string>();
+      keywordSet.add(id);
+      if (title.length > 0) keywordSet.add(title);
+      if (model) keywordSet.add(model);
+      return {
+        value: id,
+        label: primary,
+        hint,
+        keywords: Array.from(keywordSet),
+      } satisfies FuzzyMultiSelectChoice;
+    });
   };
 
+  const currentSelection = state.active;
   while (true) {
-    const choices = buildChoices(state.active);
-    const selected = await checkbox({
-      message: `Select ${opts.noun}s to enable (Space: toggle, a: all, i: invert, Enter: confirm):`,
+    const choices = buildChoiceList(currentSelection);
+    const selected = await fuzzyMultiSelect({
+      message: `Select ${opts.noun}s to enable`,
       choices,
-      pageSize: 15,
+      initialSelected: currentSelection,
+      pageSize: 12,
+      allowEmpty: true,
     });
 
-    if (selected.length === 0) {
+    const sanitized = selected.filter((id) => map.has(id));
+
+    if (sanitized.length === 0) {
       const confirmed = await confirm({
         message: `No ${opts.noun}s selected. Proceed with empty configuration?`,
         default: false,
       });
       if (confirmed) {
-        updateLibraryStateSection(opts.section, () => ({ active: [], agentSync: {} }));
+        updateLibraryStateSection(opts.section, () => ({ active: [], agentSync: {} }), opts.scope);
         return { active: [] };
       }
       continue;
     }
 
     if (!allowOrdering) {
-      updateLibraryStateSection(opts.section, () => ({ active: selected, agentSync: {} }));
-      return { active: selected };
+      updateLibraryStateSection(
+        opts.section,
+        () => ({ active: sanitized, agentSync: {} }),
+        opts.scope
+      );
+      return { active: sanitized };
     }
 
-    const ordered = await promptOrder(opts.noun, selected, map, opts.getTitle);
-    updateLibraryStateSection(opts.section, () => ({ active: ordered, agentSync: {} }));
+    const ordered = await promptOrder(opts.noun, sanitized, map, opts.getTitle);
+    updateLibraryStateSection(opts.section, () => ({ active: ordered, agentSync: {} }), opts.scope);
     return { active: ordered };
   }
 }

@@ -1,62 +1,13 @@
-import { checkbox, confirm, input } from '@inquirer/prompts';
+import { confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
 
+import type { ConfigScope } from '../config/scope.js';
 import { loadRuleLibrary, type RuleSnippet } from '../rules/library.js';
 import { loadRuleState } from '../rules/state.js';
+import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 
 interface RuleSelectionResult {
   active: string[];
-}
-
-function buildRuleMap(rules: RuleSnippet[]): Map<string, RuleSnippet> {
-  const map = new Map<string, RuleSnippet>();
-  for (const rule of rules) {
-    map.set(rule.id, rule);
-  }
-  return map;
-}
-
-function describeRule(rule: RuleSnippet): string {
-  const title = rule.metadata.title?.trim();
-  const label = title && title.length > 0 ? chalk.cyan(title) : chalk.cyan(rule.id);
-  const idSuffix = title && title.length > 0 ? chalk.gray(` (${rule.id})`) : '';
-  const tags =
-    rule.metadata.tags.length > 0 ? chalk.gray(` [${rule.metadata.tags.join(', ')}]`) : '';
-  const requires =
-    rule.metadata.requires.length > 0
-      ? chalk.yellow(` requires: ${rule.metadata.requires.join(', ')}`)
-      : '';
-  const description = rule.metadata.description
-    ? chalk.gray(` – ${rule.metadata.description}`)
-    : '';
-  return `${label}${idSuffix}${tags}${requires}${description}`.trim();
-}
-
-function buildRuleChoices(rules: RuleSnippet[], activeIds: string[]) {
-  const activeSet = new Set(activeIds);
-  const ruleMap = buildRuleMap(rules);
-
-  const orderedActive: RuleSnippet[] = [];
-  for (const id of activeIds) {
-    const rule = ruleMap.get(id);
-    if (rule) orderedActive.push(rule);
-  }
-
-  const inactiveRules = rules
-    .filter((rule) => !activeSet.has(rule.id))
-    .sort((a, b) => {
-      const aLabel = (a.metadata.title ?? a.id).toLowerCase();
-      const bLabel = (b.metadata.title ?? b.id).toLowerCase();
-      return aLabel.localeCompare(bLabel);
-    });
-
-  const ordered = [...orderedActive, ...inactiveRules];
-
-  return ordered.map((rule) => ({
-    name: describeRule(rule),
-    value: rule.id,
-    checked: activeSet.has(rule.id),
-  }));
 }
 
 function formatOrderList(order: string[], map: Map<string, RuleSnippet>): string {
@@ -150,7 +101,7 @@ async function promptRuleOrder(
   }
 }
 
-export async function showRuleSelector(): Promise<RuleSelectionResult | null> {
+export async function showRuleSelector(scope?: ConfigScope): Promise<RuleSelectionResult | null> {
   const rules = loadRuleLibrary();
 
   if (rules.length === 0) {
@@ -168,18 +119,71 @@ export async function showRuleSelector(): Promise<RuleSelectionResult | null> {
     return null;
   }
 
-  const state = loadRuleState();
-  const ruleMap = buildRuleMap(rules);
+  const state = loadRuleState(scope);
+  const ruleMap = new Map<string, RuleSnippet>();
+  for (const rule of rules) {
+    ruleMap.set(rule.id, rule);
+  }
+
+  const buildChoiceList = (activeIds: string[]): FuzzyMultiSelectChoice[] => {
+    const activeSet = new Set(activeIds);
+    const orderedActive: RuleSnippet[] = [];
+    for (const id of activeIds) {
+      const snippet = ruleMap.get(id);
+      if (snippet) orderedActive.push(snippet);
+    }
+
+    const inactive = rules
+      .filter((rule) => !activeSet.has(rule.id))
+      .sort((a, b) => {
+        const aTitle = (a.metadata.title ?? a.id).toLowerCase();
+        const bTitle = (b.metadata.title ?? b.id).toLowerCase();
+        return aTitle.localeCompare(bTitle);
+      });
+
+    const ordered = [...orderedActive, ...inactive];
+
+    return ordered.map((rule) => {
+      const label = rule.metadata.title?.trim() ?? '';
+      const primary = label.length > 0 ? label : rule.id;
+      const hintParts = new Set<string>();
+      if (primary !== rule.id) hintParts.add(rule.id);
+      if (rule.metadata.tags.length > 0) {
+        hintParts.add(`tags: ${rule.metadata.tags.join(', ')}`);
+      }
+      if (rule.metadata.requires.length > 0) {
+        hintParts.add(`requires: ${rule.metadata.requires.join(', ')}`);
+      }
+      if (rule.metadata.description) {
+        hintParts.add(rule.metadata.description);
+      }
+      const keywordSet = new Set<string>();
+      keywordSet.add(rule.id);
+      if (label.length > 0) keywordSet.add(label);
+      if (rule.metadata.description) keywordSet.add(rule.metadata.description);
+      for (const tag of rule.metadata.tags) keywordSet.add(tag);
+      for (const req of rule.metadata.requires) keywordSet.add(req);
+      return {
+        value: rule.id,
+        label: primary,
+        hint: hintParts.size > 0 ? Array.from(hintParts).join(' · ') : undefined,
+        keywords: Array.from(keywordSet),
+      } satisfies FuzzyMultiSelectChoice;
+    });
+  };
 
   while (true) {
-    const choices = buildRuleChoices(rules, state.active);
-    const selected = await checkbox({
-      message: 'Select rule snippets to enable (Space: toggle, a: all, i: invert, Enter: confirm):',
-      choices,
-      pageSize: 15,
+    const selection = await fuzzyMultiSelect({
+      message: 'Select rules to enable',
+      choices: buildChoiceList(state.active),
+      initialSelected: state.active,
+      pageSize: 12,
+      allowEmpty: true,
     });
 
-    if (selected.length === 0) {
+    const sanitized = selection.filter((id) => ruleMap.has(id));
+
+    if (sanitized.length === 0) {
       const confirmed = await confirm({
         message: 'No rules selected. Proceed with empty configuration?',
         default: false,
@@ -190,7 +194,7 @@ export async function showRuleSelector(): Promise<RuleSelectionResult | null> {
       continue;
     }
 
-    const ordered = await promptRuleOrder(selected, ruleMap);
+    const ordered = await promptRuleOrder(sanitized, ruleMap);
     return { active: ordered };
   }
 }

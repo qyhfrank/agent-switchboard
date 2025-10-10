@@ -1,3 +1,4 @@
+import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, type SectionState } from '../library/state.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
@@ -34,9 +35,9 @@ function sortInactive(entries: SubagentEntry[]): SubagentEntry[] {
   });
 }
 
-export function buildSubagentInventory(): SubagentInventory {
+export function buildSubagentInventory(scope?: ConfigScope): SubagentInventory {
   const entries = loadSubagentLibrary();
-  const state = loadLibraryStateSection('subagents');
+  const state = loadLibraryStateSection('subagents', scope);
 
   const byId = new Map(entries.map((e) => [e.id, e]));
   const rows: SubagentInventoryRow[] = [];

@@ -1,3 +1,4 @@
+import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, type SectionState } from '../library/state.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
@@ -33,9 +34,9 @@ function sortInactive(entries: CommandEntry[]): CommandEntry[] {
   });
 }
 
-export function buildCommandInventory(): CommandInventory {
+export function buildCommandInventory(scope?: ConfigScope): CommandInventory {
   const entries = loadCommandLibrary();
-  const state = loadLibraryStateSection('commands');
+  const state = loadLibraryStateSection('commands', scope);
 
   const byId = new Map(entries.map((e) => [e.id, e]));
   const rows: CommandInventoryRow[] = [];

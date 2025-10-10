@@ -1,6 +1,9 @@
-import fs from 'node:fs';
 import { z } from 'zod';
-import { getConfigDir, getRuleStatePath } from '../config/paths.js';
+import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
+import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
+import type { SwitchboardConfigLayer } from '../config/schemas.js';
+import type { ConfigScope } from '../config/scope.js';
+import { scopeToLayerOptions } from '../config/scope.js';
 
 const agentSyncEntrySchema = z
   .object({
@@ -17,65 +20,69 @@ const sectionStateSchema = z
   .passthrough();
 
 export type SectionState = z.infer<typeof sectionStateSchema>;
+const agentSyncCache: Record<
+  'commands' | 'subagents',
+  Record<string, { hash?: string; updatedAt?: string }>
+> = {
+  commands: {},
+  subagents: {},
+};
 
-export function loadLibraryStateSection(section: 'commands' | 'subagents'): SectionState {
-  const filePath = getRuleStatePath();
-  if (!fs.existsSync(filePath)) {
-    return { active: [], agentSync: {} };
-  }
-  try {
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const parsed: unknown = JSON.parse(raw);
-    const obj = (parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {})[
-      section
-    ];
-    return sectionStateSchema.parse(obj ?? {});
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to load ${section} state from ${filePath}: ${error.message}`);
-    }
-    throw error;
-  }
+function getConfigSectionActive(
+  section: 'commands' | 'subagents',
+  options?: UpdateConfigLayerOptions
+): string[] {
+  const { config } = loadMergedSwitchboardConfig(options);
+  return [...config[section].active];
+}
+
+export function loadLibraryStateSection(
+  section: 'commands' | 'subagents',
+  scope?: ConfigScope
+): SectionState {
+  const layerOptions = scopeToLayerOptions(scope);
+  const configActive = getConfigSectionActive(section, layerOptions);
+  return {
+    active: configActive,
+    agentSync: { ...agentSyncCache[section] },
+  };
 }
 
 export function saveLibraryStateSection(
   section: 'commands' | 'subagents',
-  state: SectionState
+  state: SectionState,
+  scope?: ConfigScope
 ): void {
-  const filePath = getRuleStatePath();
-  const baseDir = getConfigDir();
-
+  const layerOptions = scopeToLayerOptions(scope);
   const validated = sectionStateSchema.parse(state);
 
-  try {
-    let root: Record<string, unknown> = {};
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      root = JSON.parse(raw) as Record<string, unknown>;
+  updateConfigLayer((layer) => {
+    const next: SwitchboardConfigLayer = { ...layer };
+    if (section === 'commands') {
+      const currentCommands = (next.commands ?? {}) as Record<string, unknown>;
+      next.commands = {
+        ...currentCommands,
+        active: [...validated.active],
+      } as SwitchboardConfigLayer['commands'];
+    } else {
+      const currentSubagents = (next.subagents ?? {}) as Record<string, unknown>;
+      next.subagents = {
+        ...currentSubagents,
+        active: [...validated.active],
+      } as SwitchboardConfigLayer['subagents'];
     }
-
-    root[section] = validated;
-
-    if (!fs.existsSync(baseDir)) {
-      fs.mkdirSync(baseDir, { recursive: true });
-    }
-
-    const json = `${JSON.stringify(root, null, 4)}\n`;
-    fs.writeFileSync(filePath, json, 'utf-8');
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to save ${section} state to ${filePath}: ${error.message}`);
-    }
-    throw error;
-  }
+    return next;
+  }, layerOptions);
+  agentSyncCache[section] = { ...validated.agentSync };
 }
 
 export function updateLibraryStateSection(
   section: 'commands' | 'subagents',
-  mutator: (current: SectionState) => SectionState
+  mutator: (current: SectionState) => SectionState,
+  scope?: ConfigScope
 ): SectionState {
-  const current = loadLibraryStateSection(section);
+  const current = loadLibraryStateSection(section, scope);
   const next = mutator(current);
-  saveLibraryStateSection(section, next);
-  return loadLibraryStateSection(section);
+  saveLibraryStateSection(section, next, scope);
+  return loadLibraryStateSection(section, scope);
 }

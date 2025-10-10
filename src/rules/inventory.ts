@@ -1,3 +1,4 @@
+import type { ConfigScope } from '../config/scope.js';
 import { loadRuleLibrary, type RuleSnippet } from './library.js';
 import type { RuleState } from './schema.js';
 import { loadRuleState } from './state.js';
@@ -27,9 +28,9 @@ function sortInactiveRules(rules: RuleSnippet[]): RuleSnippet[] {
   });
 }
 
-export function buildRuleInventory(): RuleInventory {
+export function buildRuleInventory(scope?: ConfigScope): RuleInventory {
   const rules = loadRuleLibrary();
-  const state = loadRuleState();
+  const state = loadRuleState(scope);
 
   const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));
   const rows: RuleInventoryRow[] = [];

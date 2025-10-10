@@ -28,24 +28,63 @@ export const mcpConfigSchema = z.object({
 });
 
 /**
- * Schema for Agent Switchboard configuration file (~/.agent-switchboard/config.toml)
+ * Base schema for selection sections (commands, subagents, etc.) without defaults
  */
-export const ruleOutputConfigSchema = z
+const selectionSectionBaseSchema = z
   .object({
+    active: z.array(z.string().trim().min(1)).optional(),
+  })
+  .passthrough();
+
+export const selectionSectionSchema = selectionSectionBaseSchema
+  .extend({
+    active: z.array(z.string().trim().min(1)).default([]),
+  })
+  .passthrough();
+
+const rulesSectionBaseSchema = selectionSectionBaseSchema.extend({
+  includeDelimiters: z.boolean().optional(),
+});
+
+export const rulesSectionSchema = rulesSectionBaseSchema
+  .extend({
+    active: z.array(z.string().trim().min(1)).default([]),
     includeDelimiters: z.boolean().default(false),
   })
-  .passthrough()
-  .default({ includeDelimiters: false });
+  .passthrough();
 
-export const switchboardConfigSchema = z.object({
-  agents: z.array(z.string()).default([]),
-  rules: ruleOutputConfigSchema.default({ includeDelimiters: false }),
-});
+/**
+ * Schema for Agent Switchboard configuration file (~/.agent-switchboard/config.toml)
+ */
+export const switchboardConfigSchema = z
+  .object({
+    agents: z.array(z.string().trim().min(1)).default([]),
+    mcp: selectionSectionSchema.default({ active: [] }),
+    commands: selectionSectionSchema.default({ active: [] }),
+    subagents: selectionSectionSchema.default({ active: [] }),
+    rules: rulesSectionSchema.default({ active: [], includeDelimiters: false }),
+  })
+  .passthrough();
+
+/**
+ * Input schema for partial config layers (no defaults)
+ */
+export const switchboardConfigLayerSchema = z
+  .object({
+    agents: z.array(z.string().trim().min(1)).optional(),
+    mcp: selectionSectionBaseSchema.optional(),
+    commands: selectionSectionBaseSchema.optional(),
+    subagents: selectionSectionBaseSchema.optional(),
+    rules: rulesSectionBaseSchema.optional(),
+  })
+  .passthrough();
 
 /**
  * Infer TypeScript types from schemas
  */
 export type McpServer = z.infer<typeof mcpServerSchema>;
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
-export type RuleOutputConfig = z.infer<typeof ruleOutputConfigSchema>;
+export type SelectionSection = z.infer<typeof selectionSectionSchema>;
+export type RulesSection = z.infer<typeof rulesSectionSchema>;
 export type SwitchboardConfig = z.infer<typeof switchboardConfigSchema>;
+export type SwitchboardConfigLayer = z.infer<typeof switchboardConfigLayerSchema>;

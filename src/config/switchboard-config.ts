@@ -4,9 +4,18 @@
  */
 
 import fs from 'node:fs';
-import { parse, stringify } from '@iarna/toml';
+import { stringify } from '@iarna/toml';
+import type { ConfigLayers, LoadConfigLayersOptions } from './layered-config.js';
+import { loadMergedSwitchboardConfig } from './layered-config.js';
 import { getConfigDir, getSwitchboardConfigPath } from './paths.js';
 import { type SwitchboardConfig, switchboardConfigSchema } from './schemas.js';
+
+export interface SwitchboardConfigLoadOptions extends LoadConfigLayersOptions {}
+
+export interface SwitchboardConfigLoadResult {
+  config: SwitchboardConfig;
+  layers: ConfigLayers;
+}
 
 /**
  * Loads the Agent Switchboard configuration from ~/.agent-switchboard/config.toml
@@ -15,33 +24,14 @@ import { type SwitchboardConfig, switchboardConfigSchema } from './schemas.js';
  * @returns {SwitchboardConfig} Parsed and validated configuration
  * @throws {Error} If file exists but contains invalid TOML or fails schema validation
  */
-export function loadSwitchboardConfig(): SwitchboardConfig {
-  const configPath = getSwitchboardConfigPath();
+export function loadSwitchboardConfig(options?: SwitchboardConfigLoadOptions): SwitchboardConfig {
+  return loadMergedSwitchboardConfig(options).config;
+}
 
-  // Return default config if file doesn't exist
-  if (!fs.existsSync(configPath)) {
-    return switchboardConfigSchema.parse({});
-  }
-
-  try {
-    // Read file content
-    const content = fs.readFileSync(configPath, 'utf-8');
-
-    // Parse TOML
-    const parsed = parse(content);
-
-    // Validate against Zod schema
-    const validated = switchboardConfigSchema.parse(parsed);
-
-    return validated;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(
-        `Failed to load Agent Switchboard config from ${configPath}: ${error.message}`
-      );
-    }
-    throw error;
-  }
+export function loadSwitchboardConfigWithLayers(
+  options?: SwitchboardConfigLoadOptions
+): SwitchboardConfigLoadResult {
+  return loadMergedSwitchboardConfig(options);
 }
 
 /**

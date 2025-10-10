@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { ConfigScope } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import type { RuleSnippet } from './library.js';
 import { loadRuleLibrary } from './library.js';
@@ -92,10 +93,16 @@ export function composeRules(
   };
 }
 
-export function composeActiveRules(): ComposedRules {
+export function composeActiveRules(scope?: ConfigScope): ComposedRules {
   const rules = loadRuleLibrary();
-  const state = loadRuleState();
-  const config = loadSwitchboardConfig();
+  const state = loadRuleState(scope);
+  const loadOptions = scope
+    ? {
+        profile: scope.profile ?? undefined,
+        projectPath: scope.project ?? undefined,
+      }
+    : undefined;
+  const config = loadSwitchboardConfig(loadOptions);
   return composeRules(state.active, rules, {
     includeDelimiters: config.rules?.includeDelimiters === true,
   });

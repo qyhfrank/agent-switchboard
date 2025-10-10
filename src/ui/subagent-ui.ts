@@ -1,9 +1,12 @@
+import type { ConfigScope } from '../config/scope.js';
 import { loadSubagentLibrary, type SubagentEntry } from '../subagents/library.js';
 import { type GenericSelectionResult, showLibrarySelector } from './library-selector.js';
 
 export type SubagentSelectionResult = GenericSelectionResult;
 
-export async function showSubagentSelector(): Promise<SubagentSelectionResult | null> {
+export async function showSubagentSelector(
+  scope?: ConfigScope
+): Promise<SubagentSelectionResult | null> {
   return showLibrarySelector<SubagentEntry>({
     section: 'subagents',
     noun: 'subagent',
@@ -27,5 +30,6 @@ export async function showSubagentSelector(): Promise<SubagentSelectionResult | 
           ? m2
           : undefined;
     },
+    scope,
   });
 }

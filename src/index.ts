@@ -29,7 +29,11 @@ import {
   getSubagentsDir,
 } from './config/paths.js';
 import type { McpServer } from './config/schemas.js';
-import { loadSwitchboardConfig } from './config/switchboard-config.js';
+import type { ConfigScope } from './config/scope.js';
+import {
+  loadSwitchboardConfig,
+  loadSwitchboardConfigWithLayers,
+} from './config/switchboard-config.js';
 import { ensureLibraryDirectories, writeFileSecure } from './library/fs.js';
 import { RULE_SUPPORTED_AGENTS } from './rules/agents.js';
 import { composeActiveRules } from './rules/composer.js';
@@ -37,11 +41,16 @@ import { distributeRules, listUnsupportedAgents } from './rules/distribution.js'
 import { buildRuleInventory } from './rules/inventory.js';
 import { loadRuleLibrary } from './rules/library.js';
 import { loadRuleState, updateRuleState } from './rules/state.js';
+import type { SubagentPlatform as SubPlatform } from './subagents/distribution.js';
+import { distributeSubagents } from './subagents/distribution.js';
+import { importSubagentFromFile } from './subagents/importer.js';
+import { buildSubagentInventory } from './subagents/inventory.js';
 
 import { showCommandSelector } from './ui/command-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
 import { showRuleSelector } from './ui/rule-ui.js';
 import { showSubagentSelector } from './ui/subagent-ui.js';
+import { formatSyncTimestamp, printTable } from './util/cli.js';
 
 const program = new Command();
 
@@ -50,14 +59,156 @@ program.name('asb').description('Unified MCP server manager for AI coding agents
 // Initialize library directories for commands/subagents (secure permissions)
 ensureLibraryDirectories();
 
-import type { SubagentPlatform as SubPlatform } from './subagents/distribution.js';
+program
+  .command('sync')
+  .description('Synchronize active rules, commands, and subagents to agent targets')
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml')
+  .action((options: ScopeOptionInput) => {
+    try {
+      const scope = resolveScope(options);
+      const loadOptions = scopeToLoadOptions(scope);
+      const { config, layers } = loadSwitchboardConfigWithLayers(loadOptions);
 
-// Subagent library wiring
-import { distributeSubagents } from './subagents/distribution.js';
-import { importSubagentFromFile } from './subagents/importer.js';
-import { buildSubagentInventory } from './subagents/inventory.js';
-// Shared CLI helpers
-import { formatSyncTimestamp, printTable } from './util/cli.js';
+      console.log();
+      console.log(
+        `${chalk.bgRed.white(' WARNING ')} ${chalk.red(
+          '`asb sync` overwrites target files without diff checks.'
+        )}`
+      );
+      console.log(chalk.red('Proceeding with synchronization...'));
+      console.log();
+
+      console.log(chalk.blue('Configuration layers:'));
+      const layerEntries: Array<{
+        label: string;
+        exists: boolean;
+        path: string;
+      }> = [
+        { label: 'User', exists: layers.user.exists, path: layers.user.path },
+        {
+          label: 'Profile',
+          exists: layers.profile?.exists === true,
+          path: layers.profile?.path ?? '(none)',
+        },
+        {
+          label: 'Project',
+          exists: layers.project?.exists === true,
+          path: layers.project?.path ?? '(none)',
+        },
+      ];
+      for (const entry of layerEntries) {
+        const marker = entry.exists ? chalk.green('✓') : chalk.gray('•');
+        const pathLabel = entry.exists ? chalk.dim(entry.path) : chalk.gray(entry.path);
+        console.log(`  ${marker} ${entry.label}: ${pathLabel}`);
+      }
+      console.log();
+
+      console.log(chalk.blue('Active selections:'));
+      console.log(`  Rules: ${chalk.cyan(String(config.rules.active.length))}`);
+      console.log(`  Commands: ${chalk.cyan(String(config.commands.active.length))}`);
+      console.log(`  Subagents: ${chalk.cyan(String(config.subagents.active.length))}`);
+      if (config.agents.length > 0) {
+        console.log(`  Agents: ${chalk.cyan(config.agents.join(', '))}`);
+      } else {
+        console.log(`  Agents: ${chalk.gray('none configured')}`);
+      }
+      console.log();
+
+      const ruleDistribution = distributeRules(undefined, { force: true }, scope);
+      const commandDistribution = distributeCommands(scope);
+      const subagentDistribution = distributeSubagents(scope);
+
+      const ruleErrors = ruleDistribution.results.filter((result) => result.status === 'error');
+      const commandErrors = commandDistribution.results.filter(
+        (result) => result.status === 'error'
+      );
+      const subagentErrors = subagentDistribution.results.filter(
+        (result) => result.status === 'error'
+      );
+
+      console.log(chalk.blue('Rule distribution:'));
+      for (const result of ruleDistribution.results) {
+        const pathLabel = chalk.dim(result.filePath);
+        if (result.status === 'written') {
+          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.agent)} ${pathLabel}${reason}`);
+        } else if (result.status === 'skipped') {
+          const reason = result.reason
+            ? chalk.gray(` (${result.reason})`)
+            : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.agent)} ${pathLabel}${reason}`);
+        } else {
+          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
+          console.log(`  ${chalk.red('✗')} ${chalk.cyan(result.agent)} ${pathLabel}${errorLabel}`);
+        }
+      }
+      if (ruleDistribution.results.length === 0) {
+        console.log(`  ${chalk.gray('no supported agents configured')}`);
+      }
+      console.log();
+
+      console.log(chalk.blue('Command distribution:'));
+      if (commandDistribution.results.length === 0) {
+        console.log(`  ${chalk.gray('no active commands')}`);
+      }
+      for (const result of commandDistribution.results) {
+        const pathLabel = chalk.dim(result.filePath);
+        if (result.status === 'written') {
+          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
+        } else if (result.status === 'skipped') {
+          const reason = result.reason
+            ? chalk.gray(` (${result.reason})`)
+            : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
+        } else {
+          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
+          console.log(
+            `  ${chalk.red('✗')} ${chalk.cyan(result.platform)} ${pathLabel}${errorLabel}`
+          );
+        }
+      }
+      console.log();
+
+      console.log(chalk.blue('Subagent distribution:'));
+      if (subagentDistribution.results.length === 0) {
+        console.log(`  ${chalk.gray('no active subagents')}`);
+      }
+      for (const result of subagentDistribution.results) {
+        const pathLabel = chalk.dim(result.filePath);
+        if (result.status === 'written') {
+          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
+        } else if (result.status === 'skipped') {
+          const reason = result.reason
+            ? chalk.gray(` (${result.reason})`)
+            : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
+        } else {
+          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
+          console.log(
+            `  ${chalk.red('✗')} ${chalk.cyan(result.platform)} ${pathLabel}${errorLabel}`
+          );
+        }
+      }
+      console.log();
+
+      const hasErrors =
+        ruleErrors.length > 0 || commandErrors.length > 0 || subagentErrors.length > 0;
+      if (hasErrors) {
+        console.log(chalk.red('✗ Synchronization completed with errors.'));
+        process.exit(1);
+      } else {
+        console.log(chalk.green('✓ Synchronization complete.'));
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
 
 function isDir(p: string): boolean {
   try {
@@ -73,6 +224,32 @@ function isFile(p: string): boolean {
   } catch {
     return false;
   }
+}
+
+interface ScopeOptionInput {
+  profile?: string;
+  project?: string;
+}
+
+function resolveScope(input?: ScopeOptionInput): ConfigScope | undefined {
+  if (!input) return undefined;
+  const profile = input.profile?.trim();
+  const projectRaw = input.project?.trim();
+  const project = projectRaw && projectRaw.length > 0 ? path.resolve(projectRaw) : undefined;
+  if (!profile && !project) return undefined;
+  return {
+    profile: profile && profile.length > 0 ? profile : undefined,
+    project: project,
+  };
+}
+
+function scopeToLoadOptions(scope?: ConfigScope) {
+  return scope
+    ? {
+        profile: scope.profile ?? undefined,
+        projectPath: scope.project ?? undefined,
+      }
+    : undefined;
 }
 
 function defaultCommandSourceDir(platform: CmdPlatform): string {
@@ -125,8 +302,11 @@ async function confirmOverwrite(filePath: string, force?: boolean): Promise<bool
 program
   .command('mcp')
   .description('Interactive UI to enable/disable MCP servers')
-  .action(async () => {
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml')
+  .action(async (options: ScopeOptionInput) => {
     try {
+      const scope = resolveScope(options);
       // Step 1: Show UI and get selected servers
       const selectedServers = await showMcpServerUI();
 
@@ -139,10 +319,10 @@ program
       spinner.succeed(chalk.green('✓ Updated ~/.agent-switchboard/mcp.json'));
 
       // Step 3: Apply to registered agents
-      await applyToAgents();
+      await applyToAgents(scope);
 
       // Step 4: Show summary
-      showSummary(selectedServers);
+      showSummary(selectedServers, scope);
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -151,15 +331,22 @@ program
     }
   });
 
-const ruleCommand = program.command('rule').description('Manage rule snippets and synchronization');
+const ruleCommand = program
+  .command('rule')
+  .description('Manage rule snippets and synchronization')
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml');
 
 ruleCommand
   .command('list')
   .description('Display rule snippets and sync information')
   .option('--json', 'Output inventory as JSON')
-  .action((options: { json?: boolean }) => {
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml')
+  .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
-      const inventory = buildRuleInventory();
+      const scope = resolveScope(options);
+      const inventory = buildRuleInventory(scope);
 
       if (options.json) {
         console.log(
@@ -231,9 +418,10 @@ ruleCommand
     }
   });
 
-ruleCommand.action(async () => {
+ruleCommand.action(async (options: ScopeOptionInput) => {
   try {
-    const selection = await showRuleSelector();
+    const scope = resolveScope(options);
+    const selection = await showRuleSelector(scope);
     if (!selection) {
       return;
     }
@@ -241,7 +429,7 @@ ruleCommand.action(async () => {
     const rules = loadRuleLibrary();
     const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));
 
-    const previousState = loadRuleState();
+    const previousState = loadRuleState(scope);
     const desiredActive = selection.active;
 
     const arraysEqual = (a: string[], b: string[]): boolean => {
@@ -260,7 +448,7 @@ ruleCommand.action(async () => {
         active: desiredActive,
         agentSync: {},
       };
-    });
+    }, scope);
 
     if (!selectionChanged) {
       console.log(chalk.gray('\nNo changes to active rules. Refreshing agent files...'));
@@ -284,7 +472,11 @@ ruleCommand.action(async () => {
       }
     }
 
-    const distribution = distributeRules(composeActiveRules(), { force: !selectionChanged });
+    const distribution = distributeRules(
+      composeActiveRules(scope),
+      { force: !selectionChanged },
+      scope
+    );
 
     if (distribution.results.length > 0) {
       console.log();
@@ -331,11 +523,16 @@ ruleCommand.action(async () => {
 });
 
 // Commands library: manage and distribute commands
-const commandRoot = program.command('command').description('Manage command library');
+const commandRoot = program
+  .command('command')
+  .description('Manage command library')
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml');
 
-commandRoot.action(async () => {
+commandRoot.action(async (options: ScopeOptionInput) => {
   try {
-    const selection = await showCommandSelector();
+    const scope = resolveScope(options);
+    const selection = await showCommandSelector(scope);
     if (!selection) return;
     console.log();
     console.log(chalk.green('✓ Updated active commands:'));
@@ -347,7 +544,7 @@ commandRoot.action(async () => {
       }
     }
 
-    const out = distributeCommands();
+    const out = distributeCommands(scope);
     if (out.results.length > 0) {
       console.log();
       console.log(chalk.blue('Command distribution:'));
@@ -452,10 +649,12 @@ commandRoot
   .command('list')
   .description('Display command inventory and sync information')
   .option('--json', 'Output inventory as JSON')
-
-  .action((options: { json?: boolean }) => {
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml')
+  .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
-      const inventory = buildCommandInventory();
+      const scope = resolveScope(options);
+      const inventory = buildCommandInventory(scope);
 
       if (options.json) {
         console.log(
@@ -524,11 +723,16 @@ commandRoot
   });
 
 // Subagents library: scaffold, load, list, and interactive distribute
-const subagentRoot = program.command('subagent').description('Manage subagent (persona) library');
+const subagentRoot = program
+  .command('subagent')
+  .description('Manage subagent (persona) library')
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml');
 
-subagentRoot.action(async () => {
+subagentRoot.action(async (options: ScopeOptionInput) => {
   try {
-    const selection = await showSubagentSelector();
+    const scope = resolveScope(options);
+    const selection = await showSubagentSelector(scope);
     if (!selection) return;
     console.log();
     console.log(chalk.green('✓ Updated active subagents:'));
@@ -540,7 +744,7 @@ subagentRoot.action(async () => {
       }
     }
 
-    const out = distributeSubagents();
+    const out = distributeSubagents(scope);
     if (out.results.length > 0) {
       console.log();
       console.log(chalk.blue('Subagent distribution:'));
@@ -574,9 +778,12 @@ subagentRoot
   .command('list')
   .description('Display subagent inventory and sync information')
   .option('--json', 'Output inventory as JSON')
-  .action((options: { json?: boolean }) => {
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml')
+  .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
-      const inventory = buildSubagentInventory();
+      const scope = resolveScope(options);
+      const inventory = buildSubagentInventory(scope);
 
       if (options.json) {
         console.log(
@@ -715,19 +922,15 @@ subagentRoot
 /**
  * Apply enabled MCP servers to all registered agents
  */
-async function applyToAgents(): Promise<void> {
+async function applyToAgents(scope?: ConfigScope): Promise<void> {
   const mcpConfig = loadMcpConfig();
-  const switchboardConfig = loadSwitchboardConfig();
+  const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
 
-  // Check if any agents are registered
   if (switchboardConfig.agents.length === 0) {
-    console.log(chalk.yellow('\n⚠ No agents found in ~/.agent-switchboard/config.toml'));
+    console.log(chalk.yellow('\n⚠ No agents found in the active configuration stack.'));
     console.log();
-    console.log('Please add agents to:');
-    console.log(chalk.dim('  ~/.agent-switchboard/config.toml'));
-    console.log();
-    console.log('Example:');
-    console.log(chalk.dim('  agents = ["claude-code", "cursor"]'));
+    console.log('Add agents under the relevant TOML layer (user, profile, or project).');
+    console.log(chalk.dim('  Example: agents = ["claude-code", "cursor"]'));
     return;
   }
 
@@ -764,7 +967,7 @@ async function applyToAgents(): Promise<void> {
 /**
  * Show summary of enabled/disabled servers and applied agents
  */
-function showSummary(selectedServers: string[]): void {
+function showSummary(selectedServers: string[], scope?: ConfigScope): void {
   const mcpConfig = loadMcpConfig();
   const allServers = Object.keys(mcpConfig.mcpServers);
 
@@ -788,7 +991,7 @@ function showSummary(selectedServers: string[]): void {
     }
   }
 
-  const switchboardConfig = loadSwitchboardConfig();
+  const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
   if (switchboardConfig.agents.length > 0) {
     console.log(chalk.blue(`\nApplied to agents (${switchboardConfig.agents.length}):`));
     for (const agent of switchboardConfig.agents) {
