@@ -1,6 +1,7 @@
-import fs from 'node:fs';
-
-import { getConfigDir, getRuleStatePath } from '../config/paths.js';
+import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
+import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
+import type { ConfigScope } from '../config/scope.js';
+import { scopeToLayerOptions } from '../config/scope.js';
 import { type RuleState, ruleStateSchema } from './schema.js';
 
 export const DEFAULT_RULE_STATE: RuleState = {
@@ -20,60 +21,57 @@ function deduplicateActive(ids: string[]): string[] {
   return result;
 }
 
-function normalizeState(input: RuleState): RuleState {
-  const active = deduplicateActive(
-    input.active.map((id) => id.trim()).filter((id) => id.length > 0)
-  );
+function normalizeActive(ids: string[]): string[] {
+  return deduplicateActive(ids.map((id) => id.trim()).filter((id) => id.length > 0));
+}
+
+function getConfigActive(options?: UpdateConfigLayerOptions): string[] {
+  const { config } = loadMergedSwitchboardConfig(options);
+  return [...config.rules.active];
+}
+
+function writeConfigActive(active: string[], options?: UpdateConfigLayerOptions): void {
+  updateConfigLayer((layer) => {
+    const next = { ...layer };
+    const currentRules = (next.rules ?? {}) as Record<string, unknown>;
+    next.rules = {
+      ...currentRules,
+      active: [...active],
+    } as unknown as typeof next.rules;
+    return next;
+  }, options);
+}
+
+const agentSyncCache: RuleState['agentSync'] = {};
+
+export function loadRuleState(scope?: ConfigScope): RuleState {
+  const layerOptions = scopeToLayerOptions(scope);
+  const active = normalizeActive(getConfigActive(layerOptions));
   return {
-    ...input,
     active,
+    agentSync: { ...agentSyncCache },
   };
 }
 
-export function loadRuleState(): RuleState {
-  const filePath = getRuleStatePath();
-  if (!fs.existsSync(filePath)) {
-    return { ...DEFAULT_RULE_STATE };
-  }
-
-  try {
-    const raw = fs.readFileSync(filePath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    const validated = ruleStateSchema.parse(parsed);
-    return normalizeState(validated);
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to load rule state from ${filePath}: ${error.message}`);
-    }
-    throw error;
+export function saveRuleState(state: RuleState, scope?: ConfigScope): void {
+  const layerOptions = scopeToLayerOptions(scope);
+  const validated = ruleStateSchema.parse(state);
+  const normalizedActive = normalizeActive(validated.active);
+  writeConfigActive(normalizedActive, layerOptions);
+  Object.keys(agentSyncCache).forEach((key) => {
+    delete agentSyncCache[key];
+  });
+  for (const [key, value] of Object.entries(validated.agentSync)) {
+    agentSyncCache[key] = { ...value };
   }
 }
 
-export function saveRuleState(state: RuleState): void {
-  const filePath = getRuleStatePath();
-  const configDir = getConfigDir();
-
-  try {
-    const validated = ruleStateSchema.parse(state);
-    const normalized = normalizeState(validated);
-
-    if (!fs.existsSync(configDir)) {
-      fs.mkdirSync(configDir, { recursive: true });
-    }
-
-    const json = `${JSON.stringify(normalized, null, 4)}\n`;
-    fs.writeFileSync(filePath, json, 'utf-8');
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to save rule state to ${filePath}: ${error.message}`);
-    }
-    throw error;
-  }
-}
-
-export function updateRuleState(mutator: (current: RuleState) => RuleState): RuleState {
-  const current = loadRuleState();
+export function updateRuleState(
+  mutator: (current: RuleState) => RuleState,
+  scope?: ConfigScope
+): RuleState {
+  const current = loadRuleState(scope);
   const next = mutator(current);
-  saveRuleState(next);
-  return loadRuleState();
+  saveRuleState(next, scope);
+  return loadRuleState(scope);
 }

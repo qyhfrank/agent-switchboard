@@ -1,9 +1,12 @@
 import { type CommandEntry, loadCommandLibrary } from '../commands/library.js';
+import type { ConfigScope } from '../config/scope.js';
 import { type GenericSelectionResult, showLibrarySelector } from './library-selector.js';
 
 export type CommandSelectionResult = GenericSelectionResult;
 
-export async function showCommandSelector(): Promise<CommandSelectionResult | null> {
+export async function showCommandSelector(
+  scope?: ConfigScope
+): Promise<CommandSelectionResult | null> {
   return showLibrarySelector<CommandEntry>({
     section: 'commands',
     noun: 'command',
@@ -21,5 +24,6 @@ export async function showCommandSelector(): Promise<CommandSelectionResult | nu
       const m = cc?.model as unknown as string | undefined;
       return typeof m === 'string' && m.trim().length > 0 ? m : undefined;
     },
+    scope,
   });
 }

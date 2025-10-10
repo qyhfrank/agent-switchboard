@@ -45,17 +45,29 @@ export function getSwitchboardConfigPath(): string {
 }
 
 /**
+ * Returns the absolute path to a profile-specific configuration file located under ASB_HOME.
+ * Example: ~/.agent-switchboard/team.toml
+ */
+export function getProfileConfigPath(profileName: string): string {
+  const trimmed = profileName.trim();
+  if (trimmed.length === 0) {
+    throw new Error('Profile name must be a non-empty string.');
+  }
+  return path.join(getConfigDir(), `${trimmed}.toml`);
+}
+
+/**
+ * Returns the absolute path to a project-scoped configuration file (.asb.toml).
+ */
+export function getProjectConfigPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), '.asb.toml');
+}
+
+/**
  * Returns the absolute path to the rule snippets directory
  */
 export function getRulesDir(): string {
   return path.join(getConfigDir(), 'rules');
-}
-
-/**
- * Returns the absolute path to the rule state file
- */
-export function getRuleStatePath(): string {
-  return path.join(getConfigDir(), 'state.json');
 }
 
 /**

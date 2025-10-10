@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { getClaudeDir, getOpencodePath } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import {
   type DistributeOutcome,
   type DistributionResult,
@@ -70,9 +71,9 @@ function renderForPlatform(platform: SubagentPlatform, entry: SubagentEntry): st
   }
 }
 
-export function distributeSubagents(): SubagentDistributionOutcome {
+export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOutcome {
   const entries = loadSubagentLibrary();
-  const state = loadLibraryStateSection('subagents');
+  const state = loadLibraryStateSection('subagents', scope);
   const activeIds = state.active;
   const byId = new Map(entries.map((e) => [e.id, e]));
   const selected: SubagentEntry[] = [];
@@ -89,5 +90,6 @@ export function distributeSubagents(): SubagentDistributionOutcome {
     platforms,
     resolveFilePath: (p, e) => resolveSubagentFilePath(p, e.id),
     render: (p, e) => renderForPlatform(p, e),
+    scope,
   }) as { results: DistributionResult<SubagentPlatform>[] };
 }

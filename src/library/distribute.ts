@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import type { ConfigScope } from '../config/scope.js';
 import { ensureParentDir } from './fs.js';
 import { loadLibraryStateSection, updateLibraryStateSection } from './state.js';
 
@@ -19,6 +20,7 @@ export interface DistributeOptions<TEntry, Platform extends string> {
   platforms: Platform[];
   resolveFilePath: (platform: Platform, entry: TEntry) => string;
   render: (platform: Platform, entry: TEntry) => string;
+  scope?: ConfigScope;
 }
 
 export interface DistributeOutcome<Platform extends string> {
@@ -32,7 +34,7 @@ export interface DistributeOutcome<Platform extends string> {
 export function distributeLibrary<TEntry, Platform extends string>(
   opts: DistributeOptions<TEntry, Platform>
 ): DistributeOutcome<Platform> {
-  const state = loadLibraryStateSection(opts.section);
+  const state = loadLibraryStateSection(opts.section, opts.scope);
   const results: DistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
 
@@ -79,13 +81,17 @@ export function distributeLibrary<TEntry, Platform extends string>(
     const prev = state.agentSync[platform]?.hash;
     const hadErrors = writtenOrSkipped.some((r) => r.status === 'error');
     if (!hadErrors && prev !== aggregateHash) {
-      updateLibraryStateSection(opts.section, (current) => {
-        const agentSync = {
-          ...current.agentSync,
-          [platform]: { hash: aggregateHash, updatedAt: timestamp },
-        };
-        return { ...current, agentSync };
-      });
+      updateLibraryStateSection(
+        opts.section,
+        (current) => {
+          const agentSync = {
+            ...current.agentSync,
+            [platform]: { hash: aggregateHash, updatedAt: timestamp },
+          };
+          return { ...current, agentSync };
+        },
+        opts.scope
+      );
     }
 
     results.push(...writtenOrSkipped);

@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { stringify as toToml } from '@iarna/toml';
 import { getClaudeDir, getCodexDir, getGeminiDir, getOpencodePath } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import {
   type DistributeOutcome,
   type DistributionResult,
@@ -95,9 +96,9 @@ function renderForPlatform(platform: CommandPlatform, entry: CommandEntry): stri
   }
 }
 
-export function distributeCommands(): CommandDistributionOutcome {
+export function distributeCommands(scope?: ConfigScope): CommandDistributionOutcome {
   const entries = loadCommandLibrary();
-  const state = loadLibraryStateSection('commands');
+  const state = loadLibraryStateSection('commands', scope);
   const activeIds = state.active;
   const byId = new Map(entries.map((e) => [e.id, e]));
   const selected: CommandEntry[] = [];
@@ -114,5 +115,6 @@ export function distributeCommands(): CommandDistributionOutcome {
     platforms,
     resolveFilePath: (p, e) => resolveCommandFilePath(p, e.id),
     render: (p, e) => renderForPlatform(p, e),
+    scope,
   }) as { results: DistributionResult<CommandPlatform>[] };
 }

@@ -7,7 +7,7 @@ import {
   getGeminiDir,
   getOpencodePath,
 } from '../config/paths.js';
-
+import type { ConfigScope } from '../config/scope.js';
 import { RULE_SUPPORTED_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
 import type { ComposedRules } from './composer.js';
 import { composeActiveRules } from './composer.js';
@@ -57,10 +57,11 @@ function ensureDirectory(filePath: string): void {
 
 export function distributeRules(
   composed?: ComposedRules,
-  options?: DistributionOptions
+  options?: DistributionOptions,
+  scope?: ConfigScope
 ): DistributionOutcome {
-  const document = composed ?? composeActiveRules();
-  const state = loadRuleState();
+  const document = composed ?? composeActiveRules(scope);
+  const state = loadRuleState(scope);
   const results: DistributionResult[] = [];
   const timestamp = new Date().toISOString();
   const forceRewrite = options?.force === true;
@@ -128,7 +129,7 @@ export function distributeRules(
         ...current,
         agentSync,
       };
-    });
+    }, scope);
   }
 
   return {

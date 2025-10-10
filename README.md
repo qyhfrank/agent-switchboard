@@ -60,6 +60,29 @@ Toggle `rules.includeDelimiters` to `true` if you want each snippet surrounded b
 
 Run `agent-switchboard mcp` again after updating the list.
 
+### Layered configuration & scope
+
+Agent Switchboard merges configuration from three TOML layers (higher priority wins):
+
+- **User default**: `<ASB_HOME>/config.toml`
+- **Profile**: `<ASB_HOME>/<profile>.toml`
+- **Project**: `<project>/.asb.toml`
+
+Every layer can define `[commands]`, `[subagents]`, and `[rules]` `active` lists. Use profiles to share team presets and project files to override per repository. The CLI honors these layers via scope flags:
+
+```bash
+# Profile only
+agent-switchboard command -p team
+
+# Project only
+agent-switchboard rule --project /path/to/repo
+
+# Merge profile + project
+agent-switchboard subagent -p team --project /path/to/repo
+```
+
+`ASB_HOME` still defaults to `~/.agent-switchboard` but can be overridden through the environment variable.
+
 ## Rule Library
 
 Rule snippets live in `~/.agent-switchboard/rules/` (respects `ASB_HOME`). Each snippet is a Markdown file and can include YAML frontmatter with `title`, `description`, `tags`, and `requires` fields. Example:
@@ -77,13 +100,13 @@ Keep commit messages scoped to the change.
 
 ### Selecting and Ordering Rules
 
-Use the interactive selector to choose the active snippets and adjust their order:
+Use the interactive selector (arrow keys, `Space` to toggle, just start typing to fuzzy filter) to choose the active snippets and adjust their order:
 
 ```bash
-agent-switchboard rule
+agent-switchboard rule [-p <profile>] [--project <path>]
 ```
 
-Once confirmed, Agent Switchboard composes the merged Markdown, stores the active order, and writes the document to:
+The selected order is saved back to the highest-priority layer (project, profile, then user) before distribution. Once confirmed, Agent Switchboard composes the merged Markdown, stores the active order, and writes the document to:
 - `~/.claude/CLAUDE.md`
 - `~/.codex/AGENTS.md`
 - `~/.gemini/AGENTS.md`
@@ -96,7 +119,7 @@ Unsupportive agents such as Claude Desktop and Cursor are reported and left unto
 See the full inventory, activation state, and per-agent sync timestamps:
 
 ```bash
-agent-switchboard rule list
+agent-switchboard rule list [-p <profile>] [--project <path>]
 ```
 
 ## Command Library
@@ -121,10 +144,10 @@ agent-switchboard command load <platform> [path] [-r]
 ### Select and Distribute
 
 ```bash
-agent-switchboard command
+agent-switchboard command [-p <profile>] [--project <path>]
 ```
 
-On confirm, adapters write each selected command to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is.
+The selector supports fuzzy filtering—type any part of a title, ID, or model name to narrow the list. Confirming selections saves them back into the highest-priority configuration layer before distribution. Adapters then write each selected command to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is.
 
 Files are only rewritten when content changes.
 
@@ -132,7 +155,7 @@ Files are only rewritten when content changes.
 
 ```bash
 # Inventory
-agent-switchboard command list
+agent-switchboard command list [-p <profile>] [--project <path>]
 ```
 
 ## Subagent Library
@@ -153,16 +176,26 @@ agent-switchboard subagent load <platform> [path] [-r]
 ### Select and Distribute
 
 ```bash
-agent-switchboard subagent
+agent-switchboard subagent [-p <profile>] [--project <path>]
 ```
 
-On confirm, adapters write each selected subagent to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is. Platforms that do not accept subagent files are skipped with a hint.
+Type to fuzzy filter the list, then confirm to persist the selection into the active configuration layer. Adapters write each selected subagent to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is. Platforms that do not accept subagent files are skipped with a hint.
 
 ### Inventory
 
 ```bash
-agent-switchboard subagent list
+agent-switchboard subagent list [-p <profile>] [--project <path>]
 ```
+
+## Sync
+
+After curating your `active` lists in the selectors, run the unified sync command to push rules, commands, and subagents to every supported agent directory:
+
+```bash
+agent-switchboard sync [-p <profile>] [--project <path>]
+```
+
+The command merges the layered configuration, prints a warning that files will be overwritten without diffs, and rewrites the target files for each platform in place. Use profiles or project scopes to preview changes before applying them globally.
 
 ## Environment
 
