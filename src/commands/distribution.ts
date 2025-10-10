@@ -1,6 +1,14 @@
 import path from 'node:path';
 import { stringify as toToml } from '@iarna/toml';
-import { getClaudeDir, getCodexDir, getGeminiDir, getOpencodePath } from '../config/paths.js';
+import {
+  getClaudeDir,
+  getCodexDir,
+  getGeminiDir,
+  getOpencodePath,
+  getProjectClaudeDir,
+  getProjectGeminiDir,
+  getProjectOpencodePath,
+} from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
   type DistributeOutcome,
@@ -24,16 +32,38 @@ export interface CommandDistributionResult {
 
 export type CommandDistributionOutcome = DistributeOutcome<CommandPlatform>;
 
-export function resolveCommandFilePath(platform: CommandPlatform, id: string): string {
+export function resolveCommandFilePath(
+  platform: CommandPlatform,
+  id: string,
+  scope?: ConfigScope
+): string {
+  const projectRoot = scope?.project?.trim();
   switch (platform) {
-    case 'claude-code':
+    case 'claude-code': {
+      // Project-level supported: .claude/commands/
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(getProjectClaudeDir(projectRoot), 'commands', `${id}.md`);
+      }
       return path.join(getClaudeDir(), 'commands', `${id}.md`);
-    case 'codex':
+    }
+    case 'codex': {
+      // Project-level prompts not supported (per docs): always global
       return path.join(getCodexDir(), 'prompts', `${id}.md`);
-    case 'gemini':
+    }
+    case 'gemini': {
+      // Project-level supported: .gemini/commands/
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(getProjectGeminiDir(projectRoot), 'commands', `${id}.toml`);
+      }
       return path.join(getGeminiDir(), 'commands', `${id}.toml`);
-    case 'opencode':
+    }
+    case 'opencode': {
+      // Project-level supported: .opencode/command/
+      if (projectRoot && projectRoot.length > 0) {
+        return getProjectOpencodePath(projectRoot, 'command', `${id}.md`);
+      }
       return getOpencodePath('command', `${id}.md`);
+    }
   }
 }
 
@@ -113,7 +143,7 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
     section: 'commands',
     selected,
     platforms,
-    resolveFilePath: (p, e) => resolveCommandFilePath(p, e.id),
+    resolveFilePath: (p, e) => resolveCommandFilePath(p, e.id, scope),
     render: (p, e) => renderForPlatform(p, e),
     scope,
   }) as { results: DistributionResult<CommandPlatform>[] };

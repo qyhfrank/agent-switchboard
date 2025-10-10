@@ -1,5 +1,10 @@
 import path from 'node:path';
-import { getClaudeDir, getOpencodePath } from '../config/paths.js';
+import {
+  getClaudeDir,
+  getOpencodePath,
+  getProjectClaudeDir,
+  getProjectOpencodePath,
+} from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
   type DistributeOutcome,
@@ -23,12 +28,27 @@ export interface SubagentDistributionResult {
 
 export type SubagentDistributionOutcome = DistributeOutcome<SubagentPlatform>;
 
-export function resolveSubagentFilePath(platform: SubagentPlatform, id: string): string {
+export function resolveSubagentFilePath(
+  platform: SubagentPlatform,
+  id: string,
+  scope?: ConfigScope
+): string {
+  const projectRoot = scope?.project?.trim();
   switch (platform) {
-    case 'claude-code':
+    case 'claude-code': {
+      // Project-level supported: .claude/agents/
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(getProjectClaudeDir(projectRoot), 'agents', `${id}.md`);
+      }
       return path.join(getClaudeDir(), 'agents', `${id}.md`);
-    case 'opencode':
+    }
+    case 'opencode': {
+      // Project-level supported: .opencode/agent/
+      if (projectRoot && projectRoot.length > 0) {
+        return getProjectOpencodePath(projectRoot, 'agent', `${id}.md`);
+      }
       return getOpencodePath('agent', `${id}.md`);
+    }
   }
 }
 
@@ -41,6 +61,11 @@ function buildFrontmatterForClaude(entry: SubagentEntry): Record<string, unknown
   if (entry.metadata.description) base.description = entry.metadata.description;
   if (cc && typeof cc === 'object') {
     for (const [k, v] of Object.entries(cc)) base[k] = v;
+  }
+  // Claude Code requires `name` in frontmatter. If missing/empty, use filename (entry.id).
+  const rawName = base.name as unknown as string | undefined;
+  if (typeof rawName !== 'string' || rawName.trim().length === 0) {
+    base.name = entry.id;
   }
   return base;
 }
@@ -88,7 +113,7 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
     section: 'subagents',
     selected,
     platforms,
-    resolveFilePath: (p, e) => resolveSubagentFilePath(p, e.id),
+    resolveFilePath: (p, e) => resolveSubagentFilePath(p, e.id, scope),
     render: (p, e) => renderForPlatform(p, e),
     scope,
   }) as { results: DistributionResult<SubagentPlatform>[] };

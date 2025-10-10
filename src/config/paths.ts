@@ -118,6 +118,23 @@ export function getOpencodePath(...segments: string[]): string {
   return path.join(getOpencodeRoot(), ...segments);
 }
 
+/** Project-scoped platform roots (used when --project is set and platform supports project-level files) */
+export function getProjectClaudeDir(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), '.claude');
+}
+
+export function getProjectGeminiDir(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), '.gemini');
+}
+
+export function getProjectOpencodeRoot(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), '.opencode');
+}
+
+export function getProjectOpencodePath(projectRoot: string, ...segments: string[]): string {
+  return path.join(getProjectOpencodeRoot(projectRoot), ...segments);
+}
+
 /** Config file helpers */
 export function getClaudeJsonPath(): string {
   return path.join(getAgentsHome(), '.claude.json');

@@ -32,16 +32,40 @@ interface DistributionOptions {
   force?: boolean;
 }
 
-function resolveRuleFile(agent: (typeof RULE_SUPPORTED_AGENTS)[number]): string {
+function resolveRuleFile(
+  agent: (typeof RULE_SUPPORTED_AGENTS)[number],
+  scope?: ConfigScope
+): string {
   const home = getAgentsHome();
+  const projectRoot = scope?.project?.trim();
   switch (agent) {
     case 'claude-code':
+      // Project-level supported conventionally under .claude/CLAUDE.md, else user-level
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(path.resolve(projectRoot), '.claude', 'CLAUDE.md');
+      }
       return path.join(getClaudeDir(), 'CLAUDE.md');
     case 'codex':
+      // Codex supports project-root AGENTS.md; otherwise use CODEX_HOME
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(path.resolve(projectRoot), 'AGENTS.md');
+      }
       return path.join(getCodexDir(), 'AGENTS.md');
-    case 'gemini':
-      return path.join(getGeminiDir(), 'AGENTS.md');
+    case 'gemini': {
+      // Gemini CLI default project/user context file is GEMINI.md.
+      // If a project is provided and AGENTS.md already exists (user customized CLI to use it), honor it.
+      if (projectRoot && projectRoot.length > 0) {
+        const agentsPath = path.join(path.resolve(projectRoot), 'AGENTS.md');
+        if (fs.existsSync(agentsPath)) return agentsPath;
+        return path.join(path.resolve(projectRoot), 'GEMINI.md');
+      }
+      return path.join(getGeminiDir(), 'GEMINI.md');
+    }
     case 'opencode':
+      // OpenCode supports project-level AGENTS.md at repository root; otherwise use global.
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(path.resolve(projectRoot), 'AGENTS.md');
+      }
       return getOpencodePath('AGENTS.md');
     default:
       return path.join(home, agent, 'AGENTS.md');
@@ -71,7 +95,7 @@ export function distributeRules(
   >();
 
   for (const agent of RULE_SUPPORTED_AGENTS) {
-    const filePath = resolveRuleFile(agent);
+    const filePath = resolveRuleFile(agent, scope);
     const previousHash = state.agentSync[agent]?.hash;
 
     let existingContent: string | null = null;
@@ -142,6 +166,9 @@ export function listUnsupportedAgents(): string[] {
   return [...RULE_UNSUPPORTED_AGENTS];
 }
 
-export function resolveRuleFilePath(agent: (typeof RULE_SUPPORTED_AGENTS)[number]): string {
-  return resolveRuleFile(agent);
+export function resolveRuleFilePath(
+  agent: (typeof RULE_SUPPORTED_AGENTS)[number],
+  scope?: ConfigScope
+): string {
+  return resolveRuleFile(agent, scope);
 }
