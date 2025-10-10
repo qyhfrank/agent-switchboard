@@ -25,6 +25,7 @@ import {
   getCodexDir,
   getCommandsDir,
   getGeminiDir,
+  getMcpConfigPath,
   getOpencodePath,
   getSubagentsDir,
 } from './config/paths.js';
@@ -316,7 +317,8 @@ program
       // Step 2: Update enabled flags in mcp.json
       const spinner = ora('Updating MCP configuration...').start();
       updateEnabledFlags(selectedServers);
-      spinner.succeed(chalk.green('✓ Updated ~/.agent-switchboard/mcp.json'));
+      const cfgPath = getMcpConfigPath();
+      spinner.succeed(chalk.green(`✓ Updated ${cfgPath}`));
 
       // Step 3: Apply to registered agents
       await applyToAgents(scope);

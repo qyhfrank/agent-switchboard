@@ -83,6 +83,17 @@ agent-switchboard subagent -p team --project /path/to/repo
 
 `ASB_HOME` still defaults to `~/.agent-switchboard` but can be overridden through the environment variable.
 
+Project-aware outputs (when using `--project <path>`):
+- Rules: Codex writes `<project>/AGENTS.md`. Gemini writes `<project>/GEMINI.md` (or `<project>/AGENTS.md` if you configured Gemini CLI to read it). OpenCode writes `<project>/AGENTS.md`.
+- Commands (project-level supported):
+  - Claude Code → `<project>/.claude/commands/`
+  - Gemini → `<project>/.gemini/commands/`
+  - OpenCode → `<project>/.opencode/command/`
+  - Codex → global only (`~/.codex/prompts/`)
+- Subagents (project-level supported):
+  - Claude Code → `<project>/.claude/agents/`
+  - OpenCode → `<project>/.opencode/agent/`
+
 ## Rule Library
 
 Rule snippets live in `~/.agent-switchboard/rules/` (respects `ASB_HOME`). Each snippet is a Markdown file and can include YAML frontmatter with `title`, `description`, `tags`, and `requires` fields. Example:
@@ -108,8 +119,8 @@ agent-switchboard rule [-p <profile>] [--project <path>]
 
 The selected order is saved back to the highest-priority layer (project, profile, then user) before distribution. Once confirmed, Agent Switchboard composes the merged Markdown, stores the active order, and writes the document to:
 - `~/.claude/CLAUDE.md`
-- `~/.codex/AGENTS.md`
-- `~/.gemini/AGENTS.md`
+- `~/.codex/AGENTS.md` (or `<project>/AGENTS.md` with `--project`)
+- `~/.gemini/GEMINI.md`
 - `~/.config/opencode/AGENTS.md` (or `%APPDATA%/opencode/AGENTS.md` on Windows)
 
 Unsupportive agents such as Claude Desktop and Cursor are reported and left untouched. If you rerun the selector without changing the order, the tool refreshes the destination files to overwrite any manual edits.

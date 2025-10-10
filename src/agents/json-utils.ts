@@ -21,9 +21,13 @@ export function mergeMcpIntoAgent(
   agentConfig: JsonAgentConfig,
   mcpServers: Record<string, object>
 ): JsonAgentConfig {
-  if (Object.keys(mcpServers).length === 0) return agentConfig;
-
   const merged: JsonAgentConfig = { ...agentConfig };
+
+  // Empty selection means "disable all": clear the map to {}
+  if (Object.keys(mcpServers).length === 0) {
+    merged.mcpServers = {};
+    return merged;
+  }
   if (!merged.mcpServers) {
     merged.mcpServers = {};
   }
