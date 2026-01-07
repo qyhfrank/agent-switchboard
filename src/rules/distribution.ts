@@ -11,7 +11,7 @@ import type { ConfigScope } from '../config/scope.js';
 import { RULE_SUPPORTED_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
 import type { ComposedRules } from './composer.js';
 import { composeActiveRules } from './composer.js';
-import { loadRuleState, updateRuleState } from './state.js';
+import { updateRuleState } from './state.js';
 
 export type DistributionStatus = 'written' | 'skipped' | 'error';
 
@@ -81,7 +81,6 @@ export function distributeRules(
   scope?: ConfigScope
 ): DistributionOutcome {
   const document = composed ?? composeActiveRules(scope);
-  const state = loadRuleState(scope);
   const results: DistributionResult[] = [];
   const timestamp = new Date().toISOString();
   const forceRewrite = options?.force === true;
@@ -92,7 +91,6 @@ export function distributeRules(
 
   for (const agent of RULE_SUPPORTED_AGENTS) {
     const filePath = resolveRuleFile(agent, scope);
-    const previousHash = state.agentSync[agent]?.hash;
 
     let existingContent: string | null = null;
     try {
@@ -113,23 +111,14 @@ export function distributeRules(
         status: 'skipped',
         reason: 'up-to-date',
       });
-      if (previousHash !== document.hash) {
-        agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
-      }
+      agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       continue;
     }
 
-    const reason = hadExistingFile
-      ? forceRewrite && contentMatches
-        ? 'refreshed'
-        : previousHash === document.hash
-          ? 'restored'
-          : 'updated'
-      : 'created';
+    const reason = hadExistingFile ? (contentMatches ? 'refreshed' : 'updated') : 'created';
 
     try {
       ensureDirectory(filePath);
-      // No backup; write-through only
       fs.writeFileSync(filePath, document.content, 'utf-8');
       agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       results.push({ agent, filePath, status: 'written', reason });

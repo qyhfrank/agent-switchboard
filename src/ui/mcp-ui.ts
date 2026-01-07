@@ -8,6 +8,10 @@ import chalk from 'chalk';
 import { loadMcpConfig } from '../config/mcp-config.js';
 import type { CheckboxItem } from '../types.js';
 
+export interface McpServerUIOptions {
+  pageSize?: number;
+}
+
 /**
  * Create checkbox items for MCP servers
  * Displays servers with status icons and pre-selects enabled servers
@@ -38,7 +42,8 @@ export function createMcpServerItems(): CheckboxItem[] {
  * Show interactive checkbox UI for MCP server selection
  * @returns Array of selected server names
  */
-export async function showMcpServerUI(): Promise<string[]> {
+export async function showMcpServerUI(options?: McpServerUIOptions): Promise<string[]> {
+  const pageSize = options?.pageSize ?? 15;
   const items = createMcpServerItems();
 
   if (items.length === 0) {
@@ -70,7 +75,7 @@ export async function showMcpServerUI(): Promise<string[]> {
   const selectedServers = await checkbox({
     message: 'Toggle MCP servers (Space: toggle, a: all, i: invert, Enter: confirm):',
     choices: items,
-    pageSize: 15,
+    pageSize,
   });
 
   return selectedServers;

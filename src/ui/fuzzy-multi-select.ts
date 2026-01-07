@@ -18,6 +18,8 @@ interface ChoiceInput {
   value: string;
   label: string;
   hint?: string;
+  /** Optional description shown on second line */
+  description?: string;
   keywords: string[];
 }
 
@@ -222,7 +224,20 @@ const prompt = createPrompt<string[], PromptConfig>((config, done) => {
         const label = item.highlightedLabel;
         const hint = item.highlightedHint ?? item.hint;
         const hintSuffix = hint ? ` ${chalk.gray(hint)}` : '';
-        return `  ${pointer} ${checked} ${label}${hintSuffix}`;
+        const mainLine = `  ${pointer} ${checked} ${label}${hintSuffix}`;
+        if (item.description) {
+          // Truncate description based on terminal width
+          const terminalWidth = process.stdout.columns || 80;
+          // Account for indent (7 spaces) + some margin
+          const descMaxWidth = Math.max(terminalWidth - 10, 40);
+          const desc =
+            item.description.length > descMaxWidth
+              ? `${item.description.substring(0, descMaxWidth - 3)}...`
+              : item.description;
+          const descLine = `       ${chalk.dim(desc)}`;
+          return `${mainLine}\n${descLine}`;
+        }
+        return mainLine;
       },
     });
     listBlock = page;

@@ -85,6 +85,13 @@ export function getSubagentsDir(): string {
 }
 
 /**
+ * Returns the absolute path to the skills library directory
+ */
+export function getSkillsDir(): string {
+  return path.join(getConfigDir(), 'skills');
+}
+
+/**
  * Returns the home directory for installed agent apps (Claude Code, OpenCode, etc.)
  * Can be overridden via `ASB_AGENTS_HOME`; falls back to the OS user home.
  */

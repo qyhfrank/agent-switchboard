@@ -9,16 +9,18 @@ export interface GenericSelectionResult {
 }
 
 export interface LibrarySelectorOptions<TEntry> {
-  section: 'commands' | 'subagents';
+  section: 'commands' | 'subagents' | 'skills';
   emptyHint: string; // e.g. '  asb command load <platform> [path]'
   // Entry accessors
   loadEntries: () => TEntry[];
   getId: (e: TEntry) => string;
   getTitle: (e: TEntry) => string;
   getModel?: (e: TEntry) => string | undefined;
+  getDescription?: (e: TEntry) => string | undefined;
   noun: string; // e.g. 'command' | 'subagent'
   allowOrdering?: boolean; // default: true. If false, skip reordering prompt
   scope?: ConfigScope;
+  pageSize?: number; // default: 20
 }
 
 function formatOrderList<TEntry>(
@@ -137,18 +139,23 @@ export async function showLibrarySelector<TEntry>(
       const title = opts.getTitle(entry).trim();
       const primary = title.length > 0 ? title : id;
       const model = opts.getModel ? opts.getModel(entry) : undefined;
+      const description = opts.getDescription ? opts.getDescription(entry) : undefined;
+      // Build hint (displayed) - only show id and model, not description
       const hintParts = new Set<string>();
       if (primary !== id) hintParts.add(id);
       if (model) hintParts.add(model);
       const hint = hintParts.size > 0 ? Array.from(hintParts).join(' · ') : undefined;
+      // Build keywords (for search) - include description
       const keywordSet = new Set<string>();
       keywordSet.add(id);
       if (title.length > 0) keywordSet.add(title);
       if (model) keywordSet.add(model);
+      if (description) keywordSet.add(description);
       return {
         value: id,
         label: primary,
         hint,
+        description,
         keywords: Array.from(keywordSet),
       } satisfies FuzzyMultiSelectChoice;
     });
@@ -161,7 +168,7 @@ export async function showLibrarySelector<TEntry>(
       message: `Select ${opts.noun}s to enable`,
       choices,
       initialSelected: currentSelection,
-      pageSize: 12,
+      pageSize: opts.pageSize ?? 20,
       allowEmpty: true,
     });
 

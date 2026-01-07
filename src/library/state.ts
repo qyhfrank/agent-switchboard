@@ -20,16 +20,19 @@ const sectionStateSchema = z
   .passthrough();
 
 export type SectionState = z.infer<typeof sectionStateSchema>;
+export type LibrarySection = 'commands' | 'subagents' | 'skills';
+
 const agentSyncCache: Record<
-  'commands' | 'subagents',
+  LibrarySection,
   Record<string, { hash?: string; updatedAt?: string }>
 > = {
   commands: {},
   subagents: {},
+  skills: {},
 };
 
 function getConfigSectionActive(
-  section: 'commands' | 'subagents',
+  section: LibrarySection,
   options?: UpdateConfigLayerOptions
 ): string[] {
   const { config } = loadMergedSwitchboardConfig(options);
@@ -37,7 +40,7 @@ function getConfigSectionActive(
 }
 
 export function loadLibraryStateSection(
-  section: 'commands' | 'subagents',
+  section: LibrarySection,
   scope?: ConfigScope
 ): SectionState {
   const layerOptions = scopeToLayerOptions(scope);
@@ -49,7 +52,7 @@ export function loadLibraryStateSection(
 }
 
 export function saveLibraryStateSection(
-  section: 'commands' | 'subagents',
+  section: LibrarySection,
   state: SectionState,
   scope?: ConfigScope
 ): void {
@@ -64,12 +67,18 @@ export function saveLibraryStateSection(
         ...currentCommands,
         active: [...validated.active],
       } as SwitchboardConfigLayer['commands'];
-    } else {
+    } else if (section === 'subagents') {
       const currentSubagents = (next.subagents ?? {}) as Record<string, unknown>;
       next.subagents = {
         ...currentSubagents,
         active: [...validated.active],
       } as SwitchboardConfigLayer['subagents'];
+    } else {
+      const currentSkills = (next.skills ?? {}) as Record<string, unknown>;
+      next.skills = {
+        ...currentSkills,
+        active: [...validated.active],
+      } as SwitchboardConfigLayer['skills'];
     }
     return next;
   }, layerOptions);
@@ -77,7 +86,7 @@ export function saveLibraryStateSection(
 }
 
 export function updateLibraryStateSection(
-  section: 'commands' | 'subagents',
+  section: LibrarySection,
   mutator: (current: SectionState) => SectionState,
   scope?: ConfigScope
 ): SectionState {

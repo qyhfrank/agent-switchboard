@@ -4,8 +4,13 @@ import { type GenericSelectionResult, showLibrarySelector } from './library-sele
 
 export type CommandSelectionResult = GenericSelectionResult;
 
+export interface CommandSelectorOptions {
+  scope?: ConfigScope;
+  pageSize?: number;
+}
+
 export async function showCommandSelector(
-  scope?: ConfigScope
+  options?: CommandSelectorOptions
 ): Promise<CommandSelectionResult | null> {
   return showLibrarySelector<CommandEntry>({
     section: 'commands',
@@ -24,6 +29,7 @@ export async function showCommandSelector(
       const m = cc?.model as unknown as string | undefined;
       return typeof m === 'string' && m.trim().length > 0 ? m : undefined;
     },
-    scope,
+    scope: options?.scope,
+    pageSize: options?.pageSize,
   });
 }
