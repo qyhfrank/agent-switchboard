@@ -51,16 +51,12 @@ function resolveRuleFile(
         return path.join(path.resolve(projectRoot), 'AGENTS.md');
       }
       return path.join(getCodexDir(), 'AGENTS.md');
-    case 'gemini': {
-      // Gemini CLI default project/user context file is GEMINI.md.
-      // If a project is provided and AGENTS.md already exists (user customized CLI to use it), honor it.
+    case 'gemini':
+      // Gemini uses AGENTS.md
       if (projectRoot && projectRoot.length > 0) {
-        const agentsPath = path.join(path.resolve(projectRoot), 'AGENTS.md');
-        if (fs.existsSync(agentsPath)) return agentsPath;
-        return path.join(path.resolve(projectRoot), 'GEMINI.md');
+        return path.join(path.resolve(projectRoot), 'AGENTS.md');
       }
-      return path.join(getGeminiDir(), 'GEMINI.md');
-    }
+      return path.join(getGeminiDir(), 'AGENTS.md');
     case 'opencode':
       // OpenCode supports project-level AGENTS.md at repository root; otherwise use global.
       if (projectRoot && projectRoot.length > 0) {
