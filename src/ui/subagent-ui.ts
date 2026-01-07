@@ -4,8 +4,13 @@ import { type GenericSelectionResult, showLibrarySelector } from './library-sele
 
 export type SubagentSelectionResult = GenericSelectionResult;
 
+export interface SubagentSelectorOptions {
+  scope?: ConfigScope;
+  pageSize?: number;
+}
+
 export async function showSubagentSelector(
-  scope?: ConfigScope
+  options?: SubagentSelectorOptions
 ): Promise<SubagentSelectionResult | null> {
   return showLibrarySelector<SubagentEntry>({
     section: 'subagents',
@@ -30,6 +35,7 @@ export async function showSubagentSelector(
           ? m2
           : undefined;
     },
-    scope,
+    scope: options?.scope,
+    pageSize: options?.pageSize,
   });
 }

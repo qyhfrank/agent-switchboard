@@ -27,6 +27,7 @@ import {
   getGeminiDir,
   getMcpConfigPath,
   getOpencodePath,
+  getSkillsDir,
   getSubagentsDir,
 } from './config/paths.js';
 import type { McpServer } from './config/schemas.js';
@@ -42,6 +43,10 @@ import { distributeRules, listUnsupportedAgents } from './rules/distribution.js'
 import { buildRuleInventory } from './rules/inventory.js';
 import { loadRuleLibrary } from './rules/library.js';
 import { loadRuleState, updateRuleState } from './rules/state.js';
+import { distributeSkills } from './skills/distribution.js';
+import type { SkillImportPlatform } from './skills/importer.js';
+import { importSkill, listSkillsInDirectory } from './skills/importer.js';
+import { buildSkillInventory } from './skills/inventory.js';
 import type { SubagentPlatform as SubPlatform } from './subagents/distribution.js';
 import { distributeSubagents } from './subagents/distribution.js';
 import { importSubagentFromFile } from './subagents/importer.js';
@@ -50,6 +55,7 @@ import { buildSubagentInventory } from './subagents/inventory.js';
 import { showCommandSelector } from './ui/command-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
 import { showRuleSelector } from './ui/rule-ui.js';
+import { showSkillSelector } from './ui/skill-ui.js';
 import { showSubagentSelector } from './ui/subagent-ui.js';
 import { formatSyncTimestamp, printTable } from './util/cli.js';
 
@@ -109,6 +115,7 @@ program
       console.log(`  Rules: ${chalk.cyan(String(config.rules.active.length))}`);
       console.log(`  Commands: ${chalk.cyan(String(config.commands.active.length))}`);
       console.log(`  Subagents: ${chalk.cyan(String(config.subagents.active.length))}`);
+      console.log(`  Skills: ${chalk.cyan(String(config.skills.active.length))}`);
       if (config.agents.length > 0) {
         console.log(`  Agents: ${chalk.cyan(config.agents.join(', '))}`);
       } else {
@@ -119,6 +126,7 @@ program
       const ruleDistribution = distributeRules(undefined, { force: true }, scope);
       const commandDistribution = distributeCommands(scope);
       const subagentDistribution = distributeSubagents(scope);
+      const skillDistribution = distributeSkills(scope);
 
       const ruleErrors = ruleDistribution.results.filter((result) => result.status === 'error');
       const commandErrors = commandDistribution.results.filter(
@@ -127,6 +135,7 @@ program
       const subagentErrors = subagentDistribution.results.filter(
         (result) => result.status === 'error'
       );
+      const skillErrors = skillDistribution.results.filter((result) => result.status === 'error');
 
       console.log(chalk.blue('Rule distribution:'));
       for (const result of ruleDistribution.results) {
@@ -195,8 +204,34 @@ program
       }
       console.log();
 
+      console.log(chalk.blue('Skill distribution:'));
+      if (skillDistribution.results.length === 0) {
+        console.log(`  ${chalk.gray('no active skills')}`);
+      }
+      for (const result of skillDistribution.results) {
+        const pathLabel = chalk.dim(result.targetDir);
+        if (result.status === 'written') {
+          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
+        } else if (result.status === 'skipped') {
+          const reason = result.reason
+            ? chalk.gray(` (${result.reason})`)
+            : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
+        } else {
+          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
+          console.log(
+            `  ${chalk.red('✗')} ${chalk.cyan(result.platform)} ${pathLabel}${errorLabel}`
+          );
+        }
+      }
+      console.log();
+
       const hasErrors =
-        ruleErrors.length > 0 || commandErrors.length > 0 || subagentErrors.length > 0;
+        ruleErrors.length > 0 ||
+        commandErrors.length > 0 ||
+        subagentErrors.length > 0 ||
+        skillErrors.length > 0;
       if (hasErrors) {
         console.log(chalk.red('✗ Synchronization completed with errors.'));
         process.exit(1);
@@ -275,6 +310,15 @@ function defaultSubagentSourceDir(platform: SubPlatform): string {
   }
 }
 
+function defaultSkillSourceDir(platform: SkillImportPlatform): string {
+  switch (platform) {
+    case 'claude-code':
+      return path.join(getClaudeDir(), 'skills');
+    case 'codex':
+      return path.join(getCodexDir(), 'skills');
+  }
+}
+
 function listFilesRecursively(root: string, filterExts: string[]): string[] {
   const out: string[] = [];
   const exts = new Set(filterExts.map((e) => e.toLowerCase()));
@@ -308,8 +352,9 @@ program
   .action(async (options: ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
+      const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
       // Step 1: Show UI and get selected servers
-      const selectedServers = await showMcpServerUI();
+      const selectedServers = await showMcpServerUI({ pageSize: config.ui.page_size });
 
       // Proceed even if no servers are selected: this means disable all.
       // Previous behavior incorrectly bailed out and prevented users from clearing selections.
@@ -423,7 +468,8 @@ ruleCommand
 ruleCommand.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const selection = await showRuleSelector(scope);
+    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const selection = await showRuleSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) {
       return;
     }
@@ -534,7 +580,8 @@ const commandRoot = program
 commandRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const selection = await showCommandSelector(scope);
+    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const selection = await showCommandSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
     console.log(chalk.green('✓ Updated active commands:'));
@@ -576,8 +623,6 @@ commandRoot.action(async (options: ScopeOptionInput) => {
     process.exit(1);
   }
 });
-
-// (add removed) — commands are created via `load` from platform sources
 
 // Commands library: load (import) existing platform files into library
 commandRoot
@@ -734,7 +779,8 @@ const subagentRoot = program
 subagentRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const selection = await showSubagentSelector(scope);
+    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const selection = await showSubagentSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
     console.log(chalk.green('✓ Updated active subagents:'));
@@ -912,6 +958,210 @@ subagentRoot
         }
 
         console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into subagent library.`);
+      } catch (error) {
+        if (error instanceof Error) {
+          console.error(chalk.red(`\n✗ Error: ${error.message}`));
+        }
+        process.exit(1);
+      }
+    }
+  );
+
+// Skills library: manage and distribute skill bundles
+const skillRoot = program
+  .command('skill')
+  .description('Manage skill library')
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml');
+
+skillRoot.action(async (options: ScopeOptionInput) => {
+  try {
+    const scope = resolveScope(options);
+    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const selection = await showSkillSelector({ scope, pageSize: config.ui.page_size });
+    if (!selection) return;
+    console.log();
+    console.log(chalk.green('✓ Updated active skills:'));
+    if (selection.active.length === 0) {
+      console.log(`  ${chalk.gray('none')}`);
+    } else {
+      for (const id of selection.active) {
+        console.log(`  ${chalk.cyan(id)}`);
+      }
+    }
+
+    const out = distributeSkills(scope);
+    if (out.results.length > 0) {
+      console.log();
+      console.log(chalk.blue('Skill distribution:'));
+      for (const r of out.results) {
+        const pathLabel = chalk.dim(r.targetDir);
+        if (r.status === 'written') {
+          const reason = r.reason ? chalk.gray(` (${r.reason})`) : '';
+          console.log(`  ${chalk.green('✓')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
+        } else if (r.status === 'skipped') {
+          const reason = r.reason ? chalk.gray(` (${r.reason})`) : chalk.gray(' (unchanged)');
+          console.log(`  ${chalk.gray('•')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
+        } else {
+          const err = r.error ? ` ${chalk.red(r.error)}` : '';
+          console.log(`  ${chalk.red('✗')} ${chalk.cyan(r.platform)} ${pathLabel}${err}`);
+        }
+      }
+    }
+
+    // Guidance: unsupported platforms for skills
+    console.log();
+    console.log(chalk.gray('Unsupported platforms (manual steps required): Gemini, OpenCode'));
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error(chalk.red(`\n✗ Error: ${error.message}`));
+    }
+    process.exit(1);
+  }
+});
+
+skillRoot
+  .command('list')
+  .description('Display skill inventory and sync information')
+  .option('--json', 'Output inventory as JSON')
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('--project <path>', 'Project directory containing .asb.toml')
+  .action((options: { json?: boolean } & ScopeOptionInput) => {
+    try {
+      const scope = resolveScope(options);
+      const inventory = buildSkillInventory(scope);
+
+      if (options.json) {
+        console.log(
+          JSON.stringify(
+            {
+              entries: inventory.entries,
+              agentSync: inventory.state.agentSync,
+              active: inventory.state.active,
+            },
+            null,
+            2
+          )
+        );
+        return;
+      }
+
+      if (inventory.entries.length === 0) {
+        console.log(chalk.yellow('⚠ No skills found. Use `asb skill load <platform> [path]`.'));
+      } else {
+        console.log(chalk.blue('Skills:'));
+        const header = ['ID', 'Active', 'Name', 'Description'];
+        const rows = inventory.entries.map((row) => {
+          const activePlain = row.active ? 'yes' : 'no';
+          const descPlain =
+            row.description.length > 50
+              ? `${row.description.substring(0, 47)}...`
+              : row.description;
+          return [
+            { plain: row.id, formatted: row.id },
+            {
+              plain: activePlain,
+              formatted: row.active ? chalk.green(activePlain) : chalk.gray(activePlain),
+            },
+            { plain: row.name, formatted: row.name },
+            { plain: descPlain, formatted: descPlain },
+          ];
+        });
+        printTable(header, rows);
+      }
+
+      console.log();
+      console.log(chalk.blue('Agent sync status:'));
+      const keys = Object.keys(inventory.state.agentSync);
+      if (keys.length === 0) {
+        console.log(`  ${chalk.gray('no sync recorded')}`);
+      } else {
+        for (const agent of keys) {
+          const sync = inventory.state.agentSync[agent];
+          const stamp = formatSyncTimestamp(sync?.updatedAt);
+          const display = sync?.updatedAt ? stamp : chalk.gray(stamp);
+          console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
+        }
+      }
+
+      // Guidance: unsupported platforms for skills
+      console.log();
+      console.log(chalk.gray('Unsupported platforms (manual steps required): Gemini, OpenCode'));
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+skillRoot
+  .command('load')
+  .description('Import existing platform skill directories into the skill library')
+  .argument('<platform>', 'claude-code | codex')
+  .argument('[path]', 'Source directory (defaults by platform)')
+  .option('-f, --force', 'Overwrite existing library directories without confirmation')
+  .action(
+    async (
+      platform: SkillImportPlatform,
+      srcPath: string | undefined,
+      opts: { force?: boolean }
+    ) => {
+      try {
+        const source =
+          srcPath && srcPath.trim().length > 0 ? srcPath : defaultSkillSourceDir(platform);
+        if (!fs.existsSync(source)) {
+          console.error(chalk.red(`\n✗ Source not found: ${source}`));
+          process.exit(1);
+        }
+
+        if (!isDir(source)) {
+          console.error(chalk.red('\n✗ Source must be a directory containing skill folders.'));
+          process.exit(1);
+        }
+
+        const skillIds = listSkillsInDirectory(source);
+
+        if (skillIds.length === 0) {
+          console.log(
+            chalk.yellow('\n⚠ No skills to import (no SKILL.md found in subdirectories).')
+          );
+          return;
+        }
+
+        const outDir = getSkillsDir();
+        let imported = 0;
+        let skipped = 0;
+
+        for (const id of skillIds) {
+          const result = importSkill(platform, source, id, { force: opts.force });
+
+          if (result.status === 'success') {
+            imported++;
+            console.log(
+              `${chalk.green('✓')} ${chalk.cyan(result.skill.name)} → ${chalk.dim(result.skill.targetPath)}`
+            );
+          } else if (result.status === 'skipped') {
+            skipped++;
+            console.log(`${chalk.gray('•')} ${chalk.cyan(id)} ${chalk.gray(`(${result.reason})`)}`);
+          } else {
+            console.log(
+              `${chalk.red('✗')} ${chalk.cyan(id)} ${chalk.red(result.error ?? 'unknown error')}`
+            );
+          }
+        }
+
+        console.log();
+        if (imported > 0) {
+          console.log(
+            `${chalk.green('✓')} Imported ${imported} skill(s) into ${chalk.dim(outDir)}`
+          );
+        }
+        if (skipped > 0) {
+          console.log(
+            chalk.gray(`  ${skipped} skill(s) skipped (already exist, use --force to overwrite)`)
+          );
+        }
       } catch (error) {
         if (error instanceof Error) {
           console.error(chalk.red(`\n✗ Error: ${error.message}`));

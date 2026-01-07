@@ -10,6 +10,11 @@ interface RuleSelectionResult {
   active: string[];
 }
 
+export interface RuleSelectorOptions {
+  scope?: ConfigScope;
+  pageSize?: number;
+}
+
 function formatOrderList(order: string[], map: Map<string, RuleSnippet>): string {
   return order
     .map((id, index) => {
@@ -101,7 +106,11 @@ async function promptRuleOrder(
   }
 }
 
-export async function showRuleSelector(scope?: ConfigScope): Promise<RuleSelectionResult | null> {
+export async function showRuleSelector(
+  options?: RuleSelectorOptions
+): Promise<RuleSelectionResult | null> {
+  const scope = options?.scope;
+  const pageSize = options?.pageSize ?? 20;
   const rules = loadRuleLibrary();
 
   if (rules.length === 0) {
@@ -177,7 +186,7 @@ export async function showRuleSelector(scope?: ConfigScope): Promise<RuleSelecti
       message: 'Select rules to enable',
       choices: buildChoiceList(state.active),
       initialSelected: state.active,
-      pageSize: 12,
+      pageSize,
       allowEmpty: true,
     });
 

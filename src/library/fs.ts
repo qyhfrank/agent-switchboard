@@ -53,5 +53,3 @@ export function ensureParentDir(filePath: string): void {
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 }
-
-// Backup helper removed: policy is write-through without side-by-side backups.

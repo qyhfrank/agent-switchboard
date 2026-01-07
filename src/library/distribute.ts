@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import type { ConfigScope } from '../config/scope.js';
 import { ensureParentDir } from './fs.js';
-import { loadLibraryStateSection, updateLibraryStateSection } from './state.js';
+import {
+  type LibrarySection,
+  loadLibraryStateSection,
+  updateLibraryStateSection,
+} from './state.js';
 
 export type DistributionStatus = 'written' | 'skipped' | 'error';
 
@@ -15,7 +19,7 @@ export interface DistributionResult<Platform extends string> {
 }
 
 export interface DistributeOptions<TEntry, Platform extends string> {
-  section: 'commands' | 'subagents';
+  section: LibrarySection;
   selected: TEntry[];
   platforms: Platform[];
   resolveFilePath: (platform: Platform, entry: TEntry) => string;
