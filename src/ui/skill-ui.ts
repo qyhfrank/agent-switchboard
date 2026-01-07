@@ -21,7 +21,7 @@ export async function showSkillSelector(
     getTitle: (e) => e.metadata.name,
     getDescription: (e) => e.metadata.description,
     noun: 'skill',
-    allowOrdering: true,
+    allowOrdering: false,
     scope: options?.scope,
     pageSize: options?.pageSize,
   });
