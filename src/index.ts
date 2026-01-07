@@ -1008,10 +1008,6 @@ skillRoot.action(async (options: ScopeOptionInput) => {
         }
       }
     }
-
-    // Guidance: unsupported platforms for skills
-    console.log();
-    console.log(chalk.gray('Unsupported platforms (manual steps required): Gemini, OpenCode'));
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));

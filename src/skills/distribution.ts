@@ -1,5 +1,13 @@
 import path from 'node:path';
-import { getClaudeDir, getCodexDir, getProjectClaudeDir } from '../config/paths.js';
+import {
+  getClaudeDir,
+  getCodexDir,
+  getGeminiDir,
+  getOpencodeRoot,
+  getProjectClaudeDir,
+  getProjectGeminiDir,
+  getProjectOpencodeRoot,
+} from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
   type BundleDistributionResult,
@@ -9,9 +17,9 @@ import {
 import { loadLibraryStateSection } from '../library/state.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
-export type SkillPlatform = 'claude-code' | 'codex';
+export type SkillPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
 
-export const SKILL_PLATFORMS: SkillPlatform[] = ['claude-code', 'codex'];
+export const SKILL_PLATFORMS: SkillPlatform[] = ['claude-code', 'codex', 'gemini', 'opencode'];
 
 /**
  * Resolve target directory for a skill on a specific platform.
@@ -30,6 +38,16 @@ export function resolveSkillTargetDir(
     case 'codex':
       // Codex only supports global skills
       return path.join(getCodexDir(), 'skills', id);
+    case 'gemini':
+      if (scope?.project) {
+        return path.join(getProjectGeminiDir(scope.project), 'skills', id);
+      }
+      return path.join(getGeminiDir(), 'skills', id);
+    case 'opencode':
+      if (scope?.project) {
+        return path.join(getProjectOpencodeRoot(scope.project), 'skills', id);
+      }
+      return path.join(getOpencodeRoot(), 'skills', id);
   }
 }
 
