@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { Command } from 'commander';
@@ -61,7 +62,13 @@ import { formatSyncTimestamp, printTable } from './util/cli.js';
 
 const program = new Command();
 
-program.name('asb').description('Unified MCP server manager for AI coding agents').version('0.1.0');
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.json'), 'utf-8'));
+
+program
+  .name('asb')
+  .description('Unified MCP server manager for AI coding agents')
+  .version(packageJson.version);
 
 // Initialize library directories for commands/subagents (secure permissions)
 ensureLibraryDirectories();
