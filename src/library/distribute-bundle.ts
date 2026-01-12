@@ -9,7 +9,7 @@ import {
   updateLibraryStateSection,
 } from './state.js';
 
-export type BundleDistributionStatus = 'written' | 'skipped' | 'error';
+export type BundleDistributionStatus = 'written' | 'skipped' | 'error' | 'deleted';
 
 export interface BundleDistributionResult<Platform extends string> {
   platform: Platform;
@@ -29,6 +29,11 @@ export interface BundleFile {
   relativePath: string;
 }
 
+export interface BundleCleanupConfig<Platform extends string> {
+  /** Resolve parent directory containing all bundles for a platform */
+  resolveParentDir: (platform: Platform) => string;
+}
+
 export interface DistributeBundleOptions<TEntry, Platform extends string> {
   section: LibrarySection;
   selected: TEntry[];
@@ -39,11 +44,31 @@ export interface DistributeBundleOptions<TEntry, Platform extends string> {
   listFiles: (entry: TEntry) => BundleFile[];
   /** Get entry ID for logging */
   getId: (entry: TEntry) => string;
+  /** Cleanup config for removing orphan directories */
+  cleanup?: BundleCleanupConfig<Platform>;
   scope?: ConfigScope;
 }
 
 export interface DistributeBundleOutcome<Platform extends string> {
   results: BundleDistributionResult<Platform>[];
+}
+
+/**
+ * Recursively delete a directory and all its contents.
+ */
+function rmDirRecursive(dirPath: string): void {
+  if (!fs.existsSync(dirPath)) return;
+
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const fullPath = path.join(dirPath, entry.name);
+    if (entry.isDirectory()) {
+      rmDirRecursive(fullPath);
+    } else {
+      fs.unlinkSync(fullPath);
+    }
+  }
+  fs.rmdirSync(dirPath);
 }
 
 /**
@@ -155,6 +180,45 @@ export function distributeBundle<TEntry, Platform extends string>(
         }),
         opts.scope
       );
+    }
+
+    // Cleanup orphan directories if cleanup config is provided
+    if (opts.cleanup) {
+      const activeIds = new Set(opts.selected.map(opts.getId));
+      const parentDir = opts.cleanup.resolveParentDir(platform);
+
+      if (fs.existsSync(parentDir)) {
+        try {
+          const entries = fs.readdirSync(parentDir, { withFileTypes: true });
+          for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+
+            const id = entry.name;
+            if (!activeIds.has(id)) {
+              const dirPath = path.join(parentDir, id);
+              try {
+                rmDirRecursive(dirPath);
+                results.push({
+                  platform,
+                  targetDir: dirPath,
+                  status: 'deleted',
+                  reason: 'orphan',
+                });
+              } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                results.push({
+                  platform,
+                  targetDir: dirPath,
+                  status: 'error',
+                  error: `Failed to delete orphan: ${msg}`,
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore errors reading directory
+        }
+      }
     }
   }
 

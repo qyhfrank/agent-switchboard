@@ -21,22 +21,37 @@ export class CodexAgent implements AgentAdapter {
     return getCodexConfigPath();
   }
 
-  applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
-    const content = this._loadConfig();
-    const updated = mergeConfig(content, config.mcpServers);
-    this._saveConfig(updated);
+  /**
+   * Project-level config: <project>/.codex/config.toml
+   */
+  projectConfigPath(projectRoot: string): string {
+    return path.join(path.resolve(projectRoot), '.codex', 'config.toml');
   }
 
-  private _loadConfig(): string {
-    const configPath = this.configPath();
+  applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
+    const content = this._loadConfig(this.configPath());
+    const updated = mergeConfig(content, config.mcpServers);
+    this._saveConfig(this.configPath(), updated);
+  }
+
+  applyProjectConfig(
+    projectRoot: string,
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+  ): void {
+    const configPath = this.projectConfigPath(projectRoot);
+    const content = this._loadConfig(configPath);
+    const updated = mergeConfig(content, config.mcpServers);
+    this._saveConfig(configPath, updated);
+  }
+
+  private _loadConfig(configPath: string): string {
     if (!fs.existsSync(configPath)) {
       return '';
     }
     return fs.readFileSync(configPath, 'utf-8');
   }
 
-  private _saveConfig(content: string): void {
-    const configPath = this.configPath();
+  private _saveConfig(configPath: string, content: string): void {
     const dirPath = path.dirname(configPath);
 
     if (!fs.existsSync(dirPath)) {

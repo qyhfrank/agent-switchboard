@@ -3,6 +3,7 @@
  * Manages MCP server configuration for Cursor IDE
  */
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { McpServer } from '../config/schemas.js';
@@ -34,10 +35,30 @@ export class CursorAgent implements AgentAdapter {
     return path.join(base, '.cursor', 'mcp.json');
   }
 
+  /**
+   * Project-level config: <project>/.cursor/mcp.json
+   */
+  projectConfigPath(projectRoot: string): string {
+    return path.join(path.resolve(projectRoot), '.cursor', 'mcp.json');
+  }
+
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
-    const path = this.configPath();
-    const agentConfig = loadJsonFile<JsonAgentConfig>(path, { mcpServers: {} });
+    const configPath = this.configPath();
+    const agentConfig = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
     const merged = mergeMcpIntoAgent(agentConfig, config.mcpServers as Record<string, object>);
-    saveJsonFile(path, merged);
+    saveJsonFile(configPath, merged);
+  }
+
+  applyProjectConfig(
+    projectRoot: string,
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+  ): void {
+    const configPath = this.projectConfigPath(projectRoot);
+    const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
+    const merged = mergeMcpIntoAgent(existing, config.mcpServers as Record<string, object>);
+    // Ensure .cursor directory exists
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    saveJsonFile(configPath, merged);
   }
 }

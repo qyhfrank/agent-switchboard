@@ -3,6 +3,8 @@
  * Manages MCP server configuration for Gemini CLI
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { getGeminiSettingsPath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
@@ -29,10 +31,30 @@ export class GeminiAgent implements AgentAdapter {
     return getGeminiSettingsPath();
   }
 
+  /**
+   * Project-level config: <project>/.gemini/settings.json
+   */
+  projectConfigPath(projectRoot: string): string {
+    return path.join(path.resolve(projectRoot), '.gemini', 'settings.json');
+  }
+
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
-    const path = this.configPath();
-    const agentConfig = loadJsonFile<JsonAgentConfig>(path, { mcpServers: {} });
+    const configPath = this.configPath();
+    const agentConfig = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
     const merged = mergeMcpIntoAgent(agentConfig, config.mcpServers as Record<string, object>);
-    saveJsonFile(path, merged);
+    saveJsonFile(configPath, merged);
+  }
+
+  applyProjectConfig(
+    projectRoot: string,
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+  ): void {
+    const configPath = this.projectConfigPath(projectRoot);
+    const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
+    const merged = mergeMcpIntoAgent(existing, config.mcpServers as Record<string, object>);
+    // Ensure .gemini directory exists
+    const dir = path.dirname(configPath);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    saveJsonFile(configPath, merged);
   }
 }

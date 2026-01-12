@@ -5,7 +5,7 @@
 import { z } from 'zod';
 
 /**
- * Schema for MCP server configuration
+ * Schema for MCP server configuration (definition only, no enabled state)
  * Allows both command-based and URL-based servers
  * Preserves unknown fields for forward compatibility
  */
@@ -16,7 +16,6 @@ export const mcpServerSchema = z
     env: z.record(z.string()).optional(),
     url: z.string().url().optional(),
     type: z.enum(['stdio', 'http']).optional(),
-    enabled: z.boolean().default(true),
   })
   .passthrough(); // Allow unknown fields
 

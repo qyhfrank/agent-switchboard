@@ -10,6 +10,7 @@ import {
 } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
+  type BundleCleanupConfig,
   type BundleDistributionResult,
   type DistributeBundleOutcome,
   distributeBundle,
@@ -22,6 +23,31 @@ export type SkillPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
 export const SKILL_PLATFORMS: SkillPlatform[] = ['claude-code', 'codex', 'gemini', 'opencode'];
 
 /**
+ * Resolve parent directory containing all skills for a platform.
+ */
+function resolveSkillsParentDir(platform: SkillPlatform, scope?: ConfigScope): string {
+  switch (platform) {
+    case 'claude-code':
+      if (scope?.project) {
+        return path.join(getProjectClaudeDir(scope.project), 'skills');
+      }
+      return path.join(getClaudeDir(), 'skills');
+    case 'codex':
+      return path.join(getCodexDir(), 'skills');
+    case 'gemini':
+      if (scope?.project) {
+        return path.join(getProjectGeminiDir(scope.project), 'skills');
+      }
+      return path.join(getGeminiDir(), 'skills');
+    case 'opencode':
+      if (scope?.project) {
+        return path.join(getProjectOpencodeRoot(scope.project), 'skills');
+      }
+      return path.join(getOpencodeRoot(), 'skills');
+  }
+}
+
+/**
  * Resolve target directory for a skill on a specific platform.
  */
 export function resolveSkillTargetDir(
@@ -29,26 +55,7 @@ export function resolveSkillTargetDir(
   id: string,
   scope?: ConfigScope
 ): string {
-  switch (platform) {
-    case 'claude-code':
-      if (scope?.project) {
-        return path.join(getProjectClaudeDir(scope.project), 'skills', id);
-      }
-      return path.join(getClaudeDir(), 'skills', id);
-    case 'codex':
-      // Codex only supports global skills
-      return path.join(getCodexDir(), 'skills', id);
-    case 'gemini':
-      if (scope?.project) {
-        return path.join(getProjectGeminiDir(scope.project), 'skills', id);
-      }
-      return path.join(getGeminiDir(), 'skills', id);
-    case 'opencode':
-      if (scope?.project) {
-        return path.join(getProjectOpencodeRoot(scope.project), 'skills', id);
-      }
-      return path.join(getOpencodeRoot(), 'skills', id);
-  }
+  return path.join(resolveSkillsParentDir(platform, scope), id);
 }
 
 export interface SkillDistributionOutcome {
@@ -74,6 +81,11 @@ export function distributeSkills(scope?: ConfigScope): SkillDistributionOutcome 
   // Filter to active skills
   const selected = entries.filter((e) => activeIds.has(e.id));
 
+  // Cleanup config to remove orphan skill directories
+  const cleanup: BundleCleanupConfig<SkillPlatform> = {
+    resolveParentDir: (platform) => resolveSkillsParentDir(platform, scope),
+  };
+
   const outcome: DistributeBundleOutcome<SkillPlatform> = distributeBundle<
     SkillEntry,
     SkillPlatform
@@ -84,6 +96,7 @@ export function distributeSkills(scope?: ConfigScope): SkillDistributionOutcome 
     resolveTargetDir: (platform, entry) => resolveSkillTargetDir(platform, entry.id, scope),
     listFiles: listSkillFiles,
     getId: (entry) => entry.id,
+    cleanup,
     scope,
   });
 

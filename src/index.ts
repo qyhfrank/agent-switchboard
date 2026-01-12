@@ -20,24 +20,23 @@ import { importCommandFromFile } from './commands/importer.js';
 
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
-import { loadMcpConfig, updateEnabledFlags } from './config/mcp-config.js';
+import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
   getClaudeDir,
   getCodexDir,
   getCommandsDir,
   getGeminiDir,
-  getMcpConfigPath,
   getOpencodePath,
   getSkillsDir,
   getSubagentsDir,
 } from './config/paths.js';
-import type { McpServer } from './config/schemas.js';
 import type { ConfigScope } from './config/scope.js';
 import {
   loadSwitchboardConfig,
   loadSwitchboardConfigWithLayers,
 } from './config/switchboard-config.js';
 import { ensureLibraryDirectories, writeFileSecure } from './library/fs.js';
+import { loadMcpActiveState, saveMcpActiveState } from './library/state.js';
 import { RULE_SUPPORTED_AGENTS } from './rules/agents.js';
 import { composeActiveRules } from './rules/composer.js';
 import { distributeRules, listUnsupportedAgents } from './rules/distribution.js';
@@ -359,21 +358,57 @@ program
   .action(async (options: ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
-      const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+      const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLoadOptions(scope));
+      const mcpConfig = loadMcpConfig();
+
+      // Determine initial selection:
+      // - If writing to project/profile scope, only use that layer's explicit [mcp].active (no fallback).
+      // - If writing to user scope and [mcp].active is missing, fall back to legacy mcp.json enabled flags.
+      let currentActive: string[] = [];
+      if (scope?.project) {
+        const projectActive = layers.project?.config?.mcp?.active;
+        currentActive = Array.isArray(projectActive) ? [...projectActive] : [];
+      } else if (scope?.profile) {
+        const profileActive = layers.profile?.config?.mcp?.active;
+        currentActive = Array.isArray(profileActive) ? [...profileActive] : [];
+      } else {
+        const userActive = layers.user.config?.mcp?.active;
+        if (Array.isArray(userActive)) {
+          currentActive = [...userActive];
+        } else {
+          // Read from legacy mcp.json enabled flags
+          currentActive = Object.entries(mcpConfig.mcpServers)
+            .filter(([, server]) => (server as Record<string, unknown>).enabled === true)
+            .map(([name]) => name);
+        }
+      }
+
       // Step 1: Show UI and get selected servers
-      const selectedServers = await showMcpServerUI({ pageSize: config.ui.page_size });
+      const selectedServers = await showMcpServerUI({
+        pageSize: config.ui.page_size,
+        enabled: currentActive,
+      });
 
-      // Proceed even if no servers are selected: this means disable all.
-      // Previous behavior incorrectly bailed out and prevented users from clearing selections.
-
-      // Step 2: Update enabled flags in mcp.json
+      // Step 2: Save active state to config.toml (appropriate layer based on scope)
       const spinner = ora('Updating MCP configuration...').start();
-      updateEnabledFlags(selectedServers);
-      const cfgPath = getMcpConfigPath();
-      spinner.succeed(chalk.green(`✓ Updated ${cfgPath}`));
+      saveMcpActiveState(selectedServers, scope);
+      const layerName = scope?.project
+        ? 'project .asb.toml'
+        : scope?.profile
+          ? `profile ${scope.profile}.toml`
+          : 'config.toml';
+      spinner.succeed(chalk.green(`✓ Updated ${layerName} [mcp].active`));
+
+      // After user-level write, strip legacy enabled flags from mcp.json (definition-only file).
+      if (!scope?.profile && !scope?.project) {
+        const cleaned = stripLegacyEnabledFlagsFromMcpJson();
+        if (cleaned) {
+          console.log(chalk.green('✓ Removed legacy "enabled" flags from mcp.json'));
+        }
+      }
 
       // Step 3: Apply to registered agents
-      await applyToAgents(scope);
+      await applyToAgents(scope, selectedServers);
 
       // Step 4: Show summary
       showSummary(selectedServers, scope);
@@ -1176,8 +1211,10 @@ skillRoot
 
 /**
  * Apply enabled MCP servers to all registered agents
+ * @param scope - Configuration scope (profile/project)
+ * @param enabledServerNames - List of enabled server names
  */
-async function applyToAgents(scope?: ConfigScope): Promise<void> {
+async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[]): Promise<void> {
   const mcpConfig = loadMcpConfig();
   const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
 
@@ -1189,14 +1226,12 @@ async function applyToAgents(scope?: ConfigScope): Promise<void> {
     return;
   }
 
-  // Filter enabled servers and remove 'enabled' field
+  // Use provided list or read from config.toml
+  const activeSet = new Set(enabledServerNames ?? loadMcpActiveState(scope));
+
+  // Filter to only enabled servers
   const enabledServers = Object.fromEntries(
-    Object.entries(mcpConfig.mcpServers)
-      .filter(([, server]) => server.enabled === true)
-      .map(([name, server]) => {
-        const { enabled: _enabled, ...rest } = server;
-        return [name, rest as Omit<McpServer, 'enabled'>];
-      })
+    Object.entries(mcpConfig.mcpServers).filter(([name]) => activeSet.has(name))
   );
 
   const configToApply = { mcpServers: enabledServers };
@@ -1209,8 +1244,16 @@ async function applyToAgents(scope?: ConfigScope): Promise<void> {
 
     try {
       const agent = getAgentById(agentId);
-      agent.applyConfig(configToApply);
-      spinner.succeed(`${chalk.green('✓')} ${agentId} ${chalk.dim(agent.configPath())}`);
+
+      // Use project-level config when --project is specified
+      if (scope?.project && agent.applyProjectConfig) {
+        agent.applyProjectConfig(scope.project, configToApply);
+        const projectPath = agent.projectConfigPath?.(scope.project) ?? 'project config';
+        spinner.succeed(`${chalk.green('✓')} ${agentId} ${chalk.dim(projectPath)}`);
+      } else {
+        agent.applyConfig(configToApply);
+        spinner.succeed(`${chalk.green('✓')} ${agentId} ${chalk.dim(agent.configPath())}`);
+      }
     } catch (error) {
       if (error instanceof Error) {
         spinner.warn(`${chalk.yellow('⚠')} ${agentId} - ${error.message} (skipped)`);
