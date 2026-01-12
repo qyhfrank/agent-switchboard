@@ -7,6 +7,7 @@ import {
 } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
+  type CleanupConfig,
   type DistributeOutcome,
   type DistributionResult,
   distributeLibrary,
@@ -33,21 +34,23 @@ export function resolveSubagentFilePath(
   id: string,
   scope?: ConfigScope
 ): string {
+  return path.join(resolveSubagentTargetDir(platform, scope), `${id}.md`);
+}
+
+function resolveSubagentTargetDir(platform: SubagentPlatform, scope?: ConfigScope): string {
   const projectRoot = scope?.project?.trim();
   switch (platform) {
     case 'claude-code': {
-      // Project-level supported: .claude/agents/
       if (projectRoot && projectRoot.length > 0) {
-        return path.join(getProjectClaudeDir(projectRoot), 'agents', `${id}.md`);
+        return path.join(getProjectClaudeDir(projectRoot), 'agents');
       }
-      return path.join(getClaudeDir(), 'agents', `${id}.md`);
+      return path.join(getClaudeDir(), 'agents');
     }
     case 'opencode': {
-      // Project-level supported: .opencode/agent/
       if (projectRoot && projectRoot.length > 0) {
-        return getProjectOpencodePath(projectRoot, 'agent', `${id}.md`);
+        return getProjectOpencodePath(projectRoot, 'agent');
       }
-      return getOpencodePath('agent', `${id}.md`);
+      return getOpencodePath('agent');
     }
   }
 }
@@ -109,12 +112,23 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
 
   const platforms: SubagentPlatform[] = ['claude-code', 'opencode'];
 
+  // Cleanup config to remove orphan subagent files
+  const cleanup: CleanupConfig<SubagentPlatform> = {
+    resolveTargetDir: (p) => resolveSubagentTargetDir(p, scope),
+    extractId: (filename) => {
+      if (!filename.endsWith('.md')) return null;
+      return filename.slice(0, -3);
+    },
+  };
+
   return distributeLibrary<SubagentEntry, SubagentPlatform>({
     section: 'subagents',
     selected,
     platforms,
     resolveFilePath: (p, e) => resolveSubagentFilePath(p, e.id, scope),
     render: (p, e) => renderForPlatform(p, e),
+    getId: (e) => e.id,
+    cleanup,
     scope,
   }) as { results: DistributionResult<SubagentPlatform>[] };
 }

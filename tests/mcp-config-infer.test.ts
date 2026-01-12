@@ -2,11 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { loadMcpConfig, saveMcpConfig } from '../src/config/mcp-config.js';
+import { loadMcpConfig } from '../src/config/mcp-config.js';
 import { getMcpConfigPath } from '../src/config/paths.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
-test('loadMcpConfig infers enabled and type for missing fields', () => {
+test('loadMcpConfig infers type for servers', () => {
   withTempAsbHome(() => {
     const cfgPath = getMcpConfigPath();
     const initial = {
@@ -19,15 +19,9 @@ test('loadMcpConfig infers enabled and type for missing fields', () => {
     fs.writeFileSync(cfgPath, JSON.stringify(initial, null, 2));
 
     const loaded = loadMcpConfig();
-    // After load, file should be saved with inferred fields
-    const saved = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
 
-    assert.equal(saved.mcpServers.localS.enabled, true);
-    assert.equal(saved.mcpServers.remoteS.enabled, true);
-    assert.equal(saved.mcpServers.localS.type, 'stdio');
-    assert.equal(saved.mcpServers.remoteS.type, 'http');
-
-    // Round-trip consistency
-    saveMcpConfig(loaded);
+    // Type should be inferred from command/url
+    assert.equal(loaded.mcpServers.localS.type, 'stdio');
+    assert.equal(loaded.mcpServers.remoteS.type, 'http');
   });
 });

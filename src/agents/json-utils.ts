@@ -23,19 +23,14 @@ export function mergeMcpIntoAgent(
 ): JsonAgentConfig {
   const merged: JsonAgentConfig = { ...agentConfig };
 
-  // Empty selection means "disable all": clear the map to {}
-  if (Object.keys(mcpServers).length === 0) {
-    merged.mcpServers = {};
-    return merged;
-  }
-  if (!merged.mcpServers) {
-    merged.mcpServers = {};
-  }
-  const target = merged.mcpServers;
+  // Replace mcpServers entirely - only keep servers in the new config
+  // This ensures disabled servers are removed from target
+  merged.mcpServers = {};
 
   for (const [name, server] of Object.entries(mcpServers)) {
-    const existing = (target[name] as Record<string, unknown>) ?? {};
-    target[name] = { ...existing, ...server };
+    // Preserve existing server-specific settings (if any) while applying new config
+    const existing = (agentConfig.mcpServers?.[name] as Record<string, unknown>) ?? {};
+    merged.mcpServers[name] = { ...existing, ...server };
   }
 
   return merged;

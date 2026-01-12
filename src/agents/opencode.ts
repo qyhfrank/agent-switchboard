@@ -5,7 +5,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { getOpencodePath } from '../config/paths.js';
+import { getOpencodePath, getProjectOpencodePath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
 
@@ -26,9 +26,28 @@ export class OpencodeAgent implements AgentAdapter {
     return getOpencodePath('opencode.json');
   }
 
-  applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
-    const filePath = this.configPath();
+  /**
+   * Project-level config: <project>/.opencode/opencode.json
+   */
+  projectConfigPath(projectRoot: string): string {
+    return getProjectOpencodePath(projectRoot, 'opencode.json');
+  }
 
+  applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
+    this._applyToPath(this.configPath(), config);
+  }
+
+  applyProjectConfig(
+    projectRoot: string,
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+  ): void {
+    this._applyToPath(this.projectConfigPath(projectRoot), config);
+  }
+
+  private _applyToPath(
+    filePath: string,
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+  ): void {
     // Load existing
     let current: OpencodeConfig = {};
     if (fs.existsSync(filePath)) {
@@ -42,10 +61,13 @@ export class OpencodeAgent implements AgentAdapter {
     }
 
     const out: OpencodeConfig = { ...current };
-    const mcpOut: Record<string, Record<string, unknown>> = { ...(current.mcp ?? {}) };
+    // Replace mcp entirely - only keep servers in the new config
+    // This ensures disabled servers are removed from target
+    const mcpOut: Record<string, Record<string, unknown>> = {};
 
     for (const [name, server] of Object.entries(config.mcpServers)) {
-      const prev = { ...(mcpOut[name] ?? {}) };
+      // Preserve existing server-specific settings (if any) while applying new config
+      const prev = { ...(current.mcp?.[name] ?? {}) };
       // Cast to extended type to access potential additional fields
       const extServer = server as ExtendedMcpServer;
 

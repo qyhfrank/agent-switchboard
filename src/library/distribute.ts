@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import type { ConfigScope } from '../config/scope.js';
 import { ensureParentDir } from './fs.js';
 import {
@@ -8,7 +9,7 @@ import {
   updateLibraryStateSection,
 } from './state.js';
 
-export type DistributionStatus = 'written' | 'skipped' | 'error';
+export type DistributionStatus = 'written' | 'skipped' | 'error' | 'deleted';
 
 export interface DistributionResult<Platform extends string> {
   platform: Platform;
@@ -18,12 +19,23 @@ export interface DistributionResult<Platform extends string> {
   error?: string;
 }
 
+export interface CleanupConfig<Platform extends string> {
+  /** Resolve target directory to scan for orphan files */
+  resolveTargetDir: (platform: Platform) => string;
+  /** Extract entry ID from filename (without extension) */
+  extractId: (filename: string) => string | null;
+}
+
 export interface DistributeOptions<TEntry, Platform extends string> {
   section: LibrarySection;
   selected: TEntry[];
   platforms: Platform[];
   resolveFilePath: (platform: Platform, entry: TEntry) => string;
   render: (platform: Platform, entry: TEntry) => string;
+  /** Get entry ID for cleanup matching */
+  getId?: (entry: TEntry) => string;
+  /** Cleanup config for removing orphan files */
+  cleanup?: CleanupConfig<Platform>;
   scope?: ConfigScope;
 }
 
@@ -99,6 +111,46 @@ export function distributeLibrary<TEntry, Platform extends string>(
     }
 
     results.push(...writtenOrSkipped);
+
+    // Cleanup orphan files if cleanup config is provided
+    if (opts.cleanup && opts.getId) {
+      const activeIds = new Set(opts.selected.map(opts.getId));
+      const targetDir = opts.cleanup.resolveTargetDir(platform);
+
+      if (fs.existsSync(targetDir)) {
+        try {
+          const files = fs.readdirSync(targetDir);
+          for (const file of files) {
+            const filePath = path.join(targetDir, file);
+            // Skip directories
+            if (fs.statSync(filePath).isDirectory()) continue;
+
+            const id = opts.cleanup.extractId(file);
+            if (id !== null && !activeIds.has(id)) {
+              try {
+                fs.unlinkSync(filePath);
+                results.push({
+                  platform,
+                  filePath,
+                  status: 'deleted',
+                  reason: 'orphan',
+                });
+              } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                results.push({
+                  platform,
+                  filePath,
+                  status: 'error',
+                  error: `Failed to delete orphan: ${msg}`,
+                });
+              }
+            }
+          }
+        } catch {
+          // Ignore errors reading directory
+        }
+      }
+    }
   }
 
   return { results };

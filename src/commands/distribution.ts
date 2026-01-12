@@ -11,6 +11,7 @@ import {
 } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
+  type CleanupConfig,
   type DistributeOutcome,
   type DistributionResult,
   distributeLibrary,
@@ -37,34 +38,38 @@ export function resolveCommandFilePath(
   id: string,
   scope?: ConfigScope
 ): string {
+  return path.join(resolveCommandTargetDir(platform, scope), getCommandFilename(platform, id));
+}
+
+function resolveCommandTargetDir(platform: CommandPlatform, scope?: ConfigScope): string {
   const projectRoot = scope?.project?.trim();
   switch (platform) {
     case 'claude-code': {
-      // Project-level supported: .claude/commands/
       if (projectRoot && projectRoot.length > 0) {
-        return path.join(getProjectClaudeDir(projectRoot), 'commands', `${id}.md`);
+        return path.join(getProjectClaudeDir(projectRoot), 'commands');
       }
-      return path.join(getClaudeDir(), 'commands', `${id}.md`);
+      return path.join(getClaudeDir(), 'commands');
     }
     case 'codex': {
-      // Project-level prompts not supported (per docs): always global
-      return path.join(getCodexDir(), 'prompts', `${id}.md`);
+      return path.join(getCodexDir(), 'prompts');
     }
     case 'gemini': {
-      // Project-level supported: .gemini/commands/
       if (projectRoot && projectRoot.length > 0) {
-        return path.join(getProjectGeminiDir(projectRoot), 'commands', `${id}.toml`);
+        return path.join(getProjectGeminiDir(projectRoot), 'commands');
       }
-      return path.join(getGeminiDir(), 'commands', `${id}.toml`);
+      return path.join(getGeminiDir(), 'commands');
     }
     case 'opencode': {
-      // Project-level supported: .opencode/command/
       if (projectRoot && projectRoot.length > 0) {
-        return getProjectOpencodePath(projectRoot, 'command', `${id}.md`);
+        return getProjectOpencodePath(projectRoot, 'command');
       }
-      return getOpencodePath('command', `${id}.md`);
+      return getOpencodePath('command');
     }
   }
+}
+
+function getCommandFilename(platform: CommandPlatform, id: string): string {
+  return platform === 'gemini' ? `${id}.toml` : `${id}.md`;
 }
 
 function buildFrontmatterForClaude(entry: CommandEntry): Record<string, unknown> {
@@ -139,12 +144,25 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
 
   const platforms: CommandPlatform[] = ['claude-code', 'codex', 'gemini', 'opencode'];
 
+  // Cleanup config to remove orphan command files
+  const cleanup: CleanupConfig<CommandPlatform> = {
+    resolveTargetDir: (p) => resolveCommandTargetDir(p, scope),
+    extractId: (filename) => {
+      // Try both extensions since we don't know platform in extractId
+      if (filename.endsWith('.toml')) return filename.slice(0, -5);
+      if (filename.endsWith('.md')) return filename.slice(0, -3);
+      return null;
+    },
+  };
+
   return distributeLibrary<CommandEntry, CommandPlatform>({
     section: 'commands',
     selected,
     platforms,
     resolveFilePath: (p, e) => resolveCommandFilePath(p, e.id, scope),
     render: (p, e) => renderForPlatform(p, e),
+    getId: (e) => e.id,
+    cleanup,
     scope,
   }) as { results: DistributionResult<CommandPlatform>[] };
 }

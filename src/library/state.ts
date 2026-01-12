@@ -22,6 +22,33 @@ const sectionStateSchema = z
 export type SectionState = z.infer<typeof sectionStateSchema>;
 export type LibrarySection = 'commands' | 'subagents' | 'skills';
 
+export function loadMcpActiveState(scope?: ConfigScope): string[] {
+  const layerOptions = scopeToLayerOptions(scope);
+  const { config } = loadMergedSwitchboardConfig(layerOptions);
+  return [...config.mcp.active];
+}
+
+export function hasMcpActiveInConfig(scope?: ConfigScope): boolean {
+  const layerOptions = scopeToLayerOptions(scope);
+  const { layers } = loadMergedSwitchboardConfig(layerOptions);
+  const checkLayer = (layer: typeof layers.user | typeof layers.profile | typeof layers.project) =>
+    layer?.config?.mcp !== undefined && Array.isArray(layer.config.mcp.active);
+  return checkLayer(layers.user) || checkLayer(layers.profile) || checkLayer(layers.project);
+}
+
+export function saveMcpActiveState(active: string[], scope?: ConfigScope): void {
+  const layerOptions = scopeToLayerOptions(scope);
+  updateConfigLayer((layer) => {
+    const next: SwitchboardConfigLayer = { ...layer };
+    const currentMcp = (next.mcp ?? {}) as Record<string, unknown>;
+    next.mcp = {
+      ...currentMcp,
+      active: [...active],
+    } as SwitchboardConfigLayer['mcp'];
+    return next;
+  }, layerOptions);
+}
+
 const agentSyncCache: Record<
   LibrarySection,
   Record<string, { hash?: string; updatedAt?: string }>
