@@ -57,7 +57,12 @@ import { showMcpServerUI } from './ui/mcp-ui.js';
 import { showRuleSelector } from './ui/rule-ui.js';
 import { showSkillSelector } from './ui/skill-ui.js';
 import { showSubagentSelector } from './ui/subagent-ui.js';
-import { formatSyncTimestamp, printTable } from './util/cli.js';
+import {
+  printActiveSelection,
+  printAgentSyncStatus,
+  printDistributionResults,
+  printTable,
+} from './util/cli.js';
 
 const program = new Command();
 
@@ -143,94 +148,40 @@ program
       );
       const skillErrors = skillDistribution.results.filter((result) => result.status === 'error');
 
-      console.log(chalk.blue('Rule distribution:'));
-      for (const result of ruleDistribution.results) {
-        const pathLabel = chalk.dim(result.filePath);
-        if (result.status === 'written') {
-          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.agent)} ${pathLabel}${reason}`);
-        } else if (result.status === 'skipped') {
-          const reason = result.reason
-            ? chalk.gray(` (${result.reason})`)
-            : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.agent)} ${pathLabel}${reason}`);
-        } else {
-          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
-          console.log(`  ${chalk.red('✗')} ${chalk.cyan(result.agent)} ${pathLabel}${errorLabel}`);
-        }
-      }
-      if (ruleDistribution.results.length === 0) {
-        console.log(`  ${chalk.gray('no supported agents configured')}`);
-      }
+      printDistributionResults({
+        title: 'Rule distribution',
+        results: ruleDistribution.results,
+        emptyMessage: 'no supported agents configured',
+        getTargetLabel: (result) => result.agent,
+        getPath: (result) => result.filePath,
+      });
       console.log();
 
-      console.log(chalk.blue('Command distribution:'));
-      if (commandDistribution.results.length === 0) {
-        console.log(`  ${chalk.gray('no active commands')}`);
-      }
-      for (const result of commandDistribution.results) {
-        const pathLabel = chalk.dim(result.filePath);
-        if (result.status === 'written') {
-          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
-        } else if (result.status === 'skipped') {
-          const reason = result.reason
-            ? chalk.gray(` (${result.reason})`)
-            : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
-        } else {
-          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
-          console.log(
-            `  ${chalk.red('✗')} ${chalk.cyan(result.platform)} ${pathLabel}${errorLabel}`
-          );
-        }
-      }
+      printDistributionResults({
+        title: 'Command distribution',
+        results: commandDistribution.results,
+        emptyMessage: 'no active commands',
+        getTargetLabel: (result) => result.platform,
+        getPath: (result) => result.filePath,
+      });
       console.log();
 
-      console.log(chalk.blue('Subagent distribution:'));
-      if (subagentDistribution.results.length === 0) {
-        console.log(`  ${chalk.gray('no active subagents')}`);
-      }
-      for (const result of subagentDistribution.results) {
-        const pathLabel = chalk.dim(result.filePath);
-        if (result.status === 'written') {
-          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
-        } else if (result.status === 'skipped') {
-          const reason = result.reason
-            ? chalk.gray(` (${result.reason})`)
-            : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
-        } else {
-          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
-          console.log(
-            `  ${chalk.red('✗')} ${chalk.cyan(result.platform)} ${pathLabel}${errorLabel}`
-          );
-        }
-      }
+      printDistributionResults({
+        title: 'Subagent distribution',
+        results: subagentDistribution.results,
+        emptyMessage: 'no active subagents',
+        getTargetLabel: (result) => result.platform,
+        getPath: (result) => result.filePath,
+      });
       console.log();
 
-      console.log(chalk.blue('Skill distribution:'));
-      if (skillDistribution.results.length === 0) {
-        console.log(`  ${chalk.gray('no active skills')}`);
-      }
-      for (const result of skillDistribution.results) {
-        const pathLabel = chalk.dim(result.targetDir);
-        if (result.status === 'written') {
-          const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
-        } else if (result.status === 'skipped') {
-          const reason = result.reason
-            ? chalk.gray(` (${result.reason})`)
-            : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(result.platform)} ${pathLabel}${reason}`);
-        } else {
-          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
-          console.log(
-            `  ${chalk.red('✗')} ${chalk.cyan(result.platform)} ${pathLabel}${errorLabel}`
-          );
-        }
-      }
+      printDistributionResults({
+        title: 'Skill distribution',
+        results: skillDistribution.results,
+        emptyMessage: 'no active skills',
+        getTargetLabel: (result) => result.platform,
+        getPath: (result) => result.targetDir,
+      });
       console.log();
 
       const hasErrors =
@@ -484,12 +435,9 @@ ruleCommand
       }
 
       console.log();
-      console.log(chalk.blue('Agent sync status:'));
-      RULE_SUPPORTED_AGENTS.forEach((agent) => {
-        const sync = inventory.state.agentSync[agent];
-        const formatted = formatSyncTimestamp(sync?.updatedAt);
-        const display = sync?.updatedAt ? formatted : chalk.gray(formatted);
-        console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
+      printAgentSyncStatus({
+        agentSync: inventory.state.agentSync,
+        agents: RULE_SUPPORTED_AGENTS,
       });
 
       const unsupportedAgents = listUnsupportedAgents();
@@ -570,26 +518,12 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
 
     if (distribution.results.length > 0) {
       console.log();
-      console.log(chalk.blue('Rule distribution:'));
-      for (const result of distribution.results) {
-        const pathLabel = chalk.dim(result.filePath);
-        if (result.status === 'written') {
-          const reasonLabel = result.reason ? chalk.gray(` (${result.reason})`) : '';
-          console.log(
-            `  ${chalk.green('✓')} ${chalk.cyan(result.agent)} ${pathLabel}${reasonLabel}`
-          );
-        } else if (result.status === 'skipped') {
-          const reasonLabel = result.reason
-            ? chalk.gray(` (${result.reason})`)
-            : chalk.gray(' (unchanged)');
-          console.log(
-            `  ${chalk.gray('•')} ${chalk.cyan(result.agent)} ${pathLabel}${reasonLabel}`
-          );
-        } else {
-          const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
-          console.log(`  ${chalk.red('✗')} ${chalk.cyan(result.agent)} ${pathLabel}${errorLabel}`);
-        }
-      }
+      printDistributionResults({
+        title: 'Rule distribution',
+        results: distribution.results,
+        getTargetLabel: (result) => result.agent,
+        getPath: (result) => result.filePath,
+      });
     }
 
     const distributionErrors = distribution.results.filter((r) => r.status === 'error');
@@ -626,32 +560,17 @@ commandRoot.action(async (options: ScopeOptionInput) => {
     const selection = await showCommandSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
-    console.log(chalk.green('✓ Updated active commands:'));
-    if (selection.active.length === 0) {
-      console.log(`  ${chalk.gray('none')}`);
-    } else {
-      for (const id of selection.active) {
-        console.log(`  ${chalk.cyan(id)}`);
-      }
-    }
+    printActiveSelection('commands', selection.active);
 
     const out = distributeCommands(scope);
     if (out.results.length > 0) {
       console.log();
-      console.log(chalk.blue('Command distribution:'));
-      for (const r of out.results) {
-        const pathLabel = chalk.dim(r.filePath);
-        if (r.status === 'written') {
-          const reason = r.reason ? chalk.gray(` (${r.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
-        } else if (r.status === 'skipped') {
-          const reason = r.reason ? chalk.gray(` (${r.reason})`) : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
-        } else {
-          const err = r.error ? ` ${chalk.red(r.error)}` : '';
-          console.log(`  ${chalk.red('✗')} ${chalk.cyan(r.platform)} ${pathLabel}${err}`);
-        }
-      }
+      printDistributionResults({
+        title: 'Command distribution',
+        results: out.results,
+        getTargetLabel: (result) => result.platform,
+        getPath: (result) => result.filePath,
+      });
     }
     // Guidance: unsupported platforms for commands
     console.log();
@@ -785,18 +704,7 @@ commandRoot
       }
 
       console.log();
-      console.log(chalk.blue('Agent sync status:'));
-      const keys = Object.keys(inventory.state.agentSync);
-      if (keys.length === 0) {
-        console.log(`  ${chalk.gray('no sync recorded')}`);
-      } else {
-        for (const agent of keys) {
-          const sync = inventory.state.agentSync[agent];
-          const stamp = formatSyncTimestamp(sync?.updatedAt);
-          const display = sync?.updatedAt ? stamp : chalk.gray(stamp);
-          console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
-        }
-      }
+      printAgentSyncStatus({ agentSync: inventory.state.agentSync });
 
       // Guidance: unsupported platforms for commands
       console.log();
@@ -825,32 +733,17 @@ subagentRoot.action(async (options: ScopeOptionInput) => {
     const selection = await showSubagentSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
-    console.log(chalk.green('✓ Updated active subagents:'));
-    if (selection.active.length === 0) {
-      console.log(`  ${chalk.gray('none')}`);
-    } else {
-      for (const id of selection.active) {
-        console.log(`  ${chalk.cyan(id)}`);
-      }
-    }
+    printActiveSelection('subagents', selection.active);
 
     const out = distributeSubagents(scope);
     if (out.results.length > 0) {
       console.log();
-      console.log(chalk.blue('Subagent distribution:'));
-      for (const r of out.results) {
-        const pathLabel = chalk.dim(r.filePath);
-        if (r.status === 'written') {
-          const reason = r.reason ? chalk.gray(` (${r.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
-        } else if (r.status === 'skipped') {
-          const reason = r.reason ? chalk.gray(` (${r.reason})`) : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
-        } else {
-          const err = r.error ? ` ${chalk.red(r.error)}` : '';
-          console.log(`  ${chalk.red('✗')} ${chalk.cyan(r.platform)} ${pathLabel}${err}`);
-        }
-      }
+      printDistributionResults({
+        title: 'Subagent distribution',
+        results: out.results,
+        getTargetLabel: (result) => result.platform,
+        getPath: (result) => result.filePath,
+      });
     }
 
     // Guidance: unsupported platforms for subagents
@@ -919,18 +812,7 @@ subagentRoot
       }
 
       console.log();
-      console.log(chalk.blue('Agent sync status:'));
-      const keys = Object.keys(inventory.state.agentSync);
-      if (keys.length === 0) {
-        console.log(`  ${chalk.gray('no sync recorded')}`);
-      } else {
-        for (const agent of keys) {
-          const sync = inventory.state.agentSync[agent];
-          const stamp = formatSyncTimestamp(sync?.updatedAt);
-          const display = sync?.updatedAt ? stamp : chalk.gray(stamp);
-          console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
-        }
-      }
+      printAgentSyncStatus({ agentSync: inventory.state.agentSync });
 
       // Guidance: unsupported platforms for subagents
       console.log();
@@ -1023,32 +905,17 @@ skillRoot.action(async (options: ScopeOptionInput) => {
     const selection = await showSkillSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
-    console.log(chalk.green('✓ Updated active skills:'));
-    if (selection.active.length === 0) {
-      console.log(`  ${chalk.gray('none')}`);
-    } else {
-      for (const id of selection.active) {
-        console.log(`  ${chalk.cyan(id)}`);
-      }
-    }
+    printActiveSelection('skills', selection.active);
 
     const out = distributeSkills(scope);
     if (out.results.length > 0) {
       console.log();
-      console.log(chalk.blue('Skill distribution:'));
-      for (const r of out.results) {
-        const pathLabel = chalk.dim(r.targetDir);
-        if (r.status === 'written') {
-          const reason = r.reason ? chalk.gray(` (${r.reason})`) : '';
-          console.log(`  ${chalk.green('✓')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
-        } else if (r.status === 'skipped') {
-          const reason = r.reason ? chalk.gray(` (${r.reason})`) : chalk.gray(' (unchanged)');
-          console.log(`  ${chalk.gray('•')} ${chalk.cyan(r.platform)} ${pathLabel}${reason}`);
-        } else {
-          const err = r.error ? ` ${chalk.red(r.error)}` : '';
-          console.log(`  ${chalk.red('✗')} ${chalk.cyan(r.platform)} ${pathLabel}${err}`);
-        }
-      }
+      printDistributionResults({
+        title: 'Skill distribution',
+        results: out.results,
+        getTargetLabel: (result) => result.platform,
+        getPath: (result) => result.targetDir,
+      });
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -1109,18 +976,7 @@ skillRoot
       }
 
       console.log();
-      console.log(chalk.blue('Agent sync status:'));
-      const keys = Object.keys(inventory.state.agentSync);
-      if (keys.length === 0) {
-        console.log(`  ${chalk.gray('no sync recorded')}`);
-      } else {
-        for (const agent of keys) {
-          const sync = inventory.state.agentSync[agent];
-          const stamp = formatSyncTimestamp(sync?.updatedAt);
-          const display = sync?.updatedAt ? stamp : chalk.gray(stamp);
-          console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
-        }
-      }
+      printAgentSyncStatus({ agentSync: inventory.state.agentSync });
 
       // Guidance: unsupported platforms for skills
       console.log();

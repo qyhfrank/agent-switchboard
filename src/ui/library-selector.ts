@@ -48,7 +48,7 @@ function resolveToken(token: string, order: string[]): string | null {
   return trimmed;
 }
 
-async function promptOrder<TEntry>(
+export async function promptOrder<TEntry>(
   label: string,
   initialOrder: string[],
   map: Map<string, TEntry>,

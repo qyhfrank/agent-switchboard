@@ -1,10 +1,11 @@
-import { confirm, input } from '@inquirer/prompts';
+import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 
 import type { ConfigScope } from '../config/scope.js';
 import { loadRuleLibrary, type RuleSnippet } from '../rules/library.js';
 import { loadRuleState } from '../rules/state.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
+import { promptOrder } from './library-selector.js';
 
 interface RuleSelectionResult {
   active: string[];
@@ -13,97 +14,6 @@ interface RuleSelectionResult {
 export interface RuleSelectorOptions {
   scope?: ConfigScope;
   pageSize?: number;
-}
-
-function formatOrderList(order: string[], map: Map<string, RuleSnippet>): string {
-  return order
-    .map((id, index) => {
-      const rule = map.get(id);
-      const title = rule?.metadata.title ?? id;
-      return `${index + 1}. ${title} ${chalk.gray(`(${id})`)}`;
-    })
-    .join('\n');
-}
-
-function resolveToken(token: string, order: string[]): string | null {
-  const trimmed = token.trim();
-  if (trimmed.length === 0) return null;
-
-  if (/^\d+$/.test(trimmed)) {
-    const index = Number.parseInt(trimmed, 10) - 1;
-    if (index >= 0 && index < order.length) {
-      return order[index];
-    }
-    return null;
-  }
-
-  return trimmed;
-}
-
-async function promptRuleOrder(
-  initialOrder: string[],
-  ruleMap: Map<string, RuleSnippet>
-): Promise<string[]> {
-  if (initialOrder.length <= 1) {
-    return initialOrder;
-  }
-
-  let currentOrder = [...initialOrder];
-
-  while (true) {
-    console.log();
-    console.log(chalk.blue('Selected rule order:'));
-    console.log(formatOrderList(currentOrder, ruleMap));
-    console.log(
-      chalk.gray(
-        'Enter comma-separated IDs or numbers to reorder. Press Enter to keep the current order.'
-      )
-    );
-
-    const response = await input({
-      message: 'New order (IDs or numbers):',
-    });
-
-    if (!response || response.trim().length === 0) {
-      return currentOrder;
-    }
-
-    const tokens = response
-      .split(',')
-      .map((token) => token.trim())
-      .filter((token) => token.length > 0);
-    if (tokens.length !== currentOrder.length) {
-      console.log(chalk.red('✗ Please provide exactly the same number of items as selected.'));
-      continue;
-    }
-
-    const resolved: string[] = [];
-    const seen = new Set<string>();
-    let isValid = true;
-
-    for (const token of tokens) {
-      const resolvedId = resolveToken(token, currentOrder);
-      if (!resolvedId || !ruleMap.has(resolvedId) || !currentOrder.includes(resolvedId)) {
-        console.log(chalk.red(`✗ Invalid identifier: ${token}`));
-        isValid = false;
-        break;
-      }
-      if (seen.has(resolvedId)) {
-        console.log(chalk.red(`✗ Duplicate identifier: ${token}`));
-        isValid = false;
-        break;
-      }
-      seen.add(resolvedId);
-      resolved.push(resolvedId);
-    }
-
-    if (!isValid) {
-      continue;
-    }
-
-    currentOrder = resolved;
-    return currentOrder;
-  }
 }
 
 export async function showRuleSelector(
@@ -203,7 +113,12 @@ export async function showRuleSelector(
       continue;
     }
 
-    const ordered = await promptRuleOrder(sanitized, ruleMap);
+    const ordered = await promptOrder(
+      'rule',
+      sanitized,
+      ruleMap,
+      (rule) => rule.metadata.title ?? rule.id
+    );
     return { active: ordered };
   }
 }
