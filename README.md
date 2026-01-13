@@ -212,6 +212,24 @@ The command merges the layered configuration, prints a warning that files will b
 
 - `ASB_HOME`: overrides `~/.agent-switchboard` for library/state files.
 
+## Development
+
+Install dependencies, build, and link globally:
+
+```bash
+pnpm install
+pnpm build
+pnpm link --global
+```
+
+After linking, the global `agent-switchboard` command points to your local build. Code changes take effect after running `pnpm build` again.
+
+To unlink:
+
+```bash
+pnpm uninstall -g agent-switchboard
+```
+
 ## License
 
 MIT
