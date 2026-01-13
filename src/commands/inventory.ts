@@ -1,5 +1,6 @@
 import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, type SectionState } from '../library/state.js';
+import { listExtraKeys, pickFirstPlatformString } from '../util/extras.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
 export interface CommandInventoryRow {
@@ -34,6 +35,29 @@ function sortInactive(entries: CommandEntry[]): CommandEntry[] {
   });
 }
 
+function getCommandTitle(entry: CommandEntry): string | null {
+  const meta = entry.metadata as Record<string, unknown>;
+  const title = meta.title as unknown;
+  return typeof title === 'string' ? title : null;
+}
+
+function getCommandModel(entry: CommandEntry): string | null {
+  return pickFirstPlatformString(entry.metadata.extras, ['claude-code'], 'model');
+}
+
+function buildCommandRow(entry: CommandEntry, active: boolean): CommandInventoryRow {
+  return {
+    id: entry.id,
+    title: getCommandTitle(entry),
+    description: entry.metadata.description ?? null,
+    model: getCommandModel(entry),
+    extrasKeys: listExtraKeys(entry.metadata.extras),
+    active,
+    order: null,
+    filePath: entry.filePath,
+  };
+}
+
 export function buildCommandInventory(scope?: ConfigScope): CommandInventory {
   const entries = loadCommandLibrary();
   const state = loadLibraryStateSection('commands', scope);
@@ -58,46 +82,12 @@ export function buildCommandInventory(scope?: ConfigScope): CommandInventory {
       return;
     }
     seen.add(id);
-    rows.push({
-      id,
-      title: (() => {
-        const t = (e.metadata as Record<string, unknown>).title as unknown;
-        return typeof t === 'string' ? t : null;
-      })(),
-      description: e.metadata.description ?? null,
-      model: (() => {
-        const extras = e.metadata.extras as Record<string, unknown> | undefined;
-        const cc = (extras?.['claude-code'] as Record<string, unknown>) ?? undefined;
-        const m = cc?.model as unknown as string | undefined;
-        return typeof m === 'string' && m.trim().length > 0 ? m : null;
-      })(),
-      extrasKeys: e.metadata.extras ? Object.keys(e.metadata.extras) : [],
-      active: true,
-      order: null,
-      filePath: e.filePath,
-    });
+    rows.push(buildCommandRow(e, true));
   });
 
   const inactive = sortInactive(entries.filter((e) => !seen.has(e.id)));
   inactive.forEach((e) => {
-    rows.push({
-      id: e.id,
-      title: (() => {
-        const t = (e.metadata as Record<string, unknown>).title as unknown;
-        return typeof t === 'string' ? t : null;
-      })(),
-      description: e.metadata.description ?? null,
-      model: (() => {
-        const extras = e.metadata.extras as Record<string, unknown> | undefined;
-        const cc = (extras?.['claude-code'] as Record<string, unknown>) ?? undefined;
-        const m = cc?.model as unknown as string | undefined;
-        return typeof m === 'string' && m.trim().length > 0 ? m : null;
-      })(),
-      extrasKeys: e.metadata.extras ? Object.keys(e.metadata.extras) : [],
-      active: false,
-      order: null,
-      filePath: e.filePath,
-    });
+    rows.push(buildCommandRow(e, false));
   });
 
   return { entries: rows, state };

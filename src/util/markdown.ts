@@ -80,6 +80,38 @@ export function stripYamlFrontmatter(source: string): StrippedFrontmatter {
   }
 }
 
+function toRecord(value: unknown): Record<string, unknown> {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return {};
+}
+
+export interface MergedFrontmatter {
+  meta: Record<string, unknown>;
+  body: string;
+}
+
+/**
+ * Extract YAML frontmatter and merge a second block if it appears at the start of the body.
+ */
+export function extractMergedFrontmatter(
+  source: string,
+  options?: { trimBodyStart?: boolean }
+): MergedFrontmatter {
+  const extracted = stripYamlFrontmatter(source);
+  let body = extracted.body;
+  let meta = toRecord(extracted.meta);
+  const bodyForMatch = options?.trimBodyStart ? body.replace(/^\s+/, '') : body;
+  const second = bodyForMatch.match(FRONTMATTER_PATTERN);
+  if (second && second.index === 0) {
+    const stripped = stripYamlFrontmatter(bodyForMatch);
+    meta = { ...meta, ...toRecord(stripped.meta) };
+    body = stripped.body;
+  }
+  return { meta, body };
+}
+
 /** Slugify a filename or title to a stable id. */
 export function slugify(input: string): string {
   return input

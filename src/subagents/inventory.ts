@@ -1,5 +1,6 @@
 import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, type SectionState } from '../library/state.js';
+import { listExtraKeys, pickFirstPlatformArray, pickFirstPlatformString } from '../util/extras.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
 export interface SubagentInventoryRow {
@@ -35,6 +36,38 @@ function sortInactive(entries: SubagentEntry[]): SubagentEntry[] {
   });
 }
 
+function getSubagentTitle(entry: SubagentEntry): string | null {
+  const meta = entry.metadata as Record<string, unknown>;
+  const title = meta.title as unknown;
+  return typeof title === 'string' ? title : null;
+}
+
+function getSubagentModel(entry: SubagentEntry): string | null {
+  return pickFirstPlatformString(entry.metadata.extras, ['claude-code', 'opencode'], 'model');
+}
+
+function getSubagentTools(entry: SubagentEntry): string[] {
+  return pickFirstPlatformArray(entry.metadata.extras, ['claude-code', 'opencode'], 'tools');
+}
+
+function buildSubagentRow(
+  entry: SubagentEntry,
+  active: boolean,
+  order: number | null
+): SubagentInventoryRow {
+  return {
+    id: entry.id,
+    title: getSubagentTitle(entry),
+    description: entry.metadata.description ?? null,
+    model: getSubagentModel(entry),
+    tools: getSubagentTools(entry),
+    extrasKeys: listExtraKeys(entry.metadata.extras),
+    active,
+    order,
+    filePath: entry.filePath,
+  };
+}
+
 export function buildSubagentInventory(scope?: ConfigScope): SubagentInventory {
   const entries = loadSubagentLibrary();
   const state = loadLibraryStateSection('subagents', scope);
@@ -60,78 +93,12 @@ export function buildSubagentInventory(scope?: ConfigScope): SubagentInventory {
       return;
     }
     seen.add(id);
-    rows.push({
-      id,
-      title: (() => {
-        const t = (e.metadata as Record<string, unknown>).title as unknown;
-        return typeof t === 'string' ? t : null;
-      })(),
-      description: e.metadata.description ?? null,
-      model: (() => {
-        const extras = e.metadata.extras as Record<string, unknown> | undefined;
-        const cc = (extras?.['claude-code'] as Record<string, unknown>) ?? undefined;
-        const oc = (extras?.opencode as Record<string, unknown>) ?? undefined;
-        const m1 = cc?.model as unknown as string | undefined;
-        const m2 = oc?.model as unknown as string | undefined;
-        return typeof m1 === 'string' && m1.trim().length > 0
-          ? m1
-          : typeof m2 === 'string' && m2.trim().length > 0
-            ? m2
-            : null;
-      })(),
-      tools: (() => {
-        const extras = e.metadata.extras as Record<string, unknown> | undefined;
-        const cc = (extras?.['claude-code'] as Record<string, unknown>) ?? undefined;
-        const oc = (extras?.opencode as Record<string, unknown>) ?? undefined;
-        const ccTools = cc?.tools;
-        const t1 = Array.isArray(ccTools) ? (ccTools as string[]) : undefined;
-        const ocTools = oc?.tools;
-        const t2 = Array.isArray(ocTools) ? (ocTools as string[]) : undefined;
-        return t1 ?? t2 ?? [];
-      })(),
-      extrasKeys: e.metadata.extras ? Object.keys(e.metadata.extras) : [],
-      active: true,
-      order: index + 1,
-      filePath: e.filePath,
-    });
+    rows.push(buildSubagentRow(e, true, index + 1));
   });
 
   const inactive = sortInactive(entries.filter((e) => !seen.has(e.id)));
   inactive.forEach((e) => {
-    rows.push({
-      id: e.id,
-      title: (() => {
-        const t = (e.metadata as Record<string, unknown>).title as unknown;
-        return typeof t === 'string' ? t : null;
-      })(),
-      description: e.metadata.description ?? null,
-      model: (() => {
-        const extras = e.metadata.extras as Record<string, unknown> | undefined;
-        const cc = (extras?.['claude-code'] as Record<string, unknown>) ?? undefined;
-        const oc = (extras?.opencode as Record<string, unknown>) ?? undefined;
-        const m1 = cc?.model as unknown as string | undefined;
-        const m2 = oc?.model as unknown as string | undefined;
-        return typeof m1 === 'string' && m1.trim().length > 0
-          ? m1
-          : typeof m2 === 'string' && m2.trim().length > 0
-            ? m2
-            : null;
-      })(),
-      tools: (() => {
-        const extras = e.metadata.extras as Record<string, unknown> | undefined;
-        const cc = (extras?.['claude-code'] as Record<string, unknown>) ?? undefined;
-        const oc = (extras?.opencode as Record<string, unknown>) ?? undefined;
-        const ccTools = cc?.tools;
-        const t1 = Array.isArray(ccTools) ? (ccTools as string[]) : undefined;
-        const ocTools = oc?.tools;
-        const t2 = Array.isArray(ocTools) ? (ocTools as string[]) : undefined;
-        return t1 ?? t2 ?? [];
-      })(),
-      extrasKeys: e.metadata.extras ? Object.keys(e.metadata.extras) : [],
-      active: false,
-      order: null,
-      filePath: e.filePath,
-    });
+    rows.push(buildSubagentRow(e, false, null));
   });
 
   return { entries: rows, state };

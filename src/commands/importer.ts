@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { wrapFrontmatter } from '../util/frontmatter.js';
-import { FRONTMATTER_PATTERN, slugify, stripYamlFrontmatter } from '../util/markdown.js';
+import { extractMergedFrontmatter, slugify } from '../util/markdown.js';
 
 export type CommandPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
 
@@ -21,8 +21,6 @@ export interface ImportedCommand {
   content: string; // Markdown with YAML frontmatter per library schema
 }
 
-// Using shared stripYamlFrontmatter from util/markdown
-
 export function importCommandFromFile(
   platform: CommandPlatform,
   filePath: string
@@ -37,25 +35,15 @@ export function importCommandFromFile(
     case 'claude-code':
     case 'opencode': {
       // Strip any existing frontmatter and wrap into library schema (description + extras.<platform>)
-      const extracted = stripYamlFrontmatter(raw);
-      let body = extracted.body;
-      let meta = extracted.meta ?? {};
-      if (!meta || typeof meta !== 'object') meta = {};
-      // Attempt to strip accidental second frontmatter at body start
-      const second = body.match(FRONTMATTER_PATTERN);
-      if (second && second.index === 0) {
-        const stripped = stripYamlFrontmatter(body);
-        meta = { ...meta, ...(stripped.meta ?? {}) };
-        body = stripped.body;
-      }
-      const metaRecord = meta as Record<string, unknown>;
+      const extracted = extractMergedFrontmatter(raw);
+      const metaRecord = extracted.meta;
       const description =
         typeof metaRecord.description === 'string' ? (metaRecord.description as string) : '';
       const rest = Object.fromEntries(
         Object.entries(metaRecord).filter(([k]) => k !== 'description')
       );
       const fm = { description, extras: { [platform]: rest } };
-      const bodyNoFrontmatter = body.replace(/^\s*---\s*[\s\S]*?\r?\n---\s*\r?\n?/, '');
+      const bodyNoFrontmatter = extracted.body.replace(/^\s*---\s*[\s\S]*?\r?\n---\s*\r?\n?/, '');
       return { slug: baseSlug, content: wrapFrontmatter(fm, bodyNoFrontmatter) };
     }
 
