@@ -37,7 +37,8 @@ Create the file if it does not exist:
 
 ```toml
 # ~/.agent-switchboard/config.toml
-agents = ["codex", "cursor"]
+[agents]
+active = ["codex", "cursor"]
 
 [rules]
 includeDelimiters = false
@@ -59,6 +60,35 @@ Toggle `rules.includeDelimiters` to `true` if you want each snippet surrounded b
 ```
 
 Run `agent-switchboard mcp` again after updating the list.
+
+### Per-Agent Overrides
+
+You can customize which rules, commands, subagents, and skills are active for each agent using `add` and `remove` syntax:
+
+```toml
+[agents]
+active = ["claude-code", "codex", "opencode"]
+
+# Codex: exclude skill-codex (avoid self-reference)
+codex.skills.remove = ["skill-codex"]
+codex.rules.remove = ["skill-codex"]
+
+# OpenCode: same exclusions
+opencode.skills.remove = ["skill-codex"]
+opencode.rules.remove = ["skill-codex"]
+
+# Gemini: add extra command, remove a skill
+gemini.commands.add = ["cmd-gemini-only"]
+gemini.skills.remove = ["skill-go"]
+```
+
+| Syntax | Behavior |
+|--------|----------|
+| `<agent>.<section>.active = [...]` | Completely override the global list |
+| `<agent>.<section>.add = [...]` | Append to the global list |
+| `<agent>.<section>.remove = [...]` | Remove from the global list |
+
+Sections: `mcp`, `commands`, `subagents`, `skills`, `rules`
 
 ### Layered configuration & scope
 
