@@ -127,8 +127,8 @@ program
       console.log(`  Commands: ${chalk.cyan(String(config.commands.active.length))}`);
       console.log(`  Subagents: ${chalk.cyan(String(config.subagents.active.length))}`);
       console.log(`  Skills: ${chalk.cyan(String(config.skills.active.length))}`);
-      if (config.agents.length > 0) {
-        console.log(`  Agents: ${chalk.cyan(config.agents.join(', '))}`);
+      if (config.agents.active.length > 0) {
+        console.log(`  Agents: ${chalk.cyan(config.agents.active.join(', '))}`);
       } else {
         console.log(`  Agents: ${chalk.gray('none configured')}`);
       }
@@ -1074,11 +1074,11 @@ async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[])
   const mcpConfig = loadMcpConfig();
   const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
 
-  if (switchboardConfig.agents.length === 0) {
+  if (switchboardConfig.agents.active.length === 0) {
     console.log(chalk.yellow('\n⚠ No agents found in the active configuration stack.'));
     console.log();
     console.log('Add agents under the relevant TOML layer (user, profile, or project).');
-    console.log(chalk.dim('  Example: agents = ["claude-code", "cursor"]'));
+    console.log(chalk.dim('  Example: [agents]\n  active = ["claude-code", "cursor"]'));
     return;
   }
 
@@ -1095,7 +1095,7 @@ async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[])
   console.log();
 
   // Apply to each registered agent
-  for (const agentId of switchboardConfig.agents) {
+  for (const agentId of switchboardConfig.agents.active) {
     const spinner = ora().start(`Applying to ${agentId}...`);
 
     try {
@@ -1146,9 +1146,9 @@ function showSummary(selectedServers: string[], scope?: ConfigScope): void {
   }
 
   const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
-  if (switchboardConfig.agents.length > 0) {
-    console.log(chalk.blue(`\nApplied to agents (${switchboardConfig.agents.length}):`));
-    for (const agent of switchboardConfig.agents) {
+  if (switchboardConfig.agents.active.length > 0) {
+    console.log(chalk.blue(`\nApplied to agents (${switchboardConfig.agents.active.length}):`));
+    for (const agent of switchboardConfig.agents.active) {
       console.log(`  ${chalk.dim('•')} ${agent}`);
     }
   }

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolveAgentSectionConfig } from '../config/agent-config.js';
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
 import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
 import type { SwitchboardConfigLayer } from '../config/schemas.js';
@@ -121,4 +122,21 @@ export function updateLibraryStateSection(
   const next = mutator(current);
   saveLibraryStateSection(section, next, scope);
   return loadLibraryStateSection(section, scope);
+}
+
+/**
+ * Load library state for a specific agent, applying per-agent overrides
+ *
+ * This merges the global section config with agent-specific add/remove overrides
+ */
+export function loadLibraryStateSectionForAgent(
+  section: LibrarySection,
+  agentId: string,
+  scope?: ConfigScope
+): SectionState {
+  const agentConfig = resolveAgentSectionConfig(section, agentId, scope);
+  return {
+    active: agentConfig.active,
+    agentSync: { ...agentSyncCache[section] },
+  };
 }

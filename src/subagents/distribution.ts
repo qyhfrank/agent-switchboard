@@ -13,11 +13,18 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { loadLibraryStateSection } from '../library/state.js';
+import { loadLibraryStateSectionForAgent } from '../library/state.js';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
 export type SubagentPlatform = 'claude-code' | 'opencode';
+
+/**
+ * Map platform to agent ID for per-agent configuration lookup
+ */
+function platformToAgentId(platform: SubagentPlatform): string {
+  return platform;
+}
 
 export interface SubagentDistributionResult {
   platform: SubagentPlatform;
@@ -101,14 +108,7 @@ function renderForPlatform(platform: SubagentPlatform, entry: SubagentEntry): st
 
 export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOutcome {
   const entries = loadSubagentLibrary();
-  const state = loadLibraryStateSection('subagents', scope);
-  const activeIds = state.active;
   const byId = new Map(entries.map((e) => [e.id, e]));
-  const selected: SubagentEntry[] = [];
-  for (const id of activeIds) {
-    const e = byId.get(id);
-    if (e) selected.push(e);
-  }
 
   const platforms: SubagentPlatform[] = ['claude-code', 'opencode'];
 
@@ -121,14 +121,31 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
     },
   };
 
+  // Filter entries based on per-agent configuration
+  const filterSelected = (
+    platform: SubagentPlatform,
+    _allEntries: SubagentEntry[]
+  ): SubagentEntry[] => {
+    const agentId = platformToAgentId(platform);
+    const state = loadLibraryStateSectionForAgent('subagents', agentId, scope);
+    const activeIds = state.active;
+    const selected: SubagentEntry[] = [];
+    for (const id of activeIds) {
+      const e = byId.get(id);
+      if (e) selected.push(e);
+    }
+    return selected;
+  };
+
   return distributeLibrary<SubagentEntry, SubagentPlatform>({
     section: 'subagents',
-    selected,
+    selected: entries, // Pass all entries, filtering happens per-platform
     platforms,
     resolveFilePath: (p, e) => resolveSubagentFilePath(p, e.id, scope),
     render: (p, e) => renderForPlatform(p, e),
     getId: (e) => e.id,
     cleanup,
     scope,
+    filterSelected,
   }) as { results: DistributionResult<SubagentPlatform>[] };
 }

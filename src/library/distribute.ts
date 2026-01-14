@@ -37,6 +37,11 @@ export interface DistributeOptions<TEntry, Platform extends string> {
   /** Cleanup config for removing orphan files */
   cleanup?: CleanupConfig<Platform>;
   scope?: ConfigScope;
+  /**
+   * Filter selected entries for a specific platform.
+   * Used for per-agent configuration where each platform may have different active items.
+   */
+  filterSelected?: (platform: Platform, selected: TEntry[]) => TEntry[];
 }
 
 export interface DistributeOutcome<Platform extends string> {
@@ -58,7 +63,12 @@ export function distributeLibrary<TEntry, Platform extends string>(
     const hash = createHash('sha256');
     const writtenOrSkipped: DistributionResult<Platform>[] = [];
 
-    for (const entry of opts.selected) {
+    // Apply per-platform filter if provided
+    const platformSelected = opts.filterSelected
+      ? opts.filterSelected(platform, opts.selected)
+      : opts.selected;
+
+    for (const entry of platformSelected) {
       const filePath = opts.resolveFilePath(platform, entry);
       const content = opts.render(platform, entry);
 
@@ -114,7 +124,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
 
     // Cleanup orphan files if cleanup config is provided
     if (opts.cleanup && opts.getId) {
-      const activeIds = new Set(opts.selected.map(opts.getId));
+      const activeIds = new Set(platformSelected.map(opts.getId));
       const targetDir = opts.cleanup.resolveTargetDir(platform);
 
       if (fs.existsSync(targetDir)) {
