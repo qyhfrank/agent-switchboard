@@ -3,10 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
+  getAgentsWithOverrides,
+  hasAgentOverrides,
   mergeIncrementalSelection,
   resolveAgentSectionConfig,
-  hasAgentOverrides,
-  getAgentsWithOverrides,
 } from '../src/config/agent-config.js';
 import { loadMergedSwitchboardConfig } from '../src/config/layered-config.js';
 import { withTempAsbHome } from './helpers/tmp.js';
