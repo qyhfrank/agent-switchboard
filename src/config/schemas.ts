@@ -41,6 +41,62 @@ export const selectionSectionSchema = selectionSectionBaseSchema
   })
   .passthrough();
 
+/**
+ * Incremental selection schema for per-agent overrides
+ * - active: completely override the global list
+ * - add: append to the global list
+ * - remove: remove from the global list
+ */
+export const incrementalSelectionSchema = z
+  .object({
+    active: z.array(z.string().trim().min(1)).optional(),
+    add: z.array(z.string().trim().min(1)).optional(),
+    remove: z.array(z.string().trim().min(1)).optional(),
+  })
+  .passthrough();
+
+const incrementalRulesSchema = incrementalSelectionSchema.extend({
+  includeDelimiters: z.boolean().optional(),
+});
+
+/**
+ * Per-agent configuration override schema
+ * Allows overriding mcp, commands, subagents, skills, rules for a specific agent
+ */
+export const agentConfigOverrideSchema = z
+  .object({
+    mcp: incrementalSelectionSchema.optional(),
+    commands: incrementalSelectionSchema.optional(),
+    subagents: incrementalSelectionSchema.optional(),
+    skills: incrementalSelectionSchema.optional(),
+    rules: incrementalRulesSchema.optional(),
+  })
+  .passthrough();
+
+/**
+ * Agents section schema with active list and per-agent overrides
+ * Format in TOML:
+ *   [agents]
+ *   active = ["claude-code", "codex"]
+ *
+ *   [agents.codex.skills]
+ *   remove = ["skill-codex"]
+ *
+ * Note: Using passthrough() instead of catchall() to allow per-agent overrides.
+ * The per-agent overrides are validated at runtime in agent-config.ts.
+ */
+const agentsSectionBaseSchema = z
+  .object({
+    active: z.array(z.string().trim().min(1)).optional(),
+  })
+  .passthrough();
+
+const agentsSectionSchema = z
+  .object({
+    active: z.array(z.string().trim().min(1)).default([]),
+  })
+  .passthrough();
+
 const rulesSectionBaseSchema = selectionSectionBaseSchema.extend({
   includeDelimiters: z.boolean().optional(),
 });
@@ -72,7 +128,7 @@ export const uiSectionSchema = uiSectionBaseSchema
  */
 export const switchboardConfigSchema = z
   .object({
-    agents: z.array(z.string().trim().min(1)).default([]),
+    agents: agentsSectionSchema.default({ active: [] }),
     mcp: selectionSectionSchema.default({ active: [] }),
     commands: selectionSectionSchema.default({ active: [] }),
     subagents: selectionSectionSchema.default({ active: [] }),
@@ -87,7 +143,7 @@ export const switchboardConfigSchema = z
  */
 export const switchboardConfigLayerSchema = z
   .object({
-    agents: z.array(z.string().trim().min(1)).optional(),
+    agents: agentsSectionBaseSchema.optional(),
     mcp: selectionSectionBaseSchema.optional(),
     commands: selectionSectionBaseSchema.optional(),
     subagents: selectionSectionBaseSchema.optional(),
@@ -103,6 +159,9 @@ export const switchboardConfigLayerSchema = z
 export type McpServer = z.infer<typeof mcpServerSchema>;
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
 export type SelectionSection = z.infer<typeof selectionSectionSchema>;
+export type IncrementalSelection = z.infer<typeof incrementalSelectionSchema>;
+export type AgentConfigOverride = z.infer<typeof agentConfigOverrideSchema>;
+export type AgentsSection = z.infer<typeof agentsSectionSchema>;
 export type RulesSection = z.infer<typeof rulesSectionSchema>;
 export type UiSection = z.infer<typeof uiSectionSchema>;
 export type SwitchboardConfig = z.infer<typeof switchboardConfigSchema>;

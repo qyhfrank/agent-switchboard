@@ -17,11 +17,18 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { loadLibraryStateSection } from '../library/state.js';
+import { loadLibraryStateSectionForAgent } from '../library/state.js';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
 export type CommandPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
+
+/**
+ * Map platform to agent ID for per-agent configuration lookup
+ */
+function platformToAgentId(platform: CommandPlatform): string {
+  return platform;
+}
 
 export interface CommandDistributionResult {
   platform: CommandPlatform;
@@ -133,14 +140,7 @@ function renderForPlatform(platform: CommandPlatform, entry: CommandEntry): stri
 
 export function distributeCommands(scope?: ConfigScope): CommandDistributionOutcome {
   const entries = loadCommandLibrary();
-  const state = loadLibraryStateSection('commands', scope);
-  const activeIds = state.active;
   const byId = new Map(entries.map((e) => [e.id, e]));
-  const selected: CommandEntry[] = [];
-  for (const id of activeIds) {
-    const e = byId.get(id);
-    if (e) selected.push(e);
-  }
 
   const platforms: CommandPlatform[] = ['claude-code', 'codex', 'gemini', 'opencode'];
 
@@ -155,14 +155,28 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
     },
   };
 
+  // Filter entries based on per-agent configuration
+  const filterSelected = (platform: CommandPlatform, _allEntries: CommandEntry[]): CommandEntry[] => {
+    const agentId = platformToAgentId(platform);
+    const state = loadLibraryStateSectionForAgent('commands', agentId, scope);
+    const activeIds = state.active;
+    const selected: CommandEntry[] = [];
+    for (const id of activeIds) {
+      const e = byId.get(id);
+      if (e) selected.push(e);
+    }
+    return selected;
+  };
+
   return distributeLibrary<CommandEntry, CommandPlatform>({
     section: 'commands',
-    selected,
+    selected: entries, // Pass all entries, filtering happens per-platform
     platforms,
     resolveFilePath: (p, e) => resolveCommandFilePath(p, e.id, scope),
     render: (p, e) => renderForPlatform(p, e),
     getId: (e) => e.id,
     cleanup,
     scope,
+    filterSelected,
   }) as { results: DistributionResult<CommandPlatform>[] };
 }

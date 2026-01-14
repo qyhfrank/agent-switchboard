@@ -47,6 +47,11 @@ export interface DistributeBundleOptions<TEntry, Platform extends string> {
   /** Cleanup config for removing orphan directories */
   cleanup?: BundleCleanupConfig<Platform>;
   scope?: ConfigScope;
+  /**
+   * Filter selected entries for a specific platform.
+   * Used for per-agent configuration where each platform may have different active items.
+   */
+  filterSelected?: (platform: Platform, selected: TEntry[]) => TEntry[];
 }
 
 export interface DistributeBundleOutcome<Platform extends string> {
@@ -85,7 +90,12 @@ export function distributeBundle<TEntry, Platform extends string>(
   for (const platform of opts.platforms) {
     const platformHash = createHash('sha256');
 
-    for (const entry of opts.selected) {
+    // Apply per-platform filter if provided
+    const platformSelected = opts.filterSelected
+      ? opts.filterSelected(platform, opts.selected)
+      : opts.selected;
+
+    for (const entry of platformSelected) {
       const targetDir = opts.resolveTargetDir(platform, entry);
       const files = opts.listFiles(entry);
 
@@ -184,7 +194,7 @@ export function distributeBundle<TEntry, Platform extends string>(
 
     // Cleanup orphan directories if cleanup config is provided
     if (opts.cleanup) {
-      const activeIds = new Set(opts.selected.map(opts.getId));
+      const activeIds = new Set(platformSelected.map(opts.getId));
       const parentDir = opts.cleanup.resolveParentDir(platform);
 
       if (fs.existsSync(parentDir)) {

@@ -28,7 +28,12 @@ test('loadConfigLayers reads user, profile, and project configs when present', (
     const userPath = path.join(asbHome, 'config.toml');
     fs.writeFileSync(
       userPath,
-      ['agents = ["claude-code", "opencode"]', '[commands]', 'active = ["cmd-user"]'].join('\n')
+      [
+        '[agents]',
+        'active = ["claude-code", "opencode"]',
+        '[commands]',
+        'active = ["cmd-user"]',
+      ].join('\n')
     );
 
     const profilePath = getProfileConfigPath('team');
@@ -50,7 +55,7 @@ test('loadConfigLayers reads user, profile, and project configs when present', (
     const result = loadConfigLayers({ profile: 'team', projectPath: projectRoot });
 
     assert.equal(result.user.exists, true);
-    assert.deepEqual(result.user.config.agents, ['claude-code', 'opencode']);
+    assert.deepEqual(result.user.config.agents?.active, ['claude-code', 'opencode']);
     assert.deepEqual(result.user.config.commands?.active, ['cmd-user']);
 
     assert.ok(result.profile);
@@ -84,7 +89,8 @@ test('buildMergedSwitchboardConfig applies precedence project > profile > user',
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
       [
-        'agents = ["user-agent"]',
+        '[agents]',
+        'active = ["user-agent"]',
         '[commands]',
         'active = ["cmd-user"]',
         '[rules]',
@@ -123,7 +129,7 @@ test('buildMergedSwitchboardConfig applies precedence project > profile > user',
       projectPath: projectRoot,
     });
 
-    assert.deepEqual(merged.agents, ['user-agent']);
+    assert.deepEqual(merged.agents.active, ['user-agent']);
     assert.deepEqual(merged.commands.active, ['cmd-project']);
     assert.deepEqual(merged.rules.active, ['rule-project']);
     assert.equal(merged.rules.includeDelimiters, true);
