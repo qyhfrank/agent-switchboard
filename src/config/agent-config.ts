@@ -3,10 +3,10 @@
  * Supports per-agent overrides using add/remove incremental syntax
  */
 
-import type { ConfigScope } from './scope.js';
-import { scopeToLayerOptions } from './scope.js';
 import { loadMergedSwitchboardConfig } from './layered-config.js';
 import type { IncrementalSelection, SwitchboardConfig } from './schemas.js';
+import type { ConfigScope } from './scope.js';
+import { scopeToLayerOptions } from './scope.js';
 
 export type ConfigSection = 'mcp' | 'commands' | 'subagents' | 'skills' | 'rules';
 

@@ -156,7 +156,10 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
   };
 
   // Filter entries based on per-agent configuration
-  const filterSelected = (platform: CommandPlatform, _allEntries: CommandEntry[]): CommandEntry[] => {
+  const filterSelected = (
+    platform: CommandPlatform,
+    _allEntries: CommandEntry[]
+  ): CommandEntry[] => {
     const agentId = platformToAgentId(platform);
     const state = loadLibraryStateSectionForAgent('commands', agentId, scope);
     const activeIds = state.active;
