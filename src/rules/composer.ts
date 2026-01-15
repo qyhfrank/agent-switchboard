@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { resolveAgentSectionConfig } from '../config/agent-config.js';
 import type { ConfigScope } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import type { RuleSnippet } from './library.js';
@@ -104,6 +105,24 @@ export function composeActiveRules(scope?: ConfigScope): ComposedRules {
     : undefined;
   const config = loadSwitchboardConfig(loadOptions);
   return composeRules(state.active, rules, {
+    includeDelimiters: config.rules?.includeDelimiters === true,
+  });
+}
+
+/**
+ * Compose active rules for a specific agent, applying per-agent overrides
+ */
+export function composeActiveRulesForAgent(agentId: string, scope?: ConfigScope): ComposedRules {
+  const rules = loadRuleLibrary();
+  const agentConfig = resolveAgentSectionConfig('rules', agentId, scope);
+  const loadOptions = scope
+    ? {
+        profile: scope.profile ?? undefined,
+        projectPath: scope.project ?? undefined,
+      }
+    : undefined;
+  const config = loadSwitchboardConfig(loadOptions);
+  return composeRules(agentConfig.active, rules, {
     includeDelimiters: config.rules?.includeDelimiters === true,
   });
 }
