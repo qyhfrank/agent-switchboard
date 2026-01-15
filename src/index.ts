@@ -20,6 +20,7 @@ import { importCommandFromFile } from './commands/importer.js';
 
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
+import { resolveAgentSectionConfig } from './config/agent-config.js';
 import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
   getClaudeDir,
@@ -1082,23 +1083,30 @@ async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[])
     return;
   }
 
-  // Use provided list or read from config.toml
-  const activeSet = new Set(enabledServerNames ?? loadMcpActiveState(scope));
-
-  // Filter to only enabled servers
-  const enabledServers = Object.fromEntries(
-    Object.entries(mcpConfig.mcpServers).filter(([name]) => activeSet.has(name))
-  );
-
-  const configToApply = { mcpServers: enabledServers };
+  // Global MCP servers list (from UI selection or config)
+  const globalMcpServers = enabledServerNames ?? loadMcpActiveState(scope);
 
   console.log();
 
-  // Apply to each registered agent
+  // Apply to each registered agent with per-agent MCP overrides
   for (const agentId of switchboardConfig.agents.active) {
     const spinner = ora().start(`Applying to ${agentId}...`);
 
     try {
+      // Get per-agent MCP config (applies add/remove overrides)
+      const agentMcpConfig = resolveAgentSectionConfig('mcp', agentId, scope);
+      // If user selected servers via UI, use that as base; otherwise use per-agent resolved config
+      const agentActiveServers = enabledServerNames
+        ? agentMcpConfig.active.filter((s) => globalMcpServers.includes(s))
+        : agentMcpConfig.active;
+
+      // Filter to only enabled servers for this agent
+      const activeSet = new Set(agentActiveServers);
+      const enabledServers = Object.fromEntries(
+        Object.entries(mcpConfig.mcpServers).filter(([name]) => activeSet.has(name))
+      );
+      const configToApply = { mcpServers: enabledServers };
+
       const agent = getAgentById(agentId);
 
       // Use project-level config when --project is specified
