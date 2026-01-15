@@ -10,7 +10,7 @@ import {
 import type { ConfigScope } from '../config/scope.js';
 import { RULE_SUPPORTED_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
 import type { ComposedRules } from './composer.js';
-import { composeActiveRules } from './composer.js';
+import { composeActiveRulesForAgent } from './composer.js';
 import { updateRuleState } from './state.js';
 
 export type DistributionStatus = 'written' | 'skipped' | 'error';
@@ -76,11 +76,10 @@ function ensureDirectory(filePath: string): void {
 }
 
 export function distributeRules(
-  composed?: ComposedRules,
+  _composed?: ComposedRules,
   options?: DistributionOptions,
   scope?: ConfigScope
 ): DistributionOutcome {
-  const document = composed ?? composeActiveRules(scope);
   const results: DistributionResult[] = [];
   const timestamp = new Date().toISOString();
   const forceRewrite = options?.force === true;
@@ -89,7 +88,16 @@ export function distributeRules(
     { hash: string; updatedAt: string }
   >();
 
+  // Track the first composed document for return value (backwards compatibility)
+  let firstComposed: ComposedRules | null = null;
+
   for (const agent of RULE_SUPPORTED_AGENTS) {
+    // Compose rules for this specific agent (applies per-agent overrides)
+    const document = composeActiveRulesForAgent(agent, scope);
+    if (!firstComposed) {
+      firstComposed = document;
+    }
+
     const filePath = resolveRuleFile(agent, scope);
 
     let existingContent: string | null = null;
@@ -142,7 +150,7 @@ export function distributeRules(
   }
 
   return {
-    composed: document,
+    composed: firstComposed ?? { content: '', hash: '', sections: [] },
     results,
   };
 }
