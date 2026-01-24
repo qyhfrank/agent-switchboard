@@ -1,6 +1,6 @@
 # Agent Switchboard
 
-Manage MCP servers in one place and apply them to local agents (Codex, Claude Code/Desktop, Gemini) and opencode.
+Manage MCP servers, rules, commands, subagents, and skills in one place and apply them to local agents (Codex, Claude Code/Desktop, Cursor, Gemini, and OpenCode).
 
 You can run with either `agent-switchboard` or the shorter alias `asb`.
 
@@ -45,12 +45,12 @@ includeDelimiters = false
 ```
 
 Supported agent IDs:
-- `codex` — Codex CLI
-- `cursor` — Cursor IDE
-- `claude-code` — Claude Code CLI
-- `claude-desktop` — Claude Desktop app
-- `gemini` — Gemini CLI
-- `opencode` — opencode global config
+- `codex` - Codex CLI
+- `cursor` - Cursor IDE
+- `claude-code` - Claude Code CLI
+- `claude-desktop` - Claude Desktop app
+- `gemini` - Gemini CLI
+- `opencode` - OpenCode (supports `opencode.json` and `opencode.jsonc`)
 
 Toggle `rules.includeDelimiters` to `true` if you want each snippet surrounded by markers such as:
 ```
@@ -114,7 +114,7 @@ agent-switchboard subagent -p team --project /path/to/repo
 `ASB_HOME` still defaults to `~/.agent-switchboard` but can be overridden through the environment variable.
 
 Project-aware outputs (when using `--project <path>`):
-- Rules: Codex writes `<project>/AGENTS.md`. Gemini writes `<project>/AGENTS.md`. OpenCode writes `<project>/AGENTS.md`.
+- Rules: Codex writes `<project>/AGENTS.md`. Gemini writes `<project>/AGENTS.md`. OpenCode writes `<project>/.opencode/AGENTS.md`.
 - Commands (project-level supported):
   - Claude Code → `<project>/.claude/commands/`
   - Gemini → `<project>/.gemini/commands/`
@@ -123,6 +123,11 @@ Project-aware outputs (when using `--project <path>`):
 - Subagents (project-level supported):
   - Claude Code → `<project>/.claude/agents/`
   - OpenCode → `<project>/.opencode/agent/`
+- Skills (project-level supported):
+  - Claude Code → `<project>/.claude/skills/`
+  - Gemini → `<project>/.gemini/skills/`
+  - OpenCode → `<project>/.opencode/skills/`
+  - Codex → global only (`~/.codex/skills/`)
 
 ## Rule Library
 
@@ -228,9 +233,69 @@ Type to fuzzy filter the list, then confirm to persist the selection into the ac
 agent-switchboard subagent list [-p <profile>] [--project <path>]
 ```
 
+## Skill Library
+
+Skills are multi-file bundles (directories) that provide reusable capabilities to agents. Each skill is a directory containing a `SKILL.md` file and any supporting files.
+
+- Location: `~/.agent-switchboard/skills/<skill-id>/` (respects `ASB_HOME`).
+- Entry file: `SKILL.md` with required `name` and `description` in frontmatter.
+
+Example structure:
+
+```
+~/.agent-switchboard/skills/
+└── my-skill/
+    ├── SKILL.md
+    ├── helper.py
+    └── templates/
+        └── template.txt
+```
+
+Example `SKILL.md`:
+
+```markdown
+---
+name: my-skill
+description: A helpful skill that does something useful
+extras:
+  claude-code:
+    # Platform-specific options
+---
+Skill instructions and content here.
+```
+
+### Import
+
+```bash
+# Import skills from an existing platform directory
+agent-switchboard skill load <platform> [path]
+# <platform>: claude-code | codex
+# If [path] is omitted, defaults by platform:
+#   claude-code → ~/.claude/skills
+#   codex       → ~/.codex/skills
+```
+
+### Select and Distribute
+
+```bash
+agent-switchboard skill [-p <profile>] [--project <path>]
+```
+
+Type to fuzzy filter the list, then confirm to persist the selection. Skills are distributed as complete directory bundles to supported platforms:
+- Claude Code → `~/.claude/skills/<skill-id>/`
+- Codex → `~/.codex/skills/<skill-id>/`
+- Gemini → `~/.gemini/skills/<skill-id>/`
+- OpenCode → `~/.config/opencode/skills/<skill-id>/`
+
+### Inventory
+
+```bash
+agent-switchboard skill list [-p <profile>] [--project <path>]
+```
+
 ## Sync
 
-After curating your `active` lists in the selectors, run the unified sync command to push rules, commands, and subagents to every supported agent directory:
+After curating your `active` lists in the selectors, run the unified sync command to push rules, commands, subagents, and skills to every supported agent directory:
 
 ```bash
 agent-switchboard sync [-p <profile>] [--project <path>]
@@ -241,6 +306,18 @@ The command merges the layered configuration, prints a warning that files will b
 ## Environment
 
 - `ASB_HOME`: overrides `~/.agent-switchboard` for library/state files.
+- `ASB_AGENTS_HOME`: overrides the home directory used for agent config paths (defaults to OS user home).
+
+## JSON Output
+
+All `list` subcommands support `--json` for machine-readable output:
+
+```bash
+agent-switchboard rule list --json
+agent-switchboard command list --json
+agent-switchboard subagent list --json
+agent-switchboard skill list --json
+```
 
 ## Development
 
