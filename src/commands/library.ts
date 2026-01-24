@@ -3,9 +3,13 @@ import path from 'node:path';
 import { getCommandsDir } from '../config/paths.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
+import { getSubscriptionsRecord } from '../library/subscriptions.js';
 
 export interface CommandEntry {
   id: string;
+  bareId: string;
+  namespace?: string;
+  source: string;
   filePath: string;
   metadata: LibraryFrontmatter;
   content: string;
@@ -28,10 +32,17 @@ export function ensureCommandsDirectory(): string {
   return directory;
 }
 
-export function loadCommandLibrary(): CommandEntry[] {
-  const directory = ensureCommandsDirectory();
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
+/**
+ * Load commands from a specific directory
+ * @param directory - Directory to load commands from
+ * @param namespace - Optional namespace prefix for IDs
+ */
+function loadCommandsFromDirectory(directory: string, namespace?: string): CommandEntry[] {
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
 
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
   const result: CommandEntry[] = [];
 
   for (const entry of entries) {
@@ -43,8 +54,14 @@ export function loadCommandLibrary(): CommandEntry[] {
 
     try {
       const parsed = parseLibraryMarkdown(rawContent);
+      const bareId = toId(entry.name);
+      const id = namespace ? `${namespace}:${bareId}` : bareId;
+
       result.push({
-        id: toId(entry.name),
+        id,
+        bareId,
+        namespace,
+        source: directory,
         filePath: absolutePath,
         metadata: parsed.metadata,
         content: parsed.content,
@@ -55,6 +72,26 @@ export function loadCommandLibrary(): CommandEntry[] {
       }
       throw error;
     }
+  }
+
+  return result;
+}
+
+/**
+ * Load all commands from default library and subscribed libraries
+ */
+export function loadCommandLibrary(): CommandEntry[] {
+  const result: CommandEntry[] = [];
+
+  // Load from default library (no namespace)
+  const defaultDir = ensureCommandsDirectory();
+  result.push(...loadCommandsFromDirectory(defaultDir));
+
+  // Load from subscribed libraries (with namespace prefix)
+  const subscriptions = getSubscriptionsRecord();
+  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+    const commandsDir = path.join(basePath, 'commands');
+    result.push(...loadCommandsFromDirectory(commandsDir, namespace));
   }
 
   result.sort((a, b) => a.id.localeCompare(b.id));
