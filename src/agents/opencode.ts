@@ -1,13 +1,39 @@
 /**
  * opencode agent adapter
- * Synchronizes MCP servers into ~/.config/opencode/opencode.json
+ * Synchronizes MCP servers into ~/.config/opencode/opencode.json or opencode.jsonc
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { parse } from 'jsonc-parser';
 import { getOpencodePath, getProjectOpencodePath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
+
+/**
+ * Resolves the opencode config file path, preferring .jsonc over .json
+ * @param basePath - Base path without extension (e.g., ~/.config/opencode/opencode)
+ * @returns The path to use (.jsonc if exists, otherwise .json)
+ */
+function resolveConfigPath(basePath: string): { path: string; isJsonc: boolean } {
+  const jsoncPath = `${basePath}.jsonc`;
+  const jsonPath = `${basePath}.json`;
+
+  if (fs.existsSync(jsoncPath)) {
+    return { path: jsoncPath, isJsonc: true };
+  }
+  return { path: jsonPath, isJsonc: false };
+}
+
+/**
+ * Parse config file content, supporting both JSON and JSONC formats
+ */
+function parseConfigContent(content: string, isJsonc: boolean): OpencodeConfig {
+  if (isJsonc) {
+    return parse(content) as OpencodeConfig;
+  }
+  return JSON.parse(content) as OpencodeConfig;
+}
 
 type OpencodeConfig = Record<string, unknown> & {
   mcp?: Record<string, Record<string, unknown>>;
@@ -23,14 +49,16 @@ export class OpencodeAgent implements AgentAdapter {
   readonly id = 'opencode' as const;
 
   configPath(): string {
-    return getOpencodePath('opencode.json');
+    const basePath = getOpencodePath('opencode');
+    return resolveConfigPath(basePath).path;
   }
 
   /**
-   * Project-level config: <project>/.opencode/opencode.json
+   * Project-level config: <project>/.opencode/opencode.json or .jsonc
    */
   projectConfigPath(projectRoot: string): string {
-    return getProjectOpencodePath(projectRoot, 'opencode.json');
+    const basePath = getProjectOpencodePath(projectRoot, 'opencode');
+    return resolveConfigPath(basePath).path;
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
@@ -48,12 +76,15 @@ export class OpencodeAgent implements AgentAdapter {
     filePath: string,
     config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
   ): void {
+    // Determine if this is a JSONC file
+    const isJsonc = filePath.endsWith('.jsonc');
+
     // Load existing
     let current: OpencodeConfig = {};
     if (fs.existsSync(filePath)) {
       try {
         const raw = fs.readFileSync(filePath, 'utf-8');
-        current = JSON.parse(raw) as OpencodeConfig;
+        current = parseConfigContent(raw, isJsonc);
       } catch {
         // If unreadable, start fresh but do not throw to avoid blocking apply on one agent
         current = {};
