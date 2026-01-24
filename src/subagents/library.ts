@@ -3,9 +3,13 @@ import path from 'node:path';
 import { getSubagentsDir } from '../config/paths.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
+import { getSubscriptionsRecord } from '../library/subscriptions.js';
 
 export interface SubagentEntry {
   id: string;
+  bareId: string;
+  namespace?: string;
+  source: string;
   filePath: string;
   metadata: LibraryFrontmatter;
   content: string;
@@ -28,10 +32,17 @@ export function ensureSubagentsDirectory(): string {
   return directory;
 }
 
-export function loadSubagentLibrary(): SubagentEntry[] {
-  const directory = ensureSubagentsDirectory();
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
+/**
+ * Load subagents from a specific directory
+ * @param directory - Directory to load subagents from
+ * @param namespace - Optional namespace prefix for IDs
+ */
+function loadSubagentsFromDirectory(directory: string, namespace?: string): SubagentEntry[] {
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
 
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
   const result: SubagentEntry[] = [];
 
   for (const entry of entries) {
@@ -43,8 +54,14 @@ export function loadSubagentLibrary(): SubagentEntry[] {
 
     try {
       const parsed = parseLibraryMarkdown(rawContent);
+      const bareId = toId(entry.name);
+      const id = namespace ? `${namespace}:${bareId}` : bareId;
+
       result.push({
-        id: toId(entry.name),
+        id,
+        bareId,
+        namespace,
+        source: directory,
         filePath: absolutePath,
         metadata: parsed.metadata,
         content: parsed.content,
@@ -55,6 +72,26 @@ export function loadSubagentLibrary(): SubagentEntry[] {
       }
       throw error;
     }
+  }
+
+  return result;
+}
+
+/**
+ * Load all subagents from default library and subscribed libraries
+ */
+export function loadSubagentLibrary(): SubagentEntry[] {
+  const result: SubagentEntry[] = [];
+
+  // Load from default library (no namespace)
+  const defaultDir = ensureSubagentsDirectory();
+  result.push(...loadSubagentsFromDirectory(defaultDir));
+
+  // Load from subscribed libraries (with namespace prefix)
+  const subscriptions = getSubscriptionsRecord();
+  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+    const subagentsDir = path.join(basePath, 'subagents');
+    result.push(...loadSubagentsFromDirectory(subagentsDir, namespace));
   }
 
   result.sort((a, b) => a.id.localeCompare(b.id));

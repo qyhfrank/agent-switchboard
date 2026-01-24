@@ -38,6 +38,12 @@ import {
 } from './config/switchboard-config.js';
 import { ensureLibraryDirectories, writeFileSecure } from './library/fs.js';
 import { loadMcpActiveState, saveMcpActiveState } from './library/state.js';
+import {
+  addSubscription,
+  getSubscriptions,
+  removeSubscription,
+  validateSubscriptionPath,
+} from './library/subscriptions.js';
 import { RULE_SUPPORTED_AGENTS } from './rules/agents.js';
 import { composeActiveRules } from './rules/composer.js';
 import { distributeRules, listUnsupportedAgents } from './rules/distribution.js';
@@ -1170,5 +1176,107 @@ function showSummary(selectedServers: string[], scope?: ConfigScope): void {
 
   console.log();
 }
+
+// Library subscription commands
+program
+  .command('subscribe')
+  .description('Add a library subscription with a namespace')
+  .argument('<name>', 'Namespace for this subscription (e.g., "team", "project")')
+  .argument('<path>', 'Path to the library directory')
+  .action((name: string, libraryPath: string) => {
+    try {
+      // Validate the path has library structure
+      const validation = validateSubscriptionPath(libraryPath);
+      if (!validation.valid) {
+        console.error(
+          chalk.red(
+            `\n✗ Path does not contain any library folders (rules/, commands/, subagents/, skills/).`
+          )
+        );
+        process.exit(1);
+      }
+
+      addSubscription(name, libraryPath);
+
+      console.log(chalk.green(`\n✓ Subscribed to "${name}" at ${path.resolve(libraryPath)}`));
+      console.log(chalk.dim(`  Found: ${validation.found.join(', ')}`));
+      if (validation.missing.length > 0) {
+        console.log(chalk.dim(`  Missing: ${validation.missing.join(', ')}`));
+      }
+      console.log();
+      console.log(
+        chalk.dim('Library entries will now use the namespace prefix, e.g., ') +
+          chalk.cyan(`${name}:my-rule`)
+      );
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+program
+  .command('unsubscribe')
+  .description('Remove a library subscription by namespace')
+  .argument('<name>', 'Namespace to remove')
+  .action((name: string) => {
+    try {
+      removeSubscription(name);
+      console.log(chalk.green(`\n✓ Unsubscribed from "${name}"`));
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
+
+program
+  .command('subscriptions')
+  .description('List all library subscriptions')
+  .option('--json', 'Output as JSON')
+  .action((options: { json?: boolean }) => {
+    try {
+      const subscriptions = getSubscriptions();
+
+      if (options.json) {
+        console.log(JSON.stringify(subscriptions, null, 2));
+        return;
+      }
+
+      if (subscriptions.length === 0) {
+        console.log(chalk.yellow('\n⚠ No library subscriptions configured.'));
+        console.log(chalk.dim('  Use `asb subscribe <name> <path>` to add one.'));
+        return;
+      }
+
+      console.log(chalk.blue('\nLibrary subscriptions:'));
+      const header = ['Namespace', 'Path', 'Status', 'Contains'];
+      const rows = subscriptions.map((sub: { namespace: string; path: string }) => {
+        const exists = fs.existsSync(sub.path);
+        const validation = exists ? validateSubscriptionPath(sub.path) : { found: [], missing: [] };
+        const statusPlain = exists ? 'ok' : 'missing';
+        const containsPlain = validation.found.length > 0 ? validation.found.join(', ') : '-';
+
+        return [
+          { plain: sub.namespace, formatted: chalk.cyan(sub.namespace) },
+          { plain: sub.path, formatted: chalk.dim(sub.path) },
+          {
+            plain: statusPlain,
+            formatted: exists ? chalk.green(statusPlain) : chalk.red(statusPlain),
+          },
+          { plain: containsPlain, formatted: containsPlain },
+        ];
+      });
+      printTable(header, rows);
+      console.log();
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
 
 program.parse(process.argv);

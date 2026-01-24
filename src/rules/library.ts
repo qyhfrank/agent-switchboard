@@ -1,11 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getRulesDir } from '../config/paths.js';
+import { getSubscriptionsRecord } from '../library/subscriptions.js';
 import { parseRuleMarkdown } from './parser.js';
 import type { RuleMetadata } from './schema.js';
 
 export interface RuleSnippet {
   id: string;
+  bareId: string;
+  namespace?: string;
+  source: string;
   filePath: string;
   metadata: RuleMetadata;
   content: string;
@@ -28,10 +32,17 @@ export function ensureRulesDirectory(): string {
   return directory;
 }
 
-export function loadRuleLibrary(): RuleSnippet[] {
-  const directory = ensureRulesDirectory();
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
+/**
+ * Load rules from a specific directory
+ * @param directory - Directory to load rules from
+ * @param namespace - Optional namespace prefix for IDs
+ */
+function loadRulesFromDirectory(directory: string, namespace?: string): RuleSnippet[] {
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
 
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
   const rules: RuleSnippet[] = [];
 
   for (const entry of entries) {
@@ -43,8 +54,14 @@ export function loadRuleLibrary(): RuleSnippet[] {
 
     try {
       const parsed = parseRuleMarkdown(rawContent);
+      const bareId = toRuleId(entry.name);
+      const id = namespace ? `${namespace}:${bareId}` : bareId;
+
       rules.push({
-        id: toRuleId(entry.name),
+        id,
+        bareId,
+        namespace,
+        source: directory,
         filePath: absolutePath,
         metadata: parsed.metadata,
         content: parsed.content,
@@ -55,6 +72,26 @@ export function loadRuleLibrary(): RuleSnippet[] {
       }
       throw error;
     }
+  }
+
+  return rules;
+}
+
+/**
+ * Load all rules from default library and subscribed libraries
+ */
+export function loadRuleLibrary(): RuleSnippet[] {
+  const rules: RuleSnippet[] = [];
+
+  // Load from default library (no namespace)
+  const defaultDir = ensureRulesDirectory();
+  rules.push(...loadRulesFromDirectory(defaultDir));
+
+  // Load from subscribed libraries (with namespace prefix)
+  const subscriptions = getSubscriptionsRecord();
+  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+    const rulesDir = path.join(basePath, 'rules');
+    rules.push(...loadRulesFromDirectory(rulesDir, namespace));
   }
 
   rules.sort((a, b) => a.id.localeCompare(b.id));

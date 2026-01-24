@@ -1,12 +1,19 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSkillsDir } from '../config/paths.js';
+import { getSubscriptionsRecord } from '../library/subscriptions.js';
 import { parseSkillMarkdown } from './parser.js';
 import type { SkillFrontmatter } from './schema.js';
 
 export interface SkillEntry {
-  /** Skill identifier (directory name) */
+  /** Skill identifier (may include namespace prefix) */
   id: string;
+  /** Original skill identifier without namespace */
+  bareId: string;
+  /** Namespace name (undefined for default library) */
+  namespace?: string;
+  /** Source library path */
+  source: string;
   /** Absolute path to skill directory */
   dirPath: string;
   /** Absolute path to SKILL.md */
@@ -35,13 +42,16 @@ export function ensureSkillsDirectory(): string {
 }
 
 /**
- * Load all skills from the skills library directory.
- * Each skill is a directory containing a SKILL.md file.
+ * Load skills from a specific directory
+ * @param directory - Directory to load skills from
+ * @param namespace - Optional namespace prefix for IDs
  */
-export function loadSkillLibrary(): SkillEntry[] {
-  const directory = ensureSkillsDirectory();
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
+function loadSkillsFromDirectory(directory: string, namespace?: string): SkillEntry[] {
+  if (!fs.existsSync(directory)) {
+    return [];
+  }
 
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
   const result: SkillEntry[] = [];
 
   for (const entry of entries) {
@@ -57,6 +67,8 @@ export function loadSkillLibrary(): SkillEntry[] {
 
     try {
       const parsed = parseSkillMarkdown(rawContent);
+      const bareId = entry.name;
+      const id = namespace ? `${namespace}:${bareId}` : bareId;
 
       // Warn if directory name doesn't match skill name
       if (parsed.metadata.name !== entry.name) {
@@ -66,7 +78,10 @@ export function loadSkillLibrary(): SkillEntry[] {
       }
 
       result.push({
-        id: entry.name,
+        id,
+        bareId,
+        namespace,
+        source: directory,
         dirPath,
         skillPath,
         metadata: parsed.metadata,
@@ -78,6 +93,27 @@ export function loadSkillLibrary(): SkillEntry[] {
       }
       throw error;
     }
+  }
+
+  return result;
+}
+
+/**
+ * Load all skills from default library and subscribed libraries.
+ * Each skill is a directory containing a SKILL.md file.
+ */
+export function loadSkillLibrary(): SkillEntry[] {
+  const result: SkillEntry[] = [];
+
+  // Load from default library (no namespace)
+  const defaultDir = ensureSkillsDirectory();
+  result.push(...loadSkillsFromDirectory(defaultDir));
+
+  // Load from subscribed libraries (with namespace prefix)
+  const subscriptions = getSubscriptionsRecord();
+  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+    const skillsDir = path.join(basePath, 'skills');
+    result.push(...loadSkillsFromDirectory(skillsDir, namespace));
   }
 
   result.sort((a, b) => a.id.localeCompare(b.id));
