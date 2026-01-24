@@ -80,10 +80,10 @@ ensureLibraryDirectories();
 
 program
   .command('sync')
-  .description('Synchronize active rules, commands, and subagents to agent targets')
+  .description('Synchronize active MCP servers, rules, commands, subagents, and skills to agent targets')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml')
-  .action((options: ScopeOptionInput) => {
+  .action(async (options: ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
       const loadOptions = scopeToLoadOptions(scope);
@@ -124,6 +124,7 @@ program
       console.log();
 
       console.log(chalk.blue('Active selections:'));
+      console.log(`  MCP servers: ${chalk.cyan(String(config.mcp.active.length))}`);
       console.log(`  Rules: ${chalk.cyan(String(config.rules.active.length))}`);
       console.log(`  Commands: ${chalk.cyan(String(config.commands.active.length))}`);
       console.log(`  Subagents: ${chalk.cyan(String(config.subagents.active.length))}`);
@@ -134,6 +135,10 @@ program
         console.log(`  Agents: ${chalk.gray('none configured')}`);
       }
       console.log();
+
+      // Sync MCP servers to agents
+      console.log(chalk.blue('MCP server distribution:'));
+      await applyToAgents(scope);
 
       const ruleDistribution = distributeRules(undefined, { force: true }, scope);
       const commandDistribution = distributeCommands(scope);
