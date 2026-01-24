@@ -80,7 +80,9 @@ ensureLibraryDirectories();
 
 program
   .command('sync')
-  .description('Synchronize active MCP servers, rules, commands, subagents, and skills to agent targets')
+  .description(
+    'Synchronize active MCP servers, rules, commands, subagents, and skills to agent targets'
+  )
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml')
   .action(async (options: ScopeOptionInput) => {
