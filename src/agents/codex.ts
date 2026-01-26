@@ -65,6 +65,7 @@ export class CodexAgent implements AgentAdapter {
 /**
  * Merge MCP server config into TOML content
  * Preserves unrelated top-level tables/keys; rewrites mcp_servers in canonical form
+ * Note: SSE servers are filtered out as Codex only supports stdio and http
  */
 export function mergeConfig(
   content: string,
@@ -84,8 +85,19 @@ export function mergeConfig(
     otherTopLevel = {};
   }
 
+  // Filter out SSE servers - Codex only supports stdio and http
+  const filteredServers: Record<string, Omit<McpServer, 'enabled'>> = {};
+  for (const [name, server] of Object.entries(mcpServers)) {
+    const s = server as McpServerLike;
+    if (s.type === 'sse') {
+      // Skip SSE servers - Codex doesn't support them
+      continue;
+    }
+    filteredServers[name] = server;
+  }
+
   // Build canonical mcp_servers TOML from provided config
-  const mcpToml = buildNestedToml(mcpServers);
+  const mcpToml = buildNestedToml(filteredServers);
 
   // Stringify other top-level tables/keys via iarna/toml
   let otherToml = '';
@@ -115,12 +127,14 @@ export type McpServerLike = Record<string, unknown> & {
   type?: string;
   env_file?: string;
   env?: Record<string, unknown>;
+  headers?: Record<string, string>;
 };
 
 /**
  * Build canonical TOML: one table per server [mcp_servers.<name>]
  * env must be written as dotted keys inside the same table: env.KEY = "VALUE"
- * Key order per server: command, args, url, type, env_file, env.* (alpha), unknown (alpha)
+ * headers maps to http_headers in Codex format
+ * Key order per server: command, args, url, type, env_file, http_headers, env.* (alpha), unknown (alpha)
  * Exactly one blank line between server tables; final newline added by caller
  */
 export function buildNestedToml(
@@ -155,6 +169,21 @@ export function buildNestedToml(
     // Known keys
     for (const k of KNOWN_ORDER) emit(k, (server as Record<string, unknown>)[k as string]);
 
+    // headers -> http_headers (inline table format)
+    if (server.headers && typeof server.headers === 'object') {
+      const headerEntries = Object.entries(server.headers).filter(
+        ([_, v]) => v !== undefined && v !== null
+      );
+      if (headerEntries.length > 0) {
+        // Format as inline table: http_headers = { "Key" = "Value", ... }
+        const pairs = headerEntries
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([k, v]) => `"${k}" = "${String(v).replace(/"/g, '\\"')}"`)
+          .join(', ');
+        lines.push(`http_headers = { ${pairs} }`);
+      }
+    }
+
     // env dotted keys (alphabetical)
     if (server.env && typeof server.env === 'object') {
       const envEntries = Object.entries(server.env).filter(
@@ -164,8 +193,8 @@ export function buildNestedToml(
       for (const [ek, ev] of envEntries) emit(`env.${ek}`, String(ev));
     }
 
-    // Unknown keys (exclude known + env)
-    const knownSet = new Set<string>([...KNOWN_ORDER.map(String), 'env']);
+    // Unknown keys (exclude known + env + headers)
+    const knownSet = new Set<string>([...KNOWN_ORDER.map(String), 'env', 'headers']);
     const unknownKeys = Object.keys(server)
       .filter((k) => !knownSet.has(k))
       .sort((a, b) => a.localeCompare(b));

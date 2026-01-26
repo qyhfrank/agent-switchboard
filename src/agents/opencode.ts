@@ -102,8 +102,9 @@ export class OpencodeAgent implements AgentAdapter {
       // Cast to extended type to access potential additional fields
       const extServer = server as ExtendedMcpServer;
 
-      // Map stdio/local vs http/remote
-      const isRemote = extServer.type === 'http' || typeof extServer.url === 'string';
+      // Map stdio/local vs http/sse/remote
+      const isRemote =
+        extServer.type === 'http' || extServer.type === 'sse' || typeof extServer.url === 'string';
       const next: Record<string, unknown> = { ...prev };
 
       if (isRemote) {

@@ -29,8 +29,15 @@ export function mergeMcpIntoAgent(
 
   for (const [name, server] of Object.entries(mcpServers)) {
     // Preserve existing server-specific settings (if any) while applying new config
-    const existing = (agentConfig.mcpServers?.[name] as Record<string, unknown>) ?? {};
-    merged.mcpServers[name] = { ...existing, ...server };
+    const { type: _existingType, ...existingWithoutType } =
+      ((agentConfig.mcpServers?.[name] as Record<string, unknown>) ?? {}) as Record<
+        string,
+        unknown
+      >;
+    // Remove 'type' field - Claude Code/Desktop/Cursor don't use it
+    // They distinguish stdio vs remote by presence of command vs url
+    const { type: _type, ...serverWithoutType } = server as Record<string, unknown>;
+    merged.mcpServers[name] = { ...existingWithoutType, ...serverWithoutType };
   }
 
   return merged;

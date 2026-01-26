@@ -15,7 +15,7 @@ export const mcpServerSchema = z
     args: z.array(z.string()).optional(),
     env: z.record(z.string()).optional(),
     url: z.string().url().optional(),
-    type: z.enum(['stdio', 'http']).optional(),
+    type: z.enum(['stdio', 'sse', 'http']).optional(),
   })
   .passthrough(); // Allow unknown fields
 
