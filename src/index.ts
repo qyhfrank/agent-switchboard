@@ -1099,11 +1099,11 @@ async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[])
   // Global MCP servers list (from UI selection or config)
   const globalMcpServers = enabledServerNames ?? loadMcpActiveState(scope);
 
-  console.log();
-
   // Apply to each registered agent with per-agent MCP overrides
   for (const agentId of switchboardConfig.agents.active) {
-    const spinner = ora().start(`Applying to ${agentId}...`);
+    const spinner = ora({ indent: 2 }).start(`Applying to ${agentId}...`);
+    const persist = (symbol: string, text: string) =>
+      spinner.stopAndPersist({ symbol: `  ${symbol}`, text });
 
     try {
       // Get per-agent MCP config (applies add/remove overrides)
@@ -1126,14 +1126,14 @@ async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[])
       if (scope?.project && agent.applyProjectConfig) {
         agent.applyProjectConfig(scope.project, configToApply);
         const projectPath = agent.projectConfigPath?.(scope.project) ?? 'project config';
-        spinner.succeed(`${chalk.green('✓')} ${agentId} ${chalk.dim(projectPath)}`);
+        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(projectPath)}`);
       } else {
         agent.applyConfig(configToApply);
-        spinner.succeed(`${chalk.green('✓')} ${agentId} ${chalk.dim(agent.configPath())}`);
+        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(agent.configPath())}`);
       }
     } catch (error) {
       if (error instanceof Error) {
-        spinner.warn(`${chalk.yellow('⚠')} ${agentId} - ${error.message} (skipped)`);
+        persist(chalk.yellow('⚠'), `${chalk.cyan(agentId)} - ${error.message} (skipped)`);
       }
     }
   }
