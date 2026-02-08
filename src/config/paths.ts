@@ -1,27 +1,36 @@
 /**
  * Path utilities for Agent Switchboard configuration files
- * Provides cross-platform path resolution for config files under ~/.agent-switchboard
+ * Resolves config directory as: ASB_HOME > ~/.asb > ~/.agent-switchboard > ~/.asb (default)
  */
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+/** Preferred (short) config directory name */
+const CONFIG_DIR_SHORT = '.asb';
+/** Legacy config directory name */
+const CONFIG_DIR_LEGACY = '.agent-switchboard';
+
 /**
- * Returns the absolute path to the Agent Switchboard config directory
- * Cross-platform compatible: works on macOS, Linux, and Windows
- *
- * @returns {string} Absolute path to ~/.agent-switchboard
- * @example
- * // macOS/Linux: /Users/username/.agent-switchboard
- * // Windows: C:\Users\username\.agent-switchboard
+ * Returns the absolute path to the Agent Switchboard config directory.
+ * Resolution order:
+ *  1. ASB_HOME env var (explicit override)
+ *  2. ~/.asb (preferred short path, if it exists)
+ *  3. ~/.agent-switchboard (legacy path, if it exists)
+ *  4. ~/.asb (default for new installations)
  */
 export function getConfigDir(): string {
-  // Redesigned semantics:
-  // - ASB_HOME now points directly to the Switchboard config directory (i.e., replaces ~/.agent-switchboard)
-  // - If not set, default to os.homedir()/.agent-switchboard
   const asbHome = process.env.ASB_HOME?.trim();
   if (asbHome && asbHome.length > 0) return asbHome;
-  return path.join(os.homedir(), '.agent-switchboard');
+
+  const home = os.homedir();
+  const shortDir = path.join(home, CONFIG_DIR_SHORT);
+  const legacyDir = path.join(home, CONFIG_DIR_LEGACY);
+
+  if (fs.existsSync(shortDir)) return shortDir;
+  if (fs.existsSync(legacyDir)) return legacyDir;
+  return shortDir;
 }
 
 /**
