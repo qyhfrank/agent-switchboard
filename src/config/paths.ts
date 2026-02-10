@@ -134,6 +134,24 @@ export function getOpencodePath(...segments: string[]): string {
   return path.join(getOpencodeRoot(), ...segments);
 }
 
+/**
+ * Returns the Codex skills directory following the open agent skills standard.
+ * Codex reads skills from ~/.agents/skills/ (USER scope), not ~/.codex/skills/.
+ * See: https://developers.openai.com/codex/skills
+ */
+export function getCodexSkillsDir(): string {
+  return path.join(getAgentsHome(), '.agents', 'skills');
+}
+
+/**
+ * Returns the project-scoped Codex skills directory.
+ * Codex scans .agents/skills/ from CWD up to repo root.
+ * See: https://developers.openai.com/codex/skills
+ */
+export function getProjectCodexSkillsDir(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), '.agents', 'skills');
+}
+
 /** Project-scoped platform roots (used when --project is set and platform supports project-level files) */
 export function getProjectClaudeDir(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), '.claude');

@@ -23,6 +23,7 @@ import { buildCommandInventory } from './commands/inventory.js';
 import { resolveAgentSectionConfig } from './config/agent-config.js';
 import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
+  getAgentsHome,
   getClaudeDir,
   getCodexDir,
   getCommandsDir,
@@ -285,8 +286,15 @@ function defaultSkillSourceDir(platform: SkillImportPlatform): string {
   switch (platform) {
     case 'claude-code':
       return path.join(getClaudeDir(), 'skills');
-    case 'codex':
-      return path.join(getCodexDir(), 'skills');
+    case 'codex': {
+      // Primary: ~/.agents/skills (agentskills.io standard, Codex v0.94+)
+      const primary = path.join(getAgentsHome(), '.agents', 'skills');
+      if (fs.existsSync(primary)) return primary;
+      // Fallback: ~/.codex/skills (legacy, still scanned for compatibility)
+      const legacy = path.join(getCodexDir(), 'skills');
+      if (fs.existsSync(legacy)) return legacy;
+      return primary;
+    }
   }
 }
 

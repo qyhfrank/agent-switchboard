@@ -87,13 +87,19 @@ export function mergeConfig(
 
   // Filter out SSE servers - Codex only supports stdio and http
   const filteredServers: Record<string, Omit<McpServer, 'enabled'>> = {};
+  const skippedSse: string[] = [];
   for (const [name, server] of Object.entries(mcpServers)) {
     const s = server as McpServerLike;
     if (s.type === 'sse') {
-      // Skip SSE servers - Codex doesn't support them
+      skippedSse.push(name);
       continue;
     }
     filteredServers[name] = server;
+  }
+  if (skippedSse.length > 0) {
+    console.warn(
+      `[codex] Skipped ${skippedSse.length} SSE server(s) (unsupported): ${skippedSse.join(', ')}`
+    );
   }
 
   // Build canonical mcp_servers TOML from provided config
@@ -128,13 +134,27 @@ export type McpServerLike = Record<string, unknown> & {
   env_file?: string;
   env?: Record<string, unknown>;
   headers?: Record<string, string>;
+  http_headers?: Record<string, string>;
+  env_http_headers?: Record<string, string>;
+  bearer_token_env_var?: string;
+  cwd?: string;
+  env_vars?: string[];
+  enabled_tools?: string[];
+  disabled_tools?: string[];
+  enabled?: boolean;
+  required?: boolean;
+  startup_timeout_sec?: number;
+  startup_timeout_ms?: number;
+  tool_timeout_sec?: number;
 };
 
 /**
  * Build canonical TOML: one table per server [mcp_servers.<name>]
  * env must be written as dotted keys inside the same table: env.KEY = "VALUE"
  * headers maps to http_headers in Codex format
- * Key order per server: command, args, url, type, env_file, http_headers, env.* (alpha), unknown (alpha)
+ * Key order per server: command, args, url, cwd, bearer_token_env_var, env_file,
+ *   enabled, required, enabled_tools, disabled_tools, startup_timeout_sec, tool_timeout_sec,
+ *   http_headers, env_http_headers, env.* (alpha), unknown (alpha)
  * Exactly one blank line between server tables; final newline added by caller
  */
 export function buildNestedToml(
@@ -149,7 +169,32 @@ export function buildNestedToml(
 
     lines.push(`[mcp_servers.${name}]`);
 
-    const KNOWN_ORDER: (keyof McpServerLike)[] = ['command', 'args', 'url', 'type', 'env_file'];
+    // Scalar and array keys emitted in canonical order
+    const KNOWN_SCALAR_ORDER: (keyof McpServerLike)[] = [
+      'command',
+      'args',
+      'url',
+      'cwd',
+      'bearer_token_env_var',
+      'env_file',
+      'required',
+      'enabled_tools',
+      'disabled_tools',
+      'env_vars',
+      'startup_timeout_sec',
+      'startup_timeout_ms',
+      'tool_timeout_sec',
+    ];
+
+    // Keys handled specially (inline tables, dotted keys)
+    const SPECIAL_KEYS = new Set<string>([
+      'env',
+      'headers',
+      'http_headers',
+      'env_http_headers',
+      'type',
+      'enabled',
+    ]);
 
     const emit = (k: string, v: unknown) => {
       if (v === undefined || v === null) return;
@@ -166,23 +211,30 @@ export function buildNestedToml(
       lines.push(`${k} = ${rhs}`);
     };
 
-    // Known keys
-    for (const k of KNOWN_ORDER) emit(k, (server as Record<string, unknown>)[k as string]);
+    /**
+     * Render a Record<string,string> as a TOML inline table.
+     */
+    const emitInlineTable = (key: string, obj: Record<string, string> | undefined) => {
+      if (!obj || typeof obj !== 'object') return;
+      const entries = Object.entries(obj).filter(([_, v]) => v !== undefined && v !== null);
+      if (entries.length === 0) return;
+      const pairs = entries
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `"${k}" = "${String(v).replace(/"/g, '\\"')}"`)
+        .join(', ');
+      lines.push(`${key} = { ${pairs} }`);
+    };
+
+    // Known scalar/array keys
+    for (const k of KNOWN_SCALAR_ORDER) emit(k, (server as Record<string, unknown>)[k as string]);
 
     // headers -> http_headers (inline table format)
-    if (server.headers && typeof server.headers === 'object') {
-      const headerEntries = Object.entries(server.headers).filter(
-        ([_, v]) => v !== undefined && v !== null
-      );
-      if (headerEntries.length > 0) {
-        // Format as inline table: http_headers = { "Key" = "Value", ... }
-        const pairs = headerEntries
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([k, v]) => `"${k}" = "${String(v).replace(/"/g, '\\"')}"`)
-          .join(', ');
-        lines.push(`http_headers = { ${pairs} }`);
-      }
-    }
+    // Prefer explicit http_headers over the generic headers field
+    const httpHeaders = server.http_headers ?? server.headers;
+    emitInlineTable('http_headers', httpHeaders as Record<string, string> | undefined);
+
+    // env_http_headers (inline table format)
+    emitInlineTable('env_http_headers', server.env_http_headers);
 
     // env dotted keys (alphabetical)
     if (server.env && typeof server.env === 'object') {
@@ -193,8 +245,11 @@ export function buildNestedToml(
       for (const [ek, ev] of envEntries) emit(`env.${ek}`, String(ev));
     }
 
-    // Unknown keys (exclude known + env + headers)
-    const knownSet = new Set<string>([...KNOWN_ORDER.map(String), 'env', 'headers']);
+    // Unknown keys (exclude known + special)
+    const knownSet = new Set<string>([
+      ...KNOWN_SCALAR_ORDER.map(String),
+      ...SPECIAL_KEYS,
+    ]);
     const unknownKeys = Object.keys(server)
       .filter((k) => !knownSet.has(k))
       .sort((a, b) => a.localeCompare(b));

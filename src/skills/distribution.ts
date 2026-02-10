@@ -2,10 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   getClaudeDir,
-  getCodexDir,
+  getCodexSkillsDir,
   getGeminiDir,
   getOpencodeRoot,
   getProjectClaudeDir,
+  getProjectCodexSkillsDir,
   getProjectGeminiDir,
   getProjectOpencodeRoot,
 } from '../config/paths.js';
@@ -41,7 +42,10 @@ function resolveSkillsParentDir(platform: SkillPlatform, scope?: ConfigScope): s
       }
       return path.join(getClaudeDir(), 'skills');
     case 'codex':
-      return path.join(getCodexDir(), 'skills');
+      if (scope?.project) {
+        return getProjectCodexSkillsDir(scope.project);
+      }
+      return getCodexSkillsDir();
     case 'gemini':
       if (scope?.project) {
         return path.join(getProjectGeminiDir(scope.project), 'skills');
