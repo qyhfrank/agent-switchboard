@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import {
   getClaudeDir,
@@ -48,9 +49,9 @@ function resolveSkillsParentDir(platform: SkillPlatform, scope?: ConfigScope): s
       return path.join(getGeminiDir(), 'skills');
     case 'opencode':
       if (scope?.project) {
-        return path.join(getProjectOpencodeRoot(scope.project), 'skills');
+        return path.join(getProjectOpencodeRoot(scope.project), 'skill');
       }
-      return path.join(getOpencodeRoot(), 'skills');
+      return path.join(getOpencodeRoot(), 'skill');
   }
 }
 
@@ -111,6 +112,24 @@ export function distributeSkills(scope?: ConfigScope): SkillDistributionOutcome 
     scope,
     filterSelected,
   });
+
+  // Remove legacy OpenCode `skills/` (plural) directories left by earlier versions.
+  // OpenCode uses singular `skill/`; the plural form is rejected by its INVALID_DIRS guard.
+  const legacyOpencodeDirs = [
+    path.join(getOpencodeRoot(), 'skills'),
+    ...(scope?.project ? [path.join(getProjectOpencodeRoot(scope.project), 'skills')] : []),
+  ];
+  for (const legacyDir of legacyOpencodeDirs) {
+    if (fs.existsSync(legacyDir) && fs.statSync(legacyDir).isDirectory()) {
+      fs.rmSync(legacyDir, { recursive: true });
+      outcome.results.push({
+        platform: 'opencode',
+        targetDir: legacyDir,
+        status: 'deleted',
+        reason: 'legacy plural path',
+      });
+    }
+  }
 
   // Calculate summary
   const successPlatforms = new Set<SkillPlatform>();

@@ -126,7 +126,7 @@ Project-aware outputs (when using `--project <path>`):
 - Skills (project-level supported):
   - Claude Code → `<project>/.claude/skills/`
   - Gemini → `<project>/.gemini/skills/`
-  - OpenCode → `<project>/.opencode/skills/`
+  - OpenCode → `<project>/.opencode/skill/`
   - Codex → global only (`~/.codex/skills/`)
 
 ## Rule Library
@@ -285,7 +285,7 @@ Type to fuzzy filter the list, then confirm to persist the selection. Skills are
 - Claude Code → `~/.claude/skills/<skill-id>/`
 - Codex → `~/.codex/skills/<skill-id>/`
 - Gemini → `~/.gemini/skills/<skill-id>/`
-- OpenCode → `~/.config/opencode/skills/<skill-id>/`
+- OpenCode → `~/.config/opencode/skill/<skill-id>/`
 
 ### Inventory
 
