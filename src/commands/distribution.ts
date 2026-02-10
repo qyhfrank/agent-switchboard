@@ -114,7 +114,10 @@ function renderForPlatform(platform: CommandPlatform, entry: CommandEntry): stri
     case 'codex': {
       const desc = entry.metadata.description?.trim();
       const header = desc && desc.length > 0 ? `<!-- ${desc} -->\n\n` : '';
-      return `${header}${entry.content.trimStart()}`;
+      return (
+        `<!-- [deprecated] Codex custom prompts are deprecated. Consider migrating to skills: https://developers.openai.com/codex/skills -->\n\n` +
+        `${header}${entry.content.trimStart()}`
+      );
     }
     case 'gemini': {
       const extras = (entry.metadata as LibraryFrontmatter).extras as
@@ -171,7 +174,7 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
     return selected;
   };
 
-  return distributeLibrary<CommandEntry, CommandPlatform>({
+  const outcome = distributeLibrary<CommandEntry, CommandPlatform>({
     section: 'commands',
     selected: entries, // Pass all entries, filtering happens per-platform
     platforms,
@@ -182,4 +185,16 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
     scope,
     filterSelected,
   }) as { results: DistributionResult<CommandPlatform>[] };
+
+  // Warn about Codex custom prompts deprecation
+  const codexWrites = outcome.results.filter(
+    (r) => r.platform === 'codex' && r.status === 'written'
+  );
+  if (codexWrites.length > 0) {
+    console.warn(
+      `[codex] Custom prompts are deprecated. Consider migrating to skills: https://developers.openai.com/codex/skills`
+    );
+  }
+
+  return outcome;
 }

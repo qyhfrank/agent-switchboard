@@ -119,7 +119,7 @@ Project-aware outputs (when using `--project <path>`):
   - Claude Code → `<project>/.claude/commands/`
   - Gemini → `<project>/.gemini/commands/`
   - OpenCode → `<project>/.opencode/command/`
-  - Codex → global only (`~/.codex/prompts/`)
+  - Codex → global only (`~/.codex/prompts/`, deprecated; consider migrating to skills)
 - Subagents (project-level supported):
   - Claude Code → `<project>/.claude/agents/`
   - OpenCode → `<project>/.opencode/agent/`
@@ -127,7 +127,7 @@ Project-aware outputs (when using `--project <path>`):
   - Claude Code → `<project>/.claude/skills/`
   - Gemini → `<project>/.gemini/skills/`
   - OpenCode → `<project>/.opencode/skill/`
-  - Codex → global only (`~/.codex/skills/`)
+  - Codex → `~/.agents/skills/` (global) or `<project>/.agents/skills/` (project-level)
 
 ## Rule Library
 
@@ -272,7 +272,7 @@ agent-switchboard skill load <platform> [path]
 # <platform>: claude-code | codex
 # If [path] is omitted, defaults by platform:
 #   claude-code → ~/.claude/skills
-#   codex       → ~/.codex/skills
+#   codex       → ~/.agents/skills (fallback: ~/.codex/skills)
 ```
 
 ### Select and Distribute
@@ -283,7 +283,7 @@ agent-switchboard skill [-p <profile>] [--project <path>]
 
 Type to fuzzy filter the list, then confirm to persist the selection. Skills are distributed as complete directory bundles to supported platforms:
 - Claude Code → `~/.claude/skills/<skill-id>/`
-- Codex → `~/.codex/skills/<skill-id>/`
+- Codex → `~/.agents/skills/<skill-id>/` (or `<project>/.agents/skills/<skill-id>/`)
 - Gemini → `~/.gemini/skills/<skill-id>/`
 - OpenCode → `~/.config/opencode/skill/<skill-id>/`
 
