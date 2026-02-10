@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { buildNestedToml, mergeConfig } from '../src/agents/codex.js';
+import { buildNestedToml, ensureTrustEntry, mergeConfig } from '../src/agents/codex.js';
 
 // ---------------------------------------------------------------------------
 // buildNestedToml: basic stdio server
@@ -333,4 +333,51 @@ command = "old-cmd"
   assert.match(result, /model = "o3"/);
   assert.ok(!result.includes('mcp_servers'));
   assert.ok(!result.includes('old-cmd'));
+});
+
+// ---------------------------------------------------------------------------
+// ensureTrustEntry
+// ---------------------------------------------------------------------------
+
+test('ensureTrustEntry: adds trust section to empty config', () => {
+  const result = ensureTrustEntry('', '/projects/myapp');
+  assert.ok(result.changed);
+  assert.match(result.content, /\[projects."\/projects\/myapp"\]/);
+  assert.match(result.content, /trust_level = "trusted"/);
+  assert.equal(result.warning, undefined);
+});
+
+test('ensureTrustEntry: adds trust section to existing config', () => {
+  const existing = `model = "o3"\napproval_mode = "suggest"\n`;
+  const result = ensureTrustEntry(existing, '/projects/myapp');
+  assert.ok(result.changed);
+  // Preserves existing content
+  assert.match(result.content, /model = "o3"/);
+  // Adds trust section
+  assert.match(result.content, /\[projects."\/projects\/myapp"\]/);
+  assert.match(result.content, /trust_level = "trusted"/);
+});
+
+test('ensureTrustEntry: no-op when already trusted', () => {
+  const existing = `model = "o3"\n\n[projects."/projects/myapp"]\ntrust_level = "trusted"\n`;
+  const result = ensureTrustEntry(existing, '/projects/myapp');
+  assert.ok(!result.changed);
+  assert.equal(result.content, existing);
+  assert.equal(result.warning, undefined);
+});
+
+test('ensureTrustEntry: warns and skips when explicitly untrusted', () => {
+  const existing = `model = "o3"\n\n[projects."/projects/myapp"]\ntrust_level = "untrusted"\n`;
+  const result = ensureTrustEntry(existing, '/projects/myapp');
+  assert.ok(!result.changed);
+  assert.equal(result.content, existing);
+  assert.ok(result.warning?.includes('untrusted'));
+  assert.ok(result.warning?.includes('not overriding'));
+});
+
+test('ensureTrustEntry: handles unparseable config gracefully', () => {
+  const broken = `[[[invalid toml`;
+  const result = ensureTrustEntry(broken, '/projects/myapp');
+  assert.ok(!result.changed);
+  assert.equal(result.content, broken);
 });

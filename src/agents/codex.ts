@@ -42,6 +42,24 @@ export class CodexAgent implements AgentAdapter {
     const content = this._loadConfig(configPath);
     const updated = mergeConfig(content, config.mcpServers);
     this._saveConfig(configPath, updated);
+    this._ensureProjectTrusted(projectRoot);
+  }
+
+  /**
+   * Ensure the project is marked as trusted in the global config.
+   * Codex ignores project-level config.toml unless the project has
+   * trust_level = "trusted" in ~/.codex/config.toml.
+   */
+  private _ensureProjectTrusted(projectRoot: string): void {
+    const globalPath = this.configPath();
+    const globalContent = this._loadConfig(globalPath);
+    const result = ensureTrustEntry(globalContent, projectRoot);
+    if (result.warning) {
+      console.warn(`[codex] ${result.warning}`);
+    }
+    if (result.changed) {
+      this._saveConfig(globalPath, result.content);
+    }
   }
 
   private _loadConfig(configPath: string): string {
@@ -121,6 +139,44 @@ export function mergeConfig(
   if (mcpToml.trim().length > 0) parts.push(mcpToml.trimEnd());
 
   return `${parts.join('\n\n')}\n`;
+}
+
+/**
+ * Ensure a project trust entry exists in the global config TOML content.
+ * Returns the (possibly updated) content and whether it changed.
+ * If the project already has a trust section with a non-"trusted" value,
+ * returns a warning instead of overriding the user's explicit choice.
+ */
+export function ensureTrustEntry(
+  globalContent: string,
+  projectRoot: string
+): { content: string; changed: boolean; warning?: string } {
+  const absRoot = path.resolve(projectRoot);
+
+  try {
+    if (globalContent && globalContent.trim().length > 0) {
+      const parsed = parseToml(globalContent) as Record<string, unknown>;
+      const projects = parsed.projects as
+        | Record<string, Record<string, unknown>>
+        | undefined;
+      if (projects?.[absRoot]) {
+        if (projects[absRoot].trust_level === 'trusted') {
+          return { content: globalContent, changed: false };
+        }
+        return {
+          content: globalContent,
+          changed: false,
+          warning: `Project ${absRoot} has trust_level="${projects[absRoot].trust_level}"; not overriding`,
+        };
+      }
+    }
+  } catch {
+    // Can't parse global config - don't risk corrupting it
+    return { content: globalContent, changed: false };
+  }
+
+  const section = `\n[projects."${absRoot}"]\ntrust_level = "trusted"\n`;
+  return { content: globalContent.trimEnd() + '\n' + section, changed: true };
 }
 
 /**
