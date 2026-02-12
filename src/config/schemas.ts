@@ -109,6 +109,24 @@ export const rulesSectionSchema = rulesSectionBaseSchema
   .passthrough();
 
 /**
+ * Distribution configuration schema
+ * Controls how skills/commands/subagents are distributed to agent targets.
+ * - use_agents_dir: When true, skills are distributed to 2 targets (claude-code + agents).
+ *   When false (default), skills use the legacy 4-target mode for backward compatibility.
+ */
+const distributionSectionBaseSchema = z
+  .object({
+    use_agents_dir: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const distributionSectionSchema = distributionSectionBaseSchema
+  .extend({
+    use_agents_dir: z.boolean().default(false),
+  })
+  .passthrough();
+
+/**
  * UI configuration schema
  */
 const uiSectionBaseSchema = z
@@ -150,6 +168,7 @@ export const switchboardConfigSchema = z
     subagents: selectionSectionSchema.default({ active: [] }),
     skills: selectionSectionSchema.default({ active: [] }),
     rules: rulesSectionSchema.default({ active: [], includeDelimiters: false }),
+    distribution: distributionSectionSchema.default({ use_agents_dir: false }),
     ui: uiSectionSchema.default({ pageSize: 20 }),
     library: librarySectionSchema.default({ subscriptions: {} }),
   })
@@ -166,6 +185,7 @@ export const switchboardConfigLayerSchema = z
     subagents: selectionSectionBaseSchema.optional(),
     skills: selectionSectionBaseSchema.optional(),
     rules: rulesSectionBaseSchema.optional(),
+    distribution: distributionSectionBaseSchema.optional(),
     ui: uiSectionBaseSchema.optional(),
     library: librarySectionBaseSchema.optional(),
   })
@@ -181,6 +201,7 @@ export type IncrementalSelection = z.infer<typeof incrementalSelectionSchema>;
 export type AgentConfigOverride = z.infer<typeof agentConfigOverrideSchema>;
 export type AgentsSection = z.infer<typeof agentsSectionSchema>;
 export type RulesSection = z.infer<typeof rulesSectionSchema>;
+export type DistributionSection = z.infer<typeof distributionSectionSchema>;
 export type UiSection = z.infer<typeof uiSectionSchema>;
 export type LibrarySection = z.infer<typeof librarySectionSchema>;
 export type SwitchboardConfig = z.infer<typeof switchboardConfigSchema>;
