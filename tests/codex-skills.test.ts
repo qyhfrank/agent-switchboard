@@ -2,15 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import {
-  getCodexSkillsDir,
-  getProjectCodexSkillsDir,
-} from '../src/config/paths.js';
+import { getCodexSkillsDir, getProjectCodexSkillsDir } from '../src/config/paths.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
-import {
-  distributeSkills,
-  resolveSkillTargetDir,
-} from '../src/skills/distribution.js';
+import { distributeSkills, resolveSkillTargetDir } from '../src/skills/distribution.js';
 import { ensureSkillsDirectory } from '../src/skills/library.js';
 import { withTempHomes } from './helpers/tmp.js';
 
@@ -213,9 +207,7 @@ test('distributeSkills: all platforms receive skills', () => {
     const outcome = distributeSkills();
 
     const platforms = new Set(
-      outcome.results
-        .filter((r) => r.status === 'written')
-        .map((r) => r.platform)
+      outcome.results.filter((r) => r.status === 'written').map((r) => r.platform)
     );
 
     for (const p of ['claude-code', 'codex', 'gemini', 'opencode'] as const) {
@@ -251,9 +243,7 @@ test('distributeSkills: deactivated skill directory is removed', () => {
     const outcome = distributeSkills();
 
     // Should have a 'deleted' result for codex
-    const deleted = outcome.results.filter(
-      (r) => r.platform === 'codex' && r.status === 'deleted'
-    );
+    const deleted = outcome.results.filter((r) => r.platform === 'codex' && r.status === 'deleted');
     assert.ok(deleted.length > 0, 'should have deleted orphan codex skill');
     assert.ok(!fs.existsSync(codexTarget), 'orphan skill directory should be removed');
   });

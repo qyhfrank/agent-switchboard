@@ -156,9 +156,7 @@ export function ensureTrustEntry(
   try {
     if (globalContent && globalContent.trim().length > 0) {
       const parsed = parseToml(globalContent) as Record<string, unknown>;
-      const projects = parsed.projects as
-        | Record<string, Record<string, unknown>>
-        | undefined;
+      const projects = parsed.projects as Record<string, Record<string, unknown>> | undefined;
       if (projects?.[absRoot]) {
         if (projects[absRoot].trust_level === 'trusted') {
           return { content: globalContent, changed: false };
@@ -302,10 +300,7 @@ export function buildNestedToml(
     }
 
     // Unknown keys (exclude known + special)
-    const knownSet = new Set<string>([
-      ...KNOWN_SCALAR_ORDER.map(String),
-      ...SPECIAL_KEYS,
-    ]);
+    const knownSet = new Set<string>([...KNOWN_SCALAR_ORDER.map(String), ...SPECIAL_KEYS]);
     const unknownKeys = Object.keys(server)
       .filter((k) => !knownSet.has(k))
       .sort((a, b) => a.localeCompare(b));

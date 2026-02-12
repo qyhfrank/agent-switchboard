@@ -76,11 +76,7 @@ function resolveSkillsParentDir(target: string, scope?: ConfigScope): string {
 /**
  * Resolve target directory for a skill on a specific target.
  */
-export function resolveSkillTargetDir(
-  target: string,
-  id: string,
-  scope?: ConfigScope
-): string {
+export function resolveSkillTargetDir(target: string, id: string, scope?: ConfigScope): string {
   return path.join(resolveSkillsParentDir(target, scope), id);
 }
 
@@ -222,9 +218,7 @@ function distributeLegacyMode(
   // Legacy cleanup: only clean OpenCode's plural `skills/` path (original behavior)
   const legacyDirs = [
     path.join(getOpencodeRoot(), 'skills'),
-    ...(scope?.project
-      ? [path.join(getProjectOpencodeRoot(scope.project), 'skills')]
-      : []),
+    ...(scope?.project ? [path.join(getProjectOpencodeRoot(scope.project), 'skills')] : []),
   ];
 
   for (const legacyDir of legacyDirs) {
