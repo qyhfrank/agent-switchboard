@@ -174,7 +174,7 @@ export function ensureTrustEntry(
   }
 
   const section = `\n[projects."${absRoot}"]\ntrust_level = "trusted"\n`;
-  return { content: globalContent.trimEnd() + '\n' + section, changed: true };
+  return { content: `${globalContent.trimEnd()}\n${section}`, changed: true };
 }
 
 /**

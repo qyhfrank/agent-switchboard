@@ -12,7 +12,7 @@ import { withTempHomes } from './helpers/tmp.js';
  * Helper: create a minimal valid skill in the ASB library directory.
  * Returns the skill directory path.
  */
-function createSkill(asbHome: string, id: string, body = 'Skill body'): string {
+function createSkill(_asbHome: string, id: string, body = 'Skill body'): string {
   const skillsDir = ensureSkillsDirectory();
   const skillDir = path.join(skillsDir, id);
   fs.mkdirSync(skillDir, { recursive: true });
@@ -46,17 +46,17 @@ test('getProjectCodexSkillsDir resolves to <project>/.agents/skills/', () => {
 // resolveSkillTargetDir for codex platform
 // ---------------------------------------------------------------------------
 
-test('resolveSkillTargetDir: codex user scope targets ~/.agents/skills/<id>', () => {
+test('resolveSkillTargetDir: agents target resolves to ~/.agents/skills/<id>', () => {
   withTempHomes(({ agentsHome }) => {
-    const target = resolveSkillTargetDir('codex', 'my-skill');
+    const target = resolveSkillTargetDir('agents', 'my-skill');
     assert.equal(target, path.join(agentsHome, '.agents', 'skills', 'my-skill'));
   });
 });
 
-test('resolveSkillTargetDir: codex project scope targets <project>/.agents/skills/<id>', () => {
+test('resolveSkillTargetDir: agents target project scope resolves to <project>/.agents/skills/<id>', () => {
   withTempHomes(() => {
     const projectRoot = '/tmp/my-project';
-    const target = resolveSkillTargetDir('codex', 'my-skill', { project: projectRoot });
+    const target = resolveSkillTargetDir('agents', 'my-skill', { project: projectRoot });
     assert.equal(target, path.join(projectRoot, '.agents', 'skills', 'my-skill'));
   });
 });
@@ -65,7 +65,7 @@ test('resolveSkillTargetDir: codex project scope targets <project>/.agents/skill
 // Skills distribution writes to ~/.agents/skills/ for codex
 // ---------------------------------------------------------------------------
 
-test('distributeSkills: codex skills land in ~/.agents/skills/', () => {
+test('distributeSkills: agents mode writes skills to ~/.agents/skills/', () => {
   withTempHomes(({ agentsHome }) => {
     const skillId = 'test-skill';
     createSkill(agentsHome, skillId);
@@ -76,30 +76,30 @@ test('distributeSkills: codex skills land in ~/.agents/skills/', () => {
       active: [skillId],
     }));
 
-    const outcome = distributeSkills();
+    const outcome = distributeSkills(undefined, { useAgentsDir: true });
 
-    // Find codex results
-    const codexResults = outcome.results.filter(
-      (r) => r.platform === 'codex' && r.status === 'written'
+    // Find agents results
+    const agentsResults = outcome.results.filter(
+      (r) => r.platform === 'agents' && r.status === 'written'
     );
-    assert.ok(codexResults.length > 0, 'should have written codex skill');
+    assert.ok(agentsResults.length > 0, 'should have written agents skill');
 
     // Verify the target directory is under ~/.agents/skills/
     const expectedDir = path.join(agentsHome, '.agents', 'skills', skillId);
     assert.ok(
-      codexResults.some((r) => r.targetDir === expectedDir),
-      `codex skill should be at ${expectedDir}, got: ${codexResults.map((r) => r.targetDir).join(', ')}`
+      agentsResults.some((r) => r.targetDir === expectedDir),
+      `agents skill should be at ${expectedDir}, got: ${agentsResults.map((r) => r.targetDir).join(', ')}`
     );
 
     // Verify SKILL.md was actually written
     const skillMd = path.join(expectedDir, 'SKILL.md');
-    assert.ok(fs.existsSync(skillMd), 'SKILL.md should exist in codex target');
+    assert.ok(fs.existsSync(skillMd), 'SKILL.md should exist in agents target');
     const content = fs.readFileSync(skillMd, 'utf-8');
     assert.match(content, /name: test-skill/);
   });
 });
 
-test('distributeSkills: codex skills NOT written to ~/.codex/skills/', () => {
+test('distributeSkills: agents mode does NOT write to ~/.codex/skills/', () => {
   withTempHomes(({ agentsHome }) => {
     const skillId = 'check-path';
     createSkill(agentsHome, skillId);
@@ -109,7 +109,7 @@ test('distributeSkills: codex skills NOT written to ~/.codex/skills/', () => {
       active: [skillId],
     }));
 
-    distributeSkills();
+    distributeSkills(undefined, { useAgentsDir: true });
 
     // The old path should NOT have the skill
     const oldPath = path.join(agentsHome, '.codex', 'skills', skillId, 'SKILL.md');
@@ -121,7 +121,7 @@ test('distributeSkills: codex skills NOT written to ~/.codex/skills/', () => {
 // Skills distribution: second run is skipped (up-to-date)
 // ---------------------------------------------------------------------------
 
-test('distributeSkills: second run skips up-to-date codex skills', () => {
+test('distributeSkills: second run skips up-to-date agents skills', () => {
   withTempHomes(({ agentsHome }) => {
     const skillId = 'idempotent-skill';
     createSkill(agentsHome, skillId);
@@ -132,22 +132,22 @@ test('distributeSkills: second run skips up-to-date codex skills', () => {
     }));
 
     // First run
-    const outcome1 = distributeSkills();
-    const codexWritten = outcome1.results.filter(
-      (r) => r.platform === 'codex' && r.status === 'written'
+    const outcome1 = distributeSkills(undefined, { useAgentsDir: true });
+    const agentsWritten = outcome1.results.filter(
+      (r) => r.platform === 'agents' && r.status === 'written'
     );
-    assert.ok(codexWritten.length > 0);
+    assert.ok(agentsWritten.length > 0);
 
     // Second run
-    const outcome2 = distributeSkills();
-    const codexSkipped = outcome2.results.filter(
-      (r) => r.platform === 'codex' && r.status === 'skipped'
+    const outcome2 = distributeSkills(undefined, { useAgentsDir: true });
+    const agentsSkipped = outcome2.results.filter(
+      (r) => r.platform === 'agents' && r.status === 'skipped'
     );
-    assert.ok(codexSkipped.length > 0, 'second run should skip codex skills');
-    const codexWritten2 = outcome2.results.filter(
-      (r) => r.platform === 'codex' && r.status === 'written'
+    assert.ok(agentsSkipped.length > 0, 'second run should skip agents skills');
+    const agentsWritten2 = outcome2.results.filter(
+      (r) => r.platform === 'agents' && r.status === 'written'
     );
-    assert.equal(codexWritten2.length, 0, 'second run should not write codex skills');
+    assert.equal(agentsWritten2.length, 0, 'second run should not write agents skills');
   });
 });
 
@@ -155,7 +155,7 @@ test('distributeSkills: second run skips up-to-date codex skills', () => {
 // Skills distribution: project scope
 // ---------------------------------------------------------------------------
 
-test('distributeSkills: project scope writes codex skills to <project>/.agents/skills/', () => {
+test('distributeSkills: agents mode project scope writes to <project>/.agents/skills/', () => {
   withTempHomes(({ agentsHome }) => {
     const skillId = 'proj-skill';
     createSkill(agentsHome, skillId);
@@ -169,24 +169,24 @@ test('distributeSkills: project scope writes codex skills to <project>/.agents/s
       active: [skillId],
     }));
 
-    const outcome = distributeSkills({ project: projectRoot });
+    const outcome = distributeSkills({ project: projectRoot }, { useAgentsDir: true });
 
-    // Find codex results
-    const codexResults = outcome.results.filter(
-      (r) => r.platform === 'codex' && (r.status === 'written' || r.status === 'skipped')
+    // Find agents results
+    const agentsResults = outcome.results.filter(
+      (r) => r.platform === 'agents' && (r.status === 'written' || r.status === 'skipped')
     );
-    assert.ok(codexResults.length > 0, 'should have codex results');
+    assert.ok(agentsResults.length > 0, 'should have agents results');
 
     // Verify the target is under project/.agents/skills/
     const expectedDir = path.join(projectRoot, '.agents', 'skills', skillId);
     assert.ok(
-      codexResults.some((r) => r.targetDir === expectedDir),
-      `codex skill should be at ${expectedDir}`
+      agentsResults.some((r) => r.targetDir === expectedDir),
+      `agents skill should be at ${expectedDir}`
     );
 
     // Verify file exists
     const skillMd = path.join(expectedDir, 'SKILL.md');
-    assert.ok(fs.existsSync(skillMd), 'SKILL.md should exist in project codex target');
+    assert.ok(fs.existsSync(skillMd), 'SKILL.md should exist in project agents target');
   });
 });
 
@@ -220,7 +220,7 @@ test('distributeSkills: all platforms receive skills', () => {
 // Skills distribution: deactivated skill is cleaned up (orphan removal)
 // ---------------------------------------------------------------------------
 
-test('distributeSkills: deactivated skill directory is removed', () => {
+test('distributeSkills: agents mode removes deactivated skill directory', () => {
   withTempHomes(({ agentsHome }) => {
     const skillId = 'ephemeral';
     createSkill(agentsHome, skillId);
@@ -230,21 +230,23 @@ test('distributeSkills: deactivated skill directory is removed', () => {
       ...s,
       active: [skillId],
     }));
-    distributeSkills();
+    distributeSkills(undefined, { useAgentsDir: true });
 
-    const codexTarget = path.join(agentsHome, '.agents', 'skills', skillId);
-    assert.ok(fs.existsSync(codexTarget), 'skill should exist after first distribution');
+    const agentsTarget = path.join(agentsHome, '.agents', 'skills', skillId);
+    assert.ok(fs.existsSync(agentsTarget), 'skill should exist after first distribution');
 
     // Deactivate
     updateLibraryStateSection('skills', (s) => ({
       ...s,
       active: [],
     }));
-    const outcome = distributeSkills();
+    const outcome = distributeSkills(undefined, { useAgentsDir: true });
 
-    // Should have a 'deleted' result for codex
-    const deleted = outcome.results.filter((r) => r.platform === 'codex' && r.status === 'deleted');
-    assert.ok(deleted.length > 0, 'should have deleted orphan codex skill');
-    assert.ok(!fs.existsSync(codexTarget), 'orphan skill directory should be removed');
+    // Should have a 'deleted' result for agents
+    const deleted = outcome.results.filter(
+      (r) => r.platform === 'agents' && r.status === 'deleted'
+    );
+    assert.ok(deleted.length > 0, 'should have deleted orphan agents skill');
+    assert.ok(!fs.existsSync(agentsTarget), 'orphan skill directory should be removed');
   });
 });
