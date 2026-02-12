@@ -152,7 +152,9 @@ program
       const ruleDistribution = distributeRules(undefined, { force: true }, scope);
       const commandDistribution = distributeCommands(scope);
       const subagentDistribution = distributeSubagents(scope);
-      const skillDistribution = distributeSkills(scope);
+      const skillDistribution = distributeSkills(scope, {
+        useAgentsDir: config.distribution.use_agents_dir,
+      });
 
       const ruleErrors = ruleDistribution.results.filter((result) => result.status === 'error');
       const commandErrors = commandDistribution.results.filter(
@@ -194,7 +196,8 @@ program
         title: 'Skill distribution',
         results: skillDistribution.results,
         emptyMessage: 'no active skills',
-        getTargetLabel: (result) => result.platform,
+        getTargetLabel: (result) =>
+          result.platform === 'agents' ? 'codex+gemini+opencode' : result.platform,
         getPath: (result) => result.targetDir,
       });
       console.log();
@@ -929,13 +932,16 @@ skillRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('skills', selection.active);
 
-    const out = distributeSkills(scope);
+    const out = distributeSkills(scope, {
+      useAgentsDir: config.distribution.use_agents_dir,
+    });
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
         title: 'Skill distribution',
         results: out.results,
-        getTargetLabel: (result) => result.platform,
+        getTargetLabel: (result) =>
+          result.platform === 'agents' ? 'codex+gemini+opencode' : result.platform,
         getPath: (result) => result.targetDir,
       });
     }
@@ -1000,9 +1006,7 @@ skillRoot
       console.log();
       printAgentSyncStatus({ agentSync: inventory.state.agentSync });
 
-      // Guidance: unsupported platforms for skills
-      console.log();
-      console.log(chalk.gray('Unsupported platforms (manual steps required): Gemini, OpenCode'));
+      // Guidance: all skill-capable platforms are supported via claude-code + agents targets
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
