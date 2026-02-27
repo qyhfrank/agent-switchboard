@@ -42,11 +42,11 @@ test('e2e: library -> state -> distribution -> inventory', () => {
     assert.ok(sOutcome.results.some((r) => r.status === 'written' || r.status === 'skipped'));
 
     // Files exist for common platforms
-    for (const p of ['claude-code', 'codex', 'gemini', 'opencode'] as const) {
+    for (const p of ['claude-code', 'codex', 'cursor', 'gemini', 'opencode'] as const) {
       const out = resolveCommandFilePath(p, cmdId);
       assert.equal(fs.existsSync(out), true, `command output missing for ${p}`);
     }
-    for (const p of ['claude-code', 'opencode'] as const) {
+    for (const p of ['claude-code', 'opencode', 'cursor'] as const) {
       const out = resolveSubagentFilePath(p, subId);
       assert.equal(fs.existsSync(out), true, `subagent output missing for ${p}`);
     }
@@ -67,11 +67,11 @@ test('e2e: library -> state -> distribution -> inventory', () => {
     const cmdState = loadLibraryStateSection('commands');
     const subState = loadLibraryStateSection('subagents');
 
-    for (const p of ['claude-code', 'codex', 'gemini', 'opencode'] as const) {
+    for (const p of ['claude-code', 'codex', 'cursor', 'gemini', 'opencode'] as const) {
       const sync = cmdState.agentSync[p];
       assert.ok(sync && typeof sync.hash === 'string');
     }
-    for (const p of ['claude-code', 'opencode'] as const) {
+    for (const p of ['claude-code', 'opencode', 'cursor'] as const) {
       const sync = subState.agentSync[p];
       assert.ok(sync && typeof sync.hash === 'string');
     }

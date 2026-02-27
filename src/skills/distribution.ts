@@ -4,10 +4,12 @@ import {
   getClaudeDir,
   getCodexDir,
   getCodexSkillsDir,
+  getCursorDir,
   getGeminiDir,
   getOpencodeRoot,
   getProjectClaudeDir,
   getProjectCodexSkillsDir,
+  getProjectCursorDir,
   getProjectGeminiDir,
   getProjectOpencodeRoot,
 } from '../config/paths.js';
@@ -21,9 +23,15 @@ import {
 import { loadLibraryStateSectionForAgent } from '../library/state.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
-export type SkillPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
+export type SkillPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode' | 'cursor';
 
-export const SKILL_PLATFORMS: SkillPlatform[] = ['claude-code', 'codex', 'gemini', 'opencode'];
+export const SKILL_PLATFORMS: SkillPlatform[] = [
+  'claude-code',
+  'codex',
+  'gemini',
+  'opencode',
+  'cursor',
+];
 
 export type SkillTarget = 'claude-code' | 'agents';
 
@@ -32,13 +40,27 @@ export const SKILL_TARGETS: SkillTarget[] = ['claude-code', 'agents'];
 const AGENTS_TARGET_PLATFORMS = ['codex', 'gemini', 'opencode'] as const;
 
 /**
+ * Check whether cursor skills should be deduped because claude-code already
+ * has non-empty active skills for the same scope.  Cursor natively scans
+ * `.claude/skills/`, so distributing to `.cursor/skills/` as well would
+ * create duplicates.  Returning `true` means the caller should return an
+ * empty selection for cursor (but keep cursor in the platforms array so
+ * cleanup of orphan `.cursor/skills/` directories still executes).
+ */
+function shouldDedupCursorSkills(scope?: ConfigScope): boolean {
+  const claudeState = loadLibraryStateSectionForAgent('skills', 'claude-code', scope);
+  return claudeState.active.length > 0;
+}
+
+/**
  * Resolve parent directory containing all skills for a target/platform.
  *
- * Handles all 6 possible values across both distribution modes:
+ * Handles all 7 possible values across both distribution modes:
  * - `'claude-code'` -> `~/.claude/skills/`
  * - `'codex'`       -> `~/.codex/skills/`
  * - `'gemini'`      -> `~/.gemini/skills/`
  * - `'opencode'`    -> `~/.config/opencode/skill/`
+ * - `'cursor'`      -> `~/.cursor/skills/`
  * - `'agents'`      -> `~/.agents/skills/`
  */
 function resolveSkillsParentDir(target: string, scope?: ConfigScope): string {
@@ -63,6 +85,11 @@ function resolveSkillsParentDir(target: string, scope?: ConfigScope): string {
         return path.join(getProjectOpencodeRoot(scope.project), 'skill');
       }
       return path.join(getOpencodeRoot(), 'skill');
+    case 'cursor':
+      if (scope?.project) {
+        return path.join(getProjectCursorDir(scope.project), 'skills');
+      }
+      return path.join(getCursorDir(), 'skills');
     case 'agents':
       if (scope?.project) {
         return getProjectCodexSkillsDir(scope.project);
@@ -129,6 +156,12 @@ function distributeAgentsMode(
   };
 
   const filterSelected = (target: string, allEntries: SkillEntry[]): SkillEntry[] => {
+    if (target === 'cursor') {
+      if (shouldDedupCursorSkills(scope)) return [];
+      const state = loadLibraryStateSectionForAgent('skills', target, scope);
+      const activeIds = new Set(state.active);
+      return allEntries.filter((e) => activeIds.has(e.id));
+    }
     if (target === 'agents') {
       const unionIds = new Set<string>();
       for (const agentId of AGENTS_TARGET_PLATFORMS) {
@@ -147,7 +180,7 @@ function distributeAgentsMode(
   const outcome: DistributeBundleOutcome<string> = distributeBundle<SkillEntry, string>({
     section: 'skills',
     selected: entries,
-    platforms: SKILL_TARGETS as string[],
+    platforms: [...SKILL_TARGETS, 'cursor'] as string[],
     resolveTargetDir: (target, entry) => resolveSkillTargetDir(target, entry.id, scope),
     listFiles: listSkillFiles,
     getId: (entry) => entry.id,
@@ -187,7 +220,7 @@ function distributeAgentsMode(
 }
 
 /**
- * 4-target mode: claude-code, codex, gemini, opencode (legacy compatible)
+ * 5-target mode: claude-code, codex, gemini, opencode, cursor (legacy compatible)
  */
 function distributeLegacyMode(
   entries: SkillEntry[],
@@ -198,6 +231,9 @@ function distributeLegacyMode(
   };
 
   const filterSelected = (target: string, allEntries: SkillEntry[]): SkillEntry[] => {
+    if (target === 'cursor') {
+      if (shouldDedupCursorSkills(scope)) return [];
+    }
     const state = loadLibraryStateSectionForAgent('skills', target, scope);
     const activeIds = new Set(state.active);
     return allEntries.filter((e) => activeIds.has(e.id));

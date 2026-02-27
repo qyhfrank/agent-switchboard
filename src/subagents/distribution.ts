@@ -1,8 +1,10 @@
 import path from 'node:path';
 import {
   getClaudeDir,
+  getCursorDir,
   getOpencodePath,
   getProjectClaudeDir,
+  getProjectCursorDir,
   getProjectOpencodePath,
 } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
@@ -17,7 +19,7 @@ import { loadLibraryStateSectionForAgent } from '../library/state.js';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
-export type SubagentPlatform = 'claude-code' | 'opencode';
+export type SubagentPlatform = 'claude-code' | 'opencode' | 'cursor';
 
 /**
  * Map platform to agent ID for per-agent configuration lookup
@@ -59,6 +61,12 @@ function resolveSubagentTargetDir(platform: SubagentPlatform, scope?: ConfigScop
       }
       return getOpencodePath('agent');
     }
+    case 'cursor': {
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(getProjectCursorDir(projectRoot), 'agents');
+      }
+      return path.join(getCursorDir(), 'agents');
+    }
   }
 }
 
@@ -93,6 +101,32 @@ function buildFrontmatterForOpencode(entry: SubagentEntry): Record<string, unkno
   return base;
 }
 
+const CURSOR_SUBAGENT_FIELDS = new Set([
+  'name',
+  'description',
+  'model',
+  'readonly',
+  'is_background',
+]);
+
+function buildFrontmatterForCursor(entry: SubagentEntry): Record<string, unknown> {
+  const extras = (entry.metadata as LibraryFrontmatter).extras as
+    | Record<string, unknown>
+    | undefined;
+  const cursor = (extras?.cursor as Record<string, unknown>) ?? undefined;
+  const base: Record<string, unknown> = {};
+  if (entry.metadata.description) base.description = entry.metadata.description;
+  base.name = entry.id;
+  if (cursor && typeof cursor === 'object') {
+    for (const [k, v] of Object.entries(cursor)) {
+      if (CURSOR_SUBAGENT_FIELDS.has(k)) base[k] = v;
+    }
+  }
+  if (!base.name) base.name = entry.id;
+  if (!base.model) base.model = 'inherit';
+  return base;
+}
+
 function renderForPlatform(platform: SubagentPlatform, entry: SubagentEntry): string {
   switch (platform) {
     case 'claude-code': {
@@ -103,6 +137,10 @@ function renderForPlatform(platform: SubagentPlatform, entry: SubagentEntry): st
       const fm = buildFrontmatterForOpencode(entry);
       return wrapFrontmatter(fm, entry.content);
     }
+    case 'cursor': {
+      const fm = buildFrontmatterForCursor(entry);
+      return wrapFrontmatter(fm, entry.content);
+    }
   }
 }
 
@@ -110,7 +148,7 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
   const entries = loadSubagentLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const platforms: SubagentPlatform[] = ['claude-code', 'opencode'];
+  const platforms: SubagentPlatform[] = ['claude-code', 'opencode', 'cursor'];
 
   // Cleanup config to remove orphan subagent files
   const cleanup: CleanupConfig<SubagentPlatform> = {

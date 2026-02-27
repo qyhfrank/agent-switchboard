@@ -4,7 +4,7 @@ import { wrapFrontmatter } from '../util/frontmatter.js';
 import { extractMergedFrontmatter, slugify } from '../util/markdown.js';
 // no parser needed here; we only strip YAML when present
 
-export type SubagentPlatform = 'claude-code' | 'opencode';
+export type SubagentPlatform = 'claude-code' | 'opencode' | 'cursor';
 
 export interface ImportedSubagent {
   slug: string;
@@ -23,7 +23,8 @@ export function importSubagentFromFile(
 
   switch (platform) {
     case 'claude-code':
-    case 'opencode': {
+    case 'opencode':
+    case 'cursor': {
       // Minimal conversion: description + extras.<platform> = source frontmatter without description
       const extracted = extractMergedFrontmatter(raw, { trimBodyStart: true });
       const metaRecord = extracted.meta;
