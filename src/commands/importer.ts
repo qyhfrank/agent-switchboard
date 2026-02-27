@@ -3,7 +3,7 @@ import path from 'node:path';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { extractMergedFrontmatter, slugify } from '../util/markdown.js';
 
-export type CommandPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
+export type CommandPlatform = 'claude-code' | 'codex' | 'cursor' | 'gemini' | 'opencode';
 
 function parseTomlString(content: string, key: string): string | null {
   // Naive TOML key = "value" or key = """multiline"""
@@ -50,6 +50,10 @@ export function importCommandFromFile(
     case 'codex': {
       // Pure Markdown body; keep content and add minimal frontmatter
       const fm = { description: '', extras: { codex: {} } };
+      return { slug: baseSlug, content: wrapFrontmatter(fm, raw) };
+    }
+    case 'cursor': {
+      const fm = { description: '', extras: { cursor: {} } };
       return { slug: baseSlug, content: wrapFrontmatter(fm, raw) };
     }
     case 'gemini': {

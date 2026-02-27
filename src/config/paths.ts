@@ -123,6 +123,10 @@ export function getGeminiDir(): string {
   return path.join(getAgentsHome(), '.gemini');
 }
 
+export function getCursorDir(): string {
+  return path.join(getAgentsHome(), '.cursor');
+}
+
 export function getOpencodeRoot(): string {
   const home = getAgentsHome();
   return process.platform === 'win32'
@@ -159,6 +163,10 @@ export function getProjectClaudeDir(projectRoot: string): string {
 
 export function getProjectGeminiDir(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), '.gemini');
+}
+
+export function getProjectCursorDir(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), '.cursor');
 }
 
 export function getProjectOpencodeRoot(projectRoot: string): string {

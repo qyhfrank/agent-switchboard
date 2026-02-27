@@ -42,7 +42,7 @@ test('CLI: command load (claude-code) imports files and list shows guidance (min
 
     const { stdout: out2 } = runCli(['command', 'list']);
     const s = stripAnsi(out2);
-    assert.match(s, /Unsupported platforms \(manual steps required\): Claude Desktop, Cursor/);
+    assert.match(s, /Unsupported platforms \(manual steps required\): Claude Desktop/);
   });
 });
 

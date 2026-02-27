@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { composeActiveRules } from '../src/rules/composer.js';
 import {
   distributeRules,
+  listIndirectAgents,
   listUnsupportedAgents,
   resolveRuleFilePath,
 } from '../src/rules/distribution.js';
@@ -148,5 +149,11 @@ test('listUnsupportedAgents returns skipped agent identifiers', () => {
   const unsupported = listUnsupportedAgents();
   assert.equal(Array.isArray(unsupported), true);
   assert.ok(unsupported.includes('claude-desktop'));
-  assert.ok(unsupported.includes('cursor'));
+  assert.ok(!unsupported.includes('cursor'));
+});
+
+test('listIndirectAgents returns cursor', () => {
+  const indirect = listIndirectAgents();
+  assert.equal(Array.isArray(indirect), true);
+  assert.ok(indirect.includes('cursor'));
 });

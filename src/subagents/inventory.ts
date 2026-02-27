@@ -43,11 +43,19 @@ function getSubagentTitle(entry: SubagentEntry): string | null {
 }
 
 function getSubagentModel(entry: SubagentEntry): string | null {
-  return pickFirstPlatformString(entry.metadata.extras, ['claude-code', 'opencode'], 'model');
+  return pickFirstPlatformString(
+    entry.metadata.extras,
+    ['claude-code', 'opencode', 'cursor'],
+    'model'
+  );
 }
 
 function getSubagentTools(entry: SubagentEntry): string[] {
-  return pickFirstPlatformArray(entry.metadata.extras, ['claude-code', 'opencode'], 'tools');
+  return pickFirstPlatformArray(
+    entry.metadata.extras,
+    ['claude-code', 'opencode', 'cursor'],
+    'tools'
+  );
 }
 
 function buildSubagentRow(

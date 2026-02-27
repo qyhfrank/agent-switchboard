@@ -8,7 +8,7 @@ import {
   getOpencodePath,
 } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
-import { RULE_SUPPORTED_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
+import { RULE_INDIRECT_AGENTS, RULE_SUPPORTED_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
 import type { ComposedRules } from './composer.js';
 import { composeActiveRulesForAgent } from './composer.js';
 import { updateRuleState } from './state.js';
@@ -157,6 +157,10 @@ export function distributeRules(
 
 export function listUnsupportedAgents(): string[] {
   return [...RULE_UNSUPPORTED_AGENTS];
+}
+
+export function listIndirectAgents(): string[] {
+  return [...RULE_INDIRECT_AGENTS];
 }
 
 export function resolveRuleFilePath(

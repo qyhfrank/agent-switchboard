@@ -191,7 +191,7 @@ test('distributeSkills: agents mode project scope writes to <project>/.agents/sk
 });
 
 // ---------------------------------------------------------------------------
-// Skills distribution: all 4 platforms receive skills
+// Skills distribution: all 5 platforms receive skills (cursor deduped when claude-code is active)
 // ---------------------------------------------------------------------------
 
 test('distributeSkills: all platforms receive skills', () => {

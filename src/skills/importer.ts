@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getSkillsDir } from '../config/paths.js';
 import { parseSkillMarkdown } from './parser.js';
 
-export type SkillImportPlatform = 'claude-code' | 'codex';
+export type SkillImportPlatform = 'claude-code' | 'codex' | 'cursor';
 
 const SKILL_FILE = 'SKILL.md';
 

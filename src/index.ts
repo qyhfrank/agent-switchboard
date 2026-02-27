@@ -27,6 +27,7 @@ import {
   getClaudeDir,
   getCodexDir,
   getCommandsDir,
+  getCursorDir,
   getGeminiDir,
   getOpencodePath,
   getSkillsDir,
@@ -47,7 +48,11 @@ import {
 } from './library/subscriptions.js';
 import { RULE_SUPPORTED_AGENTS } from './rules/agents.js';
 import { composeActiveRules } from './rules/composer.js';
-import { distributeRules, listUnsupportedAgents } from './rules/distribution.js';
+import {
+  distributeRules,
+  listIndirectAgents,
+  listUnsupportedAgents,
+} from './rules/distribution.js';
 import { buildRuleInventory } from './rules/inventory.js';
 import { loadRuleLibrary } from './rules/library.js';
 import { loadRuleState, updateRuleState } from './rules/state.js';
@@ -269,6 +274,8 @@ function defaultCommandSourceDir(platform: CmdPlatform): string {
       return path.join(getClaudeDir(), 'commands');
     case 'codex':
       return path.join(getCodexDir(), 'prompts');
+    case 'cursor':
+      return path.join(getCursorDir(), 'commands');
     case 'gemini':
       return path.join(getGeminiDir(), 'commands');
     case 'opencode':
@@ -280,6 +287,8 @@ function defaultSubagentSourceDir(platform: SubPlatform): string {
   switch (platform) {
     case 'claude-code':
       return path.join(getClaudeDir(), 'agents');
+    case 'cursor':
+      return path.join(getCursorDir(), 'agents');
     case 'opencode':
       return getOpencodePath('agent');
   }
@@ -298,6 +307,8 @@ function defaultSkillSourceDir(platform: SkillImportPlatform): string {
       if (fs.existsSync(legacy)) return legacy;
       return primary;
     }
+    case 'cursor':
+      return path.join(getCursorDir(), 'skills');
   }
 }
 
@@ -472,6 +483,14 @@ ruleCommand
           chalk.gray(`Unsupported agents (manual update required): ${unsupportedAgents.join(', ')}`)
         );
       }
+      const indirectAgents = listIndirectAgents();
+      if (indirectAgents.length > 0) {
+        console.log(
+          chalk.gray(
+            `Indirect rules support (reads CLAUDE.md + AGENTS.md): ${indirectAgents.join(', ')}`
+          )
+        );
+      }
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -563,6 +582,14 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
         chalk.gray(`Unsupported agents (manual update required): ${unsupportedAgents.join(', ')}`)
       );
     }
+    const indirectAgents = listIndirectAgents();
+    if (indirectAgents.length > 0) {
+      console.log(
+        chalk.gray(
+          `Indirect rules support (reads CLAUDE.md + AGENTS.md): ${indirectAgents.join(', ')}`
+        )
+      );
+    }
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -599,9 +626,7 @@ commandRoot.action(async (options: ScopeOptionInput) => {
     }
     // Guidance: unsupported platforms for commands
     console.log();
-    console.log(
-      chalk.gray('Unsupported platforms (manual steps required): Claude Desktop, Cursor')
-    );
+    console.log(chalk.gray('Unsupported platforms (manual steps required): Claude Desktop'));
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -614,7 +639,7 @@ commandRoot.action(async (options: ScopeOptionInput) => {
 commandRoot
   .command('load')
   .description('Import existing platform files into the command library')
-  .argument('<platform>', 'claude-code | codex | gemini | opencode')
+  .argument('<platform>', 'claude-code | codex | cursor | gemini | opencode')
   .argument('[path]', 'Source file or directory (defaults by platform)')
   .option('-r, --recursive', 'When [path] is a directory, import files recursively')
   .option('-f, --force', 'Overwrite existing library files without confirmation')
@@ -733,9 +758,7 @@ commandRoot
 
       // Guidance: unsupported platforms for commands
       console.log();
-      console.log(
-        chalk.gray('Unsupported platforms (manual steps required): Claude Desktop, Cursor')
-      );
+      console.log(chalk.gray('Unsupported platforms (manual steps required): Claude Desktop'));
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -853,7 +876,7 @@ subagentRoot
 subagentRoot
   .command('load')
   .description('Import existing platform files into the subagent library')
-  .argument('<platform>', 'claude-code | opencode')
+  .argument('<platform>', 'claude-code | opencode | cursor')
   .argument('[path]', 'Source file or directory (defaults by platform)')
   .option('-r, --recursive', 'When [path] is a directory, import files recursively')
   .option('-f, --force', 'Overwrite existing library files without confirmation')
@@ -1018,7 +1041,7 @@ skillRoot
 skillRoot
   .command('load')
   .description('Import existing platform skill directories into the skill library')
-  .argument('<platform>', 'claude-code | codex')
+  .argument('<platform>', 'claude-code | codex | cursor')
   .argument('[path]', 'Source directory (defaults by platform)')
   .option('-f, --force', 'Overwrite existing library directories without confirmation')
   .action(

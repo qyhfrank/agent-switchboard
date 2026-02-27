@@ -3,9 +3,11 @@ import { stringify as toToml } from '@iarna/toml';
 import {
   getClaudeDir,
   getCodexDir,
+  getCursorDir,
   getGeminiDir,
   getOpencodePath,
   getProjectClaudeDir,
+  getProjectCursorDir,
   getProjectGeminiDir,
   getProjectOpencodePath,
 } from '../config/paths.js';
@@ -21,7 +23,7 @@ import { loadLibraryStateSectionForAgent } from '../library/state.js';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
-export type CommandPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode';
+export type CommandPlatform = 'claude-code' | 'codex' | 'cursor' | 'gemini' | 'opencode';
 
 /**
  * Map platform to agent ID for per-agent configuration lookup
@@ -59,6 +61,12 @@ function resolveCommandTargetDir(platform: CommandPlatform, scope?: ConfigScope)
     }
     case 'codex': {
       return path.join(getCodexDir(), 'prompts');
+    }
+    case 'cursor': {
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(getProjectCursorDir(projectRoot), 'commands');
+      }
+      return path.join(getCursorDir(), 'commands');
     }
     case 'gemini': {
       if (projectRoot && projectRoot.length > 0) {
@@ -138,6 +146,9 @@ function renderForPlatform(platform: CommandPlatform, entry: CommandEntry): stri
       const fm = buildFrontmatterForOpencode(entry);
       return wrapFrontmatter(fm, entry.content);
     }
+    case 'cursor': {
+      return `${entry.content.trimEnd()}\n`;
+    }
   }
 }
 
@@ -145,7 +156,7 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
   const entries = loadCommandLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const platforms: CommandPlatform[] = ['claude-code', 'codex', 'gemini', 'opencode'];
+  const platforms: CommandPlatform[] = ['claude-code', 'codex', 'cursor', 'gemini', 'opencode'];
 
   // Cleanup config to remove orphan command files
   const cleanup: CleanupConfig<CommandPlatform> = {
