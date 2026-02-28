@@ -129,6 +129,10 @@ export function getCodexDir(): string {
   return path.join(getAgentsHome(), '.codex');
 }
 
+export function getCodexAgentsDir(): string {
+  return path.join(getCodexDir(), 'agents');
+}
+
 export function getGeminiDir(): string {
   return path.join(getAgentsHome(), '.gemini');
 }

@@ -45,7 +45,7 @@ function getSubagentTitle(entry: SubagentEntry): string | null {
 function getSubagentModel(entry: SubagentEntry): string | null {
   return pickFirstPlatformString(
     entry.metadata.extras,
-    ['claude-code', 'opencode', 'cursor'],
+    ['claude-code', 'opencode', 'cursor', 'codex'],
     'model'
   );
 }
@@ -53,7 +53,7 @@ function getSubagentModel(entry: SubagentEntry): string | null {
 function getSubagentTools(entry: SubagentEntry): string[] {
   return pickFirstPlatformArray(
     entry.metadata.extras,
-    ['claude-code', 'opencode', 'cursor'],
+    ['claude-code', 'opencode', 'cursor', 'codex'],
     'tools'
   );
 }
