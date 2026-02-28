@@ -8,6 +8,10 @@ import { importCommandFromFile } from '../src/commands/importer.js';
 import { ensureCommandsDirectory } from '../src/commands/library.js';
 import { parseLibraryMarkdown } from '../src/library/parser.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
+import { RULE_PER_FILE_AGENTS } from '../src/rules/agents.js';
+import { distributeRules } from '../src/rules/distribution.js';
+import { ensureRulesDirectory } from '../src/rules/library.js';
+import { DEFAULT_RULE_STATE, saveRuleState } from '../src/rules/state.js';
 import {
   distributeSkills,
   resolveSkillTargetDir,
@@ -299,5 +303,154 @@ test('importSubagentFromFile: cursor platform preserves extras under cursor key'
     assert.ok(cursor && typeof cursor === 'object', 'should have extras.cursor');
     assert.equal(cursor.model, 'gpt-4');
     assert.equal(cursor.readonly, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rules: cursor per-file .mdc distribution
+// ---------------------------------------------------------------------------
+
+test('RULE_PER_FILE_AGENTS includes cursor', () => {
+  assert.ok(RULE_PER_FILE_AGENTS.includes('cursor'), 'cursor should be in RULE_PER_FILE_AGENTS');
+});
+
+test('distributeRules: writes individual .mdc files for cursor', () => {
+  withTempHomes(({ agentsHome }) => {
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(
+      path.join(rulesDir, 'hygiene.md'),
+      '---\ntitle: Prompt Hygiene\ndescription: Keep prompts clean\n---\nKeep commit messages scoped.\n'
+    );
+    fs.writeFileSync(
+      path.join(rulesDir, 'style.md'),
+      '---\ntitle: Code Style\n---\nUse consistent formatting.\n'
+    );
+
+    saveRuleState({ ...DEFAULT_RULE_STATE, active: ['hygiene', 'style'], agentSync: {} });
+    const outcome = distributeRules();
+
+    const cursorResults = outcome.results.filter((r) => r.agent === 'cursor');
+    assert.ok(cursorResults.length >= 2, 'should have cursor distribution results');
+
+    const cursorRulesDir = path.join(agentsHome, '.cursor', 'rules');
+    const hygieneFile = path.join(cursorRulesDir, 'hygiene.mdc');
+    const styleFile = path.join(cursorRulesDir, 'style.mdc');
+
+    assert.ok(fs.existsSync(hygieneFile), 'hygiene.mdc should exist');
+    assert.ok(fs.existsSync(styleFile), 'style.mdc should exist');
+
+    const hygieneContent = fs.readFileSync(hygieneFile, 'utf-8');
+    assert.match(hygieneContent, /^---/);
+    assert.match(hygieneContent, /description: Keep prompts clean/);
+    assert.match(hygieneContent, /alwaysApply: true/);
+    assert.match(hygieneContent, /Keep commit messages scoped/);
+
+    const styleContent = fs.readFileSync(styleFile, 'utf-8');
+    assert.match(styleContent, /description: Code Style/);
+    assert.match(styleContent, /Use consistent formatting/);
+  });
+});
+
+test('distributeRules: cursor .mdc uses extras.cursor overrides', () => {
+  withTempHomes(({ agentsHome }) => {
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(
+      path.join(rulesDir, 'py-only.md'),
+      [
+        '---',
+        'title: Python Only',
+        'description: Python-specific rules',
+        'extras:',
+        '  cursor:',
+        '    alwaysApply: false',
+        '    globs: "*.py"',
+        '    description: Custom cursor description',
+        '---',
+        'Use type hints everywhere.',
+        '',
+      ].join('\n')
+    );
+
+    saveRuleState({ ...DEFAULT_RULE_STATE, active: ['py-only'], agentSync: {} });
+    distributeRules();
+
+    const mdcPath = path.join(agentsHome, '.cursor', 'rules', 'py-only.mdc');
+    assert.ok(fs.existsSync(mdcPath), 'py-only.mdc should exist');
+
+    const content = fs.readFileSync(mdcPath, 'utf-8');
+    assert.match(content, /alwaysApply: false/);
+    assert.match(content, /globs: \*\.py/);
+    assert.match(content, /description: Custom cursor description/);
+    assert.match(content, /Use type hints everywhere/);
+  });
+});
+
+test('distributeRules: cursor cleans up orphan .mdc files from library', () => {
+  withTempHomes(({ agentsHome }) => {
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'keep.md'), 'Keep this.\n');
+    fs.writeFileSync(path.join(rulesDir, 'remove.md'), 'Remove this.\n');
+
+    // First distribute with both active
+    saveRuleState({ ...DEFAULT_RULE_STATE, active: ['keep', 'remove'], agentSync: {} });
+    distributeRules();
+
+    const cursorRulesDir = path.join(agentsHome, '.cursor', 'rules');
+    assert.ok(fs.existsSync(path.join(cursorRulesDir, 'keep.mdc')));
+    assert.ok(fs.existsSync(path.join(cursorRulesDir, 'remove.mdc')));
+
+    // Now deactivate 'remove'
+    saveRuleState({ ...DEFAULT_RULE_STATE, active: ['keep'], agentSync: {} });
+    distributeRules();
+
+    assert.ok(fs.existsSync(path.join(cursorRulesDir, 'keep.mdc')), 'keep.mdc should remain');
+    assert.ok(
+      !fs.existsSync(path.join(cursorRulesDir, 'remove.mdc')),
+      'remove.mdc should be cleaned up'
+    );
+  });
+});
+
+test('distributeRules: cursor does not delete non-library .mdc files', () => {
+  withTempHomes(({ agentsHome }) => {
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'managed.md'), 'Managed rule.\n');
+
+    const cursorRulesDir = path.join(agentsHome, '.cursor', 'rules');
+    fs.mkdirSync(cursorRulesDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(cursorRulesDir, 'user-own.mdc'),
+      '---\ndescription: My rule\nalwaysApply: true\n---\nUser rule.\n'
+    );
+
+    saveRuleState({ ...DEFAULT_RULE_STATE, active: ['managed'], agentSync: {} });
+    distributeRules();
+
+    assert.ok(fs.existsSync(path.join(cursorRulesDir, 'managed.mdc')), 'managed.mdc should exist');
+    assert.ok(
+      fs.existsSync(path.join(cursorRulesDir, 'user-own.mdc')),
+      'user-own.mdc should not be deleted'
+    );
+  });
+});
+
+test('distributeRules: cursor skips unchanged .mdc files', () => {
+  withTempHomes(() => {
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'stable.md'), 'Stable content.\n');
+
+    saveRuleState({ ...DEFAULT_RULE_STATE, active: ['stable'], agentSync: {} });
+
+    const first = distributeRules();
+    const cursorWritten = first.results.filter(
+      (r) => r.agent === 'cursor' && r.status === 'written'
+    );
+    assert.ok(cursorWritten.length > 0, 'first run should write');
+
+    const second = distributeRules();
+    const cursorSkipped = second.results.filter(
+      (r) => r.agent === 'cursor' && r.status === 'skipped'
+    );
+    assert.ok(cursorSkipped.length > 0, 'second run should skip unchanged');
   });
 });

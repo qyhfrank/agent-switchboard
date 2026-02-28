@@ -2,16 +2,20 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { RULE_SUPPORTED_AGENTS } from '../src/rules/agents.js';
 import { composeActiveRules } from '../src/rules/composer.js';
 import {
   distributeRules,
   listIndirectAgents,
+  listPerFileAgents,
   listUnsupportedAgents,
   resolveRuleFilePath,
 } from '../src/rules/distribution.js';
 import { ensureRulesDirectory } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, loadRuleState, saveRuleState } from '../src/rules/state.js';
 import { withTempAsbHome } from './helpers/tmp.js';
+
+const composedAgentIds = new Set<string>(RULE_SUPPORTED_AGENTS);
 
 test('distributeRules writes rule document and updates state', () => {
   withTempAsbHome(() => {
@@ -30,16 +34,17 @@ test('distributeRules writes rule document and updates state', () => {
 
     const composed1 = composeActiveRules();
     const outcome1 = distributeRules(composed1);
+    const composedResults1 = outcome1.results.filter((r) => composedAgentIds.has(r.agent));
 
-    assert.equal(outcome1.results.length > 0, true);
-    outcome1.results.forEach((result) => {
+    assert.equal(composedResults1.length > 0, true);
+    composedResults1.forEach((result) => {
       assert.equal(result.status, 'written');
       const content = fs.readFileSync(result.filePath, 'utf-8');
       assert.equal(content, composed1.content);
     });
 
     const stateAfterFirst = loadRuleState();
-    for (const result of outcome1.results) {
+    for (const result of composedResults1) {
       const sync = stateAfterFirst.agentSync[result.agent];
       assert.equal(sync?.hash, composed1.hash);
       assert.notEqual(sync?.updatedAt, undefined);
@@ -55,14 +60,15 @@ test('distributeRules writes rule document and updates state', () => {
 
     const composed2 = composeActiveRules();
     const outcome2 = distributeRules(composed2);
-    outcome2.results.forEach((result) => {
+    const composedResults2 = outcome2.results.filter((r) => composedAgentIds.has(r.agent));
+    composedResults2.forEach((result) => {
       assert.equal(result.status, 'written');
       const current = fs.readFileSync(result.filePath, 'utf-8');
       assert.equal(current, composed2.content);
     });
 
     const stateAfterSecond = loadRuleState();
-    outcome2.results.forEach((result) => {
+    composedResults2.forEach((result) => {
       const sync = stateAfterSecond.agentSync[result.agent];
       assert.equal(sync?.hash, composed2.hash);
     });
@@ -76,10 +82,12 @@ test('distributeRules writes rule document and updates state', () => {
     });
 
     const stateAfterThird = loadRuleState();
-    outcome3.results.forEach((result) => {
-      const sync = stateAfterThird.agentSync[result.agent];
-      assert.equal(sync?.hash, composed3.hash);
-    });
+    outcome3.results
+      .filter((r) => composedAgentIds.has(r.agent))
+      .forEach((result) => {
+        const sync = stateAfterThird.agentSync[result.agent];
+        assert.equal(sync?.hash, composed3.hash);
+      });
   });
 });
 
@@ -104,7 +112,8 @@ test('distributeRules updates state when files already match content', () => {
     }
 
     const outcome = distributeRules(composed);
-    outcome.results.forEach((result) => {
+    const composedResults = outcome.results.filter((r) => composedAgentIds.has(r.agent));
+    composedResults.forEach((result) => {
       assert.equal(result.status, 'skipped');
       assert.equal(result.reason, 'up-to-date');
     });
@@ -131,17 +140,21 @@ test('distributeRules with force rewrites matching content', () => {
     const composed = composeActiveRules();
 
     const firstOutcome = distributeRules(composed);
-    firstOutcome.results.forEach((result) => {
-      assert.equal(result.status, 'written');
-    });
+    firstOutcome.results
+      .filter((r) => composedAgentIds.has(r.agent))
+      .forEach((result) => {
+        assert.equal(result.status, 'written');
+      });
 
     const forcedOutcome = distributeRules(composed, { force: true });
-    forcedOutcome.results.forEach((result) => {
-      assert.equal(result.status, 'written');
-      assert.equal(result.reason, 'refreshed');
-      const current = fs.readFileSync(result.filePath, 'utf-8');
-      assert.equal(current, composed.content);
-    });
+    forcedOutcome.results
+      .filter((r) => composedAgentIds.has(r.agent))
+      .forEach((result) => {
+        assert.equal(result.status, 'written');
+        assert.equal(result.reason, 'refreshed');
+        const current = fs.readFileSync(result.filePath, 'utf-8');
+        assert.equal(current, composed.content);
+      });
   });
 });
 
@@ -152,8 +165,14 @@ test('listUnsupportedAgents returns skipped agent identifiers', () => {
   assert.ok(!unsupported.includes('cursor'));
 });
 
-test('listIndirectAgents returns cursor', () => {
+test('listIndirectAgents no longer includes cursor (now per-file)', () => {
   const indirect = listIndirectAgents();
   assert.equal(Array.isArray(indirect), true);
-  assert.ok(indirect.includes('cursor'));
+  assert.ok(!indirect.includes('cursor'));
+});
+
+test('listPerFileAgents returns cursor', () => {
+  const perFile = listPerFileAgents();
+  assert.equal(Array.isArray(perFile), true);
+  assert.ok(perFile.includes('cursor'));
 });

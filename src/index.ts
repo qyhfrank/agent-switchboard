@@ -51,6 +51,7 @@ import { composeActiveRules } from './rules/composer.js';
 import {
   distributeRules,
   listIndirectAgents,
+  listPerFileAgents,
   listUnsupportedAgents,
 } from './rules/distribution.js';
 import { buildRuleInventory } from './rules/inventory.js';
@@ -84,8 +85,20 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(__dirname, '../package.
 
 program
   .name('asb')
-  .description('Unified MCP server manager for AI coding agents')
-  .version(packageJson.version);
+  .description('Manage MCP servers, rules, commands, subagents, and skills across AI coding agents')
+  .version(packageJson.version)
+  .addHelpText(
+    'after',
+    `
+Examples:
+  $ asb mcp                          Enable/disable MCP servers interactively
+  $ asb rule                         Select and order rule snippets
+  $ asb sync                         Push all libraries to every active agent
+  $ asb sync --project .             Sync with project-level overrides
+
+Alias: agent-switchboard
+Config: ~/.agent-switchboard/config.toml`
+  );
 
 // Initialize library directories for commands/subagents (secure permissions)
 ensureLibraryDirectories();
@@ -409,7 +422,7 @@ program
 
 const ruleCommand = program
   .command('rule')
-  .description('Manage rule snippets and synchronization')
+  .description('Select and order rule snippets interactively, then sync to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml');
 
@@ -482,6 +495,10 @@ ruleCommand
         console.log(
           chalk.gray(`Unsupported agents (manual update required): ${unsupportedAgents.join(', ')}`)
         );
+      }
+      const perFileAgents = listPerFileAgents();
+      if (perFileAgents.length > 0) {
+        console.log(chalk.gray(`Per-file rules (.mdc): ${perFileAgents.join(', ')}`));
       }
       const indirectAgents = listIndirectAgents();
       if (indirectAgents.length > 0) {
@@ -582,6 +599,10 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
         chalk.gray(`Unsupported agents (manual update required): ${unsupportedAgents.join(', ')}`)
       );
     }
+    const perFileAgents = listPerFileAgents();
+    if (perFileAgents.length > 0) {
+      console.log(chalk.gray(`Per-file rules (.mdc): ${perFileAgents.join(', ')}`));
+    }
     const indirectAgents = listIndirectAgents();
     if (indirectAgents.length > 0) {
       console.log(
@@ -601,7 +622,7 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
 // Commands library: manage and distribute commands
 const commandRoot = program
   .command('command')
-  .description('Manage command library')
+  .description('Select slash commands interactively and distribute to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml');
 
@@ -770,7 +791,7 @@ commandRoot
 // Subagents library: scaffold, load, list, and interactive distribute
 const subagentRoot = program
   .command('subagent')
-  .description('Manage subagent (persona) library')
+  .description('Select subagent definitions interactively and distribute to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml');
 
@@ -804,6 +825,72 @@ subagentRoot.action(async (options: ScopeOptionInput) => {
     process.exit(1);
   }
 });
+
+subagentRoot
+  .command('load')
+  .description('Import existing platform files into the subagent library')
+  .argument('<platform>', 'claude-code | opencode | cursor')
+  .argument('[path]', 'Source file or directory (defaults by platform)')
+  .option('-r, --recursive', 'When [path] is a directory, import files recursively')
+  .option('-f, --force', 'Overwrite existing library files without confirmation')
+  .action(
+    async (
+      platform: SubPlatform,
+      srcPath: string | undefined,
+      opts: { recursive?: boolean; force?: boolean }
+    ) => {
+      try {
+        const exts = ['.md', '.markdown'];
+        const source =
+          srcPath && srcPath.trim().length > 0 ? srcPath : defaultSubagentSourceDir(platform);
+        if (!fs.existsSync(source)) {
+          console.error(chalk.red(`\n✗ Source not found: ${source}`));
+          process.exit(1);
+        }
+
+        const inputs: string[] = [];
+        if (isFile(source)) {
+          inputs.push(source);
+        } else if (isDir(source)) {
+          if (!opts.recursive) {
+            console.error(
+              chalk.red('\n✗ Source is a directory. Use -r/--recursive to import recursively.')
+            );
+            process.exit(1);
+          }
+          inputs.push(...listFilesRecursively(source, exts));
+        }
+
+        if (inputs.length === 0) {
+          console.log(chalk.yellow('\n⚠ No files to import.'));
+          return;
+        }
+
+        const outDir = getSubagentsDir();
+        let imported = 0;
+        for (const file of inputs) {
+          try {
+            const { slug, content } = importSubagentFromFile(platform, file);
+            const target = path.join(outDir, `${slug}.md`);
+            if (!(await confirmOverwrite(target, opts.force))) continue;
+            writeFileSecure(target, content);
+            imported++;
+            console.log(`${chalk.green('✓')} ${chalk.cyan(slug)} → ${chalk.dim(target)}`);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.log(`${chalk.red('✗')} ${chalk.dim(file)} ${chalk.red(msg)}`);
+          }
+        }
+
+        console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into subagent library.`);
+      } catch (error) {
+        if (error instanceof Error) {
+          console.error(chalk.red(`\n✗ Error: ${error.message}`));
+        }
+        process.exit(1);
+      }
+    }
+  );
 
 subagentRoot
   .command('list')
@@ -873,76 +960,10 @@ subagentRoot
     }
   });
 
-subagentRoot
-  .command('load')
-  .description('Import existing platform files into the subagent library')
-  .argument('<platform>', 'claude-code | opencode | cursor')
-  .argument('[path]', 'Source file or directory (defaults by platform)')
-  .option('-r, --recursive', 'When [path] is a directory, import files recursively')
-  .option('-f, --force', 'Overwrite existing library files without confirmation')
-  .action(
-    async (
-      platform: SubPlatform,
-      srcPath: string | undefined,
-      opts: { recursive?: boolean; force?: boolean }
-    ) => {
-      try {
-        const exts = ['.md', '.markdown'];
-        const source =
-          srcPath && srcPath.trim().length > 0 ? srcPath : defaultSubagentSourceDir(platform);
-        if (!fs.existsSync(source)) {
-          console.error(chalk.red(`\n✗ Source not found: ${source}`));
-          process.exit(1);
-        }
-
-        const inputs: string[] = [];
-        if (isFile(source)) {
-          inputs.push(source);
-        } else if (isDir(source)) {
-          if (!opts.recursive) {
-            console.error(
-              chalk.red('\n✗ Source is a directory. Use -r/--recursive to import recursively.')
-            );
-            process.exit(1);
-          }
-          inputs.push(...listFilesRecursively(source, exts));
-        }
-
-        if (inputs.length === 0) {
-          console.log(chalk.yellow('\n⚠ No files to import.'));
-          return;
-        }
-
-        const outDir = getSubagentsDir();
-        let imported = 0;
-        for (const file of inputs) {
-          try {
-            const { slug, content } = importSubagentFromFile(platform, file);
-            const target = path.join(outDir, `${slug}.md`);
-            if (!(await confirmOverwrite(target, opts.force))) continue;
-            writeFileSecure(target, content);
-            imported++;
-            console.log(`${chalk.green('✓')} ${chalk.cyan(slug)} → ${chalk.dim(target)}`);
-          } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            console.log(`${chalk.red('✗')} ${chalk.dim(file)} ${chalk.red(msg)}`);
-          }
-        }
-
-        console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into subagent library.`);
-      } catch (error) {
-        if (error instanceof Error) {
-          console.error(chalk.red(`\n✗ Error: ${error.message}`));
-        }
-        process.exit(1);
-      }
-    }
-  );
-
 // Skills library: manage and distribute skill bundles
 const skillRoot = program
   .command('skill')
-  .description('Manage skill library')
+  .description('Select skill bundles interactively and distribute to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml');
 

@@ -1,341 +1,280 @@
 # Agent Switchboard
 
-Manage MCP servers, rules, commands, subagents, and skills in one place and apply them to local agents (Codex, Claude Code/Desktop, Cursor, Gemini, and OpenCode).
+[![npm version](https://img.shields.io/npm/v/agent-switchboard)](https://www.npmjs.com/package/agent-switchboard)
+[![CI](https://github.com/qyhfrank/agent-switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/qyhfrank/agent-switchboard/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-You can run with either `agent-switchboard` or the shorter alias `asb`.
+Manage MCP servers, rules, commands, subagents, and skills from a single source of truth, then sync them to every AI coding agent you use.
 
-## Installation
+Alias: `asb`
 
-Global install:
+## Why
 
-```bash
-npm i -g agent-switchboard
+AI coding agents (Codex, Claude Code, Cursor, Gemini, OpenCode ...) each store MCP servers, prompt rules, slash commands, and skills in their own formats and locations. When you add a new MCP server or tweak a coding rule, you repeat the work for each agent. Configs drift, setups go stale.
+
+Agent Switchboard solves this with **one library, one config, many targets**:
+
+```
+Libraries              Config Layers            Distribution
+┌──────────────┐    ┌─────────────────────┐    ┌────────────────┐
+│ mcp.json     │    │ User   config.toml  │    │ Claude Code    │
+│ rules/       │    │ Profile <name>.toml │    │ Codex          │
+│ commands/    │ ─► │ Project .asb.toml   │ ─► │ Cursor         │
+│ subagents/   │    │                     │    │ Gemini         │
+│ skills/      │    │ Per-agent overrides │    │ OpenCode       │
+└──────────────┘    └─────────────────────┘    │ Claude Desktop │
+                                               └────────────────┘
 ```
 
-Run once without installing:
+All library entries are agent-agnostic Markdown files (or directories for skills). Agent Switchboard reads them, applies layered configuration and per-agent overrides, then writes the correct format to each agent's config location.
 
-```bash
-npx agent-switchboard@latest mcp
-```
+## Compatibility
+
+| Feature          | Claude Code | Codex | Cursor | Gemini | OpenCode | Claude Desktop |
+|:-----------------|:-----------:|:-----:|:------:|:------:|:--------:|:--------------:|
+| MCP servers      | ✓           | ✓     | ✓      | ✓      | ✓        | ✓              |
+| Project-level MCP| ✓           | ✓     | ✓      | ✓      | ✓        |                |
+| Rules            | ✓           | ✓     | ✓ mdc  | ✓      | ✓        |                |
+| Commands         | ✓           | ✓\*   | ✓      | ✓      | ✓        |                |
+| Subagents        | ✓           |       | ✓      |        | ✓        |                |
+| Skills           | ✓           | ✓     | ✓      | ✓      | ✓        |                |
+
+\* Codex commands use deprecated `~/.codex/prompts/`; prefer skills instead.
+
+Cursor rules are distributed as individual `.mdc` files to `~/.cursor/rules/` (native format), not as a single composed document.
 
 ## Quick Start
 
-1) Create `~/.agent-switchboard/mcp.json` (if missing).
-2) Run the interactive UI:
-
 ```bash
-agent-switchboard mcp
+npm i -g agent-switchboard    # or: npx agent-switchboard@latest mcp
 ```
 
-That’s it. The tool updates `~/.agent-switchboard/mcp.json` and writes agent configs.
-
-## Configure Agents
-
-Agent Switchboard only applies MCP servers to the agents you list in `~/.agent-switchboard/config.toml`.
-
-Create the file if it does not exist:
+1. **Pick your agents** -- create `~/.agent-switchboard/config.toml`:
 
 ```toml
-# ~/.agent-switchboard/config.toml
 [agents]
-active = ["codex", "cursor"]
+active = ["claude-code", "codex", "cursor"]
+```
+
+2. **Manage MCP servers** -- launches an interactive checkbox UI:
+
+```bash
+asb mcp
+```
+
+3. **Sync everything** -- pushes all libraries (rules, commands, subagents, skills) and MCP config to every active agent:
+
+```bash
+asb sync
+```
+
+That's it. Library content lives under `~/.agent-switchboard/` and agent configs are updated in place.
+
+## Command Reference
+
+| Command              | Description                                             |
+|:---------------------|:--------------------------------------------------------|
+| `asb mcp`            | Interactive MCP server selector                         |
+| `asb rule`           | Interactive rule snippet selector with ordering         |
+| `asb command`        | Interactive command selector                            |
+| `asb subagent`       | Interactive subagent selector                           |
+| `asb skill`          | Interactive skill selector                              |
+| `asb sync`           | Push all libraries + MCP to agents (no UI)              |
+| `asb <lib> load`     | Import files from a platform into the library           |
+| `asb <lib> list`     | Show inventory, activation state, and sync timestamps   |
+| `asb subscribe`      | Add an external library subscription                    |
+| `asb unsubscribe`    | Remove a subscription                                   |
+| `asb subscriptions`  | List active subscriptions                               |
+
+`<lib>` = `rule`, `command`, `subagent`, or `skill`.
+
+**Shared flags**: `-p, --profile <name>`, `--project <path>`, `--json` (on `list` and `subscriptions`).
+
+## Configuration
+
+### `config.toml`
+
+The central config file at `~/.agent-switchboard/config.toml` controls which agents and library entries are active:
+
+```toml
+[agents]
+active = ["claude-code", "codex", "cursor", "gemini", "opencode"]
 
 [rules]
-includeDelimiters = false
+includeDelimiters = false   # wrap each rule snippet in <!-- id:start/end --> markers
 ```
 
-Supported agent IDs:
-- `codex` - Codex CLI
-- `cursor` - Cursor IDE
-- `claude-code` - Claude Code CLI
-- `claude-desktop` - Claude Desktop app
-- `gemini` - Gemini CLI
-- `opencode` - OpenCode (supports `opencode.json` and `opencode.jsonc`)
-
-Toggle `rules.includeDelimiters` to `true` if you want each snippet surrounded by markers such as:
-```
-<!-- your-rule-name:start -->
-…
-<!-- your-rule-name:end -->
-```
-
-Run `agent-switchboard mcp` again after updating the list.
+Supported agent IDs: `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini`, `opencode`.
 
 ### Per-Agent Overrides
 
-You can customize which rules, commands, subagents, and skills are active for each agent using `add` and `remove` syntax:
+Fine-tune which library entries reach each agent using `add` / `remove` / `active`:
 
 ```toml
 [agents]
 active = ["claude-code", "codex", "opencode"]
 
-# Codex: exclude skill-codex (avoid self-reference)
 codex.skills.remove = ["skill-codex"]
-codex.rules.remove = ["skill-codex"]
+codex.rules.remove  = ["skill-codex"]
 
-# OpenCode: same exclusions
-opencode.skills.remove = ["skill-codex"]
-opencode.rules.remove = ["skill-codex"]
-
-# Gemini: add extra command, remove a skill
-gemini.commands.add = ["cmd-gemini-only"]
-gemini.skills.remove = ["skill-go"]
+gemini.commands.add    = ["cmd-gemini-only"]
+gemini.skills.remove   = ["skill-go"]
 ```
 
-| Syntax | Behavior |
-|--------|----------|
-| `<agent>.<section>.active = [...]` | Completely override the global list |
-| `<agent>.<section>.add = [...]` | Append to the global list |
-| `<agent>.<section>.remove = [...]` | Remove from the global list |
+| Syntax                            | Behavior                   |
+|:----------------------------------|:---------------------------|
+| `<agent>.<section>.active = [...]`| Replace the global list    |
+| `<agent>.<section>.add = [...]`   | Append to the global list  |
+| `<agent>.<section>.remove = [...]`| Remove from the global list|
 
-Sections: `mcp`, `commands`, `subagents`, `skills`, `rules`
+Sections: `mcp`, `rules`, `commands`, `subagents`, `skills`.
 
-### Layered configuration & scope
+### Layered Configuration
 
-Agent Switchboard merges configuration from three TOML layers (higher priority wins):
+Three TOML layers merge in priority order (higher wins):
 
-- **User default**: `<ASB_HOME>/config.toml`
-- **Profile**: `<ASB_HOME>/<profile>.toml`
-- **Project**: `<project>/.asb.toml`
-
-Every layer can define `[commands]`, `[subagents]`, and `[rules]` `active` lists. Use profiles to share team presets and project files to override per repository. The CLI honors these layers via scope flags:
+| Layer   | File                            | Scope                             |
+|:--------|:--------------------------------|:----------------------------------|
+| User    | `<ASB_HOME>/config.toml`        | Personal defaults                 |
+| Profile | `<ASB_HOME>/<profile>.toml`     | Team or workflow presets (`-p`)    |
+| Project | `<project>/.asb.toml`           | Per-repository overrides          |
 
 ```bash
-# Profile only
-agent-switchboard command -p team
-
-# Project only
-agent-switchboard rule --project /path/to/repo
-
-# Merge profile + project
-agent-switchboard subagent -p team --project /path/to/repo
+asb command -p team                        # profile layer
+asb rule --project /path/to/repo           # project layer
+asb subagent -p team --project /path/to/repo  # both
 ```
 
-`ASB_HOME` still defaults to `~/.agent-switchboard` but can be overridden through the environment variable.
+When `--project` is used, outputs target the project directory (e.g. `<project>/AGENTS.md`, `<project>/.claude/commands/`).
 
-Project-aware outputs (when using `--project <path>`):
-- Rules: Codex writes `<project>/AGENTS.md`. Gemini writes `<project>/AGENTS.md`. OpenCode writes `<project>/.opencode/AGENTS.md`.
-- Commands (project-level supported):
-  - Claude Code → `<project>/.claude/commands/`
-  - Gemini → `<project>/.gemini/commands/`
-  - OpenCode → `<project>/.opencode/command/`
-  - Codex → global only (`~/.codex/prompts/`, deprecated; consider migrating to skills)
-- Subagents (project-level supported):
-  - Claude Code → `<project>/.claude/agents/`
-  - OpenCode → `<project>/.opencode/agent/`
-- Skills (project-level supported):
-  - Claude Code → `<project>/.claude/skills/`
-  - Gemini → `<project>/.gemini/skills/`
-  - OpenCode → `<project>/.opencode/skill/`
-  - Codex → `~/.agents/skills/` (global) or `<project>/.agents/skills/` (project-level)
+## Libraries
 
-## Rule Library
+All library types follow the same pattern:
 
-Rule snippets live in `~/.agent-switchboard/rules/` (respects `ASB_HOME`). Each snippet is a Markdown file and can include YAML frontmatter with `title`, `description`, `tags`, and `requires` fields. Example:
+1. **Store** entries in `~/.agent-switchboard/<type>/` as Markdown files (or directories for skills).
+2. **Import** existing platform files: `asb <type> load <platform> [path] [-r]`.
+3. **Select** active entries: `asb <type>` (interactive fuzzy-search selector).
+4. **Audit** inventory: `asb <type> list [--json]`.
+
+Selections are saved into the highest-priority config layer. Distribution writes each entry in the format the target agent expects, skipping unchanged files (hash-based).
+
+### Rules
+
+Snippets in `~/.agent-switchboard/rules/` with optional YAML frontmatter:
 
 ```markdown
 ---
 title: Prompt Hygiene
-tags:
-  - hygiene
-requires:
-  - claude-code
+tags: [hygiene]
+requires: [claude-code]
 ---
 Keep commit messages scoped to the change.
 ```
 
-### Selecting and Ordering Rules
-
-Use the interactive selector (arrow keys, `Space` to toggle, just start typing to fuzzy filter) to choose the active snippets and adjust their order:
-
-```bash
-agent-switchboard rule [-p <profile>] [--project <path>]
-```
-
-The selected order is saved back to the highest-priority layer (project, profile, then user) before distribution. Once confirmed, Agent Switchboard composes the merged Markdown, stores the active order, and writes the document to:
-- `~/.claude/CLAUDE.md`
-- `~/.codex/AGENTS.md` (or `<project>/AGENTS.md` with `--project`)
-- `~/.gemini/AGENTS.md`
-- `~/.config/opencode/AGENTS.md` (or `%APPDATA%/opencode/AGENTS.md` on Windows)
-
-Unsupportive agents such as Claude Desktop and Cursor are reported and left untouched. If you rerun the selector without changing the order, the tool refreshes the destination files to overwrite any manual edits.
-
-### Auditing Rules
-
-See the full inventory, activation state, and per-agent sync timestamps:
-
-```bash
-agent-switchboard rule list [-p <profile>] [--project <path>]
-```
-
-## Command Library
-
-- Location: `~/.agent-switchboard/commands/<slug>.md` (respects `ASB_HOME`).
-- Frontmatter: only global `description` (optional). Any platform-native options must live under `extras.<platform>` and are written through verbatim. No parsing, no key renaming, no documentation of platform keys here.
-
-### Import
-
-```bash
-# Import an existing platform file or directory into the library
-# Use -r/--recursive to traverse subdirectories when <path> is a directory
-agent-switchboard command load <platform> [path] [-r]
-# <platform>: claude-code | codex | gemini | opencode
-# If [path] is omitted, defaults by platform:
-#   claude-code → ~/.claude/commands
-#   codex       → ~/.codex/prompts
-#   gemini      → ~/.gemini/commands
-#   opencode    → ~/.config/opencode/command (Windows: %APPDATA%/opencode/command)
-```
-
-### Select and Distribute
-
-```bash
-agent-switchboard command [-p <profile>] [--project <path>]
-```
-
-The selector supports fuzzy filtering—type any part of a title, ID, or model name to narrow the list. Confirming selections saves them back into the highest-priority configuration layer before distribution. Adapters then write each selected command to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is.
-
-Files are only rewritten when content changes.
-
-### Inventory
-
-```bash
-# Inventory
-agent-switchboard command list [-p <profile>] [--project <path>]
-```
-
-## Subagent Library
-
-- Location: `~/.agent-switchboard/subagents/<slug>.md` (respects `ASB_HOME`).
-- Frontmatter: only global `description` (optional). Any platform-native options must live under `extras.<platform>` and are written through verbatim. We do not parse, validate, or showcase platform key names in this README. Platforms that do not support subagent files are skipped.
-
-### Import
-
-```bash
-agent-switchboard subagent load <platform> [path] [-r]
-# <platform>: claude-code | opencode
-# If [path] is omitted, defaults by platform:
-#   claude-code → ~/.claude/agents
-#   opencode    → ~/.config/opencode/agent (Windows: %APPDATA%/opencode/agent)
-```
-
-### Select and Distribute
-
-```bash
-agent-switchboard subagent [-p <profile>] [--project <path>]
-```
-
-Type to fuzzy filter the list, then confirm to persist the selection into the active configuration layer. Adapters write each selected subagent to the corresponding platform output in your user home (platform defaults), using the file format that platform expects. The frontmatter consists of the global `description` (if present) plus `extras.<platform>` written as-is. Platforms that do not accept subagent files are skipped with a hint.
-
-### Inventory
-
-```bash
-agent-switchboard subagent list [-p <profile>] [--project <path>]
-```
-
-## Skill Library
-
-Skills are multi-file bundles (directories) that provide reusable capabilities to agents. Each skill is a directory containing a `SKILL.md` file and any supporting files.
-
-- Location: `~/.agent-switchboard/skills/<skill-id>/` (respects `ASB_HOME`).
-- Entry file: `SKILL.md` with required `name` and `description` in frontmatter.
-
-Example structure:
-
-```
-~/.agent-switchboard/skills/
-└── my-skill/
-    ├── SKILL.md
-    ├── helper.py
-    └── templates/
-        └── template.txt
-```
-
-Example `SKILL.md`:
+Cursor-specific options can be set via `extras.cursor` in rule frontmatter:
 
 ```markdown
 ---
-name: my-skill
-description: A helpful skill that does something useful
+title: Python Rules
+description: Python coding standards
 extras:
-  claude-code:
-    # Platform-specific options
+  cursor:
+    alwaysApply: false
+    globs: "*.py"
 ---
-Skill instructions and content here.
+Use type hints everywhere.
 ```
 
-### Import
+The interactive selector lets you **reorder** snippets. For most agents, rules are composed into a single document. For Cursor, each rule is written as an individual `.mdc` file with native frontmatter (`description`, `alwaysApply`, `globs`):
+
+| Agent       | Global output                       | Project output                    |
+|:------------|:------------------------------------|:----------------------------------|
+| Claude Code | `~/.claude/CLAUDE.md`               | `<project>/.claude/CLAUDE.md`     |
+| Codex       | `~/.codex/AGENTS.md`                | `<project>/AGENTS.md`             |
+| Cursor      | `~/.cursor/rules/<id>.mdc`          | `<project>/.cursor/rules/<id>.mdc`|
+| Gemini      | `~/.gemini/AGENTS.md`               | `<project>/.gemini/AGENTS.md`     |
+| OpenCode    | `~/.config/opencode/AGENTS.md`      | `<project>/AGENTS.md`             |
+
+### Commands
+
+Markdown files in `~/.agent-switchboard/commands/` with optional `description` and `extras.<platform>`:
 
 ```bash
-# Import skills from an existing platform directory
-agent-switchboard skill load <platform> [path]
-# <platform>: claude-code | codex
-# If [path] is omitted, defaults by platform:
-#   claude-code → ~/.claude/skills
-#   codex       → ~/.agents/skills (fallback: ~/.codex/skills)
+asb command load claude-code           # import from ~/.claude/commands/
+asb command load gemini [path] -r      # import recursively
 ```
 
-### Select and Distribute
+Platforms: `claude-code`, `codex`, `cursor`, `gemini`, `opencode`.
+
+### Subagents
+
+Same format as commands, stored in `~/.agent-switchboard/subagents/`.
 
 ```bash
-agent-switchboard skill [-p <profile>] [--project <path>]
+asb subagent load claude-code          # import from ~/.claude/agents/
 ```
 
-Type to fuzzy filter the list, then confirm to persist the selection. Skills are distributed as complete directory bundles to supported platforms:
-- Claude Code → `~/.claude/skills/<skill-id>/`
-- Codex → `~/.agents/skills/<skill-id>/` (or `<project>/.agents/skills/<skill-id>/`)
-- Gemini → `~/.gemini/skills/<skill-id>/`
-- OpenCode → `~/.config/opencode/skill/<skill-id>/`
+Platforms: `claude-code`, `opencode`, `cursor`.
 
-### Inventory
+### Skills
+
+Multi-file directory bundles in `~/.agent-switchboard/skills/<skill-id>/`, each containing a `SKILL.md` entry file:
+
+```
+~/.agent-switchboard/skills/my-skill/
+├── SKILL.md          # name + description in frontmatter
+├── helper.py
+└── templates/
+    └── template.txt
+```
 
 ```bash
-agent-switchboard skill list [-p <profile>] [--project <path>]
+asb skill load claude-code             # import from ~/.claude/skills/
+asb skill load codex                   # import from ~/.agents/skills/
 ```
+
+Entire directories are copied to each agent's skill location. Deactivated skills are cleaned up automatically.
+
+## Library Subscriptions
+
+Pull library entries from external directories (e.g. a team-shared repo):
+
+```bash
+asb subscribe team /path/to/team-library
+asb subscriptions                      # list active subscriptions
+asb unsubscribe team                   # remove
+```
+
+The subscription path must contain at least one of `rules/`, `commands/`, `subagents/`, or `skills/`. Entries from subscriptions appear with a namespace prefix (e.g. `team:my-rule`) in selectors and config.
 
 ## Sync
 
-After curating your `active` lists in the selectors, run the unified sync command to push rules, commands, subagents, and skills to every supported agent directory:
+Push all libraries and MCP config to every active agent in one step:
 
 ```bash
-agent-switchboard sync [-p <profile>] [--project <path>]
+asb sync [-p <profile>] [--project <path>]
 ```
 
-The command merges the layered configuration, prints a warning that files will be overwritten without diffs, and rewrites the target files for each platform in place. Use profiles or project scopes to preview changes before applying them globally.
+This merges layered config, applies per-agent overrides, and writes target files in place. Files are only rewritten when content changes.
 
 ## Environment
 
-- `ASB_HOME`: overrides `~/.agent-switchboard` for library/state files.
-- `ASB_AGENTS_HOME`: overrides the home directory used for agent config paths (defaults to OS user home).
-
-## JSON Output
-
-All `list` subcommands support `--json` for machine-readable output:
-
-```bash
-agent-switchboard rule list --json
-agent-switchboard command list --json
-agent-switchboard subagent list --json
-agent-switchboard skill list --json
-```
+| Variable         | Default                    | Purpose                                      |
+|:-----------------|:---------------------------|:---------------------------------------------|
+| `ASB_HOME`       | `~/.agent-switchboard`     | Library, config, and state directory          |
+| `ASB_AGENTS_HOME`| OS user home               | Base path for agent config locations          |
 
 ## Development
-
-Install dependencies, build, and link globally:
 
 ```bash
 pnpm install
 pnpm build
-pnpm link --global
+pnpm link --global          # global `agent-switchboard` points to local build
 ```
 
-After linking, the global `agent-switchboard` command points to your local build. Code changes take effect after running `pnpm build` again.
+Code changes take effect after `pnpm build`. To unlink: `pnpm uninstall -g agent-switchboard`.
 
-To unlink:
-
-```bash
-pnpm uninstall -g agent-switchboard
-```
+Other scripts: `pnpm dev` (tsx), `pnpm test`, `pnpm lint`, `pnpm typecheck`.
 
 ## License
 
