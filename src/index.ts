@@ -20,7 +20,7 @@ import { importCommandFromFile } from './commands/importer.js';
 
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
-import { resolveAgentSectionConfig } from './config/agent-config.js';
+import { getAgentOverride, resolveAgentSectionConfig } from './config/agent-config.js';
 import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
   getAgentsHome,
@@ -82,6 +82,7 @@ import {
   printAgentSyncStatus,
   printDistributionResults,
   printTable,
+  shortenPath,
 } from './util/cli.js';
 
 const program = new Command();
@@ -171,16 +172,31 @@ program
       ];
       for (const entry of layerEntries) {
         const marker = entry.exists ? chalk.green('✓') : chalk.gray('•');
-        const pathLabel = entry.exists ? chalk.dim(entry.path) : chalk.gray(entry.path);
+        const displayPath = entry.exists ? shortenPath(entry.path) : entry.path;
+        const pathLabel = entry.exists ? chalk.dim(displayPath) : chalk.gray(displayPath);
         console.log(`  ${marker} ${entry.label}: ${pathLabel}`);
       }
       console.log();
+
+      // Build subagent count with per-agent additions
+      const globalSubagentCount = config.subagents.active.length;
+      const perAgentAdds: string[] = [];
+      for (const agentId of config.agents.active) {
+        const override = getAgentOverride(config, agentId, 'subagents');
+        if (override?.add && override.add.length > 0) {
+          perAgentAdds.push(`${agentId}+${override.add.length}`);
+        }
+      }
+      const subagentLabel =
+        perAgentAdds.length > 0
+          ? `${chalk.cyan(String(globalSubagentCount))} ${chalk.gray(`(${perAgentAdds.join(', ')})`)}`
+          : chalk.cyan(String(globalSubagentCount));
 
       console.log(chalk.blue('Active selections:'));
       console.log(`  MCP servers: ${chalk.cyan(String(config.mcp.active.length))}`);
       console.log(`  Rules: ${chalk.cyan(String(config.rules.active.length))}`);
       console.log(`  Commands: ${chalk.cyan(String(config.commands.active.length))}`);
-      console.log(`  Subagents: ${chalk.cyan(String(config.subagents.active.length))}`);
+      console.log(`  Subagents: ${subagentLabel}`);
       console.log(`  Skills: ${chalk.cyan(String(config.skills.active.length))}`);
       if (config.agents.active.length > 0) {
         console.log(`  Agents: ${chalk.cyan(config.agents.active.join(', '))}`);
@@ -192,6 +208,7 @@ program
       // Sync MCP servers to agents
       console.log(chalk.blue('MCP server distribution:'));
       await applyToAgents(scope);
+      console.log();
 
       const ruleDistribution = distributeRules(undefined, { force: true }, scope);
       const commandDistribution = distributeCommands(scope);
@@ -330,6 +347,8 @@ function defaultSubagentSourceDir(platform: SubPlatform): string {
       return path.join(getCursorDir(), 'agents');
     case 'opencode':
       return getOpencodePath('agent');
+    default:
+      throw new Error(`Unknown subagent platform: ${String(platform)}`);
   }
 }
 
@@ -1208,10 +1227,13 @@ async function applyToAgents(scope?: ConfigScope, enabledServerNames?: string[])
       if (scope?.project && agent.applyProjectConfig) {
         agent.applyProjectConfig(scope.project, configToApply);
         const projectPath = agent.projectConfigPath?.(scope.project) ?? 'project config';
-        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(projectPath)}`);
+        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(projectPath))}`);
       } else {
         agent.applyConfig(configToApply);
-        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(agent.configPath())}`);
+        persist(
+          chalk.green('✓'),
+          `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(agent.configPath()))}`
+        );
       }
     } catch (error) {
       if (error instanceof Error) {

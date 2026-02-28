@@ -1,4 +1,14 @@
+import os from 'node:os';
 import chalk from 'chalk';
+
+const HOME = os.homedir();
+
+export function shortenPath(p: string): string {
+  if (p.startsWith(HOME)) {
+    return '~' + p.slice(HOME.length);
+  }
+  return p;
+}
 
 export type Cell = { plain: string; formatted: string };
 
@@ -46,22 +56,49 @@ export function printDistributionResults<T extends DistributionResultLike>({
     }
     return;
   }
+
+  let written = 0;
+  let skipped = 0;
+  let deleted = 0;
+  let errors = 0;
+
   for (const result of results) {
-    const pathLabel = chalk.dim(getPath(result));
+    switch (result.status) {
+      case 'written':
+        written++;
+        break;
+      case 'skipped':
+        skipped++;
+        break;
+      case 'deleted':
+        deleted++;
+        break;
+      case 'error':
+        errors++;
+        break;
+    }
+  }
+
+  for (const result of results) {
+    if (result.status === 'skipped') continue;
+
+    const pathLabel = chalk.dim(shortenPath(getPath(result)));
     const targetLabel = chalk.cyan(getTargetLabel(result));
+
     if (result.status === 'written') {
       const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
       console.log(`  ${chalk.green('✓')} ${targetLabel} ${pathLabel}${reason}`);
-    } else if (result.status === 'skipped') {
-      const reason = result.reason ? chalk.gray(` (${result.reason})`) : chalk.gray(' (unchanged)');
-      console.log(`  ${chalk.gray('•')} ${targetLabel} ${pathLabel}${reason}`);
     } else if (result.status === 'deleted') {
       const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-      console.log(`  ${chalk.gray('•')} ${targetLabel} ${pathLabel}${reason}`);
+      console.log(`  ${chalk.yellow('−')} ${targetLabel} ${pathLabel}${reason}`);
     } else {
       const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
       console.log(`  ${chalk.red('✗')} ${targetLabel} ${pathLabel}${errorLabel}`);
     }
+  }
+
+  if (skipped > 0) {
+    console.log(`  ${chalk.gray(`${skipped} up-to-date`)}`);
   }
 }
 
