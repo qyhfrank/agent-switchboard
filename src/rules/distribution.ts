@@ -1,7 +1,5 @@
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { resolveAgentSectionConfig } from '../config/agent-config.js';
 import {
   getAgentsHome,
   getClaudeDir,
@@ -17,12 +15,9 @@ import {
   RULE_PER_FILE_AGENTS,
   RULE_SUPPORTED_AGENTS,
   RULE_UNSUPPORTED_AGENTS,
-  type RulePerFileAgent,
-  type RuleSupportedAgent,
 } from './agents.js';
 import type { ComposedRules } from './composer.js';
 import { composeActiveRulesForAgent } from './composer.js';
-import type { RuleSnippet } from './library.js';
 import { loadRuleLibrary } from './library.js';
 import { updateRuleState } from './state.js';
 
@@ -70,6 +65,11 @@ function resolveRuleFile(
         return path.join(path.resolve(projectRoot), 'AGENTS.md');
       }
       return path.join(getGeminiDir(), 'AGENTS.md');
+    case 'cursor':
+      if (projectRoot && projectRoot.length > 0) {
+        return path.join(getProjectCursorDir(projectRoot), 'rules', 'asb-rules.mdc');
+      }
+      return path.join(getCursorDir(), 'rules', 'asb-rules.mdc');
     case 'opencode':
       // OpenCode supports project-level AGENTS.md at repository root; otherwise use global.
       if (projectRoot && projectRoot.length > 0) {
@@ -88,6 +88,45 @@ function ensureDirectory(filePath: string): void {
   }
 }
 
+function wrapMdcFrontmatter(body: string): string {
+  const lines = ['---', 'description: Agent Switchboard Rules', 'alwaysApply: true', '---', ''];
+  if (body.length > 0) {
+    lines.push(body);
+  }
+  return lines.join('\n');
+}
+
+const CURSOR_SINGLE_FILE = 'asb-rules.mdc';
+
+/**
+ * Remove legacy per-rule .mdc files left by the old Cursor distribution scheme.
+ * Only deletes files whose basename (minus .mdc) matches a known rule library ID,
+ * leaving user-created .mdc files and the new single-file untouched.
+ */
+function cleanupLegacyCursorMdcFiles(scope?: ConfigScope): void {
+  const projectRoot = scope?.project?.trim();
+  const targetDir =
+    projectRoot && projectRoot.length > 0
+      ? path.join(getProjectCursorDir(projectRoot), 'rules')
+      : path.join(getCursorDir(), 'rules');
+
+  if (!fs.existsSync(targetDir)) return;
+
+  const libraryIds = new Set(loadRuleLibrary().map((r) => r.id));
+
+  for (const file of fs.readdirSync(targetDir)) {
+    if (!file.endsWith('.mdc') || file === CURSOR_SINGLE_FILE) continue;
+    const fileId = file.slice(0, -4);
+    if (libraryIds.has(fileId)) {
+      try {
+        fs.unlinkSync(path.join(targetDir, file));
+      } catch {
+        // best-effort
+      }
+    }
+  }
+}
+
 export function distributeRules(
   _composed?: ComposedRules,
   options?: DistributionOptions,
@@ -96,10 +135,7 @@ export function distributeRules(
   const results: DistributionResult[] = [];
   const timestamp = new Date().toISOString();
   const forceRewrite = options?.force === true;
-  const agentSyncUpdates = new Map<
-    RuleSupportedAgent | RulePerFileAgent,
-    { hash: string; updatedAt: string }
-  >();
+  const agentSyncUpdates = new Map<string, { hash: string; updatedAt: string }>();
 
   // Track the first composed document for return value (backwards compatibility)
   let firstComposed: ComposedRules | null = null;
@@ -112,6 +148,8 @@ export function distributeRules(
     }
 
     const filePath = resolveRuleFile(agent, scope);
+    const finalContent =
+      agent === 'cursor' ? wrapMdcFrontmatter(document.content) : document.content;
 
     let existingContent: string | null = null;
     try {
@@ -123,7 +161,7 @@ export function distributeRules(
     }
 
     const hadExistingFile = existingContent !== null;
-    const contentMatches = existingContent !== null && existingContent === document.content;
+    const contentMatches = existingContent !== null && existingContent === finalContent;
 
     if (!forceRewrite && contentMatches) {
       results.push({
@@ -140,7 +178,7 @@ export function distributeRules(
 
     try {
       ensureDirectory(filePath);
-      fs.writeFileSync(filePath, document.content, 'utf-8');
+      fs.writeFileSync(filePath, finalContent, 'utf-8');
       agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       results.push({ agent, filePath, status: 'written', reason });
     } catch (error) {
@@ -149,12 +187,9 @@ export function distributeRules(
     }
   }
 
-  // Distribute individual .mdc files to per-file agents (Cursor)
-  const perFileResults = distributeCursorRules(forceRewrite, scope);
-  results.push(...perFileResults.results);
-  for (const [agent, update] of perFileResults.syncUpdates.entries()) {
-    agentSyncUpdates.set(agent, update);
-  }
+  // Clean up legacy per-rule .mdc files from the old Cursor distribution scheme.
+  // The new approach writes a single asb-rules.mdc; old <ruleId>.mdc files are orphans.
+  cleanupLegacyCursorMdcFiles(scope);
 
   if (agentSyncUpdates.size > 0) {
     updateRuleState((current) => {
@@ -173,128 +208,6 @@ export function distributeRules(
     composed: firstComposed ?? { content: '', hash: '', sections: [] },
     results,
   };
-}
-
-// ---------------------------------------------------------------------------
-// Cursor .mdc per-file distribution
-// ---------------------------------------------------------------------------
-
-function resolveCursorRulesDir(scope?: ConfigScope): string {
-  const projectRoot = scope?.project?.trim();
-  if (projectRoot && projectRoot.length > 0) {
-    return path.join(getProjectCursorDir(projectRoot), 'rules');
-  }
-  return path.join(getCursorDir(), 'rules');
-}
-
-function renderMdcRule(rule: RuleSnippet): string {
-  const extras = (rule.metadata as Record<string, unknown>).extras as
-    | Record<string, unknown>
-    | undefined;
-  const cursorExtras = (extras?.cursor ?? {}) as Record<string, unknown>;
-
-  const description =
-    typeof cursorExtras.description === 'string'
-      ? cursorExtras.description
-      : (rule.metadata.description ?? rule.metadata.title ?? rule.id);
-  const alwaysApply =
-    typeof cursorExtras.alwaysApply === 'boolean' ? cursorExtras.alwaysApply : true;
-
-  const lines = ['---', `description: ${description}`, `alwaysApply: ${alwaysApply}`];
-  if (typeof cursorExtras.globs === 'string' && cursorExtras.globs.length > 0) {
-    lines.push(`globs: ${cursorExtras.globs}`);
-  }
-  lines.push('---', '');
-
-  const body = rule.content.replace(/\r\n/g, '\n').replace(/\s+$/u, '');
-  if (body.length > 0) {
-    lines.push(body);
-    lines.push('');
-  }
-
-  return lines.join('\n');
-}
-
-function distributeCursorRules(
-  forceRewrite: boolean,
-  scope?: ConfigScope
-): {
-  results: DistributionResult[];
-  syncUpdates: Map<RulePerFileAgent, { hash: string; updatedAt: string }>;
-} {
-  const results: DistributionResult[] = [];
-  const syncUpdates = new Map<RulePerFileAgent, { hash: string; updatedAt: string }>();
-  const timestamp = new Date().toISOString();
-
-  for (const agent of RULE_PER_FILE_AGENTS) {
-    const agentConfig = resolveAgentSectionConfig('rules', agent, scope);
-    const activeIds = new Set(agentConfig.active);
-    const rules = loadRuleLibrary();
-    const ruleMap = new Map(rules.map((r) => [r.id, r]));
-    const libraryIds = new Set(rules.map((r) => r.id));
-    const targetDir = resolveCursorRulesDir(scope);
-
-    const hashes: string[] = [];
-    let hadError = false;
-
-    for (const id of agentConfig.active) {
-      const rule = ruleMap.get(id);
-      if (!rule) continue;
-
-      const filePath = path.join(targetDir, `${id}.mdc`);
-      const content = renderMdcRule(rule);
-      hashes.push(createHash('sha256').update(content).digest('hex'));
-
-      let existing: string | null = null;
-      try {
-        if (fs.existsSync(filePath)) existing = fs.readFileSync(filePath, 'utf-8');
-      } catch {
-        existing = null;
-      }
-
-      if (!forceRewrite && existing === content) {
-        results.push({ agent, filePath, status: 'skipped', reason: 'up-to-date' });
-        continue;
-      }
-
-      try {
-        ensureDirectory(filePath);
-        fs.writeFileSync(filePath, content, 'utf-8');
-        results.push({
-          agent,
-          filePath,
-          status: 'written',
-          reason: existing !== null ? 'updated' : 'created',
-        });
-      } catch (error) {
-        hadError = true;
-        const message = error instanceof Error ? error.message : String(error);
-        results.push({ agent, filePath, status: 'error', error: message });
-      }
-    }
-
-    // Cleanup orphan .mdc files: files in target dir whose ID is in the library but not active
-    if (fs.existsSync(targetDir)) {
-      for (const file of fs.readdirSync(targetDir)) {
-        if (!file.endsWith('.mdc')) continue;
-        const fileId = file.slice(0, -4);
-        if (libraryIds.has(fileId) && !activeIds.has(fileId)) {
-          try {
-            fs.unlinkSync(path.join(targetDir, file));
-          } catch {
-            // best-effort cleanup
-          }
-        }
-      }
-    }
-
-    if (!hadError) {
-      const combinedHash = createHash('sha256').update(hashes.join(':')).digest('hex');
-      syncUpdates.set(agent, { hash: combinedHash, updatedAt: timestamp });
-    }
-  }
-
-  return { results, syncUpdates };
 }
 
 // ---------------------------------------------------------------------------

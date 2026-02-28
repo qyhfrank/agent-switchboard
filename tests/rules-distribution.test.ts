@@ -40,7 +40,12 @@ test('distributeRules writes rule document and updates state', () => {
     composedResults1.forEach((result) => {
       assert.equal(result.status, 'written');
       const content = fs.readFileSync(result.filePath, 'utf-8');
-      assert.equal(content, composed1.content);
+      if (result.agent === 'cursor') {
+        assert.ok(content.startsWith('---\n'));
+        assert.ok(content.includes(composed1.content));
+      } else {
+        assert.equal(content, composed1.content);
+      }
     });
 
     const stateAfterFirst = loadRuleState();
@@ -64,7 +69,11 @@ test('distributeRules writes rule document and updates state', () => {
     composedResults2.forEach((result) => {
       assert.equal(result.status, 'written');
       const current = fs.readFileSync(result.filePath, 'utf-8');
-      assert.equal(current, composed2.content);
+      if (result.agent === 'cursor') {
+        assert.ok(current.includes(composed2.content));
+      } else {
+        assert.equal(current, composed2.content);
+      }
     });
 
     const stateAfterSecond = loadRuleState();
@@ -104,11 +113,15 @@ test('distributeRules updates state when files already match content', () => {
 
     const composed = composeActiveRules();
 
-    for (const agent of ['claude-code', 'codex', 'gemini', 'opencode'] as const) {
+    for (const agent of RULE_SUPPORTED_AGENTS) {
       const filePath = resolveRuleFilePath(agent);
       const dir = path.dirname(filePath);
       fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(filePath, composed.content, 'utf-8');
+      const content =
+        agent === 'cursor'
+          ? `---\ndescription: Agent Switchboard Rules\nalwaysApply: true\n---\n\n${composed.content}`
+          : composed.content;
+      fs.writeFileSync(filePath, content, 'utf-8');
     }
 
     const outcome = distributeRules(composed);
@@ -119,7 +132,7 @@ test('distributeRules updates state when files already match content', () => {
     });
 
     const state = loadRuleState();
-    for (const agent of ['claude-code', 'codex', 'gemini', 'opencode'] as const) {
+    for (const agent of RULE_SUPPORTED_AGENTS) {
       const sync = state.agentSync[agent];
       assert.equal(sync?.hash, composed.hash);
     }
@@ -153,7 +166,11 @@ test('distributeRules with force rewrites matching content', () => {
         assert.equal(result.status, 'written');
         assert.equal(result.reason, 'refreshed');
         const current = fs.readFileSync(result.filePath, 'utf-8');
-        assert.equal(current, composed.content);
+        if (result.agent === 'cursor') {
+          assert.ok(current.includes(composed.content));
+        } else {
+          assert.equal(current, composed.content);
+        }
       });
   });
 });
@@ -165,14 +182,14 @@ test('listUnsupportedAgents returns skipped agent identifiers', () => {
   assert.ok(!unsupported.includes('cursor'));
 });
 
-test('listIndirectAgents no longer includes cursor (now per-file)', () => {
+test('listIndirectAgents does not include cursor', () => {
   const indirect = listIndirectAgents();
   assert.equal(Array.isArray(indirect), true);
   assert.ok(!indirect.includes('cursor'));
 });
 
-test('listPerFileAgents returns cursor', () => {
+test('listPerFileAgents returns empty (cursor moved to single-file)', () => {
   const perFile = listPerFileAgents();
   assert.equal(Array.isArray(perFile), true);
-  assert.ok(perFile.includes('cursor'));
+  assert.equal(perFile.length, 0);
 });
