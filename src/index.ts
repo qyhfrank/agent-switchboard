@@ -44,6 +44,7 @@ import {
   addLocalSource,
   addRemoteSource,
   getSources,
+  inferSourceName,
   isGitUrl,
   parseGitUrl,
   removeSource,
@@ -1266,10 +1267,11 @@ const sourceRoot = program
 sourceRoot
   .command('add')
   .description('Add a library source (local path or git URL)')
-  .argument('<name>', 'Namespace for this source (e.g., "team", "community")')
   .argument('<location>', 'Local path or git URL (e.g., https://github.com/org/repo)')
-  .action((name: string, location: string) => {
+  .argument('[name]', 'Namespace (defaults to repo or directory name)')
+  .action((location: string, nameArg: string | undefined) => {
     try {
+      const name = nameArg ?? inferSourceName(location);
       if (isGitUrl(location)) {
         const parsed = parseGitUrl(location);
         const spinner = ora(`Cloning ${parsed.url}...`).start();
@@ -1376,7 +1378,7 @@ sourceRoot
 
       if (sources.length === 0) {
         console.log(chalk.yellow('\n⚠ No library sources configured.'));
-        console.log(chalk.dim('  Use `asb source add <name> <location>` to add one.'));
+        console.log(chalk.dim('  Use `asb source add <location> [name]` to add one.'));
         return;
       }
 

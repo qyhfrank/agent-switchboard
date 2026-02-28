@@ -240,10 +240,10 @@ Entire directories are copied to each agent's skill location. Deactivated skills
 Pull library entries from external directories or git repos:
 
 ```bash
-asb source add team /path/to/team-library              # local directory
-asb source add community https://github.com/org/repo   # git repository
+asb source add https://github.com/org/repo             # name defaults to "repo"
+asb source add /path/to/team-library team              # explicit name
 asb source list                                        # list configured sources
-asb source remove team                                 # remove
+asb source remove repo                                 # remove
 ```
 
 The source path must contain at least one of `rules/`, `commands/`, `subagents/`, or `skills/`. Entries from external sources appear with a namespace prefix (e.g. `team:my-rule`) in selectors and config.

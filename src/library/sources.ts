@@ -106,6 +106,25 @@ export function parseGitUrl(input: string): { url: string; ref?: string; subdir?
   return { url: input };
 }
 
+/**
+ * Infer a namespace from a git URL or local path.
+ * Examples:
+ *   https://github.com/org/my-repo.git   → "my-repo"
+ *   https://github.com/org/repo/tree/main/sub → "repo"
+ *   git@github.com:org/repo.git           → "repo"
+ *   /path/to/team-library                 → "team-library"
+ */
+export function inferSourceName(location: string): string {
+  if (isGitUrl(location)) {
+    const { url } = parseGitUrl(location);
+    const httpsMatch = url.match(/\/([^/]+?)(?:\.git)?$/);
+    if (httpsMatch) return httpsMatch[1];
+    const sshMatch = url.match(/:([^/]+?)(?:\.git)?$/);
+    if (sshMatch) return sshMatch[1];
+  }
+  return path.basename(path.resolve(location));
+}
+
 // ── Config access helpers ──────────────────────────────────────────
 
 function getRawSources(): Record<string, SourceValue> {

@@ -10,6 +10,7 @@ import {
   getSources,
   getSourcesRecord,
   hasSource,
+  inferSourceName,
   isGitUrl,
   parseGitUrl,
   removeSource,
@@ -76,6 +77,26 @@ test('parseGitUrl passes through non-GitHub URLs unchanged', () => {
 test('parseGitUrl passes through SSH URLs unchanged', () => {
   const result = parseGitUrl('git@github.com:org/repo.git');
   assert.deepEqual(result, { url: 'git@github.com:org/repo.git' });
+});
+
+// ── Name inference ─────────────────────────────────────────────────
+
+test('inferSourceName extracts repo name from GitHub HTTPS URL', () => {
+  assert.equal(inferSourceName('https://github.com/org/my-repo'), 'my-repo');
+  assert.equal(inferSourceName('https://github.com/org/my-repo.git'), 'my-repo');
+});
+
+test('inferSourceName extracts repo name from GitHub tree URL', () => {
+  assert.equal(inferSourceName('https://github.com/org/repo/tree/main/sub'), 'repo');
+});
+
+test('inferSourceName extracts repo name from SSH URL', () => {
+  assert.equal(inferSourceName('git@github.com:org/my-lib.git'), 'my-lib');
+});
+
+test('inferSourceName uses basename for local paths', () => {
+  assert.equal(inferSourceName('/path/to/team-library'), 'team-library');
+  assert.equal(inferSourceName('./relative/my-lib'), 'my-lib');
 });
 
 // ── Local sources ──────────────────────────────────────────────────
