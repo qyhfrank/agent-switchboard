@@ -1,6 +1,7 @@
 .claude
 .cursor
 .taskmaster
+package-lock.json
 .mcp.json
 opencode.json
 CLAUDE.md
