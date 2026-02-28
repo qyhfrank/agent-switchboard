@@ -143,17 +143,25 @@ export const uiSectionSchema = uiSectionBaseSchema
 
 /**
  * Library configuration schema
- * - subscriptions: Record of namespace -> path for additional library sources
+ * - sources: Record of namespace -> local path or remote git source
  */
+export const remoteSourceSchema = z.object({
+  url: z.string().min(1),
+  ref: z.string().optional(),
+  subdir: z.string().optional(),
+});
+
+export const sourceValueSchema = z.union([z.string().trim().min(1), remoteSourceSchema]);
+
 const librarySectionBaseSchema = z
   .object({
-    subscriptions: z.record(z.string().trim().min(1), z.string().trim().min(1)).optional(),
+    sources: z.record(z.string().trim().min(1), sourceValueSchema).optional(),
   })
   .passthrough();
 
 export const librarySectionSchema = librarySectionBaseSchema
   .extend({
-    subscriptions: z.record(z.string().trim().min(1), z.string().trim().min(1)).default({}),
+    sources: z.record(z.string().trim().min(1), sourceValueSchema).default({}),
   })
   .passthrough();
 
@@ -170,7 +178,7 @@ export const switchboardConfigSchema = z
     rules: rulesSectionSchema.default({ active: [], includeDelimiters: false }),
     distribution: distributionSectionSchema.default({ use_agents_dir: false }),
     ui: uiSectionSchema.default({ pageSize: 20 }),
-    library: librarySectionSchema.default({ subscriptions: {} }),
+    library: librarySectionSchema.default({ sources: {} }),
   })
   .passthrough();
 
@@ -204,5 +212,7 @@ export type RulesSection = z.infer<typeof rulesSectionSchema>;
 export type DistributionSection = z.infer<typeof distributionSectionSchema>;
 export type UiSection = z.infer<typeof uiSectionSchema>;
 export type LibrarySection = z.infer<typeof librarySectionSchema>;
+export type RemoteSource = z.infer<typeof remoteSourceSchema>;
+export type SourceValue = z.infer<typeof sourceValueSchema>;
 export type SwitchboardConfig = z.infer<typeof switchboardConfigSchema>;
 export type SwitchboardConfigLayer = z.infer<typeof switchboardConfigLayerSchema>;

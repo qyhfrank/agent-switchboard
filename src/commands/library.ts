@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getCommandsDir } from '../config/paths.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { getSubscriptionsRecord } from '../library/subscriptions.js';
+import { getSourcesRecord } from '../library/sources.js';
 
 export interface CommandEntry {
   id: string;
@@ -78,7 +78,7 @@ function loadCommandsFromDirectory(directory: string, namespace?: string): Comma
 }
 
 /**
- * Load all commands from default library and subscribed libraries
+ * Load all commands from default library and external sources
  */
 export function loadCommandLibrary(): CommandEntry[] {
   const result: CommandEntry[] = [];
@@ -87,9 +87,8 @@ export function loadCommandLibrary(): CommandEntry[] {
   const defaultDir = ensureCommandsDirectory();
   result.push(...loadCommandsFromDirectory(defaultDir));
 
-  // Load from subscribed libraries (with namespace prefix)
-  const subscriptions = getSubscriptionsRecord();
-  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+  const sources = getSourcesRecord();
+  for (const [namespace, basePath] of Object.entries(sources)) {
     const commandsDir = path.join(basePath, 'commands');
     result.push(...loadCommandsFromDirectory(commandsDir, namespace));
   }

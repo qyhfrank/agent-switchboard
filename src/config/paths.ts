@@ -101,6 +101,16 @@ export function getSkillsDir(): string {
 }
 
 /**
+ * Returns the directory for remote source clones.
+ * Without namespace: returns the base marketplaces dir (~/.asb/marketplaces/).
+ * With namespace: returns the namespace-specific dir (~/.asb/marketplaces/<namespace>/).
+ */
+export function getSourceCacheDir(namespace?: string): string {
+  const base = path.join(getConfigDir(), 'marketplaces');
+  return namespace ? path.join(base, namespace) : base;
+}
+
+/**
  * Returns the home directory for installed agent apps (Claude Code, OpenCode, etc.)
  * Can be overridden via `ASB_AGENTS_HOME`; falls back to the OS user home.
  */

@@ -82,13 +82,13 @@ That's it. Library content lives under `~/.agent-switchboard/` and agent configs
 | `asb sync`           | Push all libraries + MCP to agents (no UI)              |
 | `asb <lib> load`     | Import files from a platform into the library           |
 | `asb <lib> list`     | Show inventory, activation state, and sync timestamps   |
-| `asb subscribe`      | Add an external library subscription                    |
-| `asb unsubscribe`    | Remove a subscription                                   |
-| `asb subscriptions`  | List active subscriptions                               |
+| `asb source add`     | Add an external library source (local path or git URL)  |
+| `asb source remove`  | Remove a library source                                 |
+| `asb source list`    | List configured library sources                         |
 
 `<lib>` = `rule`, `command`, `subagent`, or `skill`.
 
-**Shared flags**: `-p, --profile <name>`, `--project <path>`, `--json` (on `list` and `subscriptions`).
+**Shared flags**: `-p, --profile <name>`, `--project <path>`, `--json` (on `list` and `source list`).
 
 ## Configuration
 
@@ -235,17 +235,18 @@ asb skill load codex                   # import from ~/.agents/skills/
 
 Entire directories are copied to each agent's skill location. Deactivated skills are cleaned up automatically.
 
-## Library Subscriptions
+## Library Sources
 
-Pull library entries from external directories (e.g. a team-shared repo):
+Pull library entries from external directories or git repos:
 
 ```bash
-asb subscribe team /path/to/team-library
-asb subscriptions                      # list active subscriptions
-asb unsubscribe team                   # remove
+asb source add team /path/to/team-library              # local directory
+asb source add community https://github.com/org/repo   # git repository
+asb source list                                        # list configured sources
+asb source remove team                                 # remove
 ```
 
-The subscription path must contain at least one of `rules/`, `commands/`, `subagents/`, or `skills/`. Entries from subscriptions appear with a namespace prefix (e.g. `team:my-rule`) in selectors and config.
+The source path must contain at least one of `rules/`, `commands/`, `subagents/`, or `skills/`. Entries from external sources appear with a namespace prefix (e.g. `team:my-rule`) in selectors and config.
 
 ## Sync
 

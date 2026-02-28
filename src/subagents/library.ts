@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getSubagentsDir } from '../config/paths.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { getSubscriptionsRecord } from '../library/subscriptions.js';
+import { getSourcesRecord } from '../library/sources.js';
 
 export interface SubagentEntry {
   id: string;
@@ -78,7 +78,7 @@ function loadSubagentsFromDirectory(directory: string, namespace?: string): Suba
 }
 
 /**
- * Load all subagents from default library and subscribed libraries
+ * Load all subagents from default library and external sources
  */
 export function loadSubagentLibrary(): SubagentEntry[] {
   const result: SubagentEntry[] = [];
@@ -87,9 +87,8 @@ export function loadSubagentLibrary(): SubagentEntry[] {
   const defaultDir = ensureSubagentsDirectory();
   result.push(...loadSubagentsFromDirectory(defaultDir));
 
-  // Load from subscribed libraries (with namespace prefix)
-  const subscriptions = getSubscriptionsRecord();
-  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+  const sources = getSourcesRecord();
+  for (const [namespace, basePath] of Object.entries(sources)) {
     const subagentsDir = path.join(basePath, 'subagents');
     result.push(...loadSubagentsFromDirectory(subagentsDir, namespace));
   }

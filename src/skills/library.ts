@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSkillsDir } from '../config/paths.js';
-import { getSubscriptionsRecord } from '../library/subscriptions.js';
+import { getSourcesRecord } from '../library/sources.js';
 import { parseSkillMarkdown } from './parser.js';
 import type { SkillFrontmatter } from './schema.js';
 
@@ -99,7 +99,7 @@ function loadSkillsFromDirectory(directory: string, namespace?: string): SkillEn
 }
 
 /**
- * Load all skills from default library and subscribed libraries.
+ * Load all skills from default library and external sources.
  * Each skill is a directory containing a SKILL.md file.
  */
 export function loadSkillLibrary(): SkillEntry[] {
@@ -109,9 +109,8 @@ export function loadSkillLibrary(): SkillEntry[] {
   const defaultDir = ensureSkillsDirectory();
   result.push(...loadSkillsFromDirectory(defaultDir));
 
-  // Load from subscribed libraries (with namespace prefix)
-  const subscriptions = getSubscriptionsRecord();
-  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+  const sources = getSourcesRecord();
+  for (const [namespace, basePath] of Object.entries(sources)) {
     const skillsDir = path.join(basePath, 'skills');
     result.push(...loadSkillsFromDirectory(skillsDir, namespace));
   }

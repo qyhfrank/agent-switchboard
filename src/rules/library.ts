@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getRulesDir } from '../config/paths.js';
-import { getSubscriptionsRecord } from '../library/subscriptions.js';
+import { getSourcesRecord } from '../library/sources.js';
 import { parseRuleMarkdown } from './parser.js';
 import type { RuleMetadata } from './schema.js';
 
@@ -78,7 +78,7 @@ function loadRulesFromDirectory(directory: string, namespace?: string): RuleSnip
 }
 
 /**
- * Load all rules from default library and subscribed libraries
+ * Load all rules from default library and external sources
  */
 export function loadRuleLibrary(): RuleSnippet[] {
   const rules: RuleSnippet[] = [];
@@ -87,9 +87,8 @@ export function loadRuleLibrary(): RuleSnippet[] {
   const defaultDir = ensureRulesDirectory();
   rules.push(...loadRulesFromDirectory(defaultDir));
 
-  // Load from subscribed libraries (with namespace prefix)
-  const subscriptions = getSubscriptionsRecord();
-  for (const [namespace, basePath] of Object.entries(subscriptions)) {
+  const sources = getSourcesRecord();
+  for (const [namespace, basePath] of Object.entries(sources)) {
     const rulesDir = path.join(basePath, 'rules');
     rules.push(...loadRulesFromDirectory(rulesDir, namespace));
   }

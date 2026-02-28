@@ -31,6 +31,7 @@ import {
   getGeminiDir,
   getOpencodePath,
   getSkillsDir,
+  getSourceCacheDir,
   getSubagentsDir,
 } from './config/paths.js';
 import type { ConfigScope } from './config/scope.js';
@@ -39,13 +40,17 @@ import {
   loadSwitchboardConfigWithLayers,
 } from './config/switchboard-config.js';
 import { ensureLibraryDirectories, writeFileSecure } from './library/fs.js';
-import { loadMcpActiveState, saveMcpActiveState } from './library/state.js';
 import {
-  addSubscription,
-  getSubscriptions,
-  removeSubscription,
-  validateSubscriptionPath,
-} from './library/subscriptions.js';
+  addLocalSource,
+  addRemoteSource,
+  getSources,
+  isGitUrl,
+  parseGitUrl,
+  removeSource,
+  updateRemoteSources,
+  validateSourcePath,
+} from './library/sources.js';
+import { loadMcpActiveState, saveMcpActiveState } from './library/state.js';
 import { RULE_SUPPORTED_AGENTS } from './rules/agents.js';
 import { composeActiveRules } from './rules/composer.js';
 import {
@@ -110,7 +115,8 @@ program
   )
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml')
-  .action(async (options: ScopeOptionInput) => {
+  .option('--no-update', 'Skip updating remote sources')
+  .action(async (options: ScopeOptionInput & { update: boolean }) => {
     try {
       const scope = resolveScope(options);
       const loadOptions = scopeToLoadOptions(scope);
@@ -124,6 +130,25 @@ program
       );
       console.log(chalk.red('Proceeding with synchronization...'));
       console.log();
+
+      if (options.update !== false) {
+        const remoteResults = updateRemoteSources();
+        if (remoteResults.length > 0) {
+          console.log(chalk.blue('Remote source updates:'));
+          for (const result of remoteResults) {
+            if (result.status === 'updated') {
+              console.log(
+                `  ${chalk.green('✓')} ${chalk.cyan(result.namespace)} ${chalk.dim(result.url)}`
+              );
+            } else {
+              console.log(
+                `  ${chalk.yellow('⚠')} ${chalk.cyan(result.namespace)} ${chalk.yellow(result.error ?? 'update failed')}`
+              );
+            }
+          }
+          console.log();
+        }
+      }
 
       console.log(chalk.blue('Configuration layers:'));
       const layerEntries: Array<{
@@ -1233,32 +1258,74 @@ function showSummary(selectedServers: string[], scope?: ConfigScope): void {
   console.log();
 }
 
-// Library subscription commands
-program
-  .command('subscribe')
-  .description('Add a library subscription with a namespace')
-  .argument('<name>', 'Namespace for this subscription (e.g., "team", "project")')
-  .argument('<path>', 'Path to the library directory')
-  .action((name: string, libraryPath: string) => {
+// Library source management commands
+const sourceRoot = program
+  .command('source')
+  .description('Manage external library sources (local paths or git repos)');
+
+sourceRoot
+  .command('add')
+  .description('Add a library source (local path or git URL)')
+  .argument('<name>', 'Namespace for this source (e.g., "team", "community")')
+  .argument('<location>', 'Local path or git URL (e.g., https://github.com/org/repo)')
+  .action((name: string, location: string) => {
     try {
-      // Validate the path has library structure
-      const validation = validateSubscriptionPath(libraryPath);
-      if (!validation.valid) {
-        console.error(
-          chalk.red(
-            `\n✗ Path does not contain any library folders (rules/, commands/, subagents/, skills/).`
-          )
-        );
-        process.exit(1);
+      if (isGitUrl(location)) {
+        const parsed = parseGitUrl(location);
+        const spinner = ora(`Cloning ${parsed.url}...`).start();
+        try {
+          addRemoteSource(name, {
+            url: parsed.url,
+            ref: parsed.ref,
+            subdir: parsed.subdir,
+          });
+          spinner.succeed(chalk.green(`✓ Cloned ${parsed.url}`));
+        } catch (err) {
+          spinner.fail(chalk.red('Failed to clone'));
+          throw err;
+        }
+
+        let effectivePath = getSourceCacheDir(name);
+        if (parsed.subdir) effectivePath = path.join(effectivePath, parsed.subdir);
+        const validation = validateSourcePath(effectivePath);
+
+        if (!validation.valid) {
+          removeSource(name);
+          console.error(
+            chalk.red(
+              '\n✗ Cloned repository does not contain any library folders (rules/, commands/, subagents/, skills/).'
+            )
+          );
+          process.exit(1);
+        }
+
+        console.log(chalk.green(`\n✓ Added source "${name}" from ${parsed.url}`));
+        if (parsed.ref) console.log(chalk.dim(`  Ref: ${parsed.ref}`));
+        if (parsed.subdir) console.log(chalk.dim(`  Subdir: ${parsed.subdir}`));
+        console.log(chalk.dim(`  Found: ${validation.found.join(', ')}`));
+        if (validation.missing.length > 0) {
+          console.log(chalk.dim(`  Missing: ${validation.missing.join(', ')}`));
+        }
+      } else {
+        const validation = validateSourcePath(location);
+        if (!validation.valid) {
+          console.error(
+            chalk.red(
+              '\n✗ Path does not contain any library folders (rules/, commands/, subagents/, skills/).'
+            )
+          );
+          process.exit(1);
+        }
+
+        addLocalSource(name, location);
+
+        console.log(chalk.green(`\n✓ Added source "${name}" at ${path.resolve(location)}`));
+        console.log(chalk.dim(`  Found: ${validation.found.join(', ')}`));
+        if (validation.missing.length > 0) {
+          console.log(chalk.dim(`  Missing: ${validation.missing.join(', ')}`));
+        }
       }
 
-      addSubscription(name, libraryPath);
-
-      console.log(chalk.green(`\n✓ Subscribed to "${name}" at ${path.resolve(libraryPath)}`));
-      console.log(chalk.dim(`  Found: ${validation.found.join(', ')}`));
-      if (validation.missing.length > 0) {
-        console.log(chalk.dim(`  Missing: ${validation.missing.join(', ')}`));
-      }
       console.log();
       console.log(
         chalk.dim('Library entries will now use the namespace prefix, e.g., ') +
@@ -1272,14 +1339,20 @@ program
     }
   });
 
-program
-  .command('unsubscribe')
-  .description('Remove a library subscription by namespace')
+sourceRoot
+  .command('remove')
+  .description('Remove a library source by namespace')
   .argument('<name>', 'Namespace to remove')
   .action((name: string) => {
     try {
-      removeSubscription(name);
-      console.log(chalk.green(`\n✓ Unsubscribed from "${name}"`));
+      const sources = getSources();
+      const source = sources.find((s) => s.namespace === name);
+      removeSource(name);
+      if (source?.remote) {
+        console.log(chalk.green(`\n✓ Removed source "${name}" and cleaned up cache`));
+      } else {
+        console.log(chalk.green(`\n✓ Removed source "${name}"`));
+      }
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1288,36 +1361,50 @@ program
     }
   });
 
-program
-  .command('subscriptions')
-  .description('List all library subscriptions')
+sourceRoot
+  .command('list')
+  .description('List all library sources')
   .option('--json', 'Output as JSON')
   .action((options: { json?: boolean }) => {
     try {
-      const subscriptions = getSubscriptions();
+      const sources = getSources();
 
       if (options.json) {
-        console.log(JSON.stringify(subscriptions, null, 2));
+        console.log(JSON.stringify(sources, null, 2));
         return;
       }
 
-      if (subscriptions.length === 0) {
-        console.log(chalk.yellow('\n⚠ No library subscriptions configured.'));
-        console.log(chalk.dim('  Use `asb subscribe <name> <path>` to add one.'));
+      if (sources.length === 0) {
+        console.log(chalk.yellow('\n⚠ No library sources configured.'));
+        console.log(chalk.dim('  Use `asb source add <name> <location>` to add one.'));
         return;
       }
 
-      console.log(chalk.blue('\nLibrary subscriptions:'));
-      const header = ['Namespace', 'Path', 'Status', 'Contains'];
-      const rows = subscriptions.map((sub: { namespace: string; path: string }) => {
-        const exists = fs.existsSync(sub.path);
-        const validation = exists ? validateSubscriptionPath(sub.path) : { found: [], missing: [] };
-        const statusPlain = exists ? 'ok' : 'missing';
+      console.log(chalk.blue('\nLibrary sources:'));
+      const header = ['Namespace', 'Type', 'Source', 'Status', 'Contains'];
+      const rows = sources.map((src) => {
+        const isRemote = !!src.remote;
+        const typePlain = isRemote ? 'remote' : 'local';
+        const sourcePlain = isRemote ? (src.remote?.url ?? src.path) : src.path;
+        const exists = fs.existsSync(src.path);
+        const validation = exists ? validateSourcePath(src.path) : { found: [], missing: [] };
+
+        let statusPlain: string;
+        if (isRemote) {
+          statusPlain = exists ? 'cached' : 'not cached';
+        } else {
+          statusPlain = exists ? 'ok' : 'missing';
+        }
+
         const containsPlain = validation.found.length > 0 ? validation.found.join(', ') : '-';
 
         return [
-          { plain: sub.namespace, formatted: chalk.cyan(sub.namespace) },
-          { plain: sub.path, formatted: chalk.dim(sub.path) },
+          { plain: src.namespace, formatted: chalk.cyan(src.namespace) },
+          {
+            plain: typePlain,
+            formatted: isRemote ? chalk.blue(typePlain) : chalk.gray(typePlain),
+          },
+          { plain: sourcePlain, formatted: chalk.dim(sourcePlain) },
           {
             plain: statusPlain,
             formatted: exists ? chalk.green(statusPlain) : chalk.red(statusPlain),
@@ -1334,5 +1421,9 @@ program
       process.exit(1);
     }
   });
+
+sourceRoot.action(() => {
+  sourceRoot.commands.find((c) => c.name() === 'list')?.parse(process.argv);
+});
 
 program.parse(process.argv);
