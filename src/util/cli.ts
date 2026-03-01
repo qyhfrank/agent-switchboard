@@ -5,7 +5,7 @@ const HOME = os.homedir();
 
 export function shortenPath(p: string): string {
   if (p.startsWith(HOME)) {
-    return '~' + p.slice(HOME.length);
+    return `~${p.slice(HOME.length)}`;
   }
   return p;
 }
@@ -36,27 +36,18 @@ export interface DistributionResultLike {
   error?: string;
 }
 
-export function printDistributionResults<T extends DistributionResultLike>({
-  title,
-  results,
-  getTargetLabel,
-  getPath,
-  emptyMessage,
-}: {
-  title: string;
-  results: T[];
-  getTargetLabel: (result: T) => string;
-  getPath: (result: T) => string;
-  emptyMessage?: string;
-}): void {
-  console.log(chalk.blue(`${title}:`));
-  if (results.length === 0) {
-    if (emptyMessage) {
-      console.log(`  ${chalk.gray(emptyMessage)}`);
-    }
-    return;
-  }
+export interface DistributionCounts {
+  written: number;
+  skipped: number;
+  deleted: number;
+  errors: number;
+  skippedByTarget: Map<string, number>;
+}
 
+export function countDistributionResults<T extends DistributionResultLike>(
+  results: T[],
+  getTargetLabel: (result: T) => string
+): DistributionCounts {
   let written = 0;
   let skipped = 0;
   let deleted = 0;
@@ -81,41 +72,125 @@ export function printDistributionResults<T extends DistributionResultLike>({
         break;
     }
   }
+  return { written, skipped, deleted, errors, skippedByTarget };
+}
+
+export function formatDistributionSummary(counts: DistributionCounts): string {
+  const { written, skipped, deleted, errors, skippedByTarget } = counts;
+  const parts: string[] = [];
+  if (written > 0) parts.push(`${chalk.green(String(written))} written`);
+  if (deleted > 0) parts.push(`${chalk.yellow(String(deleted))} deleted`);
+  if (errors > 0) parts.push(`${chalk.red(String(errors))} error`);
+  if (skipped > 0) {
+    const entries = [...skippedByTarget.entries()].sort(([a], [b]) => a.localeCompare(b));
+    const uniqueCounts = new Set(skippedByTarget.values());
+    const showBreakdown = entries.length > 0 && uniqueCounts.size > 1;
+    if (showBreakdown) {
+      const breakdown = entries.map(([target, count]) => `${target}:${count}`).join(', ');
+      parts.push(`${chalk.gray(String(skipped))} up-to-date${chalk.gray(` (${breakdown})`)}`);
+    } else {
+      parts.push(`${chalk.gray(String(skipped))} up-to-date`);
+    }
+  }
+  return parts.join(chalk.gray(', '));
+}
+
+export function printDistributionResults<T extends DistributionResultLike>({
+  title,
+  results,
+  getTargetLabel,
+  getPath,
+  emptyMessage,
+}: {
+  title: string;
+  results: T[];
+  getTargetLabel: (result: T) => string;
+  getPath: (result: T) => string;
+  emptyMessage?: string;
+}): void {
+  console.log(chalk.blue(`${title}:`));
+  if (results.length === 0) {
+    if (emptyMessage) {
+      console.log(`  ${chalk.gray(emptyMessage)}`);
+    }
+    return;
+  }
+
+  const counts = countDistributionResults(results, getTargetLabel);
 
   for (const result of results) {
     if (result.status === 'skipped') continue;
+    printResultLine(result, getTargetLabel, getPath, 2);
+  }
 
-    const pathLabel = chalk.dim(shortenPath(getPath(result)));
-    const targetLabel = chalk.cyan(getTargetLabel(result));
+  const summary = formatDistributionSummary(counts);
+  if (summary) {
+    console.log(`  ${chalk.gray('Summary:')} ${summary}`);
+  }
+}
 
-    if (result.status === 'written') {
-      const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-      console.log(`  ${chalk.green('✓')} ${targetLabel} ${pathLabel}${reason}`);
-    } else if (result.status === 'deleted') {
-      const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
-      console.log(`  ${chalk.yellow('−')} ${targetLabel} ${pathLabel}${reason}`);
+function printResultLine<T extends DistributionResultLike>(
+  result: T,
+  getTargetLabel: (r: T) => string,
+  getPath: (r: T) => string,
+  indent: number
+): void {
+  const pad = ' '.repeat(indent);
+  const pathLabel = chalk.dim(shortenPath(getPath(result)));
+  const targetLabel = chalk.cyan(getTargetLabel(result));
+
+  if (result.status === 'written') {
+    const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+    console.log(`${pad}${chalk.green('✓')} ${targetLabel} ${pathLabel}${reason}`);
+  } else if (result.status === 'deleted') {
+    const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+    console.log(`${pad}${chalk.yellow('−')} ${targetLabel} ${pathLabel}${reason}`);
+  } else if (result.status === 'error') {
+    const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
+    console.log(`${pad}${chalk.red('✗')} ${targetLabel} ${pathLabel}${errorLabel}`);
+  }
+}
+
+export interface CompactDistributionSection<T extends DistributionResultLike> {
+  label: string;
+  results: T[];
+  getTargetLabel: (result: T) => string;
+  getPath: (result: T) => string;
+  emptyMessage?: string;
+}
+
+export function printCompactDistributions(
+  sections: CompactDistributionSection<DistributionResultLike>[]
+): { hasErrors: boolean } {
+  console.log(chalk.blue('Distribution:'));
+  const maxLabelLen = Math.max(...sections.map((s) => s.label.length));
+  let hasErrors = false;
+
+  for (const section of sections) {
+    const label = section.label.padEnd(maxLabelLen);
+
+    if (section.results.length === 0) {
+      console.log(`  ${chalk.gray(`${label}:`)} ${chalk.gray(section.emptyMessage || 'none')}`);
+      continue;
+    }
+
+    const counts = countDistributionResults(section.results, section.getTargetLabel);
+    if (counts.errors > 0) hasErrors = true;
+    const summary = formatDistributionSummary(counts);
+    const hasChanges = counts.written > 0 || counts.deleted > 0 || counts.errors > 0;
+
+    if (!hasChanges) {
+      console.log(`  ${chalk.gray(`${label}:`)} ${summary}`);
     } else {
-      const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
-      console.log(`  ${chalk.red('✗')} ${targetLabel} ${pathLabel}${errorLabel}`);
+      console.log(`  ${label}: ${summary}`);
+      for (const result of section.results) {
+        if (result.status === 'skipped') continue;
+        printResultLine(result, section.getTargetLabel, section.getPath, 4);
+      }
     }
   }
 
-  const summaryParts: string[] = [];
-  if (written > 0) summaryParts.push(`${chalk.green(String(written))} written`);
-  if (deleted > 0) summaryParts.push(`${chalk.yellow(String(deleted))} deleted`);
-  if (errors > 0) summaryParts.push(`${chalk.red(String(errors))} error`);
-  if (skipped > 0) {
-    const breakdown = [...skippedByTarget.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([target, count]) => `${target}:${count}`)
-      .join(', ');
-    const suffix = breakdown.length > 0 ? chalk.gray(` (${breakdown})`) : '';
-    summaryParts.push(`${chalk.gray(String(skipped))} up-to-date${suffix}`);
-  }
-
-  if (summaryParts.length > 0) {
-    console.log(`  ${chalk.gray('Summary:')} ${summaryParts.join(chalk.gray(', '))}`);
-  }
+  return { hasErrors };
 }
 
 export function printActiveSelection(label: string, ids: string[]): void {
@@ -162,4 +237,3 @@ export function printAgentSyncStatus(options: {
     console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
   }
 }
-// test

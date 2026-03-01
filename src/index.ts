@@ -20,10 +20,7 @@ import { importCommandFromFile } from './commands/importer.js';
 
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
-import {
-  getApplicationOverride,
-  resolveApplicationSectionConfig,
-} from './config/application-config.js';
+import { resolveApplicationSectionConfig } from './config/application-config.js';
 import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
   getAgentsDir,
@@ -90,8 +87,11 @@ import { showRuleSelector } from './ui/rule-ui.js';
 import { showSkillSelector } from './ui/skill-ui.js';
 import { showSubagentSelector } from './ui/subagent-ui.js';
 import {
+  type CompactDistributionSection,
+  type DistributionResultLike,
   printActiveSelection,
   printAgentSyncStatus,
+  printCompactDistributions,
   printDistributionResults,
   printTable,
   shortenPath,
@@ -138,19 +138,13 @@ program
       const loadOptions = scopeToLoadOptions(scope);
       const { config, layers } = loadSwitchboardConfigWithLayers(loadOptions);
 
-      console.log();
-      console.log(
-        `${chalk.bgRed.white(' WARNING ')} ${chalk.red(
-          '`asb sync` overwrites target files without diff checks.'
-        )}`
-      );
-      console.log(chalk.red('Proceeding with synchronization...'));
+      console.log(chalk.yellow('⚠ Sync overwrites agent config without diff.'));
       console.log();
 
       if (options.update !== false) {
         const remoteResults = updateRemoteSources();
         if (remoteResults.length > 0) {
-          console.log(chalk.blue('Remote source updates:'));
+          console.log(chalk.blue('Sources:'));
           for (const result of remoteResults) {
             if (result.status === 'updated') {
               console.log(
@@ -162,130 +156,126 @@ program
               );
             }
           }
-          console.log();
         }
       }
 
-      console.log(chalk.blue('Configuration layers:'));
-      const layerEntries: Array<{
-        label: string;
-        exists: boolean;
-        path: string;
-      }> = [
-        { label: 'User', exists: layers.user.exists, path: layers.user.path },
-        {
-          label: 'Profile',
-          exists: layers.profile?.exists === true,
-          path: layers.profile?.path ?? '(none)',
-        },
-        {
-          label: 'Project',
-          exists: layers.project?.exists === true,
-          path: layers.project?.path ?? '(none)',
-        },
-      ];
-      for (const entry of layerEntries) {
-        const marker = entry.exists ? chalk.green('✓') : chalk.gray('•');
-        const displayPath = entry.exists ? shortenPath(entry.path) : entry.path;
-        const pathLabel = entry.exists ? chalk.dim(displayPath) : chalk.gray(displayPath);
-        console.log(`  ${marker} ${entry.label}: ${pathLabel}`);
-      }
+      // Config summary: show active layers on one line
+      const activeLayers: string[] = [];
+      if (layers.user.exists) activeLayers.push(shortenPath(layers.user.path));
+      if (layers.profile?.exists) activeLayers.push(shortenPath(layers.profile.path));
+      if (layers.project?.exists) activeLayers.push(shortenPath(layers.project.path));
+      console.log(
+        `${chalk.blue('Config:')} ${activeLayers.length > 0 ? chalk.dim(activeLayers.join(' + ')) : chalk.gray('no config files')}`
+      );
+
+      const appsLabel =
+        config.applications.active.length > 0
+          ? chalk.cyan(config.applications.active.join(', '))
+          : chalk.gray('none configured');
+      console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
       console.log();
 
-      const globalAgentCount = config.agents.active.length;
-      const perAppAdds: string[] = [];
-      for (const appId of config.applications.active) {
-        const override = getApplicationOverride(config, appId, 'agents');
-        if (override?.add && override.add.length > 0) {
-          perAppAdds.push(`${appId}+${override.add.length}`);
-        }
-      }
-      const agentLabel =
-        perAppAdds.length > 0
-          ? `${chalk.cyan(String(globalAgentCount))} ${chalk.gray(`(${perAppAdds.join(', ')})`)}`
-          : chalk.cyan(String(globalAgentCount));
-
-      console.log(chalk.blue('Active selections:'));
-      console.log(`  MCP servers: ${chalk.cyan(String(config.mcp.active.length))}`);
-      console.log(`  Rules: ${chalk.cyan(String(config.rules.active.length))}`);
-      console.log(`  Commands: ${chalk.cyan(String(config.commands.active.length))}`);
-      console.log(`  Agents: ${agentLabel}`);
-      console.log(`  Skills: ${chalk.cyan(String(config.skills.active.length))}`);
-      console.log(`  Hooks: ${chalk.cyan(String(config.hooks.active.length))}`);
-      if (config.applications.active.length > 0) {
-        console.log(`  Applications: ${chalk.cyan(config.applications.active.join(', '))}`);
-      } else {
-        console.log(`  Applications: ${chalk.gray('none configured')}`);
-      }
-      console.log();
-
-      // Effective inventory: what is active per application after overrides
-      console.log(chalk.blue('Effective inventory:'));
+      const cursorSkillsDeduped =
+        config.applications.active.includes('claude-code') &&
+        resolveApplicationSectionConfig('skills', 'claude-code', scope).active.length > 0;
+      console.log(chalk.blue('Inventory:'));
       {
-        const header = ['Section', 'Global', 'Effective per application', 'Preview'];
         const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
 
-        const rows = sections.map((section) => {
+        // Keep in sync with platform lists in each distribution module
+        const sectionPlatforms: Record<string, readonly string[]> = {
+          mcp: ['claude-code', 'claude-desktop', 'codex', 'cursor', 'gemini', 'opencode'],
+          rules: ['claude-code', 'codex', 'cursor', 'gemini', 'opencode'],
+          commands: ['claude-code', 'codex', 'cursor', 'gemini', 'opencode'],
+          agents: ['claude-code', 'opencode', 'cursor'],
+          skills: cursorSkillsDeduped
+            ? ['claude-code', 'codex', 'gemini', 'opencode']
+            : ['claude-code', 'codex', 'gemini', 'opencode', 'cursor'],
+          hooks: ['claude-code'],
+        };
+
+        const termWidth = process.stdout.columns || 80;
+        const maxSectionLen = Math.max(...sections.map((s) => s.length));
+        const maxCountLen = Math.max(...sections.map((s) => `(${config[s].active.length})`.length));
+        const prefixPlainLen = 2 + maxSectionLen + 1 + maxCountLen + 2;
+
+        const fitPreview = (ids: string[], maxWidth: number): string => {
+          if (ids.length === 0) return chalk.gray('none');
+          const full = ids.join(', ');
+          if (full.length <= maxWidth) return full;
+
+          let text = '';
+          let shown = 0;
+          for (let i = 0; i < ids.length; i++) {
+            const sep = shown > 0 ? ', ' : '';
+            const candidate = text + sep + ids[i];
+            const remaining = ids.length - (i + 1);
+            if (remaining > 0) {
+              const suffix = `, ... (+${remaining} more)`;
+              if (candidate.length + suffix.length > maxWidth && shown > 0) {
+                const left = ids.length - shown;
+                return `${text}${chalk.gray(`, ... (+${left} more)`)}`;
+              }
+            }
+            text = candidate;
+            shown++;
+          }
+          return text;
+        };
+
+        for (const section of sections) {
           const globalActive = config[section].active;
           const globalCount = globalActive.length;
 
-          const perAppEffective = config.applications.active.map((appId) => {
-            const eff = resolveApplicationSectionConfig(section, appId, scope).active;
+          const supported = new Set(sectionPlatforms[section] ?? []);
+          const applicableApps = config.applications.active.filter((id) => supported.has(id));
+
+          const effectiveByApp = new Map<string, string[]>();
+          for (const appId of applicableApps) {
+            effectiveByApp.set(
+              appId,
+              resolveApplicationSectionConfig(section, appId, scope).active
+            );
+          }
+
+          const perAppParts = applicableApps.map((appId) => {
+            const eff = effectiveByApp.get(appId) ?? [];
             const delta = eff.length - globalCount;
-            const deltaLabel = delta === 0 ? '' : delta > 0 ? `(+${delta})` : `(${delta})`;
-            return `${appId}:${eff.length}${deltaLabel}`;
+            const d = delta === 0 ? '' : delta > 0 ? `(+${delta})` : `(${delta})`;
+            return `${appId}:${eff.length}${d}`;
           });
 
           const union = new Set<string>();
-          for (const appId of config.applications.active) {
-            const eff = resolveApplicationSectionConfig(section, appId, scope).active;
-            for (const id of eff) union.add(id);
+          for (const [, ids] of effectiveByApp) {
+            for (const id of ids) union.add(id);
           }
+          const previewIds = globalActive.length > 0 ? [...globalActive] : [...union];
 
-          const previewIds = globalActive.length > 0 ? globalActive : [...union];
-          const maxPreview = 5;
-          const preview =
-            previewIds.length === 0
-              ? 'none'
-              : previewIds.length <= maxPreview
-                ? previewIds.join(', ')
-                : `${previewIds.slice(0, maxPreview).join(', ')}, ... (+${
-                    previewIds.length - maxPreview
-                  } more)`;
+          const paddedSection = section.padEnd(maxSectionLen);
+          const countStr = `(${globalCount})`.padStart(maxCountLen);
+          const appsStr = perAppParts.join('  ');
+          console.log(`  ${chalk.cyan(paddedSection)} ${chalk.gray(countStr)}  ${appsStr}`);
 
-          const sectionLabel =
-            section === 'mcp'
-              ? 'mcp'
-              : section === 'agents'
-                ? 'agents'
-                : section === 'rules'
-                  ? 'rules'
-                  : section;
-
-          return [
-            { plain: sectionLabel, formatted: chalk.cyan(sectionLabel) },
-            { plain: String(globalCount), formatted: chalk.cyan(String(globalCount)) },
-            {
-              plain: perAppEffective.join(' '),
-              formatted: perAppEffective.length > 0 ? perAppEffective.join(chalk.gray(' ')) : '—',
-            },
-            { plain: preview, formatted: preview === 'none' ? chalk.gray(preview) : preview },
-          ];
-        });
-
-        printTable(header, rows);
+          if (previewIds.length > 0) {
+            const indent = ' '.repeat(prefixPlainLen);
+            const previewWidth = Math.max(20, termWidth - prefixPlainLen - 2);
+            const preview = fitPreview(previewIds, previewWidth);
+            console.log(`${indent}${chalk.gray('→')} ${preview}`);
+          }
+        }
       }
       console.log();
-      console.log(
-        chalk.gray(
-          'Note: some library types may distribute to additional platforms (e.g., gemini) even if not listed under [applications].'
-        )
-      );
+      const notes: string[] = ['rules, skills also distribute to gemini'];
+      if (cursorSkillsDeduped) notes.push('cursor reads skills via claude-code');
+      for (let i = 0; i < notes.length; i++) {
+        const prefix = i === 0 ? '  Note: ' : '        ';
+        const suffix = i === notes.length - 1 ? '.' : '.';
+        console.log(chalk.gray(`${prefix}${notes[i]}${suffix}`));
+      }
       console.log();
 
       const mcpDistribution = await applyToAgents(scope, undefined, { useSpinner: false });
-
-      const ruleDistribution = distributeRules(undefined, { force: true }, scope);
+      const ruleDistribution = distributeRules(undefined, undefined, scope);
       const commandDistribution = distributeCommands(scope);
       const agentDistribution = distributeSubagents(scope);
       const skillDistribution = distributeSkills(scope, {
@@ -293,81 +283,65 @@ program
       });
       const hookDistribution = distributeHooks(scope);
 
-      const ruleErrors = ruleDistribution.results.filter((result) => result.status === 'error');
-      const commandErrors = commandDistribution.results.filter(
-        (result) => result.status === 'error'
-      );
-      const agentErrors = agentDistribution.results.filter((result) => result.status === 'error');
-      const skillErrors = skillDistribution.results.filter((result) => result.status === 'error');
-      const hookErrors = hookDistribution.results.filter((result) => result.status === 'error');
+      const distSections: CompactDistributionSection<DistributionResultLike>[] = [
+        {
+          label: 'mcp',
+          results: mcpDistribution,
+          emptyMessage: 'no apps configured',
+          getTargetLabel: (r) => (r as (typeof mcpDistribution)[number]).application,
+          getPath: (r) => (r as (typeof mcpDistribution)[number]).filePath,
+        },
+        {
+          label: 'rules',
+          results: ruleDistribution.results,
+          emptyMessage: 'none',
+          getTargetLabel: (r) => (r as (typeof ruleDistribution.results)[number]).agent,
+          getPath: (r) => (r as (typeof ruleDistribution.results)[number]).filePath,
+        },
+        {
+          label: 'commands',
+          results: commandDistribution.results,
+          emptyMessage: 'none',
+          getTargetLabel: (r) => (r as (typeof commandDistribution.results)[number]).platform,
+          getPath: (r) => (r as (typeof commandDistribution.results)[number]).filePath,
+        },
+        {
+          label: 'agents',
+          results: agentDistribution.results,
+          emptyMessage: 'none',
+          getTargetLabel: (r) => (r as (typeof agentDistribution.results)[number]).platform,
+          getPath: (r) => (r as (typeof agentDistribution.results)[number]).filePath,
+        },
+        {
+          label: 'skills',
+          results: skillDistribution.results,
+          emptyMessage: 'none',
+          getTargetLabel: (r) => {
+            const sr = r as (typeof skillDistribution.results)[number];
+            return sr.platform === 'agents' ? 'codex+gemini+opencode' : sr.platform;
+          },
+          getPath: (r) => (r as (typeof skillDistribution.results)[number]).targetDir,
+        },
+        {
+          label: 'hooks',
+          results: hookDistribution.results,
+          emptyMessage: 'none',
+          getTargetLabel: (r) => (r as (typeof hookDistribution.results)[number]).platform,
+          getPath: (r) => {
+            const hr = r as (typeof hookDistribution.results)[number];
+            return 'filePath' in hr ? hr.filePath : (hr as { targetDir: string }).targetDir;
+          },
+        },
+      ];
 
-      printDistributionResults({
-        title: 'MCP server distribution',
-        results: mcpDistribution,
-        emptyMessage: 'no applications configured',
-        getTargetLabel: (result) => result.application,
-        getPath: (result) => result.filePath,
-      });
+      const { hasErrors } = printCompactDistributions(distSections);
       console.log();
 
-      printDistributionResults({
-        title: 'Rule distribution',
-        results: ruleDistribution.results,
-        emptyMessage: 'no supported agents configured',
-        getTargetLabel: (result) => result.agent,
-        getPath: (result) => result.filePath,
-      });
-      console.log();
-
-      printDistributionResults({
-        title: 'Command distribution',
-        results: commandDistribution.results,
-        emptyMessage: 'no active commands',
-        getTargetLabel: (result) => result.platform,
-        getPath: (result) => result.filePath,
-      });
-      console.log();
-
-      printDistributionResults({
-        title: 'Agent distribution',
-        results: agentDistribution.results,
-        emptyMessage: 'no active agents',
-        getTargetLabel: (result) => result.platform,
-        getPath: (result) => result.filePath,
-      });
-      console.log();
-
-      printDistributionResults({
-        title: 'Skill distribution',
-        results: skillDistribution.results,
-        emptyMessage: 'no active skills',
-        getTargetLabel: (result) =>
-          result.platform === 'agents' ? 'codex+gemini+opencode' : result.platform,
-        getPath: (result) => result.targetDir,
-      });
-      console.log();
-
-      printDistributionResults({
-        title: 'Hook distribution',
-        results: hookDistribution.results,
-        emptyMessage: 'no active hooks',
-        getTargetLabel: (result) => result.platform,
-        getPath: (result) =>
-          'filePath' in result ? result.filePath : (result as { targetDir: string }).targetDir,
-      });
-      console.log();
-
-      const hasErrors =
-        ruleErrors.length > 0 ||
-        commandErrors.length > 0 ||
-        agentErrors.length > 0 ||
-        skillErrors.length > 0 ||
-        hookErrors.length > 0;
       if (hasErrors) {
-        console.log(chalk.red('✗ Synchronization completed with errors.'));
+        console.log(chalk.red('✗ Sync completed with errors.'));
         process.exit(1);
       } else {
-        console.log(chalk.green('✓ Synchronization complete.'));
+        console.log(chalk.green('✓ Sync complete.'));
       }
     } catch (error) {
       if (error instanceof Error) {
@@ -1467,7 +1441,7 @@ hookRoot.action(async (options: ScopeOptionInput) => {
 hookRoot
   .command('list')
   .description('Display hook library entries')
-  .option('--json', 'Output as JSON')
+  .option('--json', 'Output inventory as JSON')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('--project <path>', 'Project directory containing .asb.toml')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
@@ -1620,7 +1594,7 @@ hookRoot
 type McpDistributionResult = {
   application: string;
   filePath: string;
-  status: 'written' | 'error';
+  status: 'written' | 'skipped' | 'error';
   reason?: string;
   error?: string;
 };
@@ -1671,28 +1645,40 @@ async function applyToAgents(
 
       const agent = getAgentById(agentId);
 
+      const readFileSafe = (p: string): string | null => {
+        try {
+          return fs.readFileSync(p, 'utf-8');
+        } catch {
+          return null;
+        }
+      };
+
       // Use project-level config when --project is specified
       if (scope?.project && agent.applyProjectConfig) {
-        agent.applyProjectConfig(scope.project, configToApply);
         const projectPath = agent.projectConfigPath?.(scope.project) ?? 'project config';
+        const before = readFileSafe(projectPath);
+        agent.applyProjectConfig(scope.project, configToApply);
+        const after = readFileSafe(projectPath);
+        const changed = before !== after;
         persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(projectPath))}`);
         results.push({
           application: agentId,
           filePath: projectPath,
-          status: 'written',
-          reason: 'applied',
+          status: changed ? 'written' : 'skipped',
+          reason: changed ? 'applied' : 'up-to-date',
         });
       } else {
+        const configPath = agent.configPath();
+        const before = readFileSafe(configPath);
         agent.applyConfig(configToApply);
-        persist(
-          chalk.green('✓'),
-          `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(agent.configPath()))}`
-        );
+        const after = readFileSafe(configPath);
+        const changed = before !== after;
+        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(configPath))}`);
         results.push({
           application: agentId,
-          filePath: agent.configPath(),
-          status: 'written',
-          reason: 'applied',
+          filePath: configPath,
+          status: changed ? 'written' : 'skipped',
+          reason: changed ? 'applied' : 'up-to-date',
         });
       }
     } catch (error) {
@@ -1883,7 +1869,7 @@ sourceRoot
 sourceRoot
   .command('list')
   .description('List all library sources')
-  .option('--json', 'Output as JSON')
+  .option('--json', 'Output inventory as JSON')
   .action((options: { json?: boolean }) => {
     try {
       const sources = getSources();
@@ -1894,7 +1880,7 @@ sourceRoot
       }
 
       if (sources.length === 0) {
-        console.log(chalk.yellow('\n⚠ No library sources configured.'));
+        console.log(chalk.yellow('⚠ No library sources configured.'));
         console.log(chalk.dim('  Use `asb source add <location> [name]` to add one.'));
         return;
       }
