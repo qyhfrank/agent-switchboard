@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Agent Switchboard (`asb`) is a CLI tool that unifies configuration management across multiple AI coding agents (Claude Code, Codex, Cursor, Gemini, OpenCode, Claude Desktop). It stores all library entries (rules, commands, subagents, skills, MCP servers) in a single agent-agnostic location (`~/.asb/`), then distributes them to each agent in its native format.
+Agent Switchboard (`asb`) is a CLI tool that unifies configuration management across multiple AI coding agents (Claude Code, Codex, Cursor, Gemini, OpenCode, Claude Desktop). It stores all library entries (rules, commands, agents, skills, hooks, MCP servers) in a single agent-agnostic location (`~/.asb/`), then distributes them to each agent in its native format. Sources can be local directories or Git repos, including Claude Code Marketplace format.
 
 ## Commands
 
@@ -39,8 +39,9 @@ To publish a new version, use `pnpm release [patch|minor|major|<version>]`. The 
 │ mcp.json    │         │ User  config.toml│        │ ~/.claude/   │
 │ rules/      │  load   │ Profile <p>.toml │  dist  │ ~/.codex/    │
 │ commands/   ├────────►│ Project .asb.toml├───────►│ ~/.cursor/   │
-│ subagents/  │         │                  │        │ ~/.gemini/   │
-│ skills/     │         │ Per-agent ovride │        │ ~/.config/   │
+│ agents/     │         │                  │        │ ~/.gemini/   │
+│ skills/     │         │ Per-app override │        │ ~/.config/   │
+│ hooks/      │         │                  │        │              │
 └─────────────┘         └──────────────────┘        └──────────────┘
 ```
 
@@ -48,20 +49,25 @@ To publish a new version, use `pnpm release [patch|minor|major|<version>]`. The 
 
 **Agent Adapters** (`src/agents/`): Strategy pattern. Each agent implements `AgentAdapter` (defined in `adapter.ts`) to handle its own config format (JSON, TOML, etc.). `registry.ts` is the factory. Adding a new agent means implementing the interface and registering it.
 
-**Layered Config** (`src/config/`): Three TOML layers (user/profile/project) deep-merge with higher priority winning. All schemas live in `schemas.ts` as Zod definitions; TypeScript types are inferred from them. Per-agent overrides (`add`/`remove`/`active`) are resolved in `agent-config.ts`.
+**Layered Config** (`src/config/`): Three TOML layers (user/profile/project) deep-merge with higher priority winning. All schemas live in `schemas.ts` as Zod definitions; TypeScript types are inferred from them. Per-application overrides (`add`/`remove`/`active`) are resolved in `application-config.ts`. The config uses `[applications]` for target AI apps and `[agents]` for the agent library type.
 
-**Library Framework** (`src/library/`): Generic distribution for single-file libraries (commands, subagents) in `distribute.ts` and directory bundles (skills) in `distribute-bundle.ts`. Uses SHA-256 hash comparison to skip unchanged files. Secure file permissions (0o600 files, 0o700 dirs).
+**Library Framework** (`src/library/`): Generic distribution for single-file libraries (commands, agents) in `distribute.ts` and directory bundles (skills) in `distribute-bundle.ts`. Uses SHA-256 hash comparison to skip unchanged files. Secure file permissions (0o600 files, 0o700 dirs).
 
-**Rules** (`src/rules/`): The most complex library type. Has its own composer (`composer.ts`) that merges ordered rule snippets into a single document, and its own distribution logic (`distribution.ts`) because different agents need different output formats (CLAUDE.md vs AGENTS.md vs individual `.mdc` files for Cursor).
+**Rules** (`src/rules/`): The most complex library type. Has its own composer (`composer.ts`) that merges ordered rule snippets into a single document, and its own distribution logic (`distribution.ts`) because different agents need different output formats (CLAUDE.md vs AGENTS.md vs single `.mdc` for Cursor).
 
-**CLI** (`src/index.ts`): Single entry point defining all commands via Commander.js. ~1500 lines.
+**Hooks** (`src/hooks/`): Bundle-based library type. Each hook is a directory (`~/.asb/hooks/<id>/`) containing `hook.json` + script files. Distribution rewrites `${HOOK_DIR}` placeholders to absolute paths and merges into `~/.claude/settings.json`. Only distributes to Claude Code.
+
+**Marketplace** (`src/marketplace/`): Reads Claude Code Marketplace repos (`.claude-plugin/marketplace.json`) and extracts commands, agents, skills, and hooks from plugins. Sources auto-detect between flat library and marketplace formats.
+
+**CLI** (`src/index.ts`): Single entry point defining all commands via Commander.js.
 
 ### Cross-Cutting Patterns
 
 - `ConfigScope` (`{ profile?, project? }`) threads through the entire call chain from CLI option parsing to file writes.
 - Library entries use Markdown + YAML frontmatter. The `extras.<platform>` field carries platform-specific config while keeping the body agent-agnostic.
 - State updates use a mutator pattern: `updateState((current) => newState, scope)`.
-- `LibrarySection` type and shared helpers (`loadLibraryStateSection`/`updateLibraryStateSection`) generalize commands, subagents, and skills state management.
+- `LibrarySection` type and shared helpers (`loadLibraryStateSection`/`updateLibraryStateSection`) generalize commands, agents, and skills state management.
+- `resolveApplicationSectionConfig(section, appId, scope)` is a **hypothetical query**: it returns the effective config for any `appId` regardless of whether it is in `applications.active`. When using its result to make decisions about actual distribution behavior (e.g., whether to deduplicate), always check `config.applications.active.includes(appId)` first.
 
 ## Code Conventions
 
