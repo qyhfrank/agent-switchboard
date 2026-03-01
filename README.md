@@ -268,7 +268,7 @@ This merges layered config, applies per-agent overrides, and writes target files
 ## Development
 
 ```bash
-pnpm install
+pnpm install                # also activates git hooks via postinstall
 pnpm build
 pnpm link --global          # global `agent-switchboard` points to local build
 ```
@@ -276,6 +276,31 @@ pnpm link --global          # global `agent-switchboard` points to local build
 Code changes take effect after `pnpm build`. To unlink: `pnpm uninstall -g agent-switchboard`.
 
 Other scripts: `pnpm dev` (tsx), `pnpm test`, `pnpm lint`, `pnpm typecheck`.
+
+### Git Hooks
+
+`pnpm install` automatically sets `core.hooksPath` to `.githooks/`. The pre-commit hook runs `biome check --write --staged` on staged files, ensuring all committed code passes formatting and lint checks.
+
+### Releasing
+
+Use the release script instead of manually tagging:
+
+```bash
+pnpm release           # patch bump (default): 0.1.27 → 0.1.28
+pnpm release minor     # minor bump: 0.1.27 → 0.2.0
+pnpm release major     # major bump: 0.1.27 → 1.0.0
+pnpm release 0.2.0     # explicit version
+```
+
+The script performs these steps in order:
+
+1. Verify working tree is clean and main is in sync with origin
+2. Run the full validation suite: lint, typecheck, test, build
+3. Bump `version` in `package.json`
+4. Commit and tag (`v<version>`)
+5. Push commit and tag to origin
+
+This guarantees the CI Release workflow will pass, since the exact same checks run locally first.
 
 ## License
 
