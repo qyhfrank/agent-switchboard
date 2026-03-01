@@ -4,7 +4,7 @@
 [![CI](https://github.com/qyhfrank/agent-switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/qyhfrank/agent-switchboard/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Manage MCP servers, rules, commands, subagents, and skills from a single source of truth, then sync them to every AI coding agent you use.
+Manage MCP servers, rules, commands, agents, skills, and hooks from a single source of truth, then sync them to every AI coding agent you use.
 
 Alias: `asb`
 
@@ -20,13 +20,13 @@ Libraries              Config Layers            Distribution
 │ mcp.json     │    │ User   config.toml  │    │ Claude Code    │
 │ rules/       │    │ Profile <name>.toml │    │ Codex          │
 │ commands/    │ ─► │ Project .asb.toml   │ ─► │ Cursor         │
-│ subagents/   │    │                     │    │ Gemini         │
-│ skills/      │    │ Per-agent overrides │    │ OpenCode       │
-└──────────────┘    └─────────────────────┘    │ Claude Desktop │
-                                               └────────────────┘
+│ agents/      │    │                     │    │ Gemini         │
+│ skills/      │    │ Per-app overrides   │    │ OpenCode       │
+│ hooks/       │    │                     │    │ Claude Desktop │
+└──────────────┘    └─────────────────────┘    └────────────────┘
 ```
 
-All library entries are agent-agnostic Markdown files (or directories for skills). Agent Switchboard reads them, applies layered configuration and per-agent overrides, then writes the correct format to each agent's config location.
+Library entries are agent-agnostic Markdown files (or directories for skills, JSON for hooks). Agent Switchboard reads them, applies layered configuration and per-application overrides, then writes the correct format to each agent's config location.
 
 ## Compatibility
 
@@ -36,8 +36,9 @@ All library entries are agent-agnostic Markdown files (or directories for skills
 | Project-level MCP| ✓           | ✓     | ✓      | ✓      | ✓        |                |
 | Rules            | ✓           | ✓     | ✓ mdc  | ✓      | ✓        |                |
 | Commands         | ✓           | ✓\*   | ✓      | ✓      | ✓        |                |
-| Subagents        | ✓           |       | ✓      |        | ✓        |                |
+| Agents           | ✓           |       | ✓      |        | ✓        |                |
 | Skills           | ✓           | ✓     | ✓      | ✓      | ✓        |                |
+| Hooks            | ✓           |       |        |        |          |                |
 
 \* Codex commands use deprecated `~/.codex/prompts/`; prefer skills instead.
 
@@ -52,7 +53,7 @@ npm i -g agent-switchboard    # or: npx agent-switchboard@latest mcp
 1. **Pick your agents** -- create `~/.agent-switchboard/config.toml`:
 
 ```toml
-[agents]
+[applications]
 active = ["claude-code", "codex", "cursor"]
 ```
 
@@ -62,7 +63,7 @@ active = ["claude-code", "codex", "cursor"]
 asb mcp
 ```
 
-3. **Sync everything** -- pushes all libraries (rules, commands, subagents, skills) and MCP config to every active agent:
+3. **Sync everything** -- pushes all libraries (rules, commands, agents, skills, hooks) and MCP config to every active application:
 
 ```bash
 asb sync
@@ -77,16 +78,17 @@ That's it. Library content lives under `~/.agent-switchboard/` and agent configs
 | `asb mcp`            | Interactive MCP server selector                         |
 | `asb rule`           | Interactive rule snippet selector with ordering         |
 | `asb command`        | Interactive command selector                            |
-| `asb subagent`       | Interactive subagent selector                           |
+| `asb agent`          | Interactive agent selector                              |
 | `asb skill`          | Interactive skill selector                              |
-| `asb sync`           | Push all libraries + MCP to agents (no UI)              |
+| `asb hook`           | Interactive hook selector (Claude Code only)            |
+| `asb sync`           | Push all libraries + MCP to applications (no UI)        |
 | `asb <lib> load`     | Import files from a platform into the library           |
 | `asb <lib> list`     | Show inventory, activation state, and sync timestamps   |
 | `asb source add`     | Add an external library source (local path or git URL)  |
 | `asb source remove`  | Remove a library source                                 |
 | `asb source list`    | List configured library sources                         |
 
-`<lib>` = `rule`, `command`, `subagent`, or `skill`.
+`<lib>` = `rule`, `command`, `agent`, `skill`, or `hook`.
 
 **Shared flags**: `-p, --profile <name>`, `--project <path>`, `--json` (on `list` and `source list`).
 
@@ -94,24 +96,24 @@ That's it. Library content lives under `~/.agent-switchboard/` and agent configs
 
 ### `config.toml`
 
-The central config file at `~/.agent-switchboard/config.toml` controls which agents and library entries are active:
+The central config file at `~/.agent-switchboard/config.toml` controls which applications and library entries are active:
 
 ```toml
-[agents]
+[applications]
 active = ["claude-code", "codex", "cursor", "gemini", "opencode"]
 
 [rules]
 includeDelimiters = false   # wrap each rule snippet in <!-- id:start/end --> markers
 ```
 
-Supported agent IDs: `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini`, `opencode`.
+Supported application IDs: `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini`, `opencode`.
 
-### Per-Agent Overrides
+### Per-Application Overrides
 
-Fine-tune which library entries reach each agent using `add` / `remove` / `active`:
+Fine-tune which library entries reach each application using `add` / `remove` / `active`:
 
 ```toml
-[agents]
+[applications]
 active = ["claude-code", "codex", "opencode"]
 
 codex.skills.remove = ["skill-codex"]
@@ -121,13 +123,13 @@ gemini.commands.add    = ["cmd-gemini-only"]
 gemini.skills.remove   = ["skill-go"]
 ```
 
-| Syntax                            | Behavior                   |
-|:----------------------------------|:---------------------------|
-| `<agent>.<section>.active = [...]`| Replace the global list    |
-| `<agent>.<section>.add = [...]`   | Append to the global list  |
-| `<agent>.<section>.remove = [...]`| Remove from the global list|
+| Syntax                          | Behavior                   |
+|:--------------------------------|:---------------------------|
+| `<app>.<section>.active = [...]`| Replace the global list    |
+| `<app>.<section>.add = [...]`   | Append to the global list  |
+| `<app>.<section>.remove = [...]`| Remove from the global list|
 
-Sections: `mcp`, `rules`, `commands`, `subagents`, `skills`.
+Sections: `mcp`, `rules`, `commands`, `agents`, `skills`, `hooks`.
 
 ### Layered Configuration
 
@@ -142,7 +144,7 @@ Three TOML layers merge in priority order (higher wins):
 ```bash
 asb command -p team                        # profile layer
 asb rule --project /path/to/repo           # project layer
-asb subagent -p team --project /path/to/repo  # both
+asb agent -p team --project /path/to/repo     # both
 ```
 
 When `--project` is used, outputs target the project directory (e.g. `<project>/AGENTS.md`, `<project>/.claude/commands/`).
@@ -206,12 +208,12 @@ asb command load gemini [path] -r      # import recursively
 
 Platforms: `claude-code`, `codex`, `cursor`, `gemini`, `opencode`.
 
-### Subagents
+### Agents
 
-Same format as commands, stored in `~/.agent-switchboard/subagents/`.
+Same format as commands, stored in `~/.agent-switchboard/agents/`.
 
 ```bash
-asb subagent load claude-code          # import from ~/.claude/agents/
+asb agent load claude-code             # import from ~/.claude/agents/
 ```
 
 Platforms: `claude-code`, `opencode`, `cursor`.
@@ -235,6 +237,21 @@ asb skill load codex                   # import from ~/.agents/skills/
 
 Entire directories are copied to each agent's skill location. Deactivated skills are cleaned up automatically.
 
+### Hooks
+
+JSON-based hook definitions distributed to Claude Code's `settings.json`. Two storage formats:
+
+- **Single file**: `~/.agent-switchboard/hooks/<id>.json`
+- **Bundle**: `~/.agent-switchboard/hooks/<id>/hook.json` plus script files
+
+```bash
+asb hook load claude-code              # import from ~/.claude/settings.json
+asb hook load /path/to/hook.json       # import a JSON file
+asb hook load /path/to/hook-dir/       # import a bundle directory
+```
+
+Bundle scripts are copied to `~/.claude/hooks/asb/<id>/` and the `${HOOK_DIR}` placeholder in commands is resolved to the absolute path at distribution time.
+
 ## Library Sources
 
 Pull library entries from external directories or git repos:
@@ -246,17 +263,17 @@ asb source list                                        # list configured sources
 asb source remove repo                                 # remove
 ```
 
-The source path must contain at least one of `rules/`, `commands/`, `subagents/`, or `skills/`. Entries from external sources appear with a namespace prefix (e.g. `team:my-rule`) in selectors and config.
+A source can be a flat directory containing `rules/`, `commands/`, `agents/`, `skills/`, or `hooks/` subdirectories, or a `.claude-plugin` marketplace (detected by the presence of `.claude-plugin/marketplace.json`). Entries from external sources appear with a namespace prefix (e.g. `team:my-rule`) in selectors and config.
 
 ## Sync
 
-Push all libraries and MCP config to every active agent in one step:
+Push all libraries and MCP config to every active application in one step:
 
 ```bash
 asb sync [-p <profile>] [--project <path>]
 ```
 
-This merges layered config, applies per-agent overrides, and writes target files in place. Files are only rewritten when content changes.
+This merges layered config, applies per-application overrides, and writes target files in place. Files are only rewritten when content changes.
 
 ## Environment
 
