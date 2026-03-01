@@ -27,7 +27,7 @@ export const mcpConfigSchema = z.object({
 });
 
 /**
- * Base schema for selection sections (commands, subagents, etc.) without defaults
+ * Base schema for selection sections (commands, agents, etc.) without defaults
  */
 const selectionSectionBaseSchema = z
   .object({
@@ -42,7 +42,7 @@ export const selectionSectionSchema = selectionSectionBaseSchema
   .passthrough();
 
 /**
- * Incremental selection schema for per-agent overrides
+ * Incremental selection schema for per-application overrides
  * - active: completely override the global list
  * - add: append to the global list
  * - remove: remove from the global list
@@ -60,38 +60,40 @@ const incrementalRulesSchema = incrementalSelectionSchema.extend({
 });
 
 /**
- * Per-agent configuration override schema
- * Allows overriding mcp, commands, subagents, skills, rules for a specific agent
+ * Per-application configuration override schema
+ * Allows overriding mcp, commands, agents, skills, rules for a specific application
  */
-export const agentConfigOverrideSchema = z
+export const applicationConfigOverrideSchema = z
   .object({
     mcp: incrementalSelectionSchema.optional(),
     commands: incrementalSelectionSchema.optional(),
-    subagents: incrementalSelectionSchema.optional(),
+    agents: incrementalSelectionSchema.optional(),
     skills: incrementalSelectionSchema.optional(),
+    hooks: incrementalSelectionSchema.optional(),
     rules: incrementalRulesSchema.optional(),
   })
   .passthrough();
 
 /**
- * Agents section schema with active list and per-agent overrides
+ * Applications section schema with active list and per-application overrides.
+ * Lists which AI agent applications (claude-code, cursor, codex, etc.) to sync to.
  * Format in TOML:
- *   [agents]
+ *   [applications]
  *   active = ["claude-code", "codex"]
  *
- *   [agents.codex.skills]
+ *   [applications.codex.skills]
  *   remove = ["skill-codex"]
  *
- * Note: Using passthrough() instead of catchall() to allow per-agent overrides.
- * The per-agent overrides are validated at runtime in agent-config.ts.
+ * Note: Using passthrough() instead of catchall() to allow per-application overrides.
+ * The per-application overrides are validated at runtime in application-config.ts.
  */
-const agentsSectionBaseSchema = z
+const applicationsSectionBaseSchema = z
   .object({
     active: z.array(z.string().trim().min(1)).optional(),
   })
   .passthrough();
 
-const agentsSectionSchema = z
+const applicationsSectionSchema = z
   .object({
     active: z.array(z.string().trim().min(1)).default([]),
   })
@@ -110,7 +112,7 @@ export const rulesSectionSchema = rulesSectionBaseSchema
 
 /**
  * Distribution configuration schema
- * Controls how skills/commands/subagents are distributed to agent targets.
+ * Controls how skills/commands/agents are distributed to application targets.
  * - use_agents_dir: When true, skills are distributed to 2 targets (claude-code + agents).
  *   When false (default), skills use the legacy 4-target mode for backward compatibility.
  */
@@ -170,11 +172,12 @@ export const librarySectionSchema = librarySectionBaseSchema
  */
 export const switchboardConfigSchema = z
   .object({
-    agents: agentsSectionSchema.default({ active: [] }),
+    applications: applicationsSectionSchema.default({ active: [] }),
     mcp: selectionSectionSchema.default({ active: [] }),
     commands: selectionSectionSchema.default({ active: [] }),
-    subagents: selectionSectionSchema.default({ active: [] }),
+    agents: selectionSectionSchema.default({ active: [] }),
     skills: selectionSectionSchema.default({ active: [] }),
+    hooks: selectionSectionSchema.default({ active: [] }),
     rules: rulesSectionSchema.default({ active: [], includeDelimiters: false }),
     distribution: distributionSectionSchema.default({ use_agents_dir: false }),
     ui: uiSectionSchema.default({ pageSize: 20 }),
@@ -187,11 +190,12 @@ export const switchboardConfigSchema = z
  */
 export const switchboardConfigLayerSchema = z
   .object({
-    agents: agentsSectionBaseSchema.optional(),
+    applications: applicationsSectionBaseSchema.optional(),
     mcp: selectionSectionBaseSchema.optional(),
     commands: selectionSectionBaseSchema.optional(),
-    subagents: selectionSectionBaseSchema.optional(),
+    agents: selectionSectionBaseSchema.optional(),
     skills: selectionSectionBaseSchema.optional(),
+    hooks: selectionSectionBaseSchema.optional(),
     rules: rulesSectionBaseSchema.optional(),
     distribution: distributionSectionBaseSchema.optional(),
     ui: uiSectionBaseSchema.optional(),
@@ -206,8 +210,8 @@ export type McpServer = z.infer<typeof mcpServerSchema>;
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
 export type SelectionSection = z.infer<typeof selectionSectionSchema>;
 export type IncrementalSelection = z.infer<typeof incrementalSelectionSchema>;
-export type AgentConfigOverride = z.infer<typeof agentConfigOverrideSchema>;
-export type AgentsSection = z.infer<typeof agentsSectionSchema>;
+export type ApplicationConfigOverride = z.infer<typeof applicationConfigOverrideSchema>;
+export type ApplicationsSection = z.infer<typeof applicationsSectionSchema>;
 export type RulesSection = z.infer<typeof rulesSectionSchema>;
 export type DistributionSection = z.infer<typeof distributionSectionSchema>;
 export type UiSection = z.infer<typeof uiSectionSchema>;

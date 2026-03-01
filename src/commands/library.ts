@@ -3,7 +3,7 @@ import path from 'node:path';
 import { getCommandsDir } from '../config/paths.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { getSourcesRecord } from '../library/sources.js';
+import { loadEntriesFromSources } from '../marketplace/source-loader.js';
 
 export interface CommandEntry {
   id: string;
@@ -78,20 +78,22 @@ function loadCommandsFromDirectory(directory: string, namespace?: string): Comma
 }
 
 /**
- * Load all commands from default library and external sources
+ * Load all commands from default library, flat sources, and marketplace sources.
  */
 export function loadCommandLibrary(): CommandEntry[] {
   const result: CommandEntry[] = [];
 
-  // Load from default library (no namespace)
   const defaultDir = ensureCommandsDirectory();
   result.push(...loadCommandsFromDirectory(defaultDir));
 
-  const sources = getSourcesRecord();
-  for (const [namespace, basePath] of Object.entries(sources)) {
+  const { flatSources, marketplaceEntries } = loadEntriesFromSources();
+
+  for (const { namespace, basePath } of flatSources) {
     const commandsDir = path.join(basePath, 'commands');
     result.push(...loadCommandsFromDirectory(commandsDir, namespace));
   }
+
+  result.push(...marketplaceEntries.commands);
 
   result.sort((a, b) => a.id.localeCompare(b.id));
   return result;

@@ -13,9 +13,9 @@ export async function showSubagentSelector(
   options?: SubagentSelectorOptions
 ): Promise<SubagentSelectionResult | null> {
   return showLibrarySelector<SubagentEntry>({
-    section: 'subagents',
-    noun: 'subagent',
-    emptyHint: 'asb subagent load <platform> [path] [-r]',
+    section: 'agents',
+    noun: 'agent',
+    emptyHint: 'asb agent load <platform> [path] [-r]',
     allowOrdering: false,
     loadEntries: () => loadSubagentLibrary(),
     getId: (e) => e.id,

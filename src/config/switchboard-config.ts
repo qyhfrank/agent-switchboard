@@ -1,6 +1,6 @@
 /**
  * Agent Switchboard configuration loader and saver (TOML format)
- * Manages the list of agents to apply MCP configs to
+ * Manages target applications and library state
  */
 
 import fs from 'node:fs';
@@ -18,11 +18,8 @@ export interface SwitchboardConfigLoadResult {
 }
 
 /**
- * Loads the Agent Switchboard configuration from ~/.agent-switchboard/config.toml
- * Returns default empty agents list if file doesn't exist
- *
- * @returns {SwitchboardConfig} Parsed and validated configuration
- * @throws {Error} If file exists but contains invalid TOML or fails schema validation
+ * Loads the Agent Switchboard configuration from ~/.agent-switchboard/config.toml.
+ * Returns default empty applications list if file doesn't exist.
  */
 export function loadSwitchboardConfig(options?: SwitchboardConfigLoadOptions): SwitchboardConfig {
   return loadMergedSwitchboardConfig(options).config;

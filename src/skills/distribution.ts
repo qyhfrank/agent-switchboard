@@ -20,7 +20,7 @@ import {
   type DistributeBundleOutcome,
   distributeBundle,
 } from '../library/distribute-bundle.js';
-import { loadLibraryStateSectionForAgent } from '../library/state.js';
+import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
 export type SkillPlatform = 'claude-code' | 'codex' | 'gemini' | 'opencode' | 'cursor';
@@ -48,7 +48,7 @@ const AGENTS_TARGET_PLATFORMS = ['codex', 'gemini', 'opencode'] as const;
  * cleanup of orphan `.cursor/skills/` directories still executes).
  */
 function shouldDedupCursorSkills(scope?: ConfigScope): boolean {
-  const claudeState = loadLibraryStateSectionForAgent('skills', 'claude-code', scope);
+  const claudeState = loadLibraryStateSectionForApplication('skills', 'claude-code', scope);
   return claudeState.active.length > 0;
 }
 
@@ -158,21 +158,21 @@ function distributeAgentsMode(
   const filterSelected = (target: string, allEntries: SkillEntry[]): SkillEntry[] => {
     if (target === 'cursor') {
       if (shouldDedupCursorSkills(scope)) return [];
-      const state = loadLibraryStateSectionForAgent('skills', target, scope);
+      const state = loadLibraryStateSectionForApplication('skills', target, scope);
       const activeIds = new Set(state.active);
       return allEntries.filter((e) => activeIds.has(e.id));
     }
     if (target === 'agents') {
       const unionIds = new Set<string>();
       for (const agentId of AGENTS_TARGET_PLATFORMS) {
-        const state = loadLibraryStateSectionForAgent('skills', agentId, scope);
+        const state = loadLibraryStateSectionForApplication('skills', agentId, scope);
         for (const id of state.active) {
           unionIds.add(id);
         }
       }
       return allEntries.filter((e) => unionIds.has(e.id));
     }
-    const state = loadLibraryStateSectionForAgent('skills', target, scope);
+    const state = loadLibraryStateSectionForApplication('skills', target, scope);
     const activeIds = new Set(state.active);
     return allEntries.filter((e) => activeIds.has(e.id));
   };
@@ -234,7 +234,7 @@ function distributeLegacyMode(
     if (target === 'cursor') {
       if (shouldDedupCursorSkills(scope)) return [];
     }
-    const state = loadLibraryStateSectionForAgent('skills', target, scope);
+    const state = loadLibraryStateSectionForApplication('skills', target, scope);
     const activeIds = new Set(state.active);
     return allEntries.filter((e) => activeIds.has(e.id));
   };

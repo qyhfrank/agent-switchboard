@@ -46,7 +46,7 @@ test('CLI: command load (claude-code) imports files and list shows guidance (min
   });
 });
 
-test('CLI: subagent load (claude-code) imports files and list shows guidance (minimal schema)', () => {
+test('CLI: agent load (claude-code) imports files and list shows guidance (minimal schema)', () => {
   withTempHomes(({ agentsHome, asbHome }) => {
     const agentsDir = path.join(agentsHome, '.claude', 'agents');
     fs.mkdirSync(agentsDir, { recursive: true });
@@ -63,10 +63,10 @@ test('CLI: subagent load (claude-code) imports files and list shows guidance (mi
         `Body.\n`
     );
 
-    const { stdout: out1 } = runCli(['subagent', 'load', 'claude-code', '-r']);
-    assert.match(stripAnsi(out1), /Imported 1 file\(s\) into subagent library\./);
+    const { stdout: out1 } = runCli(['agent', 'load', 'claude-code', '-r']);
+    assert.match(stripAnsi(out1), /Imported 1 file\(s\) into agent library\./);
 
-    const libFile = path.join(asbHome, 'subagents', 'critic.md');
+    const libFile = path.join(asbHome, 'agents', 'critic.md');
     assert.equal(fs.existsSync(libFile), true);
     const parsed = parseLibraryMarkdown(fs.readFileSync(libFile, 'utf-8'));
     // minimal schema: no top-level title required
@@ -81,7 +81,7 @@ test('CLI: subagent load (claude-code) imports files and list shows guidance (mi
     const count = (content.match(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n/gm) || []).length;
     assert.equal(count, 1);
 
-    const { stdout: out2 } = runCli(['subagent', 'list']);
+    const { stdout: out2 } = runCli(['agent', 'list']);
     const s = stripAnsi(out2);
     assert.match(s, /Unsupported platforms \(manual steps required\): Codex, Gemini/);
   });

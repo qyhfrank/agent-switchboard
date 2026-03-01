@@ -19,7 +19,7 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { loadLibraryStateSectionForAgent } from '../library/state.js';
+import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
@@ -175,7 +175,7 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
     _allEntries: CommandEntry[]
   ): CommandEntry[] => {
     const agentId = platformToAgentId(platform);
-    const state = loadLibraryStateSectionForAgent('commands', agentId, scope);
+    const state = loadLibraryStateSectionForApplication('commands', agentId, scope);
     const activeIds = state.active;
     const selected: CommandEntry[] = [];
     for (const id of activeIds) {

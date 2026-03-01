@@ -1,12 +1,12 @@
 import { z } from 'zod';
-import { resolveAgentSectionConfig } from '../config/agent-config.js';
+import { resolveApplicationSectionConfig } from '../config/application-config.js';
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
 import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
 import type { SwitchboardConfigLayer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { scopeToLayerOptions } from '../config/scope.js';
 
-const agentSyncEntrySchema = z
+const appSyncEntrySchema = z
   .object({
     hash: z.string().trim().min(1).optional(),
     updatedAt: z.string().datetime().optional(),
@@ -16,12 +16,12 @@ const agentSyncEntrySchema = z
 const sectionStateSchema = z
   .object({
     active: z.array(z.string().trim().min(1)).default([]),
-    agentSync: z.record(z.string(), agentSyncEntrySchema).default({}),
+    agentSync: z.record(z.string(), appSyncEntrySchema).default({}),
   })
   .passthrough();
 
 export type SectionState = z.infer<typeof sectionStateSchema>;
-export type LibrarySection = 'commands' | 'subagents' | 'skills';
+export type LibrarySection = 'commands' | 'agents' | 'skills' | 'hooks';
 
 export function loadMcpActiveState(scope?: ConfigScope): string[] {
   const layerOptions = scopeToLayerOptions(scope);
@@ -55,8 +55,9 @@ const agentSyncCache: Record<
   Record<string, { hash?: string; updatedAt?: string }>
 > = {
   commands: {},
-  subagents: {},
+  agents: {},
   skills: {},
+  hooks: {},
 };
 
 function getConfigSectionActive(
@@ -89,25 +90,11 @@ export function saveLibraryStateSection(
 
   updateConfigLayer((layer) => {
     const next: SwitchboardConfigLayer = { ...layer };
-    if (section === 'commands') {
-      const currentCommands = (next.commands ?? {}) as Record<string, unknown>;
-      next.commands = {
-        ...currentCommands,
-        active: [...validated.active],
-      } as SwitchboardConfigLayer['commands'];
-    } else if (section === 'subagents') {
-      const currentSubagents = (next.subagents ?? {}) as Record<string, unknown>;
-      next.subagents = {
-        ...currentSubagents,
-        active: [...validated.active],
-      } as SwitchboardConfigLayer['subagents'];
-    } else {
-      const currentSkills = (next.skills ?? {}) as Record<string, unknown>;
-      next.skills = {
-        ...currentSkills,
-        active: [...validated.active],
-      } as SwitchboardConfigLayer['skills'];
-    }
+    const current = (next[section] ?? {}) as Record<string, unknown>;
+    (next as Record<string, unknown>)[section] = {
+      ...current,
+      active: [...validated.active],
+    };
     return next;
   }, layerOptions);
   agentSyncCache[section] = { ...validated.agentSync };
@@ -125,18 +112,17 @@ export function updateLibraryStateSection(
 }
 
 /**
- * Load library state for a specific agent, applying per-agent overrides
- *
- * This merges the global section config with agent-specific add/remove overrides
+ * Load library state for a specific application, applying per-application overrides.
+ * Merges the global section config with application-specific add/remove overrides.
  */
-export function loadLibraryStateSectionForAgent(
+export function loadLibraryStateSectionForApplication(
   section: LibrarySection,
-  agentId: string,
+  appId: string,
   scope?: ConfigScope
 ): SectionState {
-  const agentConfig = resolveAgentSectionConfig(section, agentId, scope);
+  const appConfig = resolveApplicationSectionConfig(section, appId, scope);
   return {
-    active: agentConfig.active,
+    active: appConfig.active,
     agentSync: { ...agentSyncCache[section] },
   };
 }

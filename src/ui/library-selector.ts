@@ -9,7 +9,7 @@ export interface GenericSelectionResult {
 }
 
 export interface LibrarySelectorOptions<TEntry> {
-  section: 'commands' | 'subagents' | 'skills';
+  section: 'commands' | 'agents' | 'skills' | 'hooks';
   emptyHint: string; // e.g. '  asb command load <platform> [path]'
   // Entry accessors
   loadEntries: () => TEntry[];

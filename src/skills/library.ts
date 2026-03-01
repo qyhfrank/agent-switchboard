@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSkillsDir } from '../config/paths.js';
-import { getSourcesRecord } from '../library/sources.js';
+import { loadEntriesFromSources } from '../marketplace/source-loader.js';
 import { parseSkillMarkdown } from './parser.js';
 import type { SkillFrontmatter } from './schema.js';
 
@@ -99,21 +99,23 @@ function loadSkillsFromDirectory(directory: string, namespace?: string): SkillEn
 }
 
 /**
- * Load all skills from default library and external sources.
- * Each skill is a directory containing a SKILL.md file.
+ * Load all skills from default library, flat sources, and marketplace sources.
  */
 export function loadSkillLibrary(): SkillEntry[] {
   const result: SkillEntry[] = [];
 
-  // Load from default library (no namespace)
   const defaultDir = ensureSkillsDirectory();
   result.push(...loadSkillsFromDirectory(defaultDir));
 
-  const sources = getSourcesRecord();
-  for (const [namespace, basePath] of Object.entries(sources)) {
+  const { flatSources, marketplaceEntries } = loadEntriesFromSources();
+
+  for (const { namespace, basePath } of flatSources) {
     const skillsDir = path.join(basePath, 'skills');
     result.push(...loadSkillsFromDirectory(skillsDir, namespace));
   }
+
+  // Marketplace skill entries have the same shape as SkillEntry
+  result.push(...(marketplaceEntries.skills as SkillEntry[]));
 
   result.sort((a, b) => a.id.localeCompare(b.id));
   return result;

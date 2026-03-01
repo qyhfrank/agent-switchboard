@@ -9,7 +9,7 @@ import { renderDefaultCommandTemplate } from '../src/commands/template.js';
 import { loadLibraryStateSection, updateLibraryStateSection } from '../src/library/state.js';
 import { distributeSubagents, resolveSubagentFilePath } from '../src/subagents/distribution.js';
 import { buildSubagentInventory } from '../src/subagents/inventory.js';
-import { ensureSubagentsDirectory } from '../src/subagents/library.js';
+import { ensureAgentsDirectory } from '../src/subagents/library.js';
 import { renderDefaultSubagentTemplate } from '../src/subagents/template.js';
 
 import { withTempHomes } from './helpers/tmp.js';
@@ -21,7 +21,7 @@ test('e2e: library -> state -> distribution -> inventory', () => {
   withTempHomes(() => {
     // 1) Scaffold sample command and subagent into library
     const cmdDir = ensureCommandsDirectory();
-    const subDir = ensureSubagentsDirectory();
+    const subDir = ensureAgentsDirectory();
 
     const cmdId = 'explain';
     const subId = 'strict-code-reviewer';
@@ -31,13 +31,12 @@ test('e2e: library -> state -> distribution -> inventory', () => {
 
     // 2) Activate with ordering in state
     updateLibraryStateSection('commands', () => ({ active: [cmdId], agentSync: {} }));
-    updateLibraryStateSection('subagents', () => ({ active: [subId], agentSync: {} }));
+    updateLibraryStateSection('agents', () => ({ active: [subId], agentSync: {} }));
 
     // 3) Propagate to all supported platforms
     const cOutcome = distributeCommands();
     const sOutcome = distributeSubagents();
 
-    // Expect at least one write per aggregate
     assert.ok(cOutcome.results.some((r) => r.status === 'written' || r.status === 'skipped'));
     assert.ok(sOutcome.results.some((r) => r.status === 'written' || r.status === 'skipped'));
 
@@ -65,7 +64,7 @@ test('e2e: library -> state -> distribution -> inventory', () => {
 
     // 5) State hashes were written for platforms
     const cmdState = loadLibraryStateSection('commands');
-    const subState = loadLibraryStateSection('subagents');
+    const subState = loadLibraryStateSection('agents');
 
     for (const p of ['claude-code', 'codex', 'cursor', 'gemini', 'opencode'] as const) {
       const sync = cmdState.agentSync[p];

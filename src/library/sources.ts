@@ -275,14 +275,23 @@ export function removeSource(namespace: string): void {
 
 /**
  * Validate a local path has expected library structure.
+ * Recognizes both flat library layout (rules/, commands/, etc.)
+ * and Claude Code marketplace layout (.claude-plugin/marketplace.json).
  */
 export function validateSourcePath(libraryPath: string): {
   valid: boolean;
   found: string[];
   missing: string[];
+  isMarketplace: boolean;
 } {
   const resolvedPath = path.resolve(libraryPath);
-  const libraryTypes = ['rules', 'commands', 'subagents', 'skills'];
+
+  const marketplaceManifest = path.join(resolvedPath, '.claude-plugin', 'marketplace.json');
+  if (fs.existsSync(marketplaceManifest)) {
+    return { valid: true, found: ['marketplace'], missing: [], isMarketplace: true };
+  }
+
+  const libraryTypes = ['rules', 'commands', 'agents', 'skills', 'hooks'];
   const found: string[] = [];
   const missing: string[] = [];
 
@@ -295,7 +304,7 @@ export function validateSourcePath(libraryPath: string): {
     }
   }
 
-  return { valid: found.length > 0, found, missing };
+  return { valid: found.length > 0, found, missing, isMarketplace: false };
 }
 
 /**

@@ -1,6 +1,9 @@
 /**
- * Agent-specific configuration resolution
- * Supports per-agent overrides using add/remove incremental syntax
+ * Application-specific configuration resolution.
+ * Supports per-application overrides using add/remove incremental syntax.
+ *
+ * "Applications" are the target AI agent apps (claude-code, cursor, codex, etc.)
+ * that ASB distributes library entries to.
  */
 
 import { loadMergedSwitchboardConfig } from './layered-config.js';
@@ -8,7 +11,7 @@ import type { IncrementalSelection, SwitchboardConfig } from './schemas.js';
 import type { ConfigScope } from './scope.js';
 import { scopeToLayerOptions } from './scope.js';
 
-export type ConfigSection = 'mcp' | 'commands' | 'subagents' | 'skills' | 'rules';
+export type ConfigSection = 'mcp' | 'commands' | 'agents' | 'skills' | 'hooks' | 'rules';
 
 export interface ResolvedSectionConfig {
   active: string[];
@@ -26,20 +29,17 @@ export function mergeIncrementalSelection(
 ): string[] {
   if (!override) return base;
 
-  // If active is specified, use it as complete override
   if (override.active && override.active.length > 0) {
     return override.active;
   }
 
   let result = [...base];
 
-  // Apply remove first
   if (override.remove && override.remove.length > 0) {
     const removeSet = new Set(override.remove);
     result = result.filter((id) => !removeSet.has(id));
   }
 
-  // Then apply add
   if (override.add && override.add.length > 0) {
     const existing = new Set(result);
     for (const id of override.add) {
@@ -53,66 +53,60 @@ export function mergeIncrementalSelection(
 }
 
 /**
- * Get per-agent override configuration for a specific section
+ * Get per-application override configuration for a specific section
  */
-export function getAgentOverride(
+export function getApplicationOverride(
   config: SwitchboardConfig,
-  agentId: string,
+  appId: string,
   section: ConfigSection
 ): IncrementalSelection | undefined {
-  // agents object may contain per-agent overrides as additional keys (via passthrough)
-  const agents = config.agents as Record<string, unknown>;
-  const agentOverrides = agents[agentId];
-  if (!agentOverrides || typeof agentOverrides !== 'object') {
+  const applications = config.applications as Record<string, unknown>;
+  const appOverrides = applications[appId];
+  if (!appOverrides || typeof appOverrides !== 'object') {
     return undefined;
   }
 
-  const overrideObj = agentOverrides as Record<string, unknown>;
+  const overrideObj = appOverrides as Record<string, unknown>;
   return overrideObj[section] as IncrementalSelection | undefined;
 }
 
 /**
- * Resolve effective configuration for a specific agent and section
- *
- * Applies per-agent overrides to the global section config
+ * Resolve effective configuration for a specific application and section.
+ * Applies per-application overrides to the global section config.
  */
-export function resolveAgentSectionConfig(
+export function resolveApplicationSectionConfig(
   section: ConfigSection,
-  agentId: string,
+  appId: string,
   scope?: ConfigScope
 ): ResolvedSectionConfig {
   const layerOptions = scopeToLayerOptions(scope);
   const { config } = loadMergedSwitchboardConfig(layerOptions);
 
-  // Get global active list for the section
   const globalActive = [...config[section].active];
+  const override = getApplicationOverride(config, appId, section);
 
-  // Get agent-specific override
-  const override = getAgentOverride(config, agentId, section);
-
-  // Merge and return
   return {
     active: mergeIncrementalSelection(globalActive, override),
   };
 }
 
 /**
- * Check if an agent has any overrides configured
+ * Check if an application has any overrides configured
  */
-export function hasAgentOverrides(config: SwitchboardConfig, agentId: string): boolean {
-  const agents = config.agents as Record<string, unknown>;
-  const agentOverrides = agents[agentId];
-  return agentOverrides !== undefined && typeof agentOverrides === 'object';
+export function hasApplicationOverrides(config: SwitchboardConfig, appId: string): boolean {
+  const applications = config.applications as Record<string, unknown>;
+  const appOverrides = applications[appId];
+  return appOverrides !== undefined && typeof appOverrides === 'object';
 }
 
 /**
- * Get list of agents that have overrides configured
+ * Get list of applications that have overrides configured
  */
-export function getAgentsWithOverrides(config: SwitchboardConfig): string[] {
-  const agents = config.agents as Record<string, unknown>;
+export function getApplicationsWithOverrides(config: SwitchboardConfig): string[] {
+  const applications = config.applications as Record<string, unknown>;
   const result: string[] = [];
-  for (const key of Object.keys(agents)) {
-    if (key !== 'active' && typeof agents[key] === 'object') {
+  for (const key of Object.keys(applications)) {
+    if (key !== 'active' && typeof applications[key] === 'object') {
       result.push(key);
     }
   }

@@ -176,7 +176,7 @@ test('validateSourcePath detects library folders', () => {
     assert.equal(result.valid, true);
     assert.deepEqual(result.found.sort(), ['rules', 'skills']);
     assert.ok(result.missing.includes('commands'));
-    assert.ok(result.missing.includes('subagents'));
+    assert.ok(result.missing.includes('agents'));
   });
 });
 

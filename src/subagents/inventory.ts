@@ -78,7 +78,7 @@ function buildSubagentRow(
 
 export function buildSubagentInventory(scope?: ConfigScope): SubagentInventory {
   const entries = loadSubagentLibrary();
-  const state = loadLibraryStateSection('subagents', scope);
+  const state = loadLibraryStateSection('agents', scope);
 
   const byId = new Map(entries.map((e) => [e.id, e]));
   const rows: SubagentInventoryRow[] = [];

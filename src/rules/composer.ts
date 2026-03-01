@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { resolveAgentSectionConfig } from '../config/agent-config.js';
+import { resolveApplicationSectionConfig } from '../config/application-config.js';
 import type { ConfigScope } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import type { RuleSnippet } from './library.js';
@@ -110,11 +110,14 @@ export function composeActiveRules(scope?: ConfigScope): ComposedRules {
 }
 
 /**
- * Compose active rules for a specific agent, applying per-agent overrides
+ * Compose active rules for a specific application, applying per-application overrides
  */
-export function composeActiveRulesForAgent(agentId: string, scope?: ConfigScope): ComposedRules {
+export function composeActiveRulesForApplication(
+  appId: string,
+  scope?: ConfigScope
+): ComposedRules {
   const rules = loadRuleLibrary();
-  const agentConfig = resolveAgentSectionConfig('rules', agentId, scope);
+  const appConfig = resolveApplicationSectionConfig('rules', appId, scope);
   const loadOptions = scope
     ? {
         profile: scope.profile ?? undefined,
@@ -122,7 +125,7 @@ export function composeActiveRulesForAgent(agentId: string, scope?: ConfigScope)
       }
     : undefined;
   const config = loadSwitchboardConfig(loadOptions);
-  return composeRules(agentConfig.active, rules, {
+  return composeRules(appConfig.active, rules, {
     includeDelimiters: config.rules?.includeDelimiters === true,
   });
 }

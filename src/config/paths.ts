@@ -87,10 +87,10 @@ export function getCommandsDir(): string {
 }
 
 /**
- * Returns the absolute path to the subagents library directory
+ * Returns the absolute path to the agents library directory (~/.asb/agents/)
  */
-export function getSubagentsDir(): string {
-  return path.join(getConfigDir(), 'subagents');
+export function getAgentsDir(): string {
+  return path.join(getConfigDir(), 'agents');
 }
 
 /**
@@ -98,6 +98,13 @@ export function getSubagentsDir(): string {
  */
 export function getSkillsDir(): string {
   return path.join(getConfigDir(), 'skills');
+}
+
+/**
+ * Returns the absolute path to the hooks library directory (~/.asb/hooks/)
+ */
+export function getHooksDir(): string {
+  return path.join(getConfigDir(), 'hooks');
 }
 
 /**

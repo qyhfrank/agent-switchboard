@@ -33,6 +33,49 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
+/**
+ * Migrate legacy config keys to the current schema.
+ *
+ * - `[agents]` (old target-app list) → `[applications]`
+ * - `[subagents]` (old agent library) → `[agents]`
+ * - Per-application override `subagents` key → `agents`
+ *
+ * Detection: the presence of `[subagents]` is an unambiguous signal of old format.
+ * Without it, `[agents]` could be either old (target list) or new (library), so we
+ * only migrate `[agents]` → `[applications]` when `[subagents]` co-exists.
+ */
+function migrateLegacyConfigKeys(raw: Record<string, unknown>): Record<string, unknown> {
+  const migrated = { ...raw };
+  const hasOldSubagents = 'subagents' in migrated;
+
+  if (hasOldSubagents && 'agents' in migrated && !('applications' in migrated)) {
+    migrated.applications = migrated.agents;
+    delete migrated.agents;
+
+    const apps = migrated.applications;
+    if (apps && typeof apps === 'object') {
+      for (const [key, value] of Object.entries(apps as Record<string, unknown>)) {
+        if (key === 'active') continue;
+        if (value && typeof value === 'object') {
+          const override = { ...(value as Record<string, unknown>) };
+          if ('subagents' in override && !('agents' in override)) {
+            override.agents = override.subagents;
+            delete override.subagents;
+          }
+          (apps as Record<string, unknown>)[key] = override;
+        }
+      }
+    }
+  }
+
+  if ('subagents' in migrated && !('agents' in migrated)) {
+    migrated.agents = migrated.subagents;
+    delete migrated.subagents;
+  }
+
+  return migrated;
+}
+
 function readLayerFile(filePath: string): ConfigLayerLoadResult {
   if (!fs.existsSync(filePath)) {
     return { path: filePath, exists: false, config: {} };
@@ -40,10 +83,10 @@ function readLayerFile(filePath: string): ConfigLayerLoadResult {
 
   try {
     const content = fs.readFileSync(filePath, 'utf-8');
-    const parsed = content.trim().length === 0 ? {} : parse(content);
-    const validated = switchboardConfigLayerSchema.parse(
-      parsed && typeof parsed === 'object' ? parsed : {}
-    );
+    const raw = content.trim().length === 0 ? {} : parse(content);
+    const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const migrated = migrateLegacyConfigKeys(obj);
+    const validated = switchboardConfigLayerSchema.parse(migrated);
     return { path: filePath, exists: true, config: validated };
   } catch (error) {
     if (error instanceof Error) {

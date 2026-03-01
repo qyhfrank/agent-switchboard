@@ -17,7 +17,7 @@ import {
   RULE_UNSUPPORTED_AGENTS,
 } from './agents.js';
 import type { ComposedRules } from './composer.js';
-import { composeActiveRulesForAgent } from './composer.js';
+import { composeActiveRulesForApplication } from './composer.js';
 import { loadRuleLibrary } from './library.js';
 import { updateRuleState } from './state.js';
 
@@ -142,7 +142,7 @@ export function distributeRules(
 
   for (const agent of RULE_SUPPORTED_AGENTS) {
     // Compose rules for this specific agent (applies per-agent overrides)
-    const document = composeActiveRulesForAgent(agent, scope);
+    const document = composeActiveRulesForApplication(agent, scope);
     if (!firstComposed) {
       firstComposed = document;
     }

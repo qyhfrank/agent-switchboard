@@ -1,24 +1,40 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getCommandsDir, getConfigDir, getSubagentsDir } from '../config/paths.js';
+import { getAgentsDir, getCommandsDir, getConfigDir, getHooksDir } from '../config/paths.js';
 
 function ensureDir(dirPath: string, mode: number): void {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true, mode });
   }
   try {
-    // Normalize permissions (best-effort; subject to OS umask and platform)
     fs.chmodSync(dirPath, mode);
   } catch {
-    // Ignore chmod errors on platforms without POSIX perms (e.g., Windows)
+    // Ignore chmod errors on platforms without POSIX perms
+  }
+}
+
+/**
+ * Migrate legacy ~/.asb/subagents/ directory to ~/.asb/agents/.
+ * Only runs when the old directory exists and the new one does not.
+ */
+function migrateLegacySubagentsDir(): void {
+  const base = getConfigDir();
+  const oldDir = path.join(base, 'subagents');
+  const newDir = getAgentsDir();
+
+  if (fs.existsSync(oldDir) && !fs.existsSync(newDir)) {
+    try {
+      fs.renameSync(oldDir, newDir);
+      console.log(`Migrated ${oldDir} → ${newDir}`);
+    } catch {
+      // Fall through; ensureDir will create the new one
+    }
   }
 }
 
 /**
  * Ensures the Agent Switchboard library directories exist with secure permissions.
- * - Base config dir: created if missing (mode is left to existing defaults)
- * - Commands dir: 0o700
- * - Subagents dir: 0o700
+ * Runs legacy migration first, then creates missing directories.
  */
 export function ensureLibraryDirectories(): void {
   const base = getConfigDir();
@@ -26,8 +42,11 @@ export function ensureLibraryDirectories(): void {
     fs.mkdirSync(base, { recursive: true });
   }
 
+  migrateLegacySubagentsDir();
+
   ensureDir(getCommandsDir(), 0o700);
-  ensureDir(getSubagentsDir(), 0o700);
+  ensureDir(getAgentsDir(), 0o700);
+  ensureDir(getHooksDir(), 0o700);
 }
 
 /**

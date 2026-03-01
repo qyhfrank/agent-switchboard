@@ -61,14 +61,17 @@ export function printDistributionResults<T extends DistributionResultLike>({
   let skipped = 0;
   let deleted = 0;
   let errors = 0;
+  const skippedByTarget = new Map<string, number>();
 
   for (const result of results) {
+    const target = getTargetLabel(result);
     switch (result.status) {
       case 'written':
         written++;
         break;
       case 'skipped':
         skipped++;
+        skippedByTarget.set(target, (skippedByTarget.get(target) ?? 0) + 1);
         break;
       case 'deleted':
         deleted++;
@@ -97,8 +100,21 @@ export function printDistributionResults<T extends DistributionResultLike>({
     }
   }
 
+  const summaryParts: string[] = [];
+  if (written > 0) summaryParts.push(`${chalk.green(String(written))} written`);
+  if (deleted > 0) summaryParts.push(`${chalk.yellow(String(deleted))} deleted`);
+  if (errors > 0) summaryParts.push(`${chalk.red(String(errors))} error`);
   if (skipped > 0) {
-    console.log(`  ${chalk.gray(`${skipped} up-to-date`)}`);
+    const breakdown = [...skippedByTarget.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([target, count]) => `${target}:${count}`)
+      .join(', ');
+    const suffix = breakdown.length > 0 ? chalk.gray(` (${breakdown})`) : '';
+    summaryParts.push(`${chalk.gray(String(skipped))} up-to-date${suffix}`);
+  }
+
+  if (summaryParts.length > 0) {
+    console.log(`  ${chalk.gray('Summary:')} ${summaryParts.join(chalk.gray(', '))}`);
   }
 }
 
@@ -146,3 +162,4 @@ export function printAgentSyncStatus(options: {
     console.log(`  ${chalk.cyan(agent)} ${chalk.gray('-')} ${display}`);
   }
 }
+// test

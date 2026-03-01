@@ -20,7 +20,7 @@ import {
 import { ensureSkillsDirectory } from '../src/skills/library.js';
 import { distributeSubagents, resolveSubagentFilePath } from '../src/subagents/distribution.js';
 import { importSubagentFromFile } from '../src/subagents/importer.js';
-import { ensureSubagentsDirectory } from '../src/subagents/library.js';
+import { ensureAgentsDirectory } from '../src/subagents/library.js';
 import { withTempDir, withTempHomes } from './helpers/tmp.js';
 
 // ---------------------------------------------------------------------------
@@ -180,7 +180,7 @@ test('distributeSkills: cursor NOT deduped when claude-code has no active skills
         '[skills]',
         `active = ["${skillId}"]`,
         '',
-        '[agents.claude-code.skills]',
+        '[applications.claude-code.skills]',
         `remove = ["${skillId}"]`,
       ].join('\n')
     );
@@ -210,7 +210,7 @@ test('distributeSkills: cursor NOT deduped when claude-code has no active skills
 
 test('distributeSubagents: cursor output has allowlisted frontmatter fields only', () => {
   withTempHomes(() => {
-    const subDir = ensureSubagentsDirectory();
+    const subDir = ensureAgentsDirectory();
     const subId = 'filtered-agent';
 
     // Create a subagent with cursor extras containing both allowed and disallowed fields
@@ -232,7 +232,7 @@ test('distributeSubagents: cursor output has allowlisted frontmatter fields only
       ].join('\n')
     );
 
-    updateLibraryStateSection('subagents', () => ({ active: [subId], agentSync: {} }));
+    updateLibraryStateSection('agents', () => ({ active: [subId], agentSync: {} }));
     distributeSubagents();
 
     const cursorFile = resolveSubagentFilePath('cursor', subId);
@@ -262,7 +262,7 @@ test('distributeSubagents: cursor output has allowlisted frontmatter fields only
 
 test('distributeSubagents: cursor model defaults to inherit when not specified', () => {
   withTempHomes(() => {
-    const subDir = ensureSubagentsDirectory();
+    const subDir = ensureAgentsDirectory();
     const subId = 'no-model-agent';
 
     // No model in extras
@@ -271,7 +271,7 @@ test('distributeSubagents: cursor model defaults to inherit when not specified',
       '---\ndescription: Agent without model\n---\nDo stuff.\n'
     );
 
-    updateLibraryStateSection('subagents', () => ({ active: [subId], agentSync: {} }));
+    updateLibraryStateSection('agents', () => ({ active: [subId], agentSync: {} }));
     distributeSubagents();
 
     const cursorFile = resolveSubagentFilePath('cursor', subId);

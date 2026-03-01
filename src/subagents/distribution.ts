@@ -21,7 +21,7 @@ import {
 } from '../library/distribute.js';
 import { ensureParentDir } from '../library/fs.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { loadLibraryStateSectionForAgent } from '../library/state.js';
+import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { wrapFrontmatter } from '../util/frontmatter.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
@@ -238,7 +238,7 @@ function distributeCodexSubagents(
   const platform: SubagentPlatform = 'codex';
 
   // Resolve active IDs for Codex via per-agent config
-  const state = loadLibraryStateSectionForAgent('subagents', platformToAgentId(platform), scope);
+  const state = loadLibraryStateSectionForApplication('agents', platformToAgentId(platform), scope);
   const selected: SubagentEntry[] = [];
   for (const id of state.active) {
     const e = byId.get(id);
@@ -496,8 +496,8 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
     platform: MarkdownPlatform,
     _allEntries: SubagentEntry[]
   ): SubagentEntry[] => {
-    const agentId = platformToAgentId(platform);
-    const state = loadLibraryStateSectionForAgent('subagents', agentId, scope);
+    const appId = platformToAgentId(platform);
+    const state = loadLibraryStateSectionForApplication('agents', appId, scope);
     const selected: SubagentEntry[] = [];
     for (const id of state.active) {
       const e = byId.get(id);
@@ -507,7 +507,7 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
   };
 
   const markdownOutcome = distributeLibrary<SubagentEntry, MarkdownPlatform>({
-    section: 'subagents',
+    section: 'agents',
     selected: entries,
     platforms: markdownPlatforms,
     resolveFilePath: (p, e) => resolveSubagentFilePath(p, e.id, scope),

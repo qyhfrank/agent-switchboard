@@ -94,7 +94,7 @@ test('composeActiveRules honours includeDelimiters flag from config', () => {
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(
       path.join(configDir, 'config.toml'),
-      '[agents]\nactive = []\n[rules]\nincludeDelimiters = true\n'
+      '[applications]\nactive = []\n[rules]\nincludeDelimiters = true\n'
     );
 
     const rulesDir = ensureRulesDirectory();

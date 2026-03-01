@@ -1,9 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { getSubagentsDir } from '../config/paths.js';
+import { getAgentsDir } from '../config/paths.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
-import { getSourcesRecord } from '../library/sources.js';
+import { loadEntriesFromSources } from '../marketplace/source-loader.js';
 
 export interface SubagentEntry {
   id: string;
@@ -24,20 +24,15 @@ function toId(fileName: string): string {
   return path.basename(fileName, path.extname(fileName));
 }
 
-export function ensureSubagentsDirectory(): string {
-  const directory = getSubagentsDir();
+export function ensureAgentsDirectory(): string {
+  const directory = getAgentsDir();
   if (!fs.existsSync(directory)) {
     fs.mkdirSync(directory, { recursive: true });
   }
   return directory;
 }
 
-/**
- * Load subagents from a specific directory
- * @param directory - Directory to load subagents from
- * @param namespace - Optional namespace prefix for IDs
- */
-function loadSubagentsFromDirectory(directory: string, namespace?: string): SubagentEntry[] {
+function loadAgentsFromDirectory(directory: string, namespace?: string): SubagentEntry[] {
   if (!fs.existsSync(directory)) {
     return [];
   }
@@ -68,7 +63,7 @@ function loadSubagentsFromDirectory(directory: string, namespace?: string): Suba
       });
     } catch (error) {
       if (error instanceof Error) {
-        throw new Error(`Failed to parse subagent file "${entry.name}": ${error.message}`);
+        throw new Error(`Failed to parse agent file "${entry.name}": ${error.message}`);
       }
       throw error;
     }
@@ -78,20 +73,22 @@ function loadSubagentsFromDirectory(directory: string, namespace?: string): Suba
 }
 
 /**
- * Load all subagents from default library and external sources
+ * Load all agents from default library, flat sources, and marketplace sources.
  */
 export function loadSubagentLibrary(): SubagentEntry[] {
   const result: SubagentEntry[] = [];
 
-  // Load from default library (no namespace)
-  const defaultDir = ensureSubagentsDirectory();
-  result.push(...loadSubagentsFromDirectory(defaultDir));
+  const defaultDir = ensureAgentsDirectory();
+  result.push(...loadAgentsFromDirectory(defaultDir));
 
-  const sources = getSourcesRecord();
-  for (const [namespace, basePath] of Object.entries(sources)) {
-    const subagentsDir = path.join(basePath, 'subagents');
-    result.push(...loadSubagentsFromDirectory(subagentsDir, namespace));
+  const { flatSources, marketplaceEntries } = loadEntriesFromSources();
+
+  for (const { namespace, basePath } of flatSources) {
+    const agentsDir = path.join(basePath, 'agents');
+    result.push(...loadAgentsFromDirectory(agentsDir, namespace));
   }
+
+  result.push(...marketplaceEntries.agents);
 
   result.sort((a, b) => a.id.localeCompare(b.id));
   return result;

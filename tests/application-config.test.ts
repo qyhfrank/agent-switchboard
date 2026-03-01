@@ -3,11 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
-  getAgentsWithOverrides,
-  hasAgentOverrides,
+  getApplicationsWithOverrides,
+  hasApplicationOverrides,
   mergeIncrementalSelection,
-  resolveAgentSectionConfig,
-} from '../src/config/agent-config.js';
+  resolveApplicationSectionConfig,
+} from '../src/config/application-config.js';
 import { loadMergedSwitchboardConfig } from '../src/config/layered-config.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -47,34 +47,34 @@ test('mergeIncrementalSelection does not add duplicates', () => {
   assert.deepEqual(result, ['a', 'b', 'c']);
 });
 
-test('resolveAgentSectionConfig applies per-agent override', () => {
+test('resolveApplicationSectionConfig applies per-agent override', () => {
   withTempAsbHome((asbHome) => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
       [
-        '[agents]',
+        '[applications]',
         'active = ["claude-code", "codex"]',
         '',
         '[skills]',
         'active = ["skill-a", "skill-b", "skill-c"]',
         '',
-        '[agents.codex.skills]',
+        '[applications.codex.skills]',
         'remove = ["skill-b"]',
         'add = ["skill-d"]',
       ].join('\n')
     );
 
-    const result = resolveAgentSectionConfig('skills', 'codex');
+    const result = resolveApplicationSectionConfig('skills', 'codex');
     assert.deepEqual(result.active, ['skill-a', 'skill-c', 'skill-d']);
   });
 });
 
-test('resolveAgentSectionConfig returns global config when no override', () => {
+test('resolveApplicationSectionConfig returns global config when no override', () => {
   withTempAsbHome((asbHome) => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
       [
-        '[agents]',
+        '[applications]',
         'active = ["claude-code", "codex"]',
         '',
         '[skills]',
@@ -82,48 +82,48 @@ test('resolveAgentSectionConfig returns global config when no override', () => {
       ].join('\n')
     );
 
-    const result = resolveAgentSectionConfig('skills', 'claude-code');
+    const result = resolveApplicationSectionConfig('skills', 'claude-code');
     assert.deepEqual(result.active, ['skill-a', 'skill-b']);
   });
 });
 
-test('hasAgentOverrides detects agent with overrides', () => {
+test('hasApplicationOverrides detects agent with overrides', () => {
   withTempAsbHome((asbHome) => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
       [
-        '[agents]',
+        '[applications]',
         'active = ["claude-code", "codex"]',
         '',
-        '[agents.codex.skills]',
+        '[applications.codex.skills]',
         'remove = ["skill-a"]',
       ].join('\n')
     );
 
     const { config } = loadMergedSwitchboardConfig();
-    assert.equal(hasAgentOverrides(config, 'codex'), true);
-    assert.equal(hasAgentOverrides(config, 'claude-code'), false);
+    assert.equal(hasApplicationOverrides(config, 'codex'), true);
+    assert.equal(hasApplicationOverrides(config, 'claude-code'), false);
   });
 });
 
-test('getAgentsWithOverrides lists all agents with overrides', () => {
+test('getApplicationsWithOverrides lists all agents with overrides', () => {
   withTempAsbHome((asbHome) => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
       [
-        '[agents]',
+        '[applications]',
         'active = ["claude-code", "codex", "gemini"]',
         '',
-        '[agents.codex.skills]',
+        '[applications.codex.skills]',
         'remove = ["skill-a"]',
         '',
-        '[agents.gemini.commands]',
+        '[applications.gemini.commands]',
         'add = ["cmd-gemini"]',
       ].join('\n')
     );
 
     const { config } = loadMergedSwitchboardConfig();
-    const result = getAgentsWithOverrides(config);
+    const result = getApplicationsWithOverrides(config);
     assert.deepEqual(result.sort(), ['codex', 'gemini']);
   });
 });
@@ -133,18 +133,18 @@ test('per-agent override with complete active replacement', () => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
       [
-        '[agents]',
+        '[applications]',
         'active = ["claude-code", "codex"]',
         '',
         '[skills]',
         'active = ["skill-a", "skill-b", "skill-c"]',
         '',
-        '[agents.codex.skills]',
+        '[applications.codex.skills]',
         'active = ["skill-x", "skill-y"]',
       ].join('\n')
     );
 
-    const result = resolveAgentSectionConfig('skills', 'codex');
+    const result = resolveApplicationSectionConfig('skills', 'codex');
     assert.deepEqual(result.active, ['skill-x', 'skill-y']);
   });
 });

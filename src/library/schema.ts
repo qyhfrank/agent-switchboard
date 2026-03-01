@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 /**
- * Unified library frontmatter schema for commands and subagents.
+ * Unified library frontmatter schema for commands and agents.
  * - Only global `description` (optional)
  * - All platform-native options live under `extras.<platform>` and are passed through verbatim
  * - Keep unknown keys for forward/backward compatibility
