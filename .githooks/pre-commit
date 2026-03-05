@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Skip if ASB_SKIP_HOOKS is set (e.g., during release script's own commits)
+if [[ "${ASB_SKIP_HOOKS:-}" == "1" ]]; then
+  exit 0
+fi
+
+has_staged() {
+  git diff --cached --name-only --diff-filter=ACMR -- "$@" | grep -q .
+}
+
+# Format and lint staged TS/JS/JSON files via Biome
+if has_staged '*.ts' '*.tsx' '*.js' '*.jsx' '*.json'; then
+  echo "pre-commit: biome check --write --staged"
+  npx biome check --write --staged
+fi
