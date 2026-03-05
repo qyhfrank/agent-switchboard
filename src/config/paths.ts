@@ -44,12 +44,12 @@ export function getMcpConfigPath(): string {
 }
 
 /**
- * Returns the absolute path to the Agent Switchboard config file (config.toml)
- * This file stores the list of agents to apply MCP configs to
- *
- * @returns {string} Absolute path to ~/.agent-switchboard/config.toml
+ * Returns the absolute path to the Agent Switchboard config file (config.toml).
+ * Resolution: ASB_CONFIG env var > <ASB_HOME>/config.toml
  */
 export function getSwitchboardConfigPath(): string {
+  const override = process.env.ASB_CONFIG?.trim();
+  if (override && override.length > 0) return override;
   return path.join(getConfigDir(), 'config.toml');
 }
 
