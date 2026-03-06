@@ -1,6 +1,12 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { TraeAgent } from '../../agents/trae.js';
-import { getProjectTraeDir, getTraeDataDir, type TraeVariant } from '../../config/paths.js';
+import {
+  getProjectTraeDir,
+  getTraeDataDir,
+  getTraeUserDataDir,
+  type TraeVariant,
+} from '../../config/paths.js';
 import type { McpServer } from '../../config/schemas.js';
 import type { ApplicationTarget } from '../types.js';
 import { resolveProjectRoot, wrapMdcFrontmatter } from './common.js';
@@ -28,6 +34,7 @@ function createTraeTarget(variant: TraeVariant): ApplicationTarget {
 
   return {
     id: variant,
+    isInstalled: () => fs.existsSync(getTraeUserDataDir(variant)),
 
     mcp: {
       configPath: () => adapter.configPath(),

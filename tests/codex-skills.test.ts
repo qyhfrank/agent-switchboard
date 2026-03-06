@@ -6,7 +6,7 @@ import { getCodexSkillsDir, getProjectCodexSkillsDir } from '../src/config/paths
 import { updateLibraryStateSection } from '../src/library/state.js';
 import { distributeSkills, resolveSkillTargetDir } from '../src/skills/distribution.js';
 import { ensureSkillsDirectory } from '../src/skills/library.js';
-import { withTempHomes } from './helpers/tmp.js';
+import { simulateTraeInstalled, withTempHomes } from './helpers/tmp.js';
 
 /**
  * Helper: create a minimal valid skill in the ASB library directory.
@@ -196,6 +196,7 @@ test('distributeSkills: agents mode project scope writes to <project>/.agents/sk
 
 test('distributeSkills: all platforms receive skills', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateTraeInstalled();
     const skillId = 'multi-platform';
     createSkill(agentsHome, skillId);
 
