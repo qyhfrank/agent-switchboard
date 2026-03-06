@@ -17,7 +17,7 @@ import {
 } from '../library/distribute-bundle.js';
 import { isDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import { getTargetsForSection } from '../targets/registry.js';
+import { filterInstalled, getTargetsForSection } from '../targets/registry.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
 export type SkillTarget = 'claude-code' | 'agents';
@@ -61,7 +61,7 @@ export function distributeSkills(
   options?: { useAgentsDir?: boolean }
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary();
-  const skillTargets = getTargetsForSection('skills');
+  const skillTargets = filterInstalled(getTargetsForSection('skills'));
 
   if (options?.useAgentsDir ?? false) {
     const traePlatforms = skillTargets

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { getTraeUserDataDir } from '../../src/config/paths.js';
 
 export function withTempDir<T>(fn: (dir: string) => T): T {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-tmp-'));
@@ -64,4 +65,11 @@ export function withTempHomes<T>(fn: (ctx: { asbHome: string; agentsHome: string
       setEnv('ASB_AGENTS_HOME', prevAgents);
     }
   });
+}
+
+/** Create Trae user data dirs to simulate installed Trae IDE. Call inside withTempHomes. */
+export function simulateTraeInstalled(): void {
+  for (const variant of ['trae', 'trae-cn'] as const) {
+    fs.mkdirSync(getTraeUserDataDir(variant), { recursive: true });
+  }
 }

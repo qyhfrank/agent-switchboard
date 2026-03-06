@@ -7,7 +7,7 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import { getTargetById, getTargetsForSection } from '../targets/registry.js';
+import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import type { TargetLibraryHandler } from '../targets/types.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
@@ -34,7 +34,7 @@ export function distributeCommands(scope?: ConfigScope): CommandDistributionOutc
   const entries = loadCommandLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const targets = getTargetsForSection('commands');
+  const targets = filterInstalled(getTargetsForSection('commands'));
   const handlerMap = new Map<string, TargetLibraryHandler>(targets.map((t) => [t.id, t.commands!]));
   const platforms = targets.map((t) => t.id);
 

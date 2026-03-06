@@ -7,7 +7,7 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import { getTargetById, getTargetsForSection } from '../targets/registry.js';
+import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import { isCustomAgentsHandler, type TargetLibraryHandler } from '../targets/types.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
@@ -37,7 +37,7 @@ export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOu
   const entries = loadSubagentLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const allTargets = getTargetsForSection('agents');
+  const allTargets = filterInstalled(getTargetsForSection('agents'));
 
   const libraryTargets = allTargets.filter((t) => !isCustomAgentsHandler(t.agents!));
   const customTargets = allTargets.filter((t) => isCustomAgentsHandler(t.agents!));

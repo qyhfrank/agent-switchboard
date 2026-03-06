@@ -89,7 +89,7 @@ import type { SubagentPlatform as SubPlatform } from './subagents/importer.js';
 import { importSubagentFromFile } from './subagents/importer.js';
 import { buildSubagentInventory } from './subagents/inventory.js';
 import { initTargets } from './targets/init.js';
-import { getTargetById, getTargetsForSection } from './targets/registry.js';
+import { filterInstalled, getTargetById, getTargetsForSection } from './targets/registry.js';
 import { showCommandSelector } from './ui/command-ui.js';
 import { showHookSelector } from './ui/hook-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
@@ -182,7 +182,13 @@ program
 
       const appsLabel =
         config.applications.active.length > 0
-          ? chalk.cyan(config.applications.active.join(', '))
+          ? config.applications.active
+              .map((id) => {
+                const t = getTargetById(id);
+                if (t?.isInstalled?.() === false) return chalk.gray(`${id} (not installed)`);
+                return chalk.cyan(id);
+              })
+              .join(', ')
           : chalk.gray('none configured');
       console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
       console.log();
@@ -196,7 +202,7 @@ program
 
         const sectionPlatforms: Record<string, readonly string[]> = {};
         for (const s of sections) {
-          let ids = getTargetsForSection(s).map((t) => t.id);
+          let ids = filterInstalled(getTargetsForSection(s)).map((t) => t.id);
           if (s === 'skills' && cursorSkillsDeduped) {
             ids = ids.filter((id) => id !== 'cursor');
           }
@@ -1623,6 +1629,19 @@ async function applyToAgents(
       const configToApply = { mcpServers: enabledServers };
 
       const target = getTargetById(agentId);
+      if (target?.isInstalled?.() === false) {
+        persist(
+          chalk.gray('○'),
+          `${chalk.cyan(agentId)} ${chalk.gray('(not installed, skipped)')}`
+        );
+        results.push({
+          application: agentId,
+          filePath: '(not installed)',
+          status: 'skipped',
+          reason: 'not installed',
+        });
+        continue;
+      }
       if (!target?.mcp) {
         persist(chalk.yellow('⚠'), `${chalk.cyan(agentId)} - no MCP handler (skipped)`);
         results.push({

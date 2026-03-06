@@ -91,6 +91,8 @@ export interface TargetHooksHandler {
  */
 export interface ApplicationTarget {
   readonly id: string;
+  /** Returns false if the application is definitively not installed. Undefined means assumed installed. */
+  readonly isInstalled?: () => boolean;
   readonly mcp?: TargetMcpHandler;
   readonly rules?: TargetRulesHandler;
   readonly commands?: TargetLibraryHandler;
