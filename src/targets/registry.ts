@@ -96,6 +96,11 @@ export function registerConfigTargets(targets: Record<string, Record<string, unk
   }
 }
 
+/** Filter targets to only those that are installed (or have no detection). */
+export function filterInstalled(targets: ApplicationTarget[]): ApplicationTarget[] {
+  return targets.filter((t) => t.isInstalled?.() !== false);
+}
+
 /** Clear all extension targets (for testing) */
 export function clearExtensionTargets(): void {
   extensionTargets.length = 0;

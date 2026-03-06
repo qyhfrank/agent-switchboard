@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ConfigScope } from '../config/scope.js';
-import { getTargetsForSection } from '../targets/registry.js';
+import { filterInstalled, getTargetsForSection } from '../targets/registry.js';
 import { RULE_INDIRECT_AGENTS, RULE_PER_FILE_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
 import type { ComposedRules } from './composer.js';
 import { composeActiveRulesForApplication } from './composer.js';
@@ -73,7 +73,7 @@ export function distributeRules(
 
   let firstComposed: ComposedRules | null = null;
 
-  const targets = getTargetsForSection('rules');
+  const targets = filterInstalled(getTargetsForSection('rules'));
 
   for (const target of targets) {
     const handler = target.rules!;

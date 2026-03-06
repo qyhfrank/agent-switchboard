@@ -10,7 +10,7 @@ import { distributeRules } from '../src/rules/distribution.js';
 import { ensureRulesDirectory } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, saveRuleState } from '../src/rules/state.js';
 import { getTargetsForSection } from '../src/targets/registry.js';
-import { withTempDir, withTempHomes } from './helpers/tmp.js';
+import { simulateTraeInstalled, withTempDir, withTempHomes } from './helpers/tmp.js';
 
 // ---------------------------------------------------------------------------
 // Registry: trae variants are registered
@@ -200,6 +200,7 @@ function withTmpTraeAgent(variant: 'trae' | 'trae-cn', fn: (agent: TraeAgent) =>
 
 function withTmpTraeRules(fn: (agentsHome: string) => void): void {
   withTempHomes(({ agentsHome }) => {
+    simulateTraeInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'trae-test.md'), 'Test rule body.\n');
     saveRuleState({ ...DEFAULT_RULE_STATE, enabled: ['trae-test'], agentSync: {} });

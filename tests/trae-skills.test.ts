@@ -7,7 +7,7 @@ import { updateLibraryStateSection } from '../src/library/state.js';
 import { distributeSkills, resolveSkillTargetDir } from '../src/skills/distribution.js';
 import { ensureSkillsDirectory } from '../src/skills/library.js';
 import { getTargetsForSection } from '../src/targets/registry.js';
-import { withTempHomes } from './helpers/tmp.js';
+import { simulateTraeInstalled, withTempHomes } from './helpers/tmp.js';
 
 /**
  * Helper: create a minimal valid skill in the ASB library directory.
@@ -99,6 +99,7 @@ test('getProjectTraeDir returns <project>/.trae', () => {
 
 test('distributeSkills: trae platforms receive skills in legacy mode', () => {
   withTempHomes(() => {
+    simulateTraeInstalled();
     const skillId = 'trae-test-skill';
     createSkill(skillId);
 
@@ -124,6 +125,7 @@ test('distributeSkills: trae platforms receive skills in legacy mode', () => {
 
 test('distributeSkills: trae platforms receive skills in agents mode', () => {
   withTempHomes(() => {
+    simulateTraeInstalled();
     const skillId = 'trae-agents-skill';
     createSkill(skillId);
 
@@ -149,6 +151,7 @@ test('distributeSkills: trae platforms receive skills in agents mode', () => {
 
 test('distributeSkills: writes SKILL.md to trae target directory', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateTraeInstalled();
     const skillId = 'trae-content-check';
     createSkill(skillId, 'Trae skill content');
 
@@ -176,6 +179,7 @@ test('distributeSkills: writes SKILL.md to trae target directory', () => {
 
 test('distributeSkills: second run skips up-to-date trae skills', () => {
   withTempHomes(() => {
+    simulateTraeInstalled();
     const skillId = 'trae-idempotent';
     createSkill(skillId);
 
@@ -210,6 +214,7 @@ test('distributeSkills: second run skips up-to-date trae skills', () => {
 
 test('distributeSkills: removes deactivated skill from trae directories', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateTraeInstalled();
     const skillId = 'trae-ephemeral';
     createSkill(skillId);
 
@@ -242,6 +247,7 @@ test('distributeSkills: removes deactivated skill from trae directories', () => 
 
 test('distributeSkills: project scope writes to <project>/.trae/skills/', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateTraeInstalled();
     const skillId = 'trae-proj-skill';
     createSkill(skillId);
 
