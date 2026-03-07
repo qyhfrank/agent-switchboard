@@ -132,7 +132,12 @@ function loadMcpFromPluginDir(
 
   try {
     const raw = JSON.parse(fs.readFileSync(mcpJsonPath, 'utf-8'));
-    const entries = typeof raw === 'object' && raw !== null ? raw : {};
+    // Support both flat format { "server": {...} } and wrapped format { "mcpServers": { "server": {...} } }
+    const parsed = typeof raw === 'object' && raw !== null ? raw : {};
+    const entries =
+      'mcpServers' in parsed && typeof parsed.mcpServers === 'object' && parsed.mcpServers !== null
+        ? parsed.mcpServers
+        : parsed;
 
     for (const [name, serverDef] of Object.entries(entries)) {
       if (typeof serverDef !== 'object' || serverDef === null) continue;
