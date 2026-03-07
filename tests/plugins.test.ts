@@ -347,6 +347,34 @@ test('plugin MCP servers are merged into config', () => {
   });
 });
 
+test('plugin .mcp.json with mcpServers wrapper is unwrapped', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    fs.writeFileSync(path.join(asbHome, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+
+    // Plugin uses { mcpServers: { ... } } wrapper (Claude Code project format)
+    const mktDir = createMarketplaceFixture(asbHome, 'mkt', [
+      {
+        name: 'wrapped-plugin',
+        mcp: { mcpServers: { 'my-server': { command: 'echo', args: ['hello'], type: 'stdio' } } },
+      },
+    ]);
+
+    writeConfigToml(
+      asbHome,
+      `[plugins]\nenabled = ["wrapped-plugin"]\n\n[plugins.sources]\nmkt = "${mktDir}"\n`
+    );
+
+    const config = loadMcpConfigWithPlugins();
+    // Should unwrap: "wrapped-plugin:my-server", NOT "wrapped-plugin:mcpServers"
+    assert.ok('wrapped-plugin:my-server' in config.mcpServers, 'unwrapped server should exist');
+    assert.ok(
+      !('wrapped-plugin:mcpServers' in config.mcpServers),
+      'mcpServers key should not be a server name'
+    );
+  });
+});
+
 test('old config without plugins section works (backward compatibility)', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
