@@ -7,7 +7,12 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
+import {
+  filterInstalled,
+  getActiveTargetsForSection,
+  getTargetById,
+  getTargetsForSection,
+} from '../targets/registry.js';
 import { isCustomAgentsHandler, type TargetLibraryHandler } from '../targets/types.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
@@ -33,11 +38,18 @@ export function resolveSubagentFilePath(platform: string, id: string, scope?: Co
   return path.join(h.resolveTargetDir(scope), h.getFilename(id));
 }
 
-export function distributeSubagents(scope?: ConfigScope): SubagentDistributionOutcome {
+export function distributeSubagents(
+  scope?: ConfigScope,
+  activeAppIds?: string[]
+): SubagentDistributionOutcome {
   const entries = loadSubagentLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const allTargets = filterInstalled(getTargetsForSection('agents'));
+  const allTargets = filterInstalled(
+    activeAppIds
+      ? getActiveTargetsForSection('agents', activeAppIds)
+      : getTargetsForSection('agents')
+  );
 
   const libraryTargets = allTargets.filter((t) => !isCustomAgentsHandler(t.agents!));
   const customTargets = allTargets.filter((t) => isCustomAgentsHandler(t.agents!));

@@ -310,14 +310,16 @@ program
       }
       console.log();
 
+      const activeAppIds = config.applications.active;
       const mcpDistribution = await applyToAgents(scope, undefined, { useSpinner: false });
-      const ruleDistribution = distributeRules(undefined, undefined, scope);
-      const commandDistribution = distributeCommands(scope);
-      const agentDistribution = distributeSubagents(scope);
+      const ruleDistribution = distributeRules(undefined, { activeAppIds }, scope);
+      const commandDistribution = distributeCommands(scope, activeAppIds);
+      const agentDistribution = distributeSubagents(scope, activeAppIds);
       const skillDistribution = distributeSkills(scope, {
         useAgentsDir: config.distribution.use_agents_dir,
+        activeAppIds,
       });
-      const hookDistribution = distributeHooks(scope);
+      const hookDistribution = distributeHooks(scope, activeAppIds);
 
       const distSections: CompactDistributionSection<DistributionResultLike>[] = [
         {
@@ -826,7 +828,7 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
 
     const distribution = distributeRules(
       composeActiveRules(scope),
-      { force: !selectionChanged },
+      { force: !selectionChanged, activeAppIds: config.applications.active },
       scope
     );
 
@@ -889,7 +891,7 @@ commandRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('commands', selection.enabled);
 
-    const out = distributeCommands(scope);
+    const out = distributeCommands(scope, config.applications.active);
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -1059,7 +1061,7 @@ agentRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('agents', selection.enabled);
 
-    const out = distributeSubagents(scope);
+    const out = distributeSubagents(scope, config.applications.active);
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -1230,6 +1232,7 @@ skillRoot.action(async (options: ScopeOptionInput) => {
 
     const out = distributeSkills(scope, {
       useAgentsDir: config.distribution.use_agents_dir,
+      activeAppIds: config.applications.active,
     });
     if (out.results.length > 0) {
       console.log();
@@ -1403,7 +1406,7 @@ hookRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('hooks', selection.enabled);
 
-    const out = distributeHooks(scope);
+    const out = distributeHooks(scope, config.applications.active);
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({

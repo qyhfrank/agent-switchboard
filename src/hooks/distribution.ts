@@ -204,9 +204,16 @@ function cleanOrphanBundleDirs(
  *  2. Merge all active hook configs into settings.json
  *  3. Clean up orphan bundle directories
  */
-export function distributeHooks(scope?: ConfigScope): HookDistributionOutcome {
+export function distributeHooks(
+  scope?: ConfigScope,
+  activeAppIds?: string[]
+): HookDistributionOutcome {
   const results: HookDistributionOutcome['results'] = [];
   const platform: HookPlatform = 'claude-code';
+
+  if (activeAppIds && !activeAppIds.includes(platform)) {
+    return { results };
+  }
 
   const allEntries = loadHookLibrary();
   const byId = new Map(allEntries.map((e) => [e.id, e]));
