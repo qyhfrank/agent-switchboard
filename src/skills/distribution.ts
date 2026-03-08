@@ -17,7 +17,11 @@ import {
 } from '../library/distribute-bundle.js';
 import { isDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import { filterInstalled, getTargetsForSection } from '../targets/registry.js';
+import {
+  filterInstalled,
+  getActiveTargetsForSection,
+  getTargetsForSection,
+} from '../targets/registry.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
 export type SkillTarget = 'claude-code' | 'agents';
@@ -58,18 +62,30 @@ export interface SkillDistributionOutcome {
 
 export function distributeSkills(
   scope?: ConfigScope,
-  options?: { useAgentsDir?: boolean }
+  options?: { useAgentsDir?: boolean; activeAppIds?: string[] }
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary();
-  const skillTargets = filterInstalled(getTargetsForSection('skills'));
+  const activeAppIds = options?.activeAppIds;
+  const skillTargets = filterInstalled(
+    activeAppIds
+      ? getActiveTargetsForSection('skills', activeAppIds)
+      : getTargetsForSection('skills')
+  );
 
   if (options?.useAgentsDir ?? false) {
     const traePlatforms = skillTargets
       .filter((t) => t.id === 'trae' || t.id === 'trae-cn')
       .map((t) => t.id);
     const cursorPlatform = skillTargets.find((t) => t.id === 'cursor') ? ['cursor'] : [];
+    let platforms = ['claude-code', 'agents', ...cursorPlatform, ...traePlatforms];
+    if (activeAppIds) {
+      platforms = platforms.filter((p) => {
+        if (p === 'agents') return AGENTS_TARGET_PLATFORMS.some((a) => activeAppIds.includes(a));
+        return activeAppIds.includes(p);
+      });
+    }
     return distributeSkillsInternal(entries, scope, {
-      platforms: ['claude-code', 'agents', ...cursorPlatform, ...traePlatforms],
+      platforms,
       legacyDirs: [
         { path: path.join(getGeminiDir(), 'skills'), platform: 'agents' },
         { path: path.join(getOpencodeRoot(), 'skill'), platform: 'agents' },
