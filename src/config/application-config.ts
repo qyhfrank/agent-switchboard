@@ -7,8 +7,13 @@
  */
 
 import { buildPluginIndex, type PluginComponentSection } from '../plugins/index.js';
-import { loadMergedSwitchboardConfig } from './layered-config.js';
-import type { IncrementalSelection, PluginExclude, SwitchboardConfig } from './schemas.js';
+import { loadMergedSwitchboardConfig, loadWritableConfigLayer } from './layered-config.js';
+import type {
+  IncrementalSelection,
+  PluginExclude,
+  SwitchboardConfig,
+  SwitchboardConfigLayer,
+} from './schemas.js';
 import type { ConfigScope } from './scope.js';
 import { scopeToLayerOptions } from './scope.js';
 
@@ -20,6 +25,8 @@ const APPLICATION_SCHEMA_KEYS = new Set(['enabled', 'active', 'assume_installed'
 export interface ResolvedSectionConfig {
   enabled: string[];
 }
+
+type ApplicationConfigSource = SwitchboardConfig | SwitchboardConfigLayer;
 
 /**
  * Merge incremental selection with base enabled list
@@ -64,7 +71,15 @@ export function getApplicationOverride(
   appId: string,
   section: ConfigSection
 ): IncrementalSelection | undefined {
-  const applications = config.applications as Record<string, unknown>;
+  return getApplicationOverrideFromConfig(config, appId, section);
+}
+
+function getApplicationOverrideFromConfig(
+  config: ApplicationConfigSource,
+  appId: string,
+  section: ConfigSection
+): IncrementalSelection | undefined {
+  const applications = (config.applications ?? {}) as Record<string, unknown>;
   const appOverrides = applications[appId];
   if (!appOverrides || typeof appOverrides !== 'object') {
     return undefined;
@@ -72,6 +87,64 @@ export function getApplicationOverride(
 
   const overrideObj = appOverrides as Record<string, unknown>;
   return overrideObj[section] as IncrementalSelection | undefined;
+}
+
+function getGlobalEnabled(config: ApplicationConfigSource, section: ConfigSection): string[] {
+  const sectionConfig = config[section] as { enabled?: string[] } | undefined;
+  return Array.isArray(sectionConfig?.enabled) ? [...sectionConfig.enabled] : [];
+}
+
+function getPluginEnabledRefs(config: ApplicationConfigSource): string[] {
+  return Array.isArray(config.plugins?.enabled) ? [...config.plugins.enabled] : [];
+}
+
+function getPluginExcludeList(
+  config: ApplicationConfigSource,
+  section: PluginComponentSection
+): string[] {
+  const exclude = config.plugins?.exclude as PluginExclude | undefined;
+  const excludeList = exclude?.[section];
+  return Array.isArray(excludeList) ? [...excludeList] : [];
+}
+
+function resolveSectionConfigFromConfig(
+  config: ApplicationConfigSource,
+  section: ConfigSection,
+  appId: string,
+  scope?: ConfigScope
+): ResolvedSectionConfig {
+  const globalEnabled = getGlobalEnabled(config, section);
+  const enabledPluginRefs = getPluginEnabledRefs(config);
+
+  let merged: string[];
+  if (enabledPluginRefs.length > 0) {
+    const index = buildPluginIndex(scope);
+    const expanded = index.expand(enabledPluginRefs);
+    const pluginSection = section as PluginComponentSection;
+    const pluginEntryIds = expanded[pluginSection] ?? [];
+
+    const seen = new Set(globalEnabled);
+    merged = [...globalEnabled];
+    for (const id of pluginEntryIds) {
+      if (!seen.has(id)) {
+        merged.push(id);
+        seen.add(id);
+      }
+    }
+
+    const excludeList = getPluginExcludeList(config, pluginSection);
+    if (excludeList.length > 0) {
+      const excludeSet = new Set(excludeList);
+      merged = merged.filter((id) => !excludeSet.has(id));
+    }
+  } else {
+    merged = globalEnabled;
+  }
+
+  const override = getApplicationOverrideFromConfig(config, appId, section);
+  return {
+    enabled: mergeIncrementalSelection(merged, override),
+  };
 }
 
 /**
@@ -85,13 +158,7 @@ export function resolveApplicationSectionConfig(
 ): ResolvedSectionConfig {
   const layerOptions = scopeToLayerOptions(scope);
   const { config } = loadMergedSwitchboardConfig(layerOptions);
-
-  const globalEnabled = [...config[section].enabled];
-  const override = getApplicationOverride(config, appId, section);
-
-  return {
-    enabled: mergeIncrementalSelection(globalEnabled, override),
-  };
+  return resolveSectionConfigFromConfig(config, section, appId);
 }
 
 /**
@@ -138,39 +205,18 @@ export function resolveEffectiveSectionConfig(
   const layerOptions = scopeToLayerOptions(scope);
   const { config } = loadMergedSwitchboardConfig(layerOptions);
 
-  const globalEnabled = [...config[section].enabled];
+  return resolveSectionConfigFromConfig(config, section, appId, scope);
+}
 
-  const { enabled: enabledPluginRefs } = config.plugins;
-
-  let merged: string[];
-  if (enabledPluginRefs.length > 0) {
-    const index = buildPluginIndex(scope);
-    const expanded = index.expand(enabledPluginRefs);
-    const pluginSection = section as PluginComponentSection;
-    const pluginEntryIds = expanded[pluginSection] ?? [];
-
-    // Union: global enabled ∪ plugin-expanded (preserving explicit enabled order first)
-    const seen = new Set(globalEnabled);
-    merged = [...globalEnabled];
-    for (const id of pluginEntryIds) {
-      if (!seen.has(id)) {
-        merged.push(id);
-        seen.add(id);
-      }
-    }
-
-    const exclude = config.plugins.exclude;
-    const excludeList = (exclude as PluginExclude)?.[pluginSection];
-    if (excludeList && excludeList.length > 0) {
-      const excludeSet = new Set(excludeList);
-      merged = merged.filter((id) => !excludeSet.has(id));
-    }
-  } else {
-    merged = globalEnabled;
+export function resolveScopedSectionConfig(
+  section: ConfigSection,
+  appId: string,
+  scope?: ConfigScope
+): ResolvedSectionConfig {
+  if (!scope?.profile && !scope?.project) {
+    return resolveEffectiveSectionConfig(section, appId, scope);
   }
 
-  const override = getApplicationOverride(config, appId, section);
-  return {
-    enabled: mergeIncrementalSelection(merged, override),
-  };
+  const layer = loadWritableConfigLayer(scopeToLayerOptions(scope));
+  return resolveSectionConfigFromConfig(layer.config, section, appId, scope);
 }

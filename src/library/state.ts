@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { resolveEffectiveSectionConfig } from '../config/application-config.js';
+import { resolveScopedSectionConfig } from '../config/application-config.js';
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
 import {
   loadMergedSwitchboardConfig,
@@ -164,7 +164,7 @@ export function loadLibraryStateSectionForApplication(
   appId: string,
   scope?: ConfigScope
 ): SectionState {
-  const appConfig = resolveEffectiveSectionConfig(section, appId, scope);
+  const appConfig = resolveScopedSectionConfig(section, appId, scope);
   return {
     enabled: appConfig.enabled,
     agentSync: { ...agentSyncCache[section] },

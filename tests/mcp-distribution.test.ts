@@ -112,6 +112,7 @@ test('distributeMcp: writes project-scoped config when project scope is provided
 
     const projectRoot = path.join(asbHome, 'project');
     fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, '.asb.toml'), '[mcp]\nenabled = ["alpha"]\n', 'utf-8');
 
     const results = await distributeMcp({ project: projectRoot }, undefined, { useSpinner: false });
     const projectConfigPath = path.join(projectRoot, '.mcp.json');
