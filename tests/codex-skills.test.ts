@@ -278,7 +278,11 @@ test('distributeSkills: useAgentsDir does not write to claude-code when it is no
 
     // Should have agents results but NO claude-code results
     const claudeResults = outcome.results.filter((r) => r.platform === 'claude-code');
-    assert.equal(claudeResults.length, 0, 'should not write to claude-code when it is not installed');
+    assert.equal(
+      claudeResults.length,
+      0,
+      'should not write to claude-code when it is not installed'
+    );
 
     const agentsResults = outcome.results.filter(
       (r) => r.platform === 'agents' && (r.status === 'written' || r.status === 'skipped')

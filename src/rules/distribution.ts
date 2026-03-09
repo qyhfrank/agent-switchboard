@@ -81,7 +81,9 @@ export function distributeRules(
 
   const activeAppIds = options?.activeAppIds;
   const targets = filterInstalled(
-    activeAppIds ? getActiveTargetsForSection('rules', activeAppIds) : getTargetsForSection('rules'),
+    activeAppIds
+      ? getActiveTargetsForSection('rules', activeAppIds)
+      : getTargetsForSection('rules'),
     options?.assumeInstalled
   );
 

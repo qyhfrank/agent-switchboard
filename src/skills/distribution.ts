@@ -58,7 +58,11 @@ export interface SkillDistributionOutcome {
 
 export function distributeSkills(
   scope?: ConfigScope,
-  options?: { useAgentsDir?: boolean; activeAppIds?: string[]; assumeInstalled?: ReadonlySet<string> }
+  options?: {
+    useAgentsDir?: boolean;
+    activeAppIds?: string[];
+    assumeInstalled?: ReadonlySet<string>;
+  }
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary();
   const activeAppIds = options?.activeAppIds;
