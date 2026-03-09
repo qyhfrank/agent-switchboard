@@ -69,8 +69,8 @@ import {
   listUnsupportedAgents,
 } from './rules/distribution.js';
 import { buildRuleInventory } from './rules/inventory.js';
-import { loadRuleLibrary } from './rules/library.js';
-import { loadRuleState, loadWritableRuleState, updateRuleState } from './rules/state.js';
+import { loadRuleRuntimeContext } from './rules/runtime.js';
+import { updateRuleState } from './rules/state.js';
 import { distributeSkills } from './skills/distribution.js';
 import type { SkillImportPlatform } from './skills/importer.js';
 import { importSkill, listSkillsInDirectory } from './skills/importer.js';
@@ -535,11 +535,8 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
       return;
     }
 
-    const rules = loadRuleLibrary(scope);
+    const { rules, writableState: previousState, effectiveState } = loadRuleRuntimeContext(scope);
     const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));
-
-    const previousState = loadWritableRuleState(scope);
-    const effectiveState = loadRuleState(scope);
     const desiredEnabled = selection.enabled;
 
     const selectionChanged =
