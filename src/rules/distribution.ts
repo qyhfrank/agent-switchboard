@@ -10,7 +10,7 @@ import { RULE_INDIRECT_AGENTS, RULE_PER_FILE_AGENTS, RULE_UNSUPPORTED_AGENTS } f
 import type { ComposedRules } from './composer.js';
 import { composeActiveRulesForApplication } from './composer.js';
 import { loadRuleLibrary } from './library.js';
-import { updateRuleState } from './state.js';
+import { updateRuleAgentSync } from './state.js';
 
 export type DistributionStatus = 'written' | 'skipped' | 'error';
 
@@ -134,13 +134,13 @@ export function distributeRules(
   cleanupLegacyCursorMdcFiles(scope);
 
   if (agentSyncUpdates.size > 0) {
-    updateRuleState((current) => {
-      const agentSync = { ...current.agentSync };
+    updateRuleAgentSync((current) => {
+      const agentSync = { ...current };
       for (const [agent, update] of agentSyncUpdates.entries()) {
         agentSync[agent] = update;
       }
-      return { ...current, agentSync };
-    }, scope);
+      return agentSync;
+    });
   }
 
   return {

@@ -3,12 +3,14 @@ import chalk from 'chalk';
 
 import type { ConfigScope } from '../config/scope.js';
 import { loadRuleLibrary, type RuleSnippet } from '../rules/library.js';
-import { loadRuleState } from '../rules/state.js';
+import { loadRuleState, loadWritableRuleState } from '../rules/state.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 import { promptOrder } from './library-selector.js';
+import { shouldPersistSelection } from './selection-state.js';
 
-interface RuleSelectionResult {
+export interface RuleSelectionResult {
   enabled: string[];
+  explicitEmpty: boolean;
 }
 
 export interface RuleSelectorOptions {
@@ -38,7 +40,8 @@ export async function showRuleSelector(
     return null;
   }
 
-  const state = loadRuleState(scope);
+  const state = loadWritableRuleState(scope);
+  const effectiveState = loadRuleState(scope);
   const ruleMap = new Map<string, RuleSnippet>();
   for (const rule of rules) {
     ruleMap.set(rule.id, rule);
@@ -108,7 +111,14 @@ export async function showRuleSelector(
         default: false,
       });
       if (confirmed) {
-        return { enabled: [] };
+        return {
+          enabled: [],
+          explicitEmpty: shouldPersistSelection({
+            currentEnabled: state.enabled,
+            effectiveEnabled: effectiveState.enabled,
+            selectedEnabled: [],
+          }),
+        };
       }
       continue;
     }
@@ -119,6 +129,6 @@ export async function showRuleSelector(
       ruleMap,
       (rule) => rule.metadata.title ?? rule.id
     );
-    return { enabled: ordered };
+    return { enabled: ordered, explicitEmpty: false };
   }
 }

@@ -1,8 +1,13 @@
 import { confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { ConfigScope } from '../config/scope.js';
-import { loadLibraryStateSection, updateLibraryStateSection } from '../library/state.js';
+import {
+  loadLibraryStateSection,
+  loadWritableLibraryStateSection,
+  updateLibraryStateSection,
+} from '../library/state.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
+import { shouldPersistSelection } from './selection-state.js';
 
 export interface GenericSelectionResult {
   enabled: string[];
@@ -118,7 +123,8 @@ export async function showLibrarySelector<TEntry>(
   const map = new Map<string, TEntry>();
   for (const entry of entries) map.set(opts.getId(entry), entry);
 
-  const state = loadLibraryStateSection(opts.section, opts.scope);
+  const state = loadWritableLibraryStateSection(opts.section, opts.scope);
+  const effectiveState = loadLibraryStateSection(opts.section, opts.scope);
 
   const buildChoiceList = (activeIds: string[]): FuzzyMultiSelectChoice[] => {
     const activeSet = new Set(activeIds);
@@ -180,6 +186,15 @@ export async function showLibrarySelector<TEntry>(
         default: false,
       });
       if (confirmed) {
+        if (
+          !shouldPersistSelection({
+            currentEnabled: currentSelection,
+            effectiveEnabled: effectiveState.enabled,
+            selectedEnabled: [],
+          })
+        ) {
+          return { enabled: [] };
+        }
         updateLibraryStateSection(opts.section, () => ({ enabled: [], agentSync: {} }), opts.scope);
         return { enabled: [] };
       }
@@ -187,6 +202,15 @@ export async function showLibrarySelector<TEntry>(
     }
 
     if (!allowOrdering) {
+      if (
+        !shouldPersistSelection({
+          currentEnabled: currentSelection,
+          effectiveEnabled: effectiveState.enabled,
+          selectedEnabled: sanitized,
+        })
+      ) {
+        return { enabled: sanitized };
+      }
       updateLibraryStateSection(
         opts.section,
         () => ({ enabled: sanitized, agentSync: {} }),
@@ -196,6 +220,15 @@ export async function showLibrarySelector<TEntry>(
     }
 
     const ordered = await promptOrder(opts.noun, sanitized, map, opts.getTitle);
+    if (
+      !shouldPersistSelection({
+        currentEnabled: currentSelection,
+        effectiveEnabled: effectiveState.enabled,
+        selectedEnabled: ordered,
+      })
+    ) {
+      return { enabled: ordered };
+    }
     updateLibraryStateSection(
       opts.section,
       () => ({ enabled: ordered, agentSync: {} }),

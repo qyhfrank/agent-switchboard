@@ -3,11 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { ConfigScope } from '../config/scope.js';
 import { ensureParentDir, rmDirRecursive } from './fs.js';
-import {
-  type LibrarySection,
-  loadLibraryStateSection,
-  updateLibraryStateSection,
-} from './state.js';
+import { type LibrarySection, loadLibraryAgentSync, updateLibraryAgentSync } from './state.js';
 
 export type BundleDistributionStatus = 'written' | 'skipped' | 'error' | 'deleted';
 
@@ -68,7 +64,7 @@ export interface DistributeBundleOutcome<Platform extends string> {
 export function distributeBundle<TEntry, Platform extends string>(
   opts: DistributeBundleOptions<TEntry, Platform>
 ): DistributeBundleOutcome<Platform> {
-  const state = loadLibraryStateSection(opts.section, opts.scope);
+  const agentSync = loadLibraryAgentSync(opts.section);
   const results: BundleDistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
 
@@ -160,21 +156,14 @@ export function distributeBundle<TEntry, Platform extends string>(
 
     // Update sync state
     const aggregateHash = platformHash.digest('hex');
-    const prev = state.agentSync[platform]?.hash;
+    const prev = agentSync[platform]?.hash;
     const hadErrors = results.some((r) => r.platform === platform && r.status === 'error');
 
     if (!hadErrors && prev !== aggregateHash) {
-      updateLibraryStateSection(
-        opts.section,
-        (current) => ({
-          ...current,
-          agentSync: {
-            ...current.agentSync,
-            [platform]: { hash: aggregateHash, updatedAt: timestamp },
-          },
-        }),
-        opts.scope
-      );
+      updateLibraryAgentSync(opts.section, (current) => ({
+        ...current,
+        [platform]: { hash: aggregateHash, updatedAt: timestamp },
+      }));
     }
 
     // Cleanup orphan directories if cleanup config is provided
