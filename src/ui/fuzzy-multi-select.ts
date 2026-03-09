@@ -48,7 +48,7 @@ interface FilteredChoice extends NormalizedChoice {
 interface PromptConfig extends FuzzyMultiSelectOptions {}
 
 const DEFAULT_HELP =
-  'Space: toggle • Arrow keys: move • A: select all • I: invert • Esc: clear filter • Enter: confirm';
+  'Space: toggle • Arrow keys: move • ^A: select all • ^R: invert • Esc: clear filter • Enter: confirm';
 
 const prompt = createPrompt<string[], PromptConfig>((config, done) => {
   const { choices, initialSelected, pageSize = 12, allowEmpty = true, helpText } = config;
@@ -165,7 +165,7 @@ const prompt = createPrompt<string[], PromptConfig>((config, done) => {
       return;
     }
 
-    if (key.name === 'a' && !key.ctrl) {
+    if (key.name === 'a' && key.ctrl) {
       rl.clearLine(0);
       rl.write(filter);
       const values = filteredChoices.map((choice) => choice.value);
@@ -176,7 +176,7 @@ const prompt = createPrompt<string[], PromptConfig>((config, done) => {
       return;
     }
 
-    if (key.name === 'i' && !key.ctrl) {
+    if (key.name === 'r' && key.ctrl) {
       rl.clearLine(0);
       rl.write(filter);
       const values = filteredChoices.map((choice) => choice.value);
