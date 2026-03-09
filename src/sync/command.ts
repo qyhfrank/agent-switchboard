@@ -1,6 +1,6 @@
 import chalk from 'chalk';
 import { distributeCommands } from '../commands/distribution.js';
-import { resolveEffectiveSectionConfig } from '../config/application-config.js';
+import { resolveScopedSectionConfig } from '../config/application-config.js';
 import type { ConfigLayers } from '../config/layered-config.js';
 import type { SwitchboardConfig } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
@@ -129,7 +129,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
 
   const cursorSkillsDeduped =
     config.applications.enabled.includes('claude-code') &&
-    resolveEffectiveSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
+    resolveScopedSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
   console.log(chalk.blue('Inventory:'));
   {
     const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
@@ -183,7 +183,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
 
       const effectiveByApp = new Map<string, string[]>();
       for (const appId of applicableApps) {
-        effectiveByApp.set(appId, resolveEffectiveSectionConfig(section, appId, scope).enabled);
+        effectiveByApp.set(appId, resolveScopedSectionConfig(section, appId, scope).enabled);
       }
 
       const perAppParts = applicableApps.map((appId) => {

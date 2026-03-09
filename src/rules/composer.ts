@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
-import { resolveEffectiveSectionConfig } from '../config/application-config.js';
+import { resolveScopedSectionConfig } from '../config/application-config.js';
+import { loadWritableConfigLayer } from '../config/layered-config.js';
 import type { ConfigScope } from '../config/scope.js';
+import { scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import type { RuleSnippet } from './library.js';
 import { loadRuleLibrary } from './library.js';
-import { loadRuleState } from './state.js';
+import { loadRuleState, loadWritableRuleState } from './state.js';
 
 export interface RuleSection {
   id: string;
@@ -96,14 +98,19 @@ export function composeRules(
 
 export function composeActiveRules(scope?: ConfigScope): ComposedRules {
   const rules = loadRuleLibrary();
-  const state = loadRuleState(scope);
-  const loadOptions = scope
-    ? {
-        profile: scope.profile ?? undefined,
-        projectPath: scope.project ?? undefined,
-      }
-    : undefined;
-  const config = loadSwitchboardConfig(loadOptions);
+  const state =
+    scope?.profile || scope?.project ? loadWritableRuleState(scope) : loadRuleState(scope);
+  const config =
+    scope?.profile || scope?.project
+      ? loadWritableConfigLayer(scopeToLayerOptions(scope)).config
+      : loadSwitchboardConfig(
+          scope
+            ? {
+                profile: scope.profile ?? undefined,
+                projectPath: scope.project ?? undefined,
+              }
+            : undefined
+        );
   return composeRules(state.enabled, rules, {
     includeDelimiters: config.rules?.includeDelimiters === true,
   });
@@ -117,14 +124,18 @@ export function composeActiveRulesForApplication(
   scope?: ConfigScope
 ): ComposedRules {
   const rules = loadRuleLibrary();
-  const appConfig = resolveEffectiveSectionConfig('rules', appId, scope);
-  const loadOptions = scope
-    ? {
-        profile: scope.profile ?? undefined,
-        projectPath: scope.project ?? undefined,
-      }
-    : undefined;
-  const config = loadSwitchboardConfig(loadOptions);
+  const appConfig = resolveScopedSectionConfig('rules', appId, scope);
+  const config =
+    scope?.profile || scope?.project
+      ? loadWritableConfigLayer(scopeToLayerOptions(scope)).config
+      : loadSwitchboardConfig(
+          scope
+            ? {
+                profile: scope.profile ?? undefined,
+                projectPath: scope.project ?? undefined,
+              }
+            : undefined
+        );
   return composeRules(appConfig.enabled, rules, {
     includeDelimiters: config.rules?.includeDelimiters === true,
   });
