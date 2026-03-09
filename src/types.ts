@@ -14,16 +14,4 @@ export type {
   SwitchboardConfig,
 } from './config/schemas.js';
 
-/**
- * Checkbox item for interactive UI
- */
-export interface CheckboxItem {
-  /** Display name with status indicators */
-  name: string;
-  /** Actual server name (value returned when selected) */
-  value: string;
-  /** Initial checkbox state */
-  checked: boolean;
-}
-
 // AgentAdapter is defined in src/agents/adapter.ts; keep a single source of truth.
