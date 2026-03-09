@@ -75,7 +75,7 @@ test('distributeMcp: skips apps that are not installed', async () => {
     resetRuntimeState();
     writeSwitchboardConfig(asbHome, [
       '[applications]',
-      'active = ["claude-code"]',
+      'enabled = ["claude-code"]',
       '',
       '[mcp]',
       'enabled = ["alpha"]',
@@ -101,7 +101,7 @@ test('distributeMcp: writes project-scoped config when project scope is provided
 
     writeSwitchboardConfig(asbHome, [
       '[applications]',
-      'active = ["claude-code"]',
+      'enabled = ["claude-code"]',
       '',
       '[mcp]',
       'enabled = ["alpha"]',
@@ -134,7 +134,7 @@ test('distributeMcp: intersects UI selection with per-app MCP config', async () 
 
     writeSwitchboardConfig(asbHome, [
       '[applications]',
-      'active = ["claude-code", "cursor"]',
+      'enabled = ["claude-code", "cursor"]',
       '',
       '[mcp]',
       'enabled = ["alpha", "beta"]',

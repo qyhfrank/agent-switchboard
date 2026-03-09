@@ -71,7 +71,7 @@ test('runSyncCommand syncs global config through extracted orchestration', async
     simulateAppsInstalled('claude-code');
     writeConfig(path.join(asbHome, 'config.toml'), [
       '[applications]',
-      'active = ["claude-code"]',
+      'enabled = ["claude-code"]',
       '',
       '[mcp]',
       'enabled = ["alpha"]',
@@ -99,7 +99,7 @@ test('runSyncCommand performs dual sync for project scope', async () => {
     simulateAppsInstalled('claude-code');
     writeConfig(path.join(asbHome, 'config.toml'), [
       '[applications]',
-      'active = ["claude-code"]',
+      'enabled = ["claude-code"]',
       '',
       '[mcp]',
       'enabled = ["alpha"]',

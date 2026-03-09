@@ -53,7 +53,7 @@ test('resolveApplicationSectionConfig applies per-agent override', () => {
       path.join(asbHome, 'config.toml'),
       [
         '[applications]',
-        'active = ["claude-code", "codex"]',
+        'enabled = ["claude-code", "codex"]',
         '',
         '[skills]',
         'enabled = ["skill-a", "skill-b", "skill-c"]',
@@ -75,7 +75,7 @@ test('resolveApplicationSectionConfig returns global config when no override', (
       path.join(asbHome, 'config.toml'),
       [
         '[applications]',
-        'active = ["claude-code", "codex"]',
+        'enabled = ["claude-code", "codex"]',
         '',
         '[skills]',
         'enabled = ["skill-a", "skill-b"]',
@@ -93,7 +93,7 @@ test('hasApplicationOverrides detects agent with overrides', () => {
       path.join(asbHome, 'config.toml'),
       [
         '[applications]',
-        'active = ["claude-code", "codex"]',
+        'enabled = ["claude-code", "codex"]',
         '',
         '[applications.codex.skills]',
         'remove = ["skill-a"]',
@@ -112,7 +112,7 @@ test('getApplicationsWithOverrides lists all agents with overrides', () => {
       path.join(asbHome, 'config.toml'),
       [
         '[applications]',
-        'active = ["claude-code", "codex", "gemini"]',
+        'enabled = ["claude-code", "codex", "gemini"]',
         '',
         '[applications.codex.skills]',
         'remove = ["skill-a"]',
@@ -134,7 +134,7 @@ test('per-agent override with complete active replacement', () => {
       path.join(asbHome, 'config.toml'),
       [
         '[applications]',
-        'active = ["claude-code", "codex"]',
+        'enabled = ["claude-code", "codex"]',
         '',
         '[skills]',
         'enabled = ["skill-a", "skill-b", "skill-c"]',

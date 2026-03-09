@@ -112,8 +112,8 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
 
   const assumeInstalledSet = new Set(config.applications.assume_installed);
   const appsLabel =
-    config.applications.active.length > 0
-      ? config.applications.active
+    config.applications.enabled.length > 0
+      ? config.applications.enabled
           .map((id) => {
             const target = getTargetById(id);
             if (target?.isInstalled?.() === false) {
@@ -128,7 +128,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   console.log();
 
   const cursorSkillsDeduped =
-    config.applications.active.includes('claude-code') &&
+    config.applications.enabled.includes('claude-code') &&
     resolveEffectiveSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
   console.log(chalk.blue('Inventory:'));
   {
@@ -179,7 +179,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       const globalCount = globalActive.length;
 
       const supported = new Set(sectionPlatforms[section] ?? []);
-      const applicableApps = config.applications.active.filter((id) => supported.has(id));
+      const applicableApps = config.applications.enabled.filter((id) => supported.has(id));
 
       const effectiveByApp = new Map<string, string[]>();
       for (const appId of applicableApps) {
@@ -235,12 +235,12 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
 
   console.log();
   const notes: string[] = [];
-  if (cursorSkillsDeduped && config.applications.active.includes('cursor')) {
+  if (cursorSkillsDeduped && config.applications.enabled.includes('cursor')) {
     notes.push('cursor reads skills via claude-code');
   }
   if (config.distribution.use_agents_dir) {
     const agentsMembers = (['codex', 'gemini', 'opencode'] as const).filter((appId) =>
-      config.applications.active.includes(appId)
+      config.applications.enabled.includes(appId)
     );
     if (agentsMembers.length > 0) {
       notes.push(`skills for ${agentsMembers.join(', ')} sync to shared .agents/skills`);
@@ -252,7 +252,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   }
   if (notes.length > 0) console.log();
 
-  const activeAppIds = config.applications.active;
+  const activeAppIds = config.applications.enabled;
   const mcpDistribution = await distributeMcp(scope, undefined, {
     useSpinner: false,
     assumeInstalled: assumeInstalledSet,

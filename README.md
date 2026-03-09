@@ -54,7 +54,7 @@ npm i -g agent-switchboard    # or: npx agent-switchboard@latest mcp
 
 ```toml
 [applications]
-active = ["claude-code", "codex", "cursor"]
+enabled = ["claude-code", "codex", "cursor"]
 ```
 
 2. **Manage MCP servers** -- launches an interactive checkbox UI:
@@ -102,7 +102,7 @@ Library content lives under `~/.agent-switchboard/` and agent configs are update
 
 `<lib>` = `rule`, `command`, `agent`, `skill`, or `hook`. `<ref>` = `plugin` or `plugin@source`.
 
-**Shared flags**: `-p, --profile <name>`, `--project <path>`, `--json` (on `list` commands).
+**Shared flags**: `-p, --profile <name>`, `-P, --project <path>`, `--json` (on `list` commands).
 
 ## Configuration
 
@@ -112,7 +112,7 @@ The central config file at `~/.agent-switchboard/config.toml` controls target ap
 
 ```toml
 [applications]
-active = ["claude-code", "codex", "cursor"]
+enabled = ["claude-code", "codex", "cursor"]
 
 [rules]
 enabled = ["prompt-hygiene", "code-style"]
@@ -130,11 +130,11 @@ team-lib = "https://github.com/org/team-library"
 
 Supported application IDs: `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini`, `opencode`, `trae`, `trae-cn`.
 
-ASB detects whether each application is installed by checking for its data directory (e.g. `~/.claude/`, `~/.cursor/`). Uninstalled applications in `active` are skipped during sync. To force distribution to an application whose directory does not exist yet, add it to `assume_installed`:
+agent-switchboard detects whether each application is installed by checking for its data directory (e.g. `~/.claude/`, `~/.cursor/`). Uninstalled applications in `enabled` are skipped during sync. To force distribution to an application whose directory does not exist yet, add it to `assume_installed`:
 
 ```toml
 [applications]
-active = ["claude-code", "codex"]
+enabled = ["claude-code", "codex"]
 assume_installed = ["codex"]    # distribute even if ~/.codex/ is missing
 ```
 
@@ -148,7 +148,7 @@ Fine-tune which library entries reach each application using `add` / `remove` / 
 
 ```toml
 [applications]
-active = ["claude-code", "codex", "opencode"]
+enabled = ["claude-code", "codex", "opencode"]
 
 codex.skills.remove = ["skill-codex"]
 codex.rules.remove  = ["skill-codex"]
@@ -290,7 +290,7 @@ Bundle scripts are copied to `~/.claude/hooks/asb/<id>/` and the `${HOOK_DIR}` p
 
 ## Plugins
 
-A plugin bundles related capabilities (rules, commands, agents, skills, hooks, MCP servers) into a single directory that can be enabled/disabled as a unit. Instead of managing dozens of individual files in `~/.agent-switchboard/`, you point ASB at a plugin and get all its components at once.
+A plugin bundles related capabilities (rules, commands, agents, skills, hooks, MCP servers) into a single directory that can be enabled/disabled as a unit. Instead of managing dozens of individual files in `~/.agent-switchboard/`, you point agent-switchboard at a plugin and get all its components at once.
 
 ### Plugin Structure
 
@@ -323,7 +323,7 @@ mono-sub = "https://github.com/org/monorepo/tree/main/plugins/my-plugin"
 
 Local plugins placed in `~/.asb/plugins/` are auto-discovered without explicit configuration.
 
-ASB auto-detects two source kinds:
+agent-switchboard auto-detects two source kinds:
 
 | Kind          | Detection                                  | Structure                                      |
 |:--------------|:-------------------------------------------|:-----------------------------------------------|
@@ -352,7 +352,7 @@ Enabled plugin components are expanded into entry-level `enabled` arrays during 
 Push all libraries and MCP config to every active application in one step:
 
 ```bash
-asb sync [-p <profile>] [--project <path>]
+asb sync [-p <profile>] [-P <path>]
 ```
 
 This merges layered config, applies per-application overrides, and writes target files in place. Files are only rewritten when content changes.

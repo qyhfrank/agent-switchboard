@@ -123,7 +123,7 @@ test('project skill distribution does not materialize inherited enabled entries 
     simulateAppsInstalled('claude-code');
     writeConfig(path.join(asbHome, 'config.toml'), [
       '[applications]',
-      'active = ["claude-code"]',
+      'enabled = ["claude-code"]',
       '',
       '[skills]',
       'enabled = ["user-skill"]',
