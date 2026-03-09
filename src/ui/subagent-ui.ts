@@ -17,7 +17,7 @@ export async function showSubagentSelector(
     noun: 'agent',
     emptyHint: 'asb agent load <platform> [path] [-r]',
     allowOrdering: false,
-    loadEntries: () => loadSubagentLibrary(),
+    loadEntries: () => loadSubagentLibrary(options?.scope),
     getId: (e) => e.id,
     getTitle: (e) => {
       const t = (e.metadata as Record<string, unknown>).title as unknown;

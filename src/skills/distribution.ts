@@ -64,7 +64,7 @@ export function distributeSkills(
     assumeInstalled?: ReadonlySet<string>;
   }
 ): SkillDistributionOutcome {
-  const entries = loadSkillLibrary();
+  const entries = loadSkillLibrary(scope);
   const activeAppIds = options?.activeAppIds;
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too
   const allSkillTargets = filterInstalled(getTargetsForSection('skills'), options?.assumeInstalled);

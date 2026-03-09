@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getRulesDir } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import { getSourcesRecord } from '../library/sources.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import { parseRuleMarkdown } from './parser.js';
@@ -81,7 +82,7 @@ function loadRulesFromDirectory(directory: string, namespace?: string): RuleSnip
 /**
  * Load all rules from default library, external sources, and marketplace plugins.
  */
-export function loadRuleLibrary(): RuleSnippet[] {
+export function loadRuleLibrary(scope?: ConfigScope): RuleSnippet[] {
   const rules: RuleSnippet[] = [];
   const seenIds = new Set<string>();
 
@@ -92,7 +93,7 @@ export function loadRuleLibrary(): RuleSnippet[] {
     seenIds.add(r.id);
   }
 
-  const sources = getSourcesRecord();
+  const sources = getSourcesRecord(scope);
   for (const [namespace, basePath] of Object.entries(sources)) {
     const rulesDir = path.join(basePath, 'rules');
     for (const r of loadRulesFromDirectory(rulesDir, namespace)) {
@@ -102,7 +103,7 @@ export function loadRuleLibrary(): RuleSnippet[] {
   }
 
   // Append rules discovered from marketplace plugins (via PluginIndex)
-  const pluginIndex = buildPluginIndex();
+  const pluginIndex = buildPluginIndex(scope);
   for (const snippet of pluginIndex.ruleSnippets) {
     if (!seenIds.has(snippet.id)) {
       rules.push(snippet);

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getCommandsDir } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
 import { loadEntriesFromSources } from '../marketplace/source-loader.js';
@@ -80,13 +81,13 @@ function loadCommandsFromDirectory(directory: string, namespace?: string): Comma
 /**
  * Load all commands from default library, plugin sources, and marketplace sources.
  */
-export function loadCommandLibrary(): CommandEntry[] {
+export function loadCommandLibrary(scope?: ConfigScope): CommandEntry[] {
   const result: CommandEntry[] = [];
 
   const defaultDir = ensureCommandsDirectory();
   result.push(...loadCommandsFromDirectory(defaultDir));
 
-  const { pluginSources, marketplaceEntries } = loadEntriesFromSources();
+  const { pluginSources, marketplaceEntries } = loadEntriesFromSources(scope);
 
   for (const { namespace, basePath } of pluginSources) {
     const commandsDir = path.join(basePath, 'commands');
