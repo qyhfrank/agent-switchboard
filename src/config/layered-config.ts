@@ -215,6 +215,12 @@ export interface UpdateConfigLayerOptions extends LoadConfigLayersOptions {
   target?: ConfigLayerKind;
 }
 
+export function loadWritableConfigLayer(options?: UpdateConfigLayerOptions): ConfigLayerLoadResult {
+  const targetKind = options?.target ?? defaultWritableLayer(options);
+  const filePath = resolveLayerPath(targetKind, options);
+  return readLayerFile(filePath);
+}
+
 export function updateConfigLayer(
   mutator: (layer: SwitchboardConfigLayer) => SwitchboardConfigLayer,
   options?: UpdateConfigLayerOptions

@@ -1,5 +1,9 @@
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
-import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
+import {
+  loadMergedSwitchboardConfig,
+  loadWritableConfigLayer,
+  updateConfigLayer,
+} from '../config/layered-config.js';
 import type { ConfigScope } from '../config/scope.js';
 import { scopeToLayerOptions } from '../config/scope.js';
 import { type RuleState, ruleStateSchema } from './schema.js';
@@ -30,6 +34,11 @@ function getConfigEnabled(options?: UpdateConfigLayerOptions): string[] {
   return [...config.rules.enabled];
 }
 
+function getWritableConfigEnabled(options?: UpdateConfigLayerOptions): string[] {
+  const layer = loadWritableConfigLayer(options);
+  return Array.isArray(layer.config.rules?.enabled) ? [...layer.config.rules.enabled] : [];
+}
+
 function writeConfigEnabled(enabled: string[], options?: UpdateConfigLayerOptions): void {
   updateConfigLayer((layer) => {
     const next = { ...layer };
@@ -53,6 +62,19 @@ export function loadRuleState(scope?: ConfigScope): RuleState {
   };
 }
 
+export function loadWritableRuleState(scope?: ConfigScope): RuleState {
+  const layerOptions = scopeToLayerOptions(scope);
+  const enabled = normalizeEnabled(getWritableConfigEnabled(layerOptions));
+  return {
+    enabled,
+    agentSync: { ...agentSyncCache },
+  };
+}
+
+export function loadRuleAgentSync(): RuleState['agentSync'] {
+  return { ...agentSyncCache };
+}
+
 export function saveRuleState(state: RuleState, scope?: ConfigScope): void {
   const layerOptions = scopeToLayerOptions(scope);
   const validated = ruleStateSchema.parse(state);
@@ -70,8 +92,20 @@ export function updateRuleState(
   mutator: (current: RuleState) => RuleState,
   scope?: ConfigScope
 ): RuleState {
-  const current = loadRuleState(scope);
+  const current = loadWritableRuleState(scope);
   const next = mutator(current);
   saveRuleState(next, scope);
-  return loadRuleState(scope);
+  return loadWritableRuleState(scope);
+}
+
+export function updateRuleAgentSync(
+  mutator: (current: RuleState['agentSync']) => RuleState['agentSync']
+): RuleState['agentSync'] {
+  Object.keys(agentSyncCache).forEach((key) => {
+    delete agentSyncCache[key];
+  });
+  for (const [key, value] of Object.entries(mutator(loadRuleAgentSync()))) {
+    agentSyncCache[key] = { ...value };
+  }
+  return loadRuleAgentSync();
 }
