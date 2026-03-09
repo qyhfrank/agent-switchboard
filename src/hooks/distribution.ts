@@ -109,6 +109,24 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): Matcher
 // ---------------------------------------------------------------------------
 
 /**
+ * Return true if a matcher group looks like it was distributed by ASB,
+ * even when `_asb_source` is missing (legacy entries).
+ * Detected by command paths that reference the ASB hooks subdirectory.
+ */
+function isLegacyAsbGroup(
+  group: Record<string, unknown>,
+  scope?: ConfigScope
+): boolean {
+  const hooks = group.hooks;
+  if (!Array.isArray(hooks)) return false;
+  const asbDir = `${resolveHooksBundleParentDir(scope)}/`;
+  return hooks.some(
+    (h: Record<string, unknown>) =>
+      typeof h.command === 'string' && h.command.includes(asbDir)
+  );
+}
+
+/**
  * Merge active hook entries into the settings.json `hooks` key.
  * Tags each injected matcher group with `_asb_source` for future cleanup.
  */
@@ -119,11 +137,11 @@ function mergeHooksIntoSettings(
 ): void {
   const existingHooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
 
-  // Remove previously ASB-managed matcher groups
+  // Remove previously ASB-managed matcher groups (tagged or legacy)
   const cleanedHooks: Record<string, unknown[]> = {};
   for (const [event, groups] of Object.entries(existingHooks)) {
     const kept = (groups as Array<Record<string, unknown>>).filter(
-      (g) => g._asb_source === undefined
+      (g) => g._asb_source === undefined && !isLegacyAsbGroup(g, scope)
     );
     if (kept.length > 0) cleanedHooks[event] = kept;
   }
@@ -257,7 +275,13 @@ export function distributeHooks(
   const settings = readSettingsJson(settingsPath);
   const previouslyManaged = (settings[ASB_MANAGED_KEY] ?? []) as string[];
 
-  if (selected.length === 0 && previouslyManaged.length === 0) {
+  // Also check for legacy ASB hooks (missing _asb_source marker)
+  const existingHooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
+  const hasLegacyAsb = Object.values(existingHooks).some((groups) =>
+    (groups as Array<Record<string, unknown>>).some((g) => isLegacyAsbGroup(g, scope))
+  );
+
+  if (selected.length === 0 && previouslyManaged.length === 0 && !hasLegacyAsb) {
     return { results };
   }
 
