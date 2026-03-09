@@ -44,22 +44,29 @@ export function distributeSubagents(
   const allInstalledTargets = filterInstalled(getTargetsForSection('agents'));
   const activeSet = activeAppIds ? new Set(activeAppIds) : null;
 
-  const libraryTargets = allInstalledTargets.filter((t) => !isCustomAgentsHandler(t.agents!));
-  // Custom targets only run for active platforms (no cleanup-only path available)
+  const withAgents = allInstalledTargets.filter((t) => t.agents != null);
+  const libraryTargets = withAgents.filter((t) => t.agents && !isCustomAgentsHandler(t.agents));
+  const customTargets = withAgents.filter((t) => t.agents && isCustomAgentsHandler(t.agents));
   const activeCustomTargets = activeSet
-    ? allInstalledTargets.filter((t) => isCustomAgentsHandler(t.agents!) && activeSet.has(t.id))
-    : allInstalledTargets.filter((t) => isCustomAgentsHandler(t.agents!));
-  const inactiveCustomTargets = activeSet
-    ? allInstalledTargets.filter((t) => isCustomAgentsHandler(t.agents!) && !activeSet.has(t.id))
-    : [];
+    ? customTargets.filter((t) => activeSet.has(t.id))
+    : customTargets;
+  const inactiveCustomTargets = activeSet ? customTargets.filter((t) => !activeSet.has(t.id)) : [];
 
   const handlerMap = new Map<string, TargetLibraryHandler>(
-    libraryTargets.map((t) => [t.id, t.agents! as TargetLibraryHandler])
+    libraryTargets.flatMap((t) =>
+      t.agents && !isCustomAgentsHandler(t.agents) ? [[t.id, t.agents] as const] : []
+    )
   );
   const libraryPlatforms = libraryTargets.map((t) => t.id);
 
+  const getHandler = (p: string): TargetLibraryHandler => {
+    const h = handlerMap.get(p);
+    if (!h) throw new Error(`Missing agents handler for platform: ${p}`);
+    return h;
+  };
+
   const cleanup: CleanupConfig<string> = {
-    resolveTargetDir: (p) => handlerMap.get(p)!.resolveTargetDir(scope),
+    resolveTargetDir: (p) => getHandler(p).resolveTargetDir(scope),
     extractId: (filename) => {
       if (!filename.endsWith('.md')) return null;
       return filename.slice(0, -3);
@@ -83,10 +90,10 @@ export function distributeSubagents(
     selected: entries,
     platforms: libraryPlatforms,
     resolveFilePath: (p, e) => {
-      const h = handlerMap.get(p)!;
+      const h = getHandler(p);
       return path.join(h.resolveTargetDir(scope), h.getFilename(e.id));
     },
-    render: (p, e) => handlerMap.get(p)!.render(e),
+    render: (p, e) => getHandler(p).render(e),
     getId: (e) => e.id,
     cleanup,
     scope,
@@ -95,7 +102,7 @@ export function distributeSubagents(
 
   const customResults: DistributionResult<string>[] = [];
   for (const target of activeCustomTargets) {
-    if (isCustomAgentsHandler(target.agents!)) {
+    if (target.agents && isCustomAgentsHandler(target.agents)) {
       const results = target.agents.distribute(entries, byId, scope);
       customResults.push(...results);
     }

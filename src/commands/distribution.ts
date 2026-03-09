@@ -41,12 +41,18 @@ export function distributeCommands(
   const allTargets = filterInstalled(getTargetsForSection('commands'));
   const activeSet = activeAppIds ? new Set(activeAppIds) : null;
   const handlerMap = new Map<string, TargetLibraryHandler>(
-    allTargets.map((t) => [t.id, t.commands!])
+    allTargets.flatMap((t) => (t.commands ? [[t.id, t.commands] as const] : []))
   );
   const platforms = allTargets.map((t) => t.id);
 
+  const getHandler = (p: string): TargetLibraryHandler => {
+    const h = handlerMap.get(p);
+    if (!h) throw new Error(`Missing commands handler for platform: ${p}`);
+    return h;
+  };
+
   const cleanup: CleanupConfig<string> = {
-    resolveTargetDir: (p) => handlerMap.get(p)!.resolveTargetDir(scope),
+    resolveTargetDir: (p) => getHandler(p).resolveTargetDir(scope),
     extractId: (filename) => {
       if (filename.endsWith('.toml')) return filename.slice(0, -5);
       if (filename.endsWith('.md')) return filename.slice(0, -3);
@@ -72,10 +78,10 @@ export function distributeCommands(
     selected: entries,
     platforms,
     resolveFilePath: (p, e) => {
-      const h = handlerMap.get(p)!;
+      const h = getHandler(p);
       return path.join(h.resolveTargetDir(scope), h.getFilename(e.id));
     },
-    render: (p, e) => handlerMap.get(p)!.render(e),
+    render: (p, e) => getHandler(p).render(e),
     getId: (e) => e.id,
     cleanup,
     scope,
