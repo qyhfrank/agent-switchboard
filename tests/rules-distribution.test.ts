@@ -36,7 +36,7 @@ test('distributeRules writes rule document and updates state', () => {
     });
 
     const composed1 = composeActiveRules();
-    const outcome1 = distributeRules(composed1);
+    const outcome1 = distributeRules();
     const composedResults1 = outcome1.results.filter((r) => composedAgentIds.has(r.agent));
 
     assert.equal(composedResults1.length > 0, true);
@@ -67,7 +67,7 @@ test('distributeRules writes rule document and updates state', () => {
     );
 
     const composed2 = composeActiveRules();
-    const outcome2 = distributeRules(composed2);
+    const outcome2 = distributeRules();
     const composedResults2 = outcome2.results.filter((r) => composedAgentIds.has(r.agent));
     composedResults2.forEach((result) => {
       assert.equal(result.status, 'written');
@@ -87,7 +87,7 @@ test('distributeRules writes rule document and updates state', () => {
 
     // Third run with no changes should skip updates
     const composed3 = composeActiveRules();
-    const outcome3 = distributeRules(composed3);
+    const outcome3 = distributeRules();
     outcome3.results.forEach((result) => {
       assert.equal(result.status, 'skipped');
       assert.equal(result.reason, 'up-to-date');
@@ -128,7 +128,7 @@ test('distributeRules updates state when files already match content', () => {
       fs.writeFileSync(filePath, content, 'utf-8');
     }
 
-    const outcome = distributeRules(composed);
+    const outcome = distributeRules();
     const composedResults = outcome.results.filter((r) => composedAgentIds.has(r.agent));
     composedResults.forEach((result) => {
       assert.equal(result.status, 'skipped');
@@ -157,14 +157,14 @@ test('distributeRules with force rewrites matching content', () => {
 
     const composed = composeActiveRules();
 
-    const firstOutcome = distributeRules(composed);
+    const firstOutcome = distributeRules();
     firstOutcome.results
       .filter((r) => composedAgentIds.has(r.agent))
       .forEach((result) => {
         assert.equal(result.status, 'written');
       });
 
-    const forcedOutcome = distributeRules(composed, { force: true });
+    const forcedOutcome = distributeRules({ force: true });
     forcedOutcome.results
       .filter((r) => composedAgentIds.has(r.agent))
       .forEach((result) => {
@@ -193,7 +193,7 @@ test('distributeRules deletes distributed rule files when no rules are enabled',
       agentSync: {},
     });
 
-    distributeRules(composeActiveRules());
+    distributeRules();
 
     saveRuleState({
       ...DEFAULT_RULE_STATE,
@@ -229,11 +229,7 @@ test('distributeRules project scope ignores inherited user-level rules', () => {
     const projectRulePath = path.join(projectRoot, '.claude', 'CLAUDE.md');
     fs.writeFileSync(projectRulePath, 'stale rules\n', 'utf-8');
 
-    const outcome = distributeRules(
-      undefined,
-      { activeAppIds: ['claude-code'] },
-      { project: projectRoot }
-    );
+    const outcome = distributeRules({ activeAppIds: ['claude-code'] }, { project: projectRoot });
     const claudeResult = outcome.results.find((result) => result.agent === 'claude-code');
 
     assert.ok(claudeResult);

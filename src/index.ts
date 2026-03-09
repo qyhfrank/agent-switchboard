@@ -62,7 +62,6 @@ import { loadLibraryStateSection, saveMcpEnabledState } from './library/state.js
 import { readMarketplace } from './marketplace/reader.js';
 import { distributeMcp } from './mcp/distribution.js';
 import { buildPluginIndex } from './plugins/index.js';
-import { composeActiveRules } from './rules/composer.js';
 import {
   distributeRules,
   listIndirectAgents,
@@ -585,7 +584,6 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
     }
 
     const distribution = distributeRules(
-      composeActiveRules(scope),
       {
         force: !selectionChanged,
         activeAppIds: config.applications.enabled,
