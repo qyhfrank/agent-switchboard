@@ -239,7 +239,10 @@ export function compileTargetSpec(id: string, spec: Record<string, unknown>): Ap
     commands?: TargetLibraryHandler;
     agents?: TargetLibraryHandler;
     skills?: TargetSkillsHandler;
+    isInstalled?: () => boolean;
   } = { id };
+
+  const detectPath = optionalString(spec, 'detect');
 
   const mcpSpec = optionalRecord(spec, 'mcp');
   if (mcpSpec) {
@@ -272,6 +275,14 @@ export function compileTargetSpec(id: string, spec: Record<string, unknown>): Ap
   const skillsSpec = optionalRecord(spec, 'skills');
   if (skillsSpec) {
     (target as { skills: TargetSkillsHandler }).skills = compileSkillsHandler(id, skillsSpec);
+  }
+
+  // Derive isInstalled from explicit detect path or MCP config path parent
+  const installDetectPath =
+    detectPath ?? (mcpSpec ? optionalString(mcpSpec, 'config_path') : undefined);
+  if (installDetectPath) {
+    const checkDir = expandPath(detectPath ? installDetectPath : path.dirname(installDetectPath));
+    target.isInstalled = () => fs.existsSync(checkDir);
   }
 
   return target;
