@@ -215,7 +215,7 @@ export type McpServerLike = Record<string, unknown> & {
 const TOML_BARE_KEY_RE = /^[A-Za-z0-9_-]+$/;
 function tomlKey(key: string): string {
   if (TOML_BARE_KEY_RE.test(key)) return key;
-  return '"' + key.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+  return `"${key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
 }
 
 export function buildNestedToml(
