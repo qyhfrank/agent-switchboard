@@ -113,16 +113,12 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): Matcher
  * even when `_asb_source` is missing (legacy entries).
  * Detected by command paths that reference the ASB hooks subdirectory.
  */
-function isLegacyAsbGroup(
-  group: Record<string, unknown>,
-  scope?: ConfigScope
-): boolean {
+function isLegacyAsbGroup(group: Record<string, unknown>, scope?: ConfigScope): boolean {
   const hooks = group.hooks;
   if (!Array.isArray(hooks)) return false;
   const asbDir = `${resolveHooksBundleParentDir(scope)}/`;
   return hooks.some(
-    (h: Record<string, unknown>) =>
-      typeof h.command === 'string' && h.command.includes(asbDir)
+    (h: Record<string, unknown>) => typeof h.command === 'string' && h.command.includes(asbDir)
   );
 }
 
