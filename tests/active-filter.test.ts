@@ -12,7 +12,6 @@ import { distributeCommands } from '../src/commands/distribution.js';
 import { ensureCommandsDirectory } from '../src/commands/library.js';
 import { renderDefaultCommandTemplate } from '../src/commands/template.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
-import { composeActiveRules } from '../src/rules/composer.js';
 import { distributeRules } from '../src/rules/distribution.js';
 import { ensureRulesDirectory } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, saveRuleState } from '../src/rules/state.js';
@@ -40,8 +39,7 @@ test('distributeRules: only distributes to activeAppIds targets', () => {
     fs.writeFileSync(path.join(rulesDir, 'test-rule.md'), 'Rule body\n');
     saveRuleState({ ...DEFAULT_RULE_STATE, enabled: ['test-rule'], agentSync: {} });
 
-    const composed = composeActiveRules();
-    const outcome = distributeRules(composed, { activeAppIds: ['claude-code'] });
+    const outcome = distributeRules({ activeAppIds: ['claude-code'] });
 
     const agents = outcome.results.map((r) => r.agent);
     assert.ok(agents.includes('claude-code'), 'should include claude-code');
@@ -57,8 +55,7 @@ test('distributeRules: empty activeAppIds produces no results', () => {
     fs.writeFileSync(path.join(rulesDir, 'test-rule.md'), 'Rule body\n');
     saveRuleState({ ...DEFAULT_RULE_STATE, enabled: ['test-rule'], agentSync: {} });
 
-    const composed = composeActiveRules();
-    const outcome = distributeRules(composed, { activeAppIds: [] });
+    const outcome = distributeRules({ activeAppIds: [] });
 
     assert.equal(outcome.results.length, 0);
   });
