@@ -1,12 +1,8 @@
 import { createHash } from 'node:crypto';
 import { resolveScopedSectionConfig } from '../config/application-config.js';
-import { loadWritableConfigLayer } from '../config/layered-config.js';
 import type { ConfigScope } from '../config/scope.js';
-import { scopeToLayerOptions } from '../config/scope.js';
-import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import type { RuleSnippet } from './library.js';
-import { loadRuleLibrary } from './library.js';
-import { loadRuleState, loadWritableRuleState } from './state.js';
+import { loadRuleRuntimeContext } from './runtime.js';
 
 export interface RuleSection {
   id: string;
@@ -97,22 +93,9 @@ export function composeRules(
 }
 
 export function composeActiveRules(scope?: ConfigScope): ComposedRules {
-  const rules = loadRuleLibrary(scope);
-  const state =
-    scope?.profile || scope?.project ? loadWritableRuleState(scope) : loadRuleState(scope);
-  const config =
-    scope?.profile || scope?.project
-      ? loadWritableConfigLayer(scopeToLayerOptions(scope)).config
-      : loadSwitchboardConfig(
-          scope
-            ? {
-                profile: scope.profile ?? undefined,
-                projectPath: scope.project ?? undefined,
-              }
-            : undefined
-        );
-  return composeRules(state.enabled, rules, {
-    includeDelimiters: config.rules?.includeDelimiters === true,
+  const { rules, activeState, includeDelimiters } = loadRuleRuntimeContext(scope);
+  return composeRules(activeState.enabled, rules, {
+    includeDelimiters,
   });
 }
 
@@ -123,20 +106,9 @@ export function composeActiveRulesForApplication(
   appId: string,
   scope?: ConfigScope
 ): ComposedRules {
-  const rules = loadRuleLibrary(scope);
+  const { rules, includeDelimiters } = loadRuleRuntimeContext(scope);
   const appConfig = resolveScopedSectionConfig('rules', appId, scope);
-  const config =
-    scope?.profile || scope?.project
-      ? loadWritableConfigLayer(scopeToLayerOptions(scope)).config
-      : loadSwitchboardConfig(
-          scope
-            ? {
-                profile: scope.profile ?? undefined,
-                projectPath: scope.project ?? undefined,
-              }
-            : undefined
-        );
   return composeRules(appConfig.enabled, rules, {
-    includeDelimiters: config.rules?.includeDelimiters === true,
+    includeDelimiters,
   });
 }
