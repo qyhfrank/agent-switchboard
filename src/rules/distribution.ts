@@ -30,6 +30,7 @@ export interface DistributionOutcome {
 interface DistributionOptions {
   force?: boolean;
   activeAppIds?: string[];
+  assumeInstalled?: ReadonlySet<string>;
 }
 
 function ensureDirectory(filePath: string): void {
@@ -80,7 +81,8 @@ export function distributeRules(
 
   const activeAppIds = options?.activeAppIds;
   const targets = filterInstalled(
-    activeAppIds ? getActiveTargetsForSection('rules', activeAppIds) : getTargetsForSection('rules')
+    activeAppIds ? getActiveTargetsForSection('rules', activeAppIds) : getTargetsForSection('rules'),
+    options?.assumeInstalled
   );
 
   for (const target of targets) {

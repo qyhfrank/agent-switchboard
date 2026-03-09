@@ -92,12 +92,14 @@ export const applicationConfigOverrideSchema = z
 const applicationsSectionBaseSchema = z
   .object({
     active: z.array(z.string().trim().min(1)).optional(),
+    assume_installed: z.array(z.string().trim().min(1)).optional(),
   })
   .passthrough();
 
 const applicationsSectionSchema = z
   .object({
     active: z.array(z.string().trim().min(1)).default([]),
+    assume_installed: z.array(z.string().trim().min(1)).default([]),
   })
   .passthrough();
 

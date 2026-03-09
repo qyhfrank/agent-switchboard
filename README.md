@@ -130,6 +130,14 @@ team-lib = "https://github.com/org/team-library"
 
 Supported application IDs: `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini`, `opencode`, `trae`, `trae-cn`.
 
+ASB detects whether each application is installed by checking for its data directory (e.g. `~/.claude/`, `~/.cursor/`). Uninstalled applications in `active` are skipped during sync. To force distribution to an application whose directory does not exist yet, add it to `assume_installed`:
+
+```toml
+[applications]
+active = ["claude-code", "codex"]
+assume_installed = ["codex"]    # distribute even if ~/.codex/ is missing
+```
+
 All entry-level sections (`rules`, `commands`, `agents`, `skills`, `hooks`, `plugins`) use `enabled = [...]` where array order defines composition priority. Plugin references in `enabled` arrays use `plugin:bareId` or `plugin@source:bareId` syntax.
 
 The `[plugins.sources]` sub-table declares explicit plugin locations. Local plugins in `~/.asb/plugins/` are auto-discovered without configuration.

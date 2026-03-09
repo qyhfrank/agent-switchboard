@@ -96,9 +96,15 @@ export function registerConfigTargets(targets: Record<string, Record<string, unk
   }
 }
 
-/** Filter targets to only those that are installed (or have no detection). */
-export function filterInstalled(targets: ApplicationTarget[]): ApplicationTarget[] {
-  return targets.filter((t) => t.isInstalled?.() !== false);
+/**
+ * Filter targets to only those that are installed (or have no detection).
+ * Targets in `assumeInstalled` bypass the detection check.
+ */
+export function filterInstalled(
+  targets: ApplicationTarget[],
+  assumeInstalled?: ReadonlySet<string>
+): ApplicationTarget[] {
+  return targets.filter((t) => assumeInstalled?.has(t.id) || t.isInstalled?.() !== false);
 }
 
 /** Clear all extension targets (for testing) */

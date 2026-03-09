@@ -13,7 +13,7 @@ import {
 import { ensureRulesDirectory } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, loadRuleState, saveRuleState } from '../src/rules/state.js';
 import { getTargetsForSection } from '../src/targets/registry.js';
-import { simulateTraeInstalled, withTempAsbHome } from './helpers/tmp.js';
+import { simulateAppsInstalled, simulateTraeInstalled, withTempAsbHome } from './helpers/tmp.js';
 
 const ruleTargetIds = getTargetsForSection('rules').map((t) => t.id);
 const composedAgentIds = new Set<string>(ruleTargetIds);
@@ -21,6 +21,7 @@ const frontmatterAgents = new Set(['cursor', 'trae', 'trae-cn']);
 
 test('distributeRules writes rule document and updates state', () => {
   withTempAsbHome(() => {
+    simulateAppsInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(
       path.join(rulesDir, 'alpha.md'),
@@ -104,6 +105,7 @@ test('distributeRules writes rule document and updates state', () => {
 
 test('distributeRules updates state when files already match content', () => {
   withTempAsbHome(() => {
+    simulateAppsInstalled();
     simulateTraeInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'only.md'), 'Only body\n');
@@ -143,6 +145,7 @@ test('distributeRules updates state when files already match content', () => {
 
 test('distributeRules with force rewrites matching content', () => {
   withTempAsbHome(() => {
+    simulateAppsInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'only.md'), 'Only body\n');
 
