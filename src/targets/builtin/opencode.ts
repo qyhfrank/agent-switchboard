@@ -19,9 +19,9 @@ export const opencodeTarget: ApplicationTarget = {
 
   mcp: {
     configPath: () => adapter.configPath(),
-    projectConfigPath: (root) => adapter.projectConfigPath!(root),
+    projectConfigPath: (root) => adapter.projectConfigPath?.(root),
     applyConfig: (config) => adapter.applyConfig(config),
-    applyProjectConfig: (root, config) => adapter.applyProjectConfig!(root, config),
+    applyProjectConfig: (root, config) => adapter.applyProjectConfig?.(root, config),
   },
 
   rules: {
