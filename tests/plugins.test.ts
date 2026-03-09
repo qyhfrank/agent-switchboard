@@ -219,7 +219,7 @@ test('resolveEffectiveSectionConfig merges plugin expansion with global active',
         'enabled = ["local-cmd"]',
         '',
         '[applications]',
-        'active = ["claude-code"]',
+        'enabled = ["claude-code"]',
       ].join('\n')
     );
 
@@ -249,7 +249,7 @@ test('plugins.exclude removes specific entries from expansion', () => {
         'commands = ["my-plugin:drop-cmd"]',
         '',
         '[applications]',
-        'active = ["claude-code"]',
+        'enabled = ["claude-code"]',
       ].join('\n')
     );
 
@@ -280,7 +280,7 @@ test('enabled plugins expand to commands for all active applications', () => {
         `mkt = "${mktDir}"`,
         '',
         '[applications]',
-        'active = ["claude-code", "codex"]',
+        'enabled = ["claude-code", "codex"]',
       ].join('\n')
     );
 
@@ -380,9 +380,13 @@ test('old config without plugins section works (backward compatibility)', () => 
     clearPluginIndexCache();
     writeConfigToml(
       asbHome,
-      ['[applications]', 'active = ["claude-code"]', '', '[commands]', 'enabled = ["my-cmd"]'].join(
-        '\n'
-      )
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[commands]',
+        'enabled = ["my-cmd"]',
+      ].join('\n')
     );
 
     const result = resolveEffectiveSectionConfig('commands', 'claude-code');
@@ -557,7 +561,7 @@ test('resolveApplicationSectionConfig still works without plugins', () => {
       asbHome,
       [
         '[applications]',
-        'active = ["claude-code"]',
+        'enabled = ["claude-code"]',
         '',
         '[commands]',
         'enabled = ["cmd-a", "cmd-b"]',

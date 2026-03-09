@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { parse, stringify } from '@iarna/toml';
 
 import { getProfileConfigPath, getProjectConfigPath, getSwitchboardConfigPath } from './paths.js';
@@ -37,6 +38,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  * Migrate legacy config keys to the current schema.
  *
  * - `[agents]` (old target-app list) → `[applications]`
+ * - `[applications].active` → `[applications].enabled`
  * - `[subagents]` (old agent library) → `[agents]`
  * - Per-application override `subagents` key → `agents`
  *
@@ -55,7 +57,7 @@ function migrateLegacyConfigKeys(raw: Record<string, unknown>): Record<string, u
     const apps = migrated.applications;
     if (apps && typeof apps === 'object') {
       for (const [key, value] of Object.entries(apps as Record<string, unknown>)) {
-        if (key === 'active') continue;
+        if (key === 'active' || key === 'enabled' || key === 'assume_installed') continue;
         if (value && typeof value === 'object') {
           const override = { ...(value as Record<string, unknown>) };
           if ('subagents' in override && !('agents' in override)) {
@@ -87,6 +89,9 @@ function readLayerFile(filePath: string): ConfigLayerLoadResult {
     const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
     const migrated = migrateLegacyConfigKeys(obj);
     const validated = switchboardConfigLayerSchema.parse(migrated);
+    if (!isDeepStrictEqual(obj, validated)) {
+      writeLayerFile(filePath, validated);
+    }
     return { path: filePath, exists: true, config: validated };
   } catch (error) {
     if (error instanceof Error) {

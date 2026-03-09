@@ -159,7 +159,26 @@ test('filterInstalled without assumeInstalled behaves as before', () => {
 test('applicationsSectionSchema defaults assume_installed to empty array', async () => {
   const { switchboardConfigSchema } = await import('../src/config/schemas.js');
   const parsed = switchboardConfigSchema.parse({});
+  assert.deepEqual(parsed.applications.enabled, []);
   assert.deepEqual(parsed.applications.assume_installed, []);
+});
+
+test('applicationsSectionSchema accepts legacy active and normalizes to enabled', async () => {
+  const { switchboardConfigSchema } = await import('../src/config/schemas.js');
+  const parsed = switchboardConfigSchema.parse({
+    applications: { active: ['codex', 'gemini'] },
+  });
+  assert.deepEqual(parsed.applications.enabled, ['codex', 'gemini']);
+  assert.equal('active' in parsed.applications, false);
+});
+
+test('applicationsSectionSchema prefers enabled when active and enabled coexist', async () => {
+  const { switchboardConfigSchema } = await import('../src/config/schemas.js');
+  const parsed = switchboardConfigSchema.parse({
+    applications: { active: ['old-app'], enabled: ['new-app'] },
+  });
+  assert.deepEqual(parsed.applications.enabled, ['new-app']);
+  assert.equal('active' in parsed.applications, false);
 });
 
 test('applicationsSectionSchema parses assume_installed array', async () => {
