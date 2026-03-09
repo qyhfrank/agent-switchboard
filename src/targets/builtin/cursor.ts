@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { CursorAgent } from '../../agents/cursor.js';
 import { getCursorDir, getProjectCursorDir } from '../../config/paths.js';
@@ -33,6 +34,7 @@ function buildCursorSubagentFrontmatter(entry: GenericLibraryEntry): Record<stri
 
 export const cursorTarget: ApplicationTarget = {
   id: 'cursor',
+  isInstalled: () => fs.existsSync(getCursorDir()),
 
   mcp: {
     configPath: () => adapter.configPath(),

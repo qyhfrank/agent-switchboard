@@ -19,7 +19,7 @@ import { distributeSubagents, resolveSubagentFilePath } from '../src/subagents/d
 import { importSubagentFromFile } from '../src/subagents/importer.js';
 import { ensureAgentsDirectory } from '../src/subagents/library.js';
 import { getTargetsForSection } from '../src/targets/registry.js';
-import { withTempDir, withTempHomes } from './helpers/tmp.js';
+import { simulateAppsInstalled, withTempDir, withTempHomes } from './helpers/tmp.js';
 
 // ---------------------------------------------------------------------------
 // Commands: cursor platform
@@ -27,6 +27,7 @@ import { withTempDir, withTempHomes } from './helpers/tmp.js';
 
 test('distributeCommands: cursor output is pure content without frontmatter', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const cmdDir = ensureCommandsDirectory();
     const cmdId = 'cursor-cmd';
     fs.writeFileSync(
@@ -86,6 +87,7 @@ test('resolveSkillTargetDir: cursor resolves to ~/.cursor/skills/<id>', () => {
 
 test('distributeSkills: cursor deduped when claude-code has active skills', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const skillsDir = ensureSkillsDirectory();
     const skillId = 'dedup-test';
     const skillDir = path.join(skillsDir, skillId);
@@ -123,6 +125,7 @@ test('distributeSkills: cursor deduped when claude-code has active skills', () =
 
 test('distributeSkills: cursor deduped in agents mode too', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const skillsDir = ensureSkillsDirectory();
     const skillId = 'agents-dedup';
     const skillDir = path.join(skillsDir, skillId);
@@ -159,6 +162,7 @@ test('distributeSkills: cursor deduped in agents mode too', () => {
 
 test('distributeSkills: cursor NOT deduped when claude-code has no active skills', () => {
   withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled();
     const skillsDir = ensureSkillsDirectory();
     const skillId = 'cursor-only-skill';
     const skillDir = path.join(skillsDir, skillId);
@@ -209,6 +213,7 @@ test('distributeSkills: cursor NOT deduped when claude-code has no active skills
 
 test('distributeSubagents: cursor output has allowlisted frontmatter fields only', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const subDir = ensureAgentsDirectory();
     const subId = 'filtered-agent';
 
@@ -261,6 +266,7 @@ test('distributeSubagents: cursor output has allowlisted frontmatter fields only
 
 test('distributeSubagents: cursor model defaults to inherit when not specified', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const subDir = ensureAgentsDirectory();
     const subId = 'no-model-agent';
 
@@ -316,6 +322,7 @@ test('rules targets include cursor', () => {
 
 test('distributeRules: writes single asb-rules.mdc for cursor', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(
       path.join(rulesDir, 'hygiene.md'),
@@ -347,6 +354,7 @@ test('distributeRules: writes single asb-rules.mdc for cursor', () => {
 
 test('distributeRules: cursor cleanup removes legacy per-rule .mdc files', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'keep.md'), 'Keep this.\n');
 
@@ -370,6 +378,7 @@ test('distributeRules: cursor cleanup removes legacy per-rule .mdc files', () =>
 
 test('distributeRules: cursor cleanup does not delete non-library .mdc files', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'managed.md'), 'Managed rule.\n');
 
@@ -396,6 +405,7 @@ test('distributeRules: cursor cleanup does not delete non-library .mdc files', (
 
 test('distributeRules: cursor skips unchanged asb-rules.mdc', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'stable.md'), 'Stable content.\n');
 

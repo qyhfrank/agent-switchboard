@@ -1,7 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getTraeUserDataDir } from '../../src/config/paths.js';
+import {
+  getClaudeDir,
+  getCodexDir,
+  getCursorDir,
+  getGeminiDir,
+  getOpencodeRoot,
+  getTraeUserDataDir,
+} from '../../src/config/paths.js';
 
 export function withTempDir<T>(fn: (dir: string) => T): T {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-tmp-'));
@@ -71,5 +78,26 @@ export function withTempHomes<T>(fn: (ctx: { asbHome: string; agentsHome: string
 export function simulateTraeInstalled(): void {
   for (const variant of ['trae', 'trae-cn'] as const) {
     fs.mkdirSync(getTraeUserDataDir(variant), { recursive: true });
+  }
+}
+
+type AppId = 'claude-code' | 'cursor' | 'codex' | 'gemini' | 'opencode';
+
+const APP_DIR_MAP: Record<AppId, () => string> = {
+  'claude-code': getClaudeDir,
+  cursor: getCursorDir,
+  codex: getCodexDir,
+  gemini: getGeminiDir,
+  opencode: getOpencodeRoot,
+};
+
+/**
+ * Create data directories for standard agent apps so isInstalled() returns true.
+ * With no arguments, creates dirs for all 5 apps. Call inside withTempHomes or withTempAsbHome.
+ */
+export function simulateAppsInstalled(...appIds: AppId[]): void {
+  const ids = appIds.length > 0 ? appIds : (Object.keys(APP_DIR_MAP) as AppId[]);
+  for (const id of ids) {
+    fs.mkdirSync(APP_DIR_MAP[id](), { recursive: true });
   }
 }

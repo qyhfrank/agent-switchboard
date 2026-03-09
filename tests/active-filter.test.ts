@@ -21,7 +21,12 @@ import { ensureSkillsDirectory } from '../src/skills/library.js';
 import { distributeSubagents } from '../src/subagents/distribution.js';
 import { ensureAgentsDirectory } from '../src/subagents/library.js';
 import { renderDefaultSubagentTemplate } from '../src/subagents/template.js';
-import { simulateTraeInstalled, withTempAsbHome, withTempHomes } from './helpers/tmp.js';
+import {
+  simulateAppsInstalled,
+  simulateTraeInstalled,
+  withTempAsbHome,
+  withTempHomes,
+} from './helpers/tmp.js';
 
 // ---------------------------------------------------------------------------
 // Rules: activeAppIds restricts distribution targets
@@ -29,6 +34,7 @@ import { simulateTraeInstalled, withTempAsbHome, withTempHomes } from './helpers
 
 test('distributeRules: only distributes to activeAppIds targets', () => {
   withTempAsbHome(() => {
+    simulateAppsInstalled();
     simulateTraeInstalled();
     const rulesDir = ensureRulesDirectory();
     fs.writeFileSync(path.join(rulesDir, 'test-rule.md'), 'Rule body\n');
@@ -64,6 +70,7 @@ test('distributeRules: empty activeAppIds produces no results', () => {
 
 test('distributeCommands: only distributes to activeAppIds targets', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const cmdDir = ensureCommandsDirectory();
     fs.writeFileSync(path.join(cmdDir, 'test-cmd.md'), renderDefaultCommandTemplate());
     updateLibraryStateSection('commands', () => ({ enabled: ['test-cmd'], agentSync: {} }));
@@ -95,6 +102,7 @@ test('distributeCommands: empty activeAppIds produces no results', () => {
 
 test('distributeSubagents: only distributes to activeAppIds targets', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     const subDir = ensureAgentsDirectory();
     fs.writeFileSync(path.join(subDir, 'test-agent.md'), renderDefaultSubagentTemplate());
     updateLibraryStateSection('agents', () => ({ enabled: ['test-agent'], agentSync: {} }));
@@ -136,6 +144,7 @@ function createSkill(id: string, body = 'Skill body'): void {
 
 test('distributeSkills: only distributes to activeAppIds targets', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     simulateTraeInstalled();
     createSkill('test-skill');
     updateLibraryStateSection('skills', (s) => ({ ...s, enabled: ['test-skill'] }));
@@ -152,6 +161,7 @@ test('distributeSkills: only distributes to activeAppIds targets', () => {
 
 test('distributeSkills: agents mode respects activeAppIds', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     simulateTraeInstalled();
     createSkill('test-skill');
     updateLibraryStateSection('skills', (s) => ({ ...s, enabled: ['test-skill'] }));
@@ -171,6 +181,7 @@ test('distributeSkills: agents mode respects activeAppIds', () => {
 
 test('distributeSkills: agents virtual target included when codex is active', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     createSkill('test-skill');
     updateLibraryStateSection('skills', (s) => ({ ...s, enabled: ['test-skill'] }));
 

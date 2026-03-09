@@ -12,13 +12,14 @@ import { buildSubagentInventory } from '../src/subagents/inventory.js';
 import { ensureAgentsDirectory } from '../src/subagents/library.js';
 import { renderDefaultSubagentTemplate } from '../src/subagents/template.js';
 
-import { withTempHomes } from './helpers/tmp.js';
+import { simulateAppsInstalled, withTempHomes } from './helpers/tmp.js';
 
 // End-to-end smoke test covering: add -> select -> propagate -> list -> state
 // Uses system temp dir via withTempHomes; keeps assertions minimal and readable.
 
 test('e2e: library -> state -> distribution -> inventory', () => {
   withTempHomes(() => {
+    simulateAppsInstalled();
     // 1) Scaffold sample command and subagent into library
     const cmdDir = ensureCommandsDirectory();
     const subDir = ensureAgentsDirectory();

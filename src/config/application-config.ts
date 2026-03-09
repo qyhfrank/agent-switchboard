@@ -14,6 +14,9 @@ import { scopeToLayerOptions } from './scope.js';
 
 export type ConfigSection = 'mcp' | 'commands' | 'agents' | 'skills' | 'hooks' | 'rules';
 
+/** Schema-level keys in [applications] that are NOT per-app override objects. */
+const APPLICATION_SCHEMA_KEYS = new Set(['active', 'assume_installed']);
+
 export interface ResolvedSectionConfig {
   enabled: string[];
 }
@@ -96,6 +99,7 @@ export function resolveApplicationSectionConfig(
  */
 export function hasApplicationOverrides(config: SwitchboardConfig, appId: string): boolean {
   const applications = config.applications as Record<string, unknown>;
+  if (APPLICATION_SCHEMA_KEYS.has(appId)) return false;
   const appOverrides = applications[appId];
   return appOverrides !== undefined && typeof appOverrides === 'object';
 }
@@ -107,7 +111,7 @@ export function getApplicationsWithOverrides(config: SwitchboardConfig): string[
   const applications = config.applications as Record<string, unknown>;
   const result: string[] = [];
   for (const key of Object.keys(applications)) {
-    if (key !== 'active' && typeof applications[key] === 'object') {
+    if (!APPLICATION_SCHEMA_KEYS.has(key) && typeof applications[key] === 'object') {
       result.push(key);
     }
   }
