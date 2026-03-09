@@ -21,6 +21,7 @@ import type { BundleDistributionResult } from '../library/distribute-bundle.js';
 import { distributeBundle } from '../library/distribute-bundle.js';
 import { ensureParentDir, rmDirRecursive } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
+import { getTargetById } from '../targets/registry.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles, loadHookLibrary } from './library.js';
 import { HOOK_DIR_PLACEHOLDER, type MatcherGroup } from './schema.js';
@@ -206,12 +207,19 @@ function cleanOrphanBundleDirs(
  */
 export function distributeHooks(
   scope?: ConfigScope,
-  activeAppIds?: string[]
+  activeAppIds?: string[],
+  assumeInstalled?: ReadonlySet<string>
 ): HookDistributionOutcome {
   const results: HookDistributionOutcome['results'] = [];
   const platform: HookPlatform = 'claude-code';
 
   if (activeAppIds && !activeAppIds.includes(platform)) {
+    return { results };
+  }
+
+  // Skip if claude-code is not installed (unless assumed installed)
+  const target = getTargetById(platform);
+  if (target?.isInstalled?.() === false && !assumeInstalled?.has(platform)) {
     return { results };
   }
 

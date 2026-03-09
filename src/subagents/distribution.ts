@@ -35,13 +35,14 @@ export function resolveSubagentFilePath(platform: string, id: string, scope?: Co
 
 export function distributeSubagents(
   scope?: ConfigScope,
-  activeAppIds?: string[]
+  activeAppIds?: string[],
+  assumeInstalled?: ReadonlySet<string>
 ): SubagentDistributionOutcome {
   const entries = loadSubagentLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too
-  const allInstalledTargets = filterInstalled(getTargetsForSection('agents'));
+  const allInstalledTargets = filterInstalled(getTargetsForSection('agents'), assumeInstalled);
   const activeSet = activeAppIds ? new Set(activeAppIds) : null;
 
   const withAgents = allInstalledTargets.filter((t) => t.agents != null);

@@ -58,12 +58,12 @@ export interface SkillDistributionOutcome {
 
 export function distributeSkills(
   scope?: ConfigScope,
-  options?: { useAgentsDir?: boolean; activeAppIds?: string[] }
+  options?: { useAgentsDir?: boolean; activeAppIds?: string[]; assumeInstalled?: ReadonlySet<string> }
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary();
   const activeAppIds = options?.activeAppIds;
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too
-  const allSkillTargets = filterInstalled(getTargetsForSection('skills'));
+  const allSkillTargets = filterInstalled(getTargetsForSection('skills'), options?.assumeInstalled);
   const activeSet = activeAppIds ? new Set(activeAppIds) : null;
 
   if (options?.useAgentsDir ?? false) {
@@ -72,7 +72,10 @@ export function distributeSkills(
       .map((t) => t.id);
     const cursorPlatform = allSkillTargets.find((t) => t.id === 'cursor') ? ['cursor'] : [];
     // Include all platforms; filterSelected handles activity check
-    const platforms = ['claude-code', 'agents', ...cursorPlatform, ...traePlatforms];
+    const claudeCodePlatform = allSkillTargets.find((t) => t.id === 'claude-code')
+      ? ['claude-code']
+      : [];
+    const platforms = [...claudeCodePlatform, 'agents', ...cursorPlatform, ...traePlatforms];
     return distributeSkillsInternal(entries, scope, {
       platforms,
       activeSet,

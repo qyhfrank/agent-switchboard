@@ -32,13 +32,14 @@ export function resolveCommandFilePath(platform: string, id: string, scope?: Con
 
 export function distributeCommands(
   scope?: ConfigScope,
-  activeAppIds?: string[]
+  activeAppIds?: string[],
+  assumeInstalled?: ReadonlySet<string>
 ): CommandDistributionOutcome {
   const entries = loadCommandLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too
-  const allTargets = filterInstalled(getTargetsForSection('commands'));
+  const allTargets = filterInstalled(getTargetsForSection('commands'), assumeInstalled);
   const activeSet = activeAppIds ? new Set(activeAppIds) : null;
   const handlerMap = new Map<string, TargetLibraryHandler>(
     allTargets.flatMap((t) => (t.commands ? [[t.id, t.commands] as const] : []))

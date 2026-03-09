@@ -251,12 +251,16 @@ async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promis
     `${chalk.blue('Config:')} ${activeLayers.length > 0 ? chalk.dim(activeLayers.join(' + ')) : chalk.gray('no config files')}`
   );
 
+  const assumeInstalledSet = new Set(config.applications.assume_installed);
   const appsLabel =
     config.applications.active.length > 0
       ? config.applications.active
           .map((id) => {
             const t = getTargetById(id);
-            if (t?.isInstalled?.() === false) return chalk.gray(`${id} (not installed)`);
+            if (t?.isInstalled?.() === false) {
+              if (assumeInstalledSet.has(id)) return chalk.yellow(`${id} (assumed installed)`);
+              return chalk.gray(`${id} (not installed)`);
+            }
             return chalk.cyan(id);
           })
           .join(', ')
@@ -273,7 +277,7 @@ async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promis
 
     const sectionPlatforms: Record<string, readonly string[]> = {};
     for (const s of sections) {
-      let ids = filterInstalled(getTargetsForSection(s)).map((t) => t.id);
+      let ids = filterInstalled(getTargetsForSection(s), assumeInstalledSet).map((t) => t.id);
       if (s === 'skills' && cursorSkillsDeduped) {
         ids = ids.filter((id) => id !== 'cursor');
       }
@@ -389,15 +393,23 @@ async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promis
   if (notes.length > 0) console.log();
 
   const activeAppIds = config.applications.active;
-  const mcpDistribution = await applyToAgents(scope, undefined, { useSpinner: false });
-  const ruleDistribution = distributeRules(undefined, { activeAppIds }, scope);
-  const commandDistribution = distributeCommands(scope, activeAppIds);
-  const agentDistribution = distributeSubagents(scope, activeAppIds);
+  const mcpDistribution = await applyToAgents(scope, undefined, {
+    useSpinner: false,
+    assumeInstalled: assumeInstalledSet,
+  });
+  const ruleDistribution = distributeRules(
+    undefined,
+    { activeAppIds, assumeInstalled: assumeInstalledSet },
+    scope
+  );
+  const commandDistribution = distributeCommands(scope, activeAppIds, assumeInstalledSet);
+  const agentDistribution = distributeSubagents(scope, activeAppIds, assumeInstalledSet);
   const skillDistribution = distributeSkills(scope, {
     useAgentsDir: config.distribution.use_agents_dir,
     activeAppIds,
+    assumeInstalled: assumeInstalledSet,
   });
-  const hookDistribution = distributeHooks(scope, activeAppIds);
+  const hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet);
 
   const distSections: CompactDistributionSection<DistributionResultLike>[] = [
     {
@@ -899,7 +911,11 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
 
     const distribution = distributeRules(
       composeActiveRules(scope),
-      { force: !selectionChanged, activeAppIds: config.applications.active },
+      {
+        force: !selectionChanged,
+        activeAppIds: config.applications.active,
+        assumeInstalled: new Set(config.applications.assume_installed),
+      },
       scope
     );
 
@@ -962,7 +978,11 @@ commandRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('commands', selection.enabled);
 
-    const out = distributeCommands(scope, config.applications.active);
+    const out = distributeCommands(
+      scope,
+      config.applications.active,
+      new Set(config.applications.assume_installed)
+    );
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -1132,7 +1152,11 @@ agentRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('agents', selection.enabled);
 
-    const out = distributeSubagents(scope, config.applications.active);
+    const out = distributeSubagents(
+      scope,
+      config.applications.active,
+      new Set(config.applications.assume_installed)
+    );
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -1304,6 +1328,7 @@ skillRoot.action(async (options: ScopeOptionInput) => {
     const out = distributeSkills(scope, {
       useAgentsDir: config.distribution.use_agents_dir,
       activeAppIds: config.applications.active,
+      assumeInstalled: new Set(config.applications.assume_installed),
     });
     if (out.results.length > 0) {
       console.log();
@@ -1484,7 +1509,11 @@ hookRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('hooks', selection.enabled);
 
-    const out = distributeHooks(scope, config.applications.active);
+    const out = distributeHooks(
+      scope,
+      config.applications.active,
+      new Set(config.applications.assume_installed)
+    );
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -1667,12 +1696,14 @@ type McpDistributionResult = {
 async function applyToAgents(
   scope?: ConfigScope,
   enabledServerNames?: string[],
-  options?: { useSpinner?: boolean }
+  options?: { useSpinner?: boolean; assumeInstalled?: ReadonlySet<string> }
 ): Promise<McpDistributionResult[]> {
   const mcpConfig = loadMcpConfigWithPlugins(scope);
   const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
   await initTargets(switchboardConfig);
   const useSpinner = options?.useSpinner ?? true;
+  const assumeInstalled =
+    options?.assumeInstalled ?? new Set(switchboardConfig.applications.assume_installed);
   const results: McpDistributionResult[] = [];
 
   if (switchboardConfig.applications.active.length === 0) {
@@ -1710,7 +1741,7 @@ async function applyToAgents(
       const configToApply = { mcpServers: enabledServers };
 
       const target = getTargetById(agentId);
-      if (target?.isInstalled?.() === false) {
+      if (!assumeInstalled.has(agentId) && target?.isInstalled?.() === false) {
         persist(
           chalk.gray('○'),
           `${chalk.cyan(agentId)} ${chalk.gray('(not installed, skipped)')}`

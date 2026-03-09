@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { CodexAgent } from '../../agents/codex.js';
 import { getCodexDir, getProjectCodexSkillsDir } from '../../config/paths.js';
@@ -9,6 +10,7 @@ const adapter = new CodexAgent();
 
 export const codexTarget: ApplicationTarget = {
   id: 'codex',
+  isInstalled: () => fs.existsSync(getCodexDir()),
 
   mcp: {
     configPath: () => adapter.configPath(),

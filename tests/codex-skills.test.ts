@@ -6,7 +6,7 @@ import { getCodexSkillsDir, getProjectCodexSkillsDir } from '../src/config/paths
 import { updateLibraryStateSection } from '../src/library/state.js';
 import { distributeSkills, resolveSkillTargetDir } from '../src/skills/distribution.js';
 import { ensureSkillsDirectory } from '../src/skills/library.js';
-import { simulateTraeInstalled, withTempHomes } from './helpers/tmp.js';
+import { simulateAppsInstalled, simulateTraeInstalled, withTempHomes } from './helpers/tmp.js';
 
 /**
  * Helper: create a minimal valid skill in the ASB library directory.
@@ -67,6 +67,7 @@ test('resolveSkillTargetDir: agents target project scope resolves to <project>/.
 
 test('distributeSkills: agents mode writes skills to ~/.agents/skills/', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const skillId = 'test-skill';
     createSkill(agentsHome, skillId);
 
@@ -101,6 +102,7 @@ test('distributeSkills: agents mode writes skills to ~/.agents/skills/', () => {
 
 test('distributeSkills: agents mode does NOT write to ~/.codex/skills/', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const skillId = 'check-path';
     createSkill(agentsHome, skillId);
 
@@ -123,6 +125,7 @@ test('distributeSkills: agents mode does NOT write to ~/.codex/skills/', () => {
 
 test('distributeSkills: second run skips up-to-date agents skills', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const skillId = 'idempotent-skill';
     createSkill(agentsHome, skillId);
 
@@ -157,6 +160,7 @@ test('distributeSkills: second run skips up-to-date agents skills', () => {
 
 test('distributeSkills: agents mode project scope writes to <project>/.agents/skills/', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const skillId = 'proj-skill';
     createSkill(agentsHome, skillId);
 
@@ -196,6 +200,7 @@ test('distributeSkills: agents mode project scope writes to <project>/.agents/sk
 
 test('distributeSkills: all platforms receive skills', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     simulateTraeInstalled();
     const skillId = 'multi-platform';
     createSkill(agentsHome, skillId);
@@ -223,6 +228,7 @@ test('distributeSkills: all platforms receive skills', () => {
 
 test('distributeSkills: agents mode removes deactivated skill directory', () => {
   withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
     const skillId = 'ephemeral';
     createSkill(agentsHome, skillId);
 
@@ -249,5 +255,34 @@ test('distributeSkills: agents mode removes deactivated skill directory', () => 
     );
     assert.ok(deleted.length > 0, 'should have deleted orphan agents skill');
     assert.ok(!fs.existsSync(agentsTarget), 'orphan skill directory should be removed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Skills distribution: useAgentsDir respects filterInstalled for claude-code
+// ---------------------------------------------------------------------------
+
+test('distributeSkills: useAgentsDir does not write to claude-code when it is not installed', () => {
+  withTempHomes(({ agentsHome }) => {
+    // Only install codex, NOT claude-code
+    simulateAppsInstalled('codex');
+    const skillId = 'no-claude';
+    createSkill(agentsHome, skillId);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    const outcome = distributeSkills(undefined, { useAgentsDir: true });
+
+    // Should have agents results but NO claude-code results
+    const claudeResults = outcome.results.filter((r) => r.platform === 'claude-code');
+    assert.equal(claudeResults.length, 0, 'should not write to claude-code when it is not installed');
+
+    const agentsResults = outcome.results.filter(
+      (r) => r.platform === 'agents' && (r.status === 'written' || r.status === 'skipped')
+    );
+    assert.ok(agentsResults.length > 0, 'should still write to agents platform');
   });
 });

@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { OpencodeAgent } from '../../agents/opencode.js';
 import {
@@ -14,6 +15,7 @@ const adapter = new OpencodeAgent();
 
 export const opencodeTarget: ApplicationTarget = {
   id: 'opencode',
+  isInstalled: () => fs.existsSync(getOpencodeRoot()),
 
   mcp: {
     configPath: () => adapter.configPath(),

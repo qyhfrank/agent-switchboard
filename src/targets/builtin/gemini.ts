@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { stringify as toToml } from '@iarna/toml';
 import { GeminiAgent } from '../../agents/gemini.js';
@@ -20,6 +21,7 @@ function renderGeminiCommand(entry: GenericLibraryEntry): string {
 
 export const geminiTarget: ApplicationTarget = {
   id: 'gemini',
+  isInstalled: () => fs.existsSync(getGeminiDir()),
 
   mcp: {
     configPath: () => adapter.configPath(),

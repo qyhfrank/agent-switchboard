@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { ClaudeCodeAgent } from '../../agents/claude-code.js';
 import { getClaudeDir, getProjectClaudeDir } from '../../config/paths.js';
@@ -9,6 +10,7 @@ const adapter = new ClaudeCodeAgent();
 
 export const claudeCodeTarget: ApplicationTarget = {
   id: 'claude-code',
+  isInstalled: () => fs.existsSync(getClaudeDir()),
 
   mcp: {
     configPath: () => adapter.configPath(),
