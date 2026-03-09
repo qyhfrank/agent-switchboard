@@ -1524,7 +1524,7 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
   }
 }
 
-function pluginDisableAction(id: string, options: ScopeOptionInput) {
+function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string) {
   try {
     const scope = resolveScope(options);
     const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
@@ -1542,34 +1542,7 @@ function pluginDisableAction(id: string, options: ScopeOptionInput) {
       }),
       scopeToLayerOptions(scope)
     );
-    console.log(chalk.green(`✓ Plugin "${id}" disabled.`));
-  } catch (error) {
-    if (error instanceof Error) {
-      console.error(chalk.red(`\n✗ Error: ${error.message}`));
-    }
-    process.exit(1);
-  }
-}
-
-function pluginUninstallAction(id: string, options: ScopeOptionInput) {
-  try {
-    const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-    if (!config.plugins.enabled.includes(id)) {
-      console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled.`));
-      return;
-    }
-    updateConfigLayer(
-      (layer) => ({
-        ...layer,
-        plugins: {
-          ...(layer.plugins ?? {}),
-          enabled: (layer.plugins?.enabled ?? []).filter((x) => x !== id),
-        },
-      }),
-      scopeToLayerOptions(scope)
-    );
-    console.log(chalk.green(`✓ Plugin "${id}" uninstalled.`));
+    console.log(chalk.green(`✓ Plugin "${id}" ${verb}.`));
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1597,13 +1570,15 @@ const disableCmd = pluginRoot
   .command('disable <id>')
   .description('Remove a plugin from the enabled list');
 for (const [flag, desc] of pluginScopeOpts) disableCmd.option(flag, desc);
-disableCmd.action(pluginDisableAction);
+disableCmd.action((id: string, opts: ScopeOptionInput) => pluginRemoveAction(id, opts, 'disabled'));
 
 const uninstallCmd = pluginRoot
   .command('uninstall <id>')
   .description('Remove a plugin from the enabled list (alias for disable)');
 for (const [flag, desc] of pluginScopeOpts) uninstallCmd.option(flag, desc);
-uninstallCmd.action(pluginUninstallAction);
+uninstallCmd.action((id: string, opts: ScopeOptionInput) =>
+  pluginRemoveAction(id, opts, 'uninstalled')
+);
 
 // ── Plugin marketplace (source management) ─────────────────────────
 

@@ -125,6 +125,12 @@ export function distributeBundle<TEntry, Platform extends string>(
         }
       }
 
+      // Clean stale files: remove files in target that are no longer in source bundle
+      if (!hadError && fs.existsSync(targetDir)) {
+        const expectedFiles = new Set(files.map((f) => f.relativePath));
+        cleanStaleFiles(targetDir, '', expectedFiles);
+      }
+
       const entryId = opts.getId(entry);
       if (hadError) {
         results.push({
@@ -210,4 +216,33 @@ export function distributeBundle<TEntry, Platform extends string>(
   }
 
   return { results };
+}
+
+/** Recursively remove files in targetDir not present in expectedFiles (relative paths). */
+function cleanStaleFiles(dir: string, prefix: string, expectedFiles: Set<string>): void {
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        cleanStaleFiles(abs, rel, expectedFiles);
+        // Remove empty directories left after cleaning
+        try {
+          const remaining = fs.readdirSync(abs);
+          if (remaining.length === 0) fs.rmdirSync(abs);
+        } catch {
+          // Ignore
+        }
+      } else if (!expectedFiles.has(rel)) {
+        try {
+          fs.unlinkSync(abs);
+        } catch {
+          // Ignore permission errors
+        }
+      }
+    }
+  } catch {
+    // Ignore errors reading directory
+  }
 }

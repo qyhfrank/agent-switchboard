@@ -374,7 +374,24 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     }
   }
 
-  const byId = new Map(plugins.map((p) => [p.id, p]));
+  // Build lookup maps: unique IDs get direct entry, collisions tracked for @source disambiguation
+  const byId = new Map<string, PluginDescriptor>();
+  const byName = new Map<string, PluginDescriptor[]>();
+  for (const p of plugins) {
+    byId.set(`${p.id}@${p.meta.sourceName}`, p);
+    const existing = byName.get(p.id);
+    if (existing) {
+      existing.push(p);
+    } else {
+      byName.set(p.id, [p]);
+    }
+  }
+  // Bare name resolves only when unambiguous (exactly one plugin with that name)
+  for (const [name, descriptors] of byName) {
+    if (descriptors.length === 1) {
+      byId.set(name, descriptors[0]);
+    }
+  }
 
   const index: PluginIndex = {
     plugins,
@@ -382,17 +399,14 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     ruleSnippets,
 
     get(pluginId: string) {
-      // Direct match first
+      // Direct match: bare name (if unambiguous) or name@source
       const direct = byId.get(pluginId);
       if (direct) return direct;
 
       // Support `name@source` disambiguation syntax
       const atIdx = pluginId.lastIndexOf('@');
       if (atIdx > 0) {
-        const name = pluginId.slice(0, atIdx);
-        const source = pluginId.slice(atIdx + 1);
-        const candidate = byId.get(name);
-        if (candidate && candidate.meta.sourceName === source) return candidate;
+        return byId.get(pluginId);
       }
 
       return undefined;
