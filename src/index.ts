@@ -17,14 +17,8 @@ import type { CommandPlatform as CmdPlatform } from './commands/importer.js';
 import { importCommandFromFile } from './commands/importer.js';
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
-import { resolveEffectiveSectionConfig } from './config/application-config.js';
-import type { ConfigLayers } from './config/layered-config.js';
 import { updateConfigLayer } from './config/layered-config.js';
-import {
-  loadMcpConfig,
-  loadMcpConfigWithPlugins,
-  stripLegacyEnabledFlagsFromMcpJson,
-} from './config/mcp-config.js';
+import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
   getAgentsDir,
   getAgentsHome,
@@ -38,8 +32,7 @@ import {
   getSkillsDir,
   getSourceCacheDir,
 } from './config/paths.js';
-import type { SwitchboardConfig } from './config/schemas.js';
-import type { ConfigScope } from './config/scope.js';
+import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
 import {
   loadSwitchboardConfig,
   loadSwitchboardConfigWithLayers,
@@ -65,13 +58,9 @@ import {
   updateRemoteSources,
   validateSourcePath,
 } from './library/sources.js';
-import {
-  loadLibraryStateSection,
-  loadMcpEnabledState,
-  resetAgentSyncCache,
-  saveMcpEnabledState,
-} from './library/state.js';
+import { loadLibraryStateSection, saveMcpEnabledState } from './library/state.js';
 import { readMarketplace } from './marketplace/reader.js';
+import { distributeMcp } from './mcp/distribution.js';
 import { buildPluginIndex } from './plugins/index.js';
 import { composeActiveRules } from './rules/composer.js';
 import {
@@ -82,7 +71,7 @@ import {
 } from './rules/distribution.js';
 import { buildRuleInventory } from './rules/inventory.js';
 import { loadRuleLibrary } from './rules/library.js';
-import { loadRuleState, updateRuleState } from './rules/state.js';
+import { loadRuleState, loadWritableRuleState, updateRuleState } from './rules/state.js';
 import { distributeSkills } from './skills/distribution.js';
 import type { SkillImportPlatform } from './skills/importer.js';
 import { importSkill, listSkillsInDirectory } from './skills/importer.js';
@@ -91,29 +80,22 @@ import { distributeSubagents } from './subagents/distribution.js';
 import type { SubagentPlatform as SubPlatform } from './subagents/importer.js';
 import { importSubagentFromFile } from './subagents/importer.js';
 import { buildSubagentInventory } from './subagents/inventory.js';
+import { runSyncCommand } from './sync/command.js';
 import { initTargets } from './targets/init.js';
-import {
-  filterInstalled,
-  getTargetById,
-  getTargetsForSection,
-  registerConfigTargets,
-} from './targets/registry.js';
+import { getTargetsForSection } from './targets/registry.js';
 import { showCommandSelector } from './ui/command-ui.js';
 import { showHookSelector } from './ui/hook-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
 import { printPluginInfo, printPluginList } from './ui/plugin-ui.js';
 import { showRuleSelector } from './ui/rule-ui.js';
+import { shouldPersistSelection } from './ui/selection-state.js';
 import { showSkillSelector } from './ui/skill-ui.js';
 import { showSubagentSelector } from './ui/subagent-ui.js';
 import {
-  type CompactDistributionSection,
-  type DistributionResultLike,
   printActiveSelection,
   printAgentSyncStatus,
-  printCompactDistributions,
   printDistributionResults,
   printTable,
-  shortenPath,
 } from './util/cli.js';
 
 const program = new Command();
@@ -154,79 +136,16 @@ program
   .action(async (options: ScopeOptionInput & { update: boolean }) => {
     try {
       const scope = resolveScope(options);
-
-      console.log(chalk.yellow('⚠ Sync overwrites agent config without diff.'));
+      const hasErrors = await runSyncCommand({
+        scope,
+        updateSources: options.update !== false,
+      });
       console.log();
-
-      if (options.update !== false) {
-        const remoteResults = updateRemoteSources();
-        if (remoteResults.length > 0) {
-          console.log(chalk.blue('Sources:'));
-          for (const result of remoteResults) {
-            if (result.status === 'updated') {
-              console.log(
-                `  ${chalk.green('✓')} ${chalk.cyan(result.namespace)} ${chalk.dim(result.url)}`
-              );
-            } else {
-              console.log(
-                `  ${chalk.yellow('⚠')} ${chalk.cyan(result.namespace)} ${chalk.yellow(result.error ?? 'update failed')}`
-              );
-            }
-          }
-        }
+      if (hasErrors) {
+        console.log(chalk.red('✗ Sync completed with errors.'));
+        process.exit(1);
       }
-
-      if (scope?.project) {
-        // Dual sync: global first, then project
-        const { config: globalConfig, layers: globalLayers } = loadSwitchboardConfigWithLayers(
-          scopeToLoadOptions(undefined)
-        );
-        await initTargets(globalConfig);
-
-        console.log(chalk.blue.bold('── Global ──'));
-        const globalErrors = await runSyncPhase({
-          scope: undefined,
-          config: globalConfig,
-          layers: globalLayers,
-        });
-
-        console.log();
-        resetAgentSyncCache();
-        console.log(chalk.blue.bold(`── Project: ${shortenPath(scope.project)} ──`));
-        const { config: projectConfig, layers: projectLayers } = loadSwitchboardConfigWithLayers(
-          scopeToLoadOptions(scope)
-        );
-        // Register any project-level [targets] not seen during initTargets (which only ran once)
-        const projectTargets = (projectConfig as Record<string, unknown>).targets as
-          | Record<string, Record<string, unknown>>
-          | undefined;
-        if (projectTargets && Object.keys(projectTargets).length > 0) {
-          registerConfigTargets(projectTargets);
-        }
-        const projectErrors = await runSyncPhase({
-          scope,
-          config: projectConfig,
-          layers: projectLayers,
-        });
-
-        console.log();
-        if (globalErrors || projectErrors) {
-          console.log(chalk.red('✗ Sync completed with errors.'));
-          process.exit(1);
-        }
-        console.log(chalk.green('✓ Sync complete.'));
-      } else {
-        const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLoadOptions(scope));
-        await initTargets(config);
-
-        const hasErrors = await runSyncPhase({ scope, config, layers });
-        console.log();
-        if (hasErrors) {
-          console.log(chalk.red('✗ Sync completed with errors.'));
-          process.exit(1);
-        }
-        console.log(chalk.green('✓ Sync complete.'));
-      }
+      console.log(chalk.green('✓ Sync complete.'));
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -234,243 +153,6 @@ program
       process.exit(1);
     }
   });
-
-interface SyncPhaseOptions {
-  scope?: ConfigScope;
-  config: SwitchboardConfig;
-  layers: ConfigLayers;
-}
-
-async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promise<boolean> {
-  // Config summary
-  const activeLayers: string[] = [];
-  if (layers.user.exists) activeLayers.push(shortenPath(layers.user.path));
-  if (layers.profile?.exists) activeLayers.push(shortenPath(layers.profile.path));
-  if (layers.project?.exists) activeLayers.push(shortenPath(layers.project.path));
-  console.log(
-    `${chalk.blue('Config:')} ${activeLayers.length > 0 ? chalk.dim(activeLayers.join(' + ')) : chalk.gray('no config files')}`
-  );
-
-  const assumeInstalledSet = new Set(config.applications.assume_installed);
-  const appsLabel =
-    config.applications.active.length > 0
-      ? config.applications.active
-          .map((id) => {
-            const t = getTargetById(id);
-            if (t?.isInstalled?.() === false) {
-              if (assumeInstalledSet.has(id)) return chalk.yellow(`${id} (assumed installed)`);
-              return chalk.gray(`${id} (not installed)`);
-            }
-            return chalk.cyan(id);
-          })
-          .join(', ')
-      : chalk.gray('none configured');
-  console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
-  console.log();
-
-  const cursorSkillsDeduped =
-    config.applications.active.includes('claude-code') &&
-    resolveEffectiveSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
-  console.log(chalk.blue('Inventory:'));
-  {
-    const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
-
-    const sectionPlatforms: Record<string, readonly string[]> = {};
-    for (const s of sections) {
-      let ids = filterInstalled(getTargetsForSection(s), assumeInstalledSet).map((t) => t.id);
-      if (s === 'skills' && cursorSkillsDeduped) {
-        ids = ids.filter((id) => id !== 'cursor');
-      }
-      sectionPlatforms[s] = ids;
-    }
-
-    const termWidth = process.stdout.columns || 80;
-    const maxSectionLen = Math.max(...sections.map((s) => s.length));
-    const maxCountLen = Math.max(...sections.map((s) => `(${config[s].enabled.length})`.length));
-    const prefixPlainLen = 2 + maxSectionLen + 1 + maxCountLen + 2;
-
-    const fitPreview = (ids: string[], maxWidth: number): string => {
-      if (ids.length === 0) return chalk.gray('none');
-      const full = ids.join(', ');
-      if (full.length <= maxWidth) return full;
-
-      let text = '';
-      let shown = 0;
-      for (let i = 0; i < ids.length; i++) {
-        const sep = shown > 0 ? ', ' : '';
-        const candidate = text + sep + ids[i];
-        const remaining = ids.length - (i + 1);
-        if (remaining > 0) {
-          const suffix = `, ... (+${remaining} more)`;
-          if (candidate.length + suffix.length > maxWidth && shown > 0) {
-            const left = ids.length - shown;
-            return `${text}${chalk.gray(`, ... (+${left} more)`)}`;
-          }
-        }
-        text = candidate;
-        shown++;
-      }
-      return text;
-    };
-
-    for (const section of sections) {
-      const globalActive = config[section].enabled;
-      const globalCount = globalActive.length;
-
-      const supported = new Set(sectionPlatforms[section] ?? []);
-      const applicableApps = config.applications.active.filter((id) => supported.has(id));
-
-      const effectiveByApp = new Map<string, string[]>();
-      for (const appId of applicableApps) {
-        effectiveByApp.set(appId, resolveEffectiveSectionConfig(section, appId, scope).enabled);
-      }
-
-      const perAppParts = applicableApps.map((appId) => {
-        const eff = effectiveByApp.get(appId) ?? [];
-        const delta = eff.length - globalCount;
-        const d = delta === 0 ? '' : delta > 0 ? `(+${delta})` : `(${delta})`;
-        return `${appId}:${eff.length}${d}`;
-      });
-
-      const union = new Set<string>();
-      for (const [, ids] of effectiveByApp) {
-        for (const id of ids) union.add(id);
-      }
-      const previewIds = globalActive.length > 0 ? [...globalActive] : [...union];
-
-      const paddedSection = section.padEnd(maxSectionLen);
-      const countStr = `(${globalCount})`.padStart(maxCountLen);
-      const appsStr = perAppParts.join('  ');
-      console.log(`  ${chalk.cyan(paddedSection)} ${chalk.gray(countStr)}  ${appsStr}`);
-
-      if (previewIds.length > 0) {
-        const indent = ' '.repeat(prefixPlainLen);
-        const previewWidth = Math.max(20, termWidth - prefixPlainLen - 2);
-        const preview = fitPreview(previewIds, previewWidth);
-        console.log(`${indent}${chalk.gray('→')} ${preview}`);
-      }
-    }
-  }
-
-  // Show enabled plugins summary
-  {
-    const pluginIndex = buildPluginIndex();
-    const enabledPluginRefs = config.plugins.enabled;
-    if (enabledPluginRefs.length > 0) {
-      const names = enabledPluginRefs
-        .map((pid) => {
-          const p = pluginIndex.get(pid);
-          return p ? pid : chalk.strikethrough(pid);
-        })
-        .join(', ');
-      console.log(
-        `  ${chalk.magenta('plugins')} ${chalk.gray(`(${enabledPluginRefs.length})`)}  ${names}`
-      );
-    } else if (pluginIndex.plugins.length > 0) {
-      console.log(
-        `  ${chalk.magenta('plugins')} ${chalk.gray('(0)')}  ${chalk.gray(`${pluginIndex.plugins.length} available`)}`
-      );
-    }
-  }
-
-  console.log();
-  const notes: string[] = [];
-  if (cursorSkillsDeduped && config.applications.active.includes('cursor')) {
-    notes.push('cursor reads skills via claude-code');
-  }
-  if (config.distribution.use_agents_dir) {
-    const agentsMembers = (['codex', 'gemini', 'opencode'] as const).filter((a) =>
-      config.applications.active.includes(a)
-    );
-    if (agentsMembers.length > 0) {
-      notes.push(`skills for ${agentsMembers.join(', ')} sync to shared .agents/skills`);
-    }
-  }
-  for (let i = 0; i < notes.length; i++) {
-    const prefix = i === 0 ? '  Note: ' : '        ';
-    console.log(chalk.gray(`${prefix}${notes[i]}.`));
-  }
-  if (notes.length > 0) console.log();
-
-  const activeAppIds = config.applications.active;
-  const mcpDistribution = await applyToAgents(scope, undefined, {
-    useSpinner: false,
-    assumeInstalled: assumeInstalledSet,
-  });
-  const ruleDistribution = distributeRules(
-    undefined,
-    { activeAppIds, assumeInstalled: assumeInstalledSet },
-    scope
-  );
-  const commandDistribution = distributeCommands(scope, activeAppIds, assumeInstalledSet);
-  const agentDistribution = distributeSubagents(scope, activeAppIds, assumeInstalledSet);
-  const skillDistribution = distributeSkills(scope, {
-    useAgentsDir: config.distribution.use_agents_dir,
-    activeAppIds,
-    assumeInstalled: assumeInstalledSet,
-  });
-  const hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet);
-
-  const distSections: CompactDistributionSection<DistributionResultLike>[] = [
-    {
-      label: 'mcp',
-      results: mcpDistribution,
-      emptyMessage: 'no apps configured',
-      getTargetLabel: (r) => (r as (typeof mcpDistribution)[number]).application,
-      getPath: (r) => (r as (typeof mcpDistribution)[number]).filePath,
-    },
-    {
-      label: 'rules',
-      results: ruleDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (r) => (r as (typeof ruleDistribution.results)[number]).agent,
-      getPath: (r) => (r as (typeof ruleDistribution.results)[number]).filePath,
-    },
-    {
-      label: 'commands',
-      results: commandDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (r) => (r as (typeof commandDistribution.results)[number]).platform,
-      getPath: (r) => (r as (typeof commandDistribution.results)[number]).filePath,
-    },
-    {
-      label: 'agents',
-      results: agentDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (r) => (r as (typeof agentDistribution.results)[number]).platform,
-      getPath: (r) => (r as (typeof agentDistribution.results)[number]).filePath,
-    },
-    {
-      label: 'skills',
-      results: skillDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (r) => {
-        const sr = r as (typeof skillDistribution.results)[number];
-        if (sr.platform === 'agents') {
-          const members = (['codex', 'gemini', 'opencode'] as const).filter((a) =>
-            activeAppIds.includes(a)
-          );
-          return members.length > 0 ? members.join('+') : 'agents';
-        }
-        return sr.platform;
-      },
-      getPath: (r) => (r as (typeof skillDistribution.results)[number]).targetDir,
-    },
-    {
-      label: 'hooks',
-      results: hookDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (r) => (r as (typeof hookDistribution.results)[number]).platform,
-      getPath: (r) => {
-        const hr = r as (typeof hookDistribution.results)[number];
-        return 'filePath' in hr ? hr.filePath : (hr as { targetDir: string }).targetDir;
-      },
-    },
-  ];
-
-  const { hasErrors } = printCompactDistributions(distSections);
-  return hasErrors;
-}
 
 interface ScopeOptionInput {
   profile?: string;
@@ -487,15 +169,6 @@ function resolveScope(input?: ScopeOptionInput): ConfigScope | undefined {
     profile: profile && profile.length > 0 ? profile : undefined,
     project: project,
   };
-}
-
-function scopeToLoadOptions(scope?: ConfigScope) {
-  return scope
-    ? {
-        profile: scope.profile ?? undefined,
-        projectPath: scope.project ?? undefined,
-      }
-    : undefined;
 }
 
 function defaultCommandSourceDir(platform: CmdPlatform): string {
@@ -695,7 +368,7 @@ program
   .action(async (options: ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
-      const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLoadOptions(scope));
+      const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
       const mcpConfig = loadMcpConfig();
 
       // Determine initial selection:
@@ -745,7 +418,7 @@ program
       }
 
       // Step 3: Apply to registered agents
-      await applyToAgents(scope, selectedServers);
+      await distributeMcp(scope, selectedServers);
 
       // Step 4: Show summary
       showSummary(selectedServers, scope);
@@ -856,7 +529,7 @@ ruleCommand
 ruleCommand.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     await initTargets(config);
     const selection = await showRuleSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) {
@@ -866,26 +539,28 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
     const rules = loadRuleLibrary();
     const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));
 
-    const previousState = loadRuleState(scope);
+    const previousState = loadWritableRuleState(scope);
+    const effectiveState = loadRuleState(scope);
     const desiredEnabled = selection.enabled;
 
-    const arraysEqual = (a: string[], b: string[]): boolean => {
-      if (a.length !== b.length) return false;
-      return a.every((value, index) => value === b[index]);
-    };
+    const selectionChanged =
+      selection.explicitEmpty ||
+      shouldPersistSelection({
+        currentEnabled: previousState.enabled,
+        effectiveEnabled: effectiveState.enabled,
+        selectedEnabled: desiredEnabled,
+      });
 
-    const selectionChanged = !arraysEqual(previousState.enabled, desiredEnabled);
-
-    const updatedState = updateRuleState((current) => {
-      if (!selectionChanged) {
-        return current;
-      }
-      return {
-        ...current,
-        enabled: desiredEnabled,
-        agentSync: {},
-      };
-    }, scope);
+    const updatedState = selectionChanged
+      ? updateRuleState(
+          (current) => ({
+            ...current,
+            enabled: desiredEnabled,
+            agentSync: {},
+          }),
+          scope
+        )
+      : previousState;
 
     if (!selectionChanged) {
       console.log(chalk.gray('\nNo changes to enabled rules. Refreshing agent files...'));
@@ -971,7 +646,7 @@ const commandRoot = program
 commandRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     await initTargets(config);
     const selection = await showCommandSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
@@ -1145,7 +820,7 @@ const agentRoot = program
 agentRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     await initTargets(config);
     const selection = await showSubagentSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
@@ -1318,7 +993,7 @@ const skillRoot = program
 skillRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     await initTargets(config);
     const selection = await showSkillSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
@@ -1503,7 +1178,7 @@ const hookRoot = program
 hookRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     const selection = await showHookSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
@@ -1681,144 +1356,6 @@ hookRoot
   });
 
 /**
- * Apply enabled MCP servers to all registered agents
- * @param scope - Configuration scope (profile/project)
- * @param enabledServerNames - List of enabled server names
- */
-type McpDistributionResult = {
-  application: string;
-  filePath: string;
-  status: 'written' | 'skipped' | 'error';
-  reason?: string;
-  error?: string;
-};
-
-async function applyToAgents(
-  scope?: ConfigScope,
-  enabledServerNames?: string[],
-  options?: { useSpinner?: boolean; assumeInstalled?: ReadonlySet<string> }
-): Promise<McpDistributionResult[]> {
-  const mcpConfig = loadMcpConfigWithPlugins(scope);
-  const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
-  await initTargets(switchboardConfig);
-  const useSpinner = options?.useSpinner ?? true;
-  const assumeInstalled =
-    options?.assumeInstalled ?? new Set(switchboardConfig.applications.assume_installed);
-  const results: McpDistributionResult[] = [];
-
-  if (switchboardConfig.applications.active.length === 0) {
-    if (useSpinner) {
-      console.log(chalk.yellow('\n⚠ No applications found in the active configuration stack.'));
-      console.log();
-      console.log('Add applications under the relevant TOML layer (user, profile, or project).');
-      console.log(chalk.dim('  Example: [applications]\n  active = ["claude-code", "cursor"]'));
-    }
-    return results;
-  }
-
-  // Global MCP servers list (from UI selection or config)
-  const globalMcpServers = enabledServerNames ?? loadMcpEnabledState(scope);
-
-  for (const agentId of switchboardConfig.applications.active) {
-    const spinner = useSpinner ? ora({ indent: 2 }).start(`Applying to ${agentId}...`) : null;
-    const persist = (symbol: string, text: string) => {
-      if (!spinner) return;
-      spinner.stopAndPersist({ symbol: `  ${symbol}`, text });
-    };
-
-    try {
-      const agentMcpConfig = resolveEffectiveSectionConfig('mcp', agentId, scope);
-      // If user selected servers via UI, use that as base; otherwise use per-agent resolved config
-      const agentActiveServers = enabledServerNames
-        ? agentMcpConfig.enabled.filter((s) => globalMcpServers.includes(s))
-        : agentMcpConfig.enabled;
-
-      // Filter to only enabled servers for this agent
-      const activeSet = new Set(agentActiveServers);
-      const enabledServers = Object.fromEntries(
-        Object.entries(mcpConfig.mcpServers).filter(([name]) => activeSet.has(name))
-      );
-      const configToApply = { mcpServers: enabledServers };
-
-      const target = getTargetById(agentId);
-      if (!assumeInstalled.has(agentId) && target?.isInstalled?.() === false) {
-        persist(
-          chalk.gray('○'),
-          `${chalk.cyan(agentId)} ${chalk.gray('(not installed, skipped)')}`
-        );
-        results.push({
-          application: agentId,
-          filePath: '(not installed)',
-          status: 'skipped',
-          reason: 'not installed',
-        });
-        continue;
-      }
-      if (!target?.mcp) {
-        persist(chalk.yellow('⚠'), `${chalk.cyan(agentId)} - no MCP handler (skipped)`);
-        results.push({
-          application: agentId,
-          filePath: '(unknown)',
-          status: 'skipped',
-          reason: 'no MCP handler',
-        });
-        continue;
-      }
-
-      const mcpHandler = target.mcp;
-
-      const readFileSafe = (p: string): string | null => {
-        try {
-          return fs.readFileSync(p, 'utf-8');
-        } catch {
-          return null;
-        }
-      };
-
-      if (scope?.project && mcpHandler.applyProjectConfig) {
-        const projectPath = mcpHandler.projectConfigPath?.(scope.project) ?? 'project config';
-        const before = readFileSafe(projectPath);
-        mcpHandler.applyProjectConfig(scope.project, configToApply);
-        const after = readFileSafe(projectPath);
-        const changed = before !== after;
-        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(projectPath))}`);
-        results.push({
-          application: agentId,
-          filePath: projectPath,
-          status: changed ? 'written' : 'skipped',
-          reason: changed ? 'applied' : 'up-to-date',
-        });
-      } else {
-        const configPath = mcpHandler.configPath();
-        const before = readFileSafe(configPath);
-        mcpHandler.applyConfig(configToApply);
-        const after = readFileSafe(configPath);
-        const changed = before !== after;
-        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(configPath))}`);
-        results.push({
-          application: agentId,
-          filePath: configPath,
-          status: changed ? 'written' : 'skipped',
-          reason: changed ? 'applied' : 'up-to-date',
-        });
-      }
-    } catch (error) {
-      if (error instanceof Error) {
-        persist(chalk.yellow('⚠'), `${chalk.cyan(agentId)} - ${error.message} (skipped)`);
-        results.push({
-          application: agentId,
-          filePath: '(unknown)',
-          status: 'error',
-          error: `${error.message} (skipped)`,
-        });
-      }
-    }
-  }
-
-  return results;
-}
-
-/**
  * Show summary of enabled/disabled servers and applied agents
  */
 function showSummary(selectedServers: string[], scope?: ConfigScope): void {
@@ -1845,7 +1382,7 @@ function showSummary(selectedServers: string[], scope?: ConfigScope): void {
     }
   }
 
-  const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
+  const switchboardConfig = loadSwitchboardConfig(scopeToLayerOptions(scope));
   if (switchboardConfig.applications.active.length > 0) {
     console.log(
       chalk.blue(`\nApplied to applications (${switchboardConfig.applications.active.length}):`)
@@ -1899,7 +1436,7 @@ pluginRoot
     try {
       const index = buildPluginIndex();
       const scope = resolveScope(options);
-      const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+      const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
       const enabledList = config.plugins.enabled;
       const enabledSet = new Set(enabledList);
 
@@ -1962,7 +1499,7 @@ pluginRoot
 function pluginEnableAction(id: string, options: ScopeOptionInput) {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     if (config.plugins.enabled.includes(id)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled.`));
       return;
@@ -1981,7 +1518,7 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
           enabled: [...(layer.plugins?.enabled ?? []), id],
         },
       }),
-      scopeToLoadOptions(scope)
+      scopeToLayerOptions(scope)
     );
     console.log(chalk.green(`✓ Plugin "${id}" enabled.`));
   } catch (error) {
@@ -1995,7 +1532,7 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
 function pluginDisableAction(id: string, options: ScopeOptionInput) {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     if (!config.plugins.enabled.includes(id)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled.`));
       return;
@@ -2008,7 +1545,7 @@ function pluginDisableAction(id: string, options: ScopeOptionInput) {
           enabled: (layer.plugins?.enabled ?? []).filter((x) => x !== id),
         },
       }),
-      scopeToLoadOptions(scope)
+      scopeToLayerOptions(scope)
     );
     console.log(chalk.green(`✓ Plugin "${id}" disabled.`));
   } catch (error) {
@@ -2022,7 +1559,7 @@ function pluginDisableAction(id: string, options: ScopeOptionInput) {
 function pluginUninstallAction(id: string, options: ScopeOptionInput) {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLoadOptions(scope));
+    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
     if (!config.plugins.enabled.includes(id)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled.`));
       return;
@@ -2035,7 +1572,7 @@ function pluginUninstallAction(id: string, options: ScopeOptionInput) {
           enabled: (layer.plugins?.enabled ?? []).filter((x) => x !== id),
         },
       }),
-      scopeToLoadOptions(scope)
+      scopeToLayerOptions(scope)
     );
     console.log(chalk.green(`✓ Plugin "${id}" uninstalled.`));
   } catch (error) {

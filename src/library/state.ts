@@ -1,7 +1,11 @@
 import { z } from 'zod';
 import { resolveEffectiveSectionConfig } from '../config/application-config.js';
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
-import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
+import {
+  loadMergedSwitchboardConfig,
+  loadWritableConfigLayer,
+  updateConfigLayer,
+} from '../config/layered-config.js';
 import type { SwitchboardConfigLayer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { scopeToLayerOptions } from '../config/scope.js';
@@ -68,6 +72,15 @@ function getConfigSectionEnabled(
   return [...config[section].enabled];
 }
 
+function getWritableConfigSectionEnabled(
+  section: LibrarySection,
+  options?: UpdateConfigLayerOptions
+): string[] {
+  const layer = loadWritableConfigLayer(options);
+  const sectionConfig = (layer.config[section] ?? {}) as { enabled?: string[] };
+  return Array.isArray(sectionConfig.enabled) ? [...sectionConfig.enabled] : [];
+}
+
 export function loadLibraryStateSection(
   section: LibrarySection,
   scope?: ConfigScope
@@ -78,6 +91,22 @@ export function loadLibraryStateSection(
     enabled: configEnabled,
     agentSync: { ...agentSyncCache[section] },
   };
+}
+
+export function loadWritableLibraryStateSection(
+  section: LibrarySection,
+  scope?: ConfigScope
+): SectionState {
+  const layerOptions = scopeToLayerOptions(scope);
+  const configEnabled = getWritableConfigSectionEnabled(section, layerOptions);
+  return {
+    enabled: configEnabled,
+    agentSync: { ...agentSyncCache[section] },
+  };
+}
+
+export function loadLibraryAgentSync(section: LibrarySection): SectionState['agentSync'] {
+  return { ...agentSyncCache[section] };
 }
 
 export function saveLibraryStateSection(
@@ -105,10 +134,18 @@ export function updateLibraryStateSection(
   mutator: (current: SectionState) => SectionState,
   scope?: ConfigScope
 ): SectionState {
-  const current = loadLibraryStateSection(section, scope);
+  const current = loadWritableLibraryStateSection(section, scope);
   const next = mutator(current);
   saveLibraryStateSection(section, next, scope);
-  return loadLibraryStateSection(section, scope);
+  return loadWritableLibraryStateSection(section, scope);
+}
+
+export function updateLibraryAgentSync(
+  section: LibrarySection,
+  mutator: (current: SectionState['agentSync']) => SectionState['agentSync']
+): SectionState['agentSync'] {
+  agentSyncCache[section] = { ...mutator(loadLibraryAgentSync(section)) };
+  return loadLibraryAgentSync(section);
 }
 
 /**
