@@ -2,8 +2,8 @@ import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 
 import type { ConfigScope } from '../config/scope.js';
-import { loadRuleLibrary, type RuleSnippet } from '../rules/library.js';
-import { loadRuleState, loadWritableRuleState } from '../rules/state.js';
+import type { RuleSnippet } from '../rules/library.js';
+import { loadRuleRuntimeContext } from '../rules/runtime.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 import { promptOrder } from './library-selector.js';
 import { shouldPersistSelection } from './selection-state.js';
@@ -23,7 +23,7 @@ export async function showRuleSelector(
 ): Promise<RuleSelectionResult | null> {
   const scope = options?.scope;
   const pageSize = options?.pageSize ?? 20;
-  const rules = loadRuleLibrary(scope);
+  const { rules, writableState: state, effectiveState } = loadRuleRuntimeContext(scope);
 
   if (rules.length === 0) {
     console.log(chalk.yellow('⚠ No rule snippets found.'));
@@ -40,8 +40,6 @@ export async function showRuleSelector(
     return null;
   }
 
-  const state = loadWritableRuleState(scope);
-  const effectiveState = loadRuleState(scope);
   const ruleMap = new Map<string, RuleSnippet>();
   for (const rule of rules) {
     ruleMap.set(rule.id, rule);

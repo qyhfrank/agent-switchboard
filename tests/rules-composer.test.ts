@@ -112,3 +112,31 @@ test('composeActiveRules honours includeDelimiters flag from config', () => {
     assert.equal(composed.content, expected);
   });
 });
+
+test('composeActiveRules project scope uses writable layer config for includeDelimiters', () => {
+  withTempAsbHome((asbHome) => {
+    const configDir = getConfigDir();
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, 'config.toml'),
+      '[applications]\nenabled = []\n[rules]\nincludeDelimiters = true\n'
+    );
+
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'alpha.md'), 'Alpha body\n');
+
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, '.asb.toml'), '[rules]\nenabled = ["alpha"]\n');
+
+    saveRuleState({
+      ...DEFAULT_RULE_STATE,
+      enabled: ['alpha'],
+      agentSync: {},
+    });
+
+    const composed = composeActiveRules({ project: projectRoot });
+
+    assert.equal(composed.content, 'Alpha body\n');
+  });
+});
