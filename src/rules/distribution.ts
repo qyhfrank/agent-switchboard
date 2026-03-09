@@ -12,7 +12,7 @@ import { composeActiveRulesForApplication } from './composer.js';
 import { loadRuleLibrary } from './library.js';
 import { updateRuleAgentSync } from './state.js';
 
-export type DistributionStatus = 'written' | 'skipped' | 'error';
+export type DistributionStatus = 'written' | 'skipped' | 'error' | 'deleted';
 
 export interface DistributionResult {
   agent: string;
@@ -98,6 +98,23 @@ export function distributeRules(
     }
 
     const filePath = handler.resolveFilePath(scope);
+
+    if (document.content.length === 0) {
+      try {
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+          results.push({ agent, filePath, status: 'deleted', reason: 'no-rules-configured' });
+        } else {
+          results.push({ agent, filePath, status: 'skipped', reason: 'no-rules-configured' });
+        }
+        agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({ agent, filePath, status: 'error', error: message });
+      }
+      continue;
+    }
+
     const finalContent = handler.render(document.content);
 
     let existingContent: string | null = null;

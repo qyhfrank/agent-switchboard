@@ -180,6 +180,38 @@ test('distributeRules with force rewrites matching content', () => {
   });
 });
 
+test('distributeRules deletes distributed rule files when no rules are enabled', () => {
+  withTempAsbHome(() => {
+    simulateAppsInstalled();
+    simulateTraeInstalled();
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'only.md'), 'Only body\n');
+
+    saveRuleState({
+      ...DEFAULT_RULE_STATE,
+      enabled: ['only'],
+      agentSync: {},
+    });
+
+    distributeRules(composeActiveRules());
+
+    saveRuleState({
+      ...DEFAULT_RULE_STATE,
+      enabled: [],
+      agentSync: {},
+    });
+
+    const outcome = distributeRules();
+    const composedResults = outcome.results.filter((r) => composedAgentIds.has(r.agent));
+
+    composedResults.forEach((result) => {
+      assert.equal(result.status, 'deleted');
+      assert.equal(result.reason, 'no-rules-configured');
+      assert.equal(fs.existsSync(result.filePath), false);
+    });
+  });
+});
+
 test('listUnsupportedAgents returns skipped agent identifiers', () => {
   const unsupported = listUnsupportedAgents();
   assert.equal(Array.isArray(unsupported), true);
