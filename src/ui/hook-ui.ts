@@ -17,7 +17,7 @@ export async function showHookSelector(
     noun: 'hook',
     emptyHint: 'asb hook load <path>',
     allowOrdering: false,
-    loadEntries: () => loadHookLibrary(),
+    loadEntries: () => loadHookLibrary(options?.scope),
     getId: (e) => e.id,
     getTitle: (e) => e.name ?? e.id,
     getDescription: (e) => e.description,

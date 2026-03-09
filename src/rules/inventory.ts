@@ -29,7 +29,7 @@ function sortInactiveRules(rules: RuleSnippet[]): RuleSnippet[] {
 }
 
 export function buildRuleInventory(scope?: ConfigScope): RuleInventory {
-  const rules = loadRuleLibrary();
+  const rules = loadRuleLibrary(scope);
   const state = loadRuleState(scope);
 
   const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));

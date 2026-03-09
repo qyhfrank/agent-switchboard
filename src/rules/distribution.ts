@@ -52,7 +52,7 @@ function cleanupLegacyCursorMdcFiles(scope?: ConfigScope): void {
   const targetDir = path.dirname(cursorTarget.rules.resolveFilePath(scope));
   if (!fs.existsSync(targetDir)) return;
 
-  const libraryIds = new Set(loadRuleLibrary().map((r) => r.id));
+  const libraryIds = new Set(loadRuleLibrary(scope).map((r) => r.id));
 
   for (const file of fs.readdirSync(targetDir)) {
     if (!file.endsWith('.mdc') || file === CURSOR_SINGLE_FILE) continue;

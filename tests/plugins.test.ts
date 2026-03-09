@@ -347,6 +347,47 @@ test('plugin MCP servers are merged into config', () => {
   });
 });
 
+test('project-scoped plugin sources are isolated from global cache and load project content', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    writeConfigToml(asbHome, '[applications]\nenabled = ["claude-code"]\n');
+
+    const projectRoot = path.join(asbHome, 'project');
+    const projectPluginDir = path.join(projectRoot, 'proj-lib');
+    fs.mkdirSync(path.join(projectPluginDir, 'rules'), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectPluginDir, 'rules', 'project-rule.md'),
+      '---\ntitle: Project Rule\n---\nProject rule content'
+    );
+    fs.writeFileSync(
+      path.join(projectPluginDir, '.mcp.json'),
+      JSON.stringify({
+        alpha: { command: 'npx', args: ['alpha'], type: 'stdio' },
+      })
+    );
+    fs.writeFileSync(
+      path.join(projectRoot, '.asb.toml'),
+      [
+        '[plugins]',
+        'enabled = ["proj-lib"]',
+        '',
+        '[plugins.sources]',
+        `proj-lib = "${projectPluginDir}"`,
+      ].join('\n')
+    );
+
+    const globalIndex = buildPluginIndex();
+    const projectIndex = buildPluginIndex({ project: projectRoot });
+    const projectRules = loadRuleLibrary({ project: projectRoot });
+    const projectMcp = loadMcpConfigWithPlugins({ project: projectRoot });
+
+    assert.equal(globalIndex.get('proj-lib'), undefined);
+    assert.ok(projectIndex.get('proj-lib'));
+    assert.ok(projectRules.some((rule) => rule.id === 'proj-lib:project-rule'));
+    assert.ok('proj-lib:alpha' in projectMcp.mcpServers);
+  });
+});
+
 test('plugin .mcp.json with mcpServers wrapper is unwrapped', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();

@@ -536,7 +536,7 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
       return;
     }
 
-    const rules = loadRuleLibrary();
+    const rules = loadRuleLibrary(scope);
     const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));
 
     const previousState = loadWritableRuleState(scope);
@@ -1216,7 +1216,7 @@ hookRoot
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
-      const entries = loadHookLibrary();
+      const entries = loadHookLibrary(scope);
       const state = loadLibraryStateSection('hooks', scope);
       const enabledSet = new Set(state.enabled);
 
@@ -1434,8 +1434,8 @@ pluginRoot
   .option('--json', 'Output as JSON')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
-      const index = buildPluginIndex();
       const scope = resolveScope(options);
+      const index = buildPluginIndex(scope);
       const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
       const enabledList = config.plugins.enabled;
       const enabledSet = new Set(enabledList);
@@ -1504,7 +1504,7 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled.`));
       return;
     }
-    const index = buildPluginIndex();
+    const index = buildPluginIndex(scope);
     if (!index.get(id)) {
       console.error(chalk.red(`✗ Plugin "${id}" not found.`));
       console.log(chalk.dim('  Run `asb plugin list` to see available plugins.'));

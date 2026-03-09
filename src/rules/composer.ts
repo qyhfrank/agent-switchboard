@@ -97,7 +97,7 @@ export function composeRules(
 }
 
 export function composeActiveRules(scope?: ConfigScope): ComposedRules {
-  const rules = loadRuleLibrary();
+  const rules = loadRuleLibrary(scope);
   const state =
     scope?.profile || scope?.project ? loadWritableRuleState(scope) : loadRuleState(scope);
   const config =
@@ -123,7 +123,7 @@ export function composeActiveRulesForApplication(
   appId: string,
   scope?: ConfigScope
 ): ComposedRules {
-  const rules = loadRuleLibrary();
+  const rules = loadRuleLibrary(scope);
   const appConfig = resolveScopedSectionConfig('rules', appId, scope);
   const config =
     scope?.profile || scope?.project

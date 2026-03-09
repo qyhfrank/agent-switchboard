@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getSkillsDir } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import { loadEntriesFromSources } from '../marketplace/source-loader.js';
 import { parseSkillMarkdown } from './parser.js';
 import type { SkillFrontmatter } from './schema.js';
@@ -101,13 +102,13 @@ function loadSkillsFromDirectory(directory: string, namespace?: string): SkillEn
 /**
  * Load all skills from default library, plugin sources, and marketplace sources.
  */
-export function loadSkillLibrary(): SkillEntry[] {
+export function loadSkillLibrary(scope?: ConfigScope): SkillEntry[] {
   const result: SkillEntry[] = [];
 
   const defaultDir = ensureSkillsDirectory();
   result.push(...loadSkillsFromDirectory(defaultDir));
 
-  const { pluginSources, marketplaceEntries } = loadEntriesFromSources();
+  const { pluginSources, marketplaceEntries } = loadEntriesFromSources(scope);
 
   for (const { namespace, basePath } of pluginSources) {
     const skillsDir = path.join(basePath, 'skills');

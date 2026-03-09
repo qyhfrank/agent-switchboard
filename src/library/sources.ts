@@ -10,6 +10,7 @@ import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
 import { getPluginsDir, getSourceCacheDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
+import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 
 export interface Source {
@@ -127,8 +128,8 @@ export function inferSourceName(location: string): string {
 
 // ── Config access helpers ──────────────────────────────────────────
 
-function getRawSources(): Record<string, SourceValue> {
-  const config = loadSwitchboardConfig();
+function getRawSources(scope?: ConfigScope): Record<string, SourceValue> {
+  const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
   return config.plugins.sources;
 }
 
@@ -203,9 +204,9 @@ function discoverLocalSources(): Record<string, string> {
  * Get all plugin sources: auto-discovered from `~/.asb/plugins/` merged
  * with explicitly configured `[plugins.<name>] source = "..."` entries. Explicit entries win on conflict.
  */
-export function getSources(): Source[] {
+export function getSources(scope?: ConfigScope): Source[] {
   const discovered = discoverLocalSources();
-  const raw = getRawSources();
+  const raw = getRawSources(scope);
 
   const merged = new Map<string, { value?: SourceValue; path: string }>();
 
@@ -228,17 +229,17 @@ export function getSources(): Source[] {
  * Get sources as namespace -> effective local path.
  * Merges auto-discovered and explicitly configured sources.
  */
-export function getSourcesRecord(): Record<string, string> {
+export function getSourcesRecord(scope?: ConfigScope): Record<string, string> {
   const result = discoverLocalSources();
-  const raw = getRawSources();
+  const raw = getRawSources(scope);
   for (const [namespace, value] of Object.entries(raw)) {
     result[namespace] = resolveEffectivePath(namespace, value);
   }
   return result;
 }
 
-export function hasSource(namespace: string): boolean {
-  const raw = getRawSources();
+export function hasSource(namespace: string, scope?: ConfigScope): boolean {
+  const raw = getRawSources(scope);
   if (namespace in raw) return true;
   const discovered = discoverLocalSources();
   return namespace in discovered;
@@ -379,8 +380,8 @@ export function validateSourcePath(libraryPath: string): {
  * Pull latest changes for all remote sources.
  * Re-clones if the cache directory is missing or corrupted.
  */
-export function updateRemoteSources(): SourceUpdateResult[] {
-  const raw = getRawSources();
+export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
+  const raw = getRawSources(scope);
   const results: SourceUpdateResult[] = [];
 
   for (const [namespace, value] of Object.entries(raw)) {

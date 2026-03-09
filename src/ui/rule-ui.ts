@@ -23,7 +23,7 @@ export async function showRuleSelector(
 ): Promise<RuleSelectionResult | null> {
   const scope = options?.scope;
   const pageSize = options?.pageSize ?? 20;
-  const rules = loadRuleLibrary();
+  const rules = loadRuleLibrary(scope);
 
   if (rules.length === 0) {
     console.log(chalk.yellow('⚠ No rule snippets found.'));

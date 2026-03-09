@@ -16,7 +16,7 @@ export async function showSkillSelector(
   return showLibrarySelector<SkillEntry>({
     section: 'skills',
     emptyHint: 'asb skill load <platform> [path]',
-    loadEntries: loadSkillLibrary,
+    loadEntries: () => loadSkillLibrary(options?.scope),
     getId: (e) => e.id,
     getTitle: (e) => e.metadata.name,
     getDescription: (e) => e.metadata.description,

@@ -7,19 +7,13 @@ import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfigWithLayers } from '../config/switchboard-config.js';
 import { distributeHooks } from '../hooks/distribution.js';
 import { updateRemoteSources } from '../library/sources.js';
-import { resetAgentSyncCache } from '../library/state.js';
 import { distributeMcp } from '../mcp/distribution.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import { distributeRules } from '../rules/distribution.js';
 import { distributeSkills } from '../skills/distribution.js';
 import { distributeSubagents } from '../subagents/distribution.js';
 import { initTargets } from '../targets/init.js';
-import {
-  filterInstalled,
-  getTargetById,
-  getTargetsForSection,
-  registerConfigTargets,
-} from '../targets/registry.js';
+import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import {
   type CompactDistributionSection,
   type DistributionResultLike,
@@ -45,7 +39,7 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
   console.log();
 
   if (updateSources) {
-    const remoteResults = updateRemoteSources();
+    const remoteResults = updateRemoteSources(scope);
     if (remoteResults.length > 0) {
       console.log(chalk.blue('Sources:'));
       for (const result of remoteResults) {
@@ -62,46 +56,37 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
     }
   }
 
-  if (scope?.project) {
-    const { config: globalConfig, layers: globalLayers } = loadSwitchboardConfigWithLayers(
-      scopeToLayerOptions(undefined)
-    );
-    await initTargets(globalConfig);
-
-    console.log(chalk.blue.bold('── Global ──'));
-    const globalErrors = await runSyncPhase({
-      scope: undefined,
-      config: globalConfig,
-      layers: globalLayers,
-    });
-
-    console.log();
-    resetAgentSyncCache();
-    console.log(chalk.blue.bold(`── Project: ${shortenPath(scope.project)} ──`));
-    const { config: projectConfig, layers: projectLayers } = loadSwitchboardConfigWithLayers(
-      scopeToLayerOptions(scope)
-    );
-    const projectTargets = (projectConfig as Record<string, unknown>).targets as
-      | Record<string, Record<string, unknown>>
-      | undefined;
-    if (projectTargets && Object.keys(projectTargets).length > 0) {
-      registerConfigTargets(projectTargets);
-    }
-    const projectErrors = await runSyncPhase({
-      scope,
-      config: projectConfig,
-      layers: projectLayers,
-    });
-
-    return globalErrors || projectErrors;
-  }
-
   const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
   await initTargets(config);
+
+  if (scope?.project) {
+    console.log(chalk.blue.bold(`── Project: ${shortenPath(scope.project)} ──`));
+  } else if (scope?.profile) {
+    console.log(chalk.blue.bold(`── Profile: ${scope.profile} ──`));
+  }
+
   return runSyncPhase({ scope, config, layers });
 }
 
 export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promise<boolean> {
+  const writableConfig = scope?.project
+    ? layers.project?.config
+    : scope?.profile
+      ? layers.profile?.config
+      : undefined;
+  const getDisplayEnabled = (
+    section: 'mcp' | 'rules' | 'commands' | 'agents' | 'skills' | 'hooks'
+  ): string[] => {
+    if (!scope?.project && !scope?.profile) {
+      return config[section].enabled;
+    }
+    return writableConfig?.[section]?.enabled ?? [];
+  };
+  const displayPluginRefs =
+    scope?.project || scope?.profile
+      ? (writableConfig?.plugins?.enabled ?? [])
+      : config.plugins.enabled;
+
   const activeLayers: string[] = [];
   if (layers.user.exists) activeLayers.push(shortenPath(layers.user.path));
   if (layers.profile?.exists) activeLayers.push(shortenPath(layers.profile.path));
@@ -146,7 +131,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
     const termWidth = process.stdout.columns || 80;
     const maxSectionLen = Math.max(...sections.map((section) => section.length));
     const maxCountLen = Math.max(
-      ...sections.map((section) => `(${config[section].enabled.length})`.length)
+      ...sections.map((section) => `(${getDisplayEnabled(section).length})`.length)
     );
     const prefixPlainLen = 2 + maxSectionLen + 1 + maxCountLen + 2;
 
@@ -175,8 +160,8 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
     };
 
     for (const section of sections) {
-      const globalActive = config[section].enabled;
-      const globalCount = globalActive.length;
+      const displayEnabled = getDisplayEnabled(section);
+      const displayCount = displayEnabled.length;
 
       const supported = new Set(sectionPlatforms[section] ?? []);
       const applicableApps = config.applications.enabled.filter((id) => supported.has(id));
@@ -188,7 +173,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
 
       const perAppParts = applicableApps.map((appId) => {
         const enabled = effectiveByApp.get(appId) ?? [];
-        const delta = enabled.length - globalCount;
+        const delta = enabled.length - displayCount;
         const suffix = delta === 0 ? '' : delta > 0 ? `(+${delta})` : `(${delta})`;
         return `${appId}:${enabled.length}${suffix}`;
       });
@@ -197,10 +182,10 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       for (const [, ids] of effectiveByApp) {
         for (const id of ids) union.add(id);
       }
-      const previewIds = globalActive.length > 0 ? [...globalActive] : [...union];
+      const previewIds = displayEnabled.length > 0 ? [...displayEnabled] : [...union];
 
       const paddedSection = section.padEnd(maxSectionLen);
-      const countStr = `(${globalCount})`.padStart(maxCountLen);
+      const countStr = `(${displayCount})`.padStart(maxCountLen);
       const appsStr = perAppParts.join('  ');
       console.log(`  ${chalk.cyan(paddedSection)} ${chalk.gray(countStr)}  ${appsStr}`);
 
@@ -214,8 +199,8 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   }
 
   {
-    const pluginIndex = buildPluginIndex();
-    const enabledPluginRefs = config.plugins.enabled;
+    const pluginIndex = buildPluginIndex(scope);
+    const enabledPluginRefs = displayPluginRefs;
     if (enabledPluginRefs.length > 0) {
       const names = enabledPluginRefs
         .map((pluginId) => {
@@ -226,7 +211,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       console.log(
         `  ${chalk.magenta('plugins')} ${chalk.gray(`(${enabledPluginRefs.length})`)}  ${names}`
       );
-    } else if (pluginIndex.plugins.length > 0) {
+    } else if (!scope?.project && !scope?.profile && pluginIndex.plugins.length > 0) {
       console.log(
         `  ${chalk.magenta('plugins')} ${chalk.gray('(0)')}  ${chalk.gray(`${pluginIndex.plugins.length} available`)}`
       );

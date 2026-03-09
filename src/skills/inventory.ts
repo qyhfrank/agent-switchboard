@@ -25,7 +25,7 @@ function sortInactive(entries: SkillEntry[]): SkillEntry[] {
 }
 
 export function buildSkillInventory(scope?: ConfigScope): SkillInventory {
-  const entries = loadSkillLibrary();
+  const entries = loadSkillLibrary(scope);
   const state = loadLibraryStateSection('skills', scope);
 
   const byId = new Map(entries.map((e) => [e.id, e]));

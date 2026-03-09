@@ -38,7 +38,7 @@ export function distributeSubagents(
   activeAppIds?: string[],
   assumeInstalled?: ReadonlySet<string>
 ): SubagentDistributionOutcome {
-  const entries = loadSubagentLibrary();
+  const entries = loadSubagentLibrary(scope);
   const byId = new Map(entries.map((e) => [e.id, e]));
 
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too

@@ -237,7 +237,7 @@ export function distributeHooks(
     return { results };
   }
 
-  const allEntries = loadHookLibrary();
+  const allEntries = loadHookLibrary(scope);
   const byId = new Map(allEntries.map((e) => [e.id, e]));
 
   const state = loadLibraryStateSectionForApplication('hooks', 'claude-code', scope);

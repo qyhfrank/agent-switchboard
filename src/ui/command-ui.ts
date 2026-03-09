@@ -17,7 +17,7 @@ export async function showCommandSelector(
     noun: 'command',
     emptyHint: 'asb command load <platform> [path] [-r]',
     allowOrdering: false,
-    loadEntries: () => loadCommandLibrary(),
+    loadEntries: () => loadCommandLibrary(options?.scope),
     getId: (e) => e.id,
     getTitle: (e) => {
       const t = (e.metadata as Record<string, unknown>).title as unknown;

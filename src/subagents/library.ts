@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getAgentsDir } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import { parseLibraryMarkdown } from '../library/parser.js';
 import type { LibraryFrontmatter } from '../library/schema.js';
 import { loadEntriesFromSources } from '../marketplace/source-loader.js';
@@ -75,13 +76,13 @@ function loadAgentsFromDirectory(directory: string, namespace?: string): Subagen
 /**
  * Load all agents from default library, plugin sources, and marketplace sources.
  */
-export function loadSubagentLibrary(): SubagentEntry[] {
+export function loadSubagentLibrary(scope?: ConfigScope): SubagentEntry[] {
   const result: SubagentEntry[] = [];
 
   const defaultDir = ensureAgentsDirectory();
   result.push(...loadAgentsFromDirectory(defaultDir));
 
-  const { pluginSources, marketplaceEntries } = loadEntriesFromSources();
+  const { pluginSources, marketplaceEntries } = loadEntriesFromSources(scope);
 
   for (const { namespace, basePath } of pluginSources) {
     const agentsDir = path.join(basePath, 'agents');

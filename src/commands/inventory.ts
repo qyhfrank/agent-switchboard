@@ -59,7 +59,7 @@ function buildCommandRow(entry: CommandEntry, active: boolean): CommandInventory
 }
 
 export function buildCommandInventory(scope?: ConfigScope): CommandInventory {
-  const entries = loadCommandLibrary();
+  const entries = loadCommandLibrary(scope);
   const state = loadLibraryStateSection('commands', scope);
 
   const byId = new Map(entries.map((e) => [e.id, e]));

@@ -5,6 +5,7 @@
  */
 
 import type { CommandEntry } from '../commands/library.js';
+import type { ConfigScope } from '../config/scope.js';
 import type { HookEntry } from '../hooks/library.js';
 import { getSourcesRecord } from '../library/sources.js';
 import type { SubagentEntry } from '../subagents/library.js';
@@ -28,11 +29,11 @@ export interface MarketplaceSourceEntries {
  * For marketplace sources: parses the marketplace, loads all plugin components,
  * and returns them directly.
  */
-export function loadEntriesFromSources(): {
+export function loadEntriesFromSources(scope?: ConfigScope): {
   pluginSources: Array<{ namespace: string; basePath: string }>;
   marketplaceEntries: MarketplaceSourceEntries;
 } {
-  const sources = getSourcesRecord();
+  const sources = getSourcesRecord(scope);
   const pluginSources: Array<{ namespace: string; basePath: string }> = [];
   const marketplaceEntries: MarketplaceSourceEntries = {
     commands: [],

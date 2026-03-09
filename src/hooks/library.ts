@@ -11,6 +11,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getHooksDir } from '../config/paths.js';
+import type { ConfigScope } from '../config/scope.js';
 import type { BundleFile } from '../library/distribute-bundle.js';
 import { loadEntriesFromSources } from '../marketplace/source-loader.js';
 import type { HookFile } from './schema.js';
@@ -169,13 +170,13 @@ function collectFiles(baseDir: string, currentDir: string, files: BundleFile[]):
 /**
  * Load all hooks from the default library, plugin sources, and marketplace sources.
  */
-export function loadHookLibrary(): HookEntry[] {
+export function loadHookLibrary(scope?: ConfigScope): HookEntry[] {
   const result: HookEntry[] = [];
 
   const defaultDir = ensureHooksDirectory();
   result.push(...loadHooksFromDirectory(defaultDir));
 
-  const { pluginSources, marketplaceEntries } = loadEntriesFromSources();
+  const { pluginSources, marketplaceEntries } = loadEntriesFromSources(scope);
 
   for (const { namespace, basePath } of pluginSources) {
     const hooksDir = path.join(basePath, 'hooks');
