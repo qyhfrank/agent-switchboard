@@ -40,7 +40,7 @@ export function mergeIncrementalSelection(
 ): string[] {
   if (!override) return base;
 
-  if (override.enabled && override.enabled.length > 0) {
+  if (override.enabled) {
     return override.enabled;
   }
 
@@ -158,7 +158,7 @@ export function resolveApplicationSectionConfig(
 ): ResolvedSectionConfig {
   const layerOptions = scopeToLayerOptions(scope);
   const { config } = loadMergedSwitchboardConfig(layerOptions);
-  return resolveSectionConfigFromConfig(config, section, appId);
+  return resolveSectionConfigFromConfig(config, section, appId, scope);
 }
 
 /**

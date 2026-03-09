@@ -136,15 +136,14 @@ export async function distributeMcp(
         reason: changed ? 'applied' : 'up-to-date',
       });
     } catch (error) {
-      if (error instanceof Error) {
-        persist(chalk.yellow('⚠'), `${chalk.cyan(agentId)} - ${error.message} (skipped)`);
-        results.push({
-          application: agentId,
-          filePath: '(unknown)',
-          status: 'error',
-          error: `${error.message} (skipped)`,
-        });
-      }
+      const msg = error instanceof Error ? error.message : String(error);
+      persist(chalk.yellow('⚠'), `${chalk.cyan(agentId)} - ${msg} (skipped)`);
+      results.push({
+        application: agentId,
+        filePath: '(unknown)',
+        status: 'error',
+        error: `${msg} (skipped)`,
+      });
     }
   }
 
