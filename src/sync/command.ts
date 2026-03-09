@@ -243,7 +243,6 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
     assumeInstalled: assumeInstalledSet,
   });
   const ruleDistribution = distributeRules(
-    undefined,
     { activeAppIds, assumeInstalled: assumeInstalledSet },
     scope
   );

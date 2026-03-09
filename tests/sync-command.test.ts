@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { getClaudeJsonPath, getMcpConfigPath } from '../src/config/paths.js';
+import { getClaudeJsonPath, getMcpConfigPath, getProfileConfigPath } from '../src/config/paths.js';
 import { resetAgentSyncCache } from '../src/library/state.js';
 import { clearPluginIndexCache } from '../src/plugins/index.js';
 import { runSyncCommand } from '../src/sync/command.js';
@@ -164,5 +164,60 @@ test('runSyncCommand project scope only syncs project outputs', async () => {
     assert.match(output, /project-skill/);
     assert.equal(fs.existsSync(getClaudeJsonPath()), false);
     assert.deepEqual(Object.keys(projectApplied.mcpServers), ['beta']);
+  });
+});
+
+test('runSyncCommand profile scope syncs writable profile selection to global outputs', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[mcp]',
+      'enabled = ["alpha"]',
+      '',
+      '[rules]',
+      'enabled = ["response"]',
+      '',
+      '[plugins]',
+      'enabled = ["ghost-plugin"]',
+    ]);
+    writeConfig(getProfileConfigPath('team'), [
+      '[mcp]',
+      'enabled = ["beta"]',
+      '',
+      '[skills]',
+      'enabled = ["profile-skill"]',
+    ]);
+    writeMcpConfig({
+      alpha: { command: 'npx', args: ['alpha'], type: 'stdio' },
+      beta: { command: 'npx', args: ['beta'], type: 'stdio' },
+    });
+    const skillDir = path.join(asbHome, 'skills', 'profile-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: profile-skill\ndescription: profile scoped skill\n---\nBody\n',
+      'utf-8'
+    );
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ scope: { profile: 'team' }, updateSources: false })
+    );
+    const applied = JSON.parse(fs.readFileSync(getClaudeJsonPath(), 'utf-8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+
+    assert.equal(result, false);
+    assert.match(output, /Profile: team/);
+    assert.doesNotMatch(output, /Global/);
+    assert.doesNotMatch(output, /plugins/);
+    assert.doesNotMatch(output, /ghost-plugin/);
+    assert.match(output, /rules\s+\(0\)\s+claude-code:0/);
+    assert.doesNotMatch(output, /response/);
+    assert.match(output, /skills\s+\(1\)\s+claude-code:1/);
+    assert.match(output, /profile-skill/);
+    assert.deepEqual(Object.keys(applied.mcpServers), ['beta']);
   });
 });

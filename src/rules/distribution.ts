@@ -68,7 +68,6 @@ function cleanupLegacyCursorMdcFiles(scope?: ConfigScope): void {
 }
 
 export function distributeRules(
-  _composed?: ComposedRules,
   options?: DistributionOptions,
   scope?: ConfigScope
 ): DistributionOutcome {
