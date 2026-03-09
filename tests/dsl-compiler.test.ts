@@ -55,7 +55,7 @@ test('compileTargetSpec rules with mdc format wraps frontmatter', () => {
     },
   };
   const target = compileTargetSpec('test', spec);
-  const rendered = target.rules!.render('body content');
+  const rendered = target.rules?.render('body content');
   assert.ok(rendered.includes('---'));
   assert.ok(rendered.includes('alwaysApply: true'));
   assert.ok(rendered.includes('body content'));
@@ -115,7 +115,7 @@ test('compileTargetSpec MCP writes YAML with keyed-array and env transform', () 
     };
     const target = compileTargetSpec('custom-test', spec);
 
-    target.mcp!.applyConfig({
+    target.mcp?.applyConfig({
       mcpServers: {
         'test-server': {
           command: 'node',
@@ -150,7 +150,7 @@ test('compileTargetSpec MCP preserves existing non-MCP fields in YAML', () => {
       },
     };
     const target = compileTargetSpec('test', spec);
-    target.mcp!.applyConfig({
+    target.mcp?.applyConfig({
       mcpServers: { s1: { command: 'cmd' } },
     });
 
@@ -181,7 +181,7 @@ test('compileTargetSpec MCP preserves existing non-MCP fields in JSON', () => {
       },
     };
     const target = compileTargetSpec('test-json', spec);
-    target.mcp!.applyConfig({
+    target.mcp?.applyConfig({
       mcpServers: { s1: { command: 'cmd' } },
     });
 
@@ -214,7 +214,7 @@ test('compileTargetSpec MCP YAML parse error: does not modify file', () => {
 
     assert.throws(
       () =>
-        target.mcp!.applyConfig({
+        target.mcp?.applyConfig({
           mcpServers: { s1: { command: 'cmd' } },
         }),
       (err: Error) =>
@@ -242,7 +242,7 @@ test('compileTargetSpec MCP JSON parse error: does not modify file', () => {
 
     assert.throws(
       () =>
-        target.mcp!.applyConfig({
+        target.mcp?.applyConfig({
           mcpServers: { s1: { command: 'cmd' } },
         }),
       (err: Error) =>
@@ -268,7 +268,7 @@ test('compileTargetSpec MCP YAML scalar root: throws and does not modify file', 
     });
 
     assert.throws(
-      () => target.mcp!.applyConfig({ mcpServers: { s: { command: 'x' } } }),
+      () => target.mcp?.applyConfig({ mcpServers: { s: { command: 'x' } } }),
       (err: Error) => err.message.includes('must be an object') && err.message.includes('string')
     );
 
@@ -287,7 +287,7 @@ test('compileTargetSpec MCP YAML array root: throws and does not modify file', (
     });
 
     assert.throws(
-      () => target.mcp!.applyConfig({ mcpServers: { s: { command: 'x' } } }),
+      () => target.mcp?.applyConfig({ mcpServers: { s: { command: 'x' } } }),
       (err: Error) => err.message.includes('must be an object') && err.message.includes('array')
     );
 
@@ -306,7 +306,7 @@ test('compileTargetSpec MCP JSON array root: throws and does not modify file', (
     });
 
     assert.throws(
-      () => target.mcp!.applyConfig({ mcpServers: { s: { command: 'x' } } }),
+      () => target.mcp?.applyConfig({ mcpServers: { s: { command: 'x' } } }),
       (err: Error) => err.message.includes('must be an object') && err.message.includes('array')
     );
 
@@ -325,7 +325,7 @@ test('compileTargetSpec MCP JSON number root: throws and does not modify file', 
     });
 
     assert.throws(
-      () => target.mcp!.applyConfig({ mcpServers: { s: { command: 'x' } } }),
+      () => target.mcp?.applyConfig({ mcpServers: { s: { command: 'x' } } }),
       (err: Error) => err.message.includes('must be an object') && err.message.includes('number')
     );
 
@@ -345,7 +345,7 @@ test('compileTargetSpec MCP creates nested parent directories for config file', 
       mcp: { format: 'json', config_path: configPath, root_key: 'mcpServers' },
     });
 
-    target.mcp!.applyConfig({ mcpServers: { s1: { command: 'cmd' } } });
+    target.mcp?.applyConfig({ mcpServers: { s1: { command: 'cmd' } } });
 
     assert.ok(fs.existsSync(configPath));
     const content = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
@@ -366,7 +366,7 @@ test('compileTargetSpec MCP empty YAML file: treated as empty object, writes nor
       mcp: { format: 'yaml', config_path: configPath, root_key: 'servers' },
     });
 
-    target.mcp!.applyConfig({ mcpServers: { s1: { command: 'cmd' } } });
+    target.mcp?.applyConfig({ mcpServers: { s1: { command: 'cmd' } } });
 
     const result = parseYaml(fs.readFileSync(configPath, 'utf-8'));
     assert.ok(result.servers);
@@ -393,7 +393,7 @@ test('compileTargetSpec commands handler applies frontmatter rename', () => {
     metadata: { description: 'test', extras: { test: { allowed_tools: ['Read'] } } },
     content: 'body',
   };
-  const rendered = target.commands!.render(entry);
+  const rendered = target.commands?.render(entry);
   assert.ok(rendered.includes('allowed-tools'));
   assert.ok(!rendered.includes('allowed_tools'));
 });
@@ -415,7 +415,7 @@ test('compileTargetSpec agents handler applies join + rename', () => {
     metadata: { description: 'test', extras: { test: { allowed_tools: ['Read', 'Write'] } } },
     content: 'body',
   };
-  const rendered = target.agents!.render(entry);
+  const rendered = target.agents?.render(entry);
   assert.ok(
     rendered.includes('tools:') && rendered.includes('Read,Write'),
     `Expected rendered output to contain "tools:" and "Read,Write", got:\n${rendered}`
