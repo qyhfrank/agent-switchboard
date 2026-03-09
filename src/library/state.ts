@@ -115,6 +115,13 @@ export function updateLibraryStateSection(
  * Load library state for a specific application, applying per-application overrides.
  * Merges the global section config with application-specific add/remove overrides.
  */
+/** Reset in-memory agentSync cache. Call between sync phases to avoid cross-contamination. */
+export function resetAgentSyncCache(): void {
+  for (const section of Object.keys(agentSyncCache) as LibrarySection[]) {
+    agentSyncCache[section] = {};
+  }
+}
+
 export function loadLibraryStateSectionForApplication(
   section: LibrarySection,
   appId: string,

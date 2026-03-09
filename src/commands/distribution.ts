@@ -7,12 +7,7 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import {
-  filterInstalled,
-  getActiveTargetsForSection,
-  getTargetById,
-  getTargetsForSection,
-} from '../targets/registry.js';
+import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import type { TargetLibraryHandler } from '../targets/types.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
 
@@ -42,13 +37,13 @@ export function distributeCommands(
   const entries = loadCommandLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const targets = filterInstalled(
-    activeAppIds
-      ? getActiveTargetsForSection('commands', activeAppIds)
-      : getTargetsForSection('commands')
+  // Enumerate ALL installed targets so cleanup runs for inactive platforms too
+  const allTargets = filterInstalled(getTargetsForSection('commands'));
+  const activeSet = activeAppIds ? new Set(activeAppIds) : null;
+  const handlerMap = new Map<string, TargetLibraryHandler>(
+    allTargets.map((t) => [t.id, t.commands!])
   );
-  const handlerMap = new Map<string, TargetLibraryHandler>(targets.map((t) => [t.id, t.commands!]));
-  const platforms = targets.map((t) => t.id);
+  const platforms = allTargets.map((t) => t.id);
 
   const cleanup: CleanupConfig<string> = {
     resolveTargetDir: (p) => handlerMap.get(p)!.resolveTargetDir(scope),
@@ -60,6 +55,8 @@ export function distributeCommands(
   };
 
   const filterSelected = (platform: string, _allEntries: CommandEntry[]): CommandEntry[] => {
+    // Inactive platform: return empty to trigger orphan cleanup
+    if (activeSet && !activeSet.has(platform)) return [];
     const state = loadLibraryStateSectionForApplication('commands', platform, scope);
     const activeIds = state.enabled;
     const selected: CommandEntry[] = [];

@@ -7,12 +7,7 @@ import {
   distributeLibrary,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import {
-  filterInstalled,
-  getActiveTargetsForSection,
-  getTargetById,
-  getTargetsForSection,
-} from '../targets/registry.js';
+import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import { isCustomAgentsHandler, type TargetLibraryHandler } from '../targets/types.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
@@ -45,14 +40,18 @@ export function distributeSubagents(
   const entries = loadSubagentLibrary();
   const byId = new Map(entries.map((e) => [e.id, e]));
 
-  const allTargets = filterInstalled(
-    activeAppIds
-      ? getActiveTargetsForSection('agents', activeAppIds)
-      : getTargetsForSection('agents')
-  );
+  // Enumerate ALL installed targets so cleanup runs for inactive platforms too
+  const allInstalledTargets = filterInstalled(getTargetsForSection('agents'));
+  const activeSet = activeAppIds ? new Set(activeAppIds) : null;
 
-  const libraryTargets = allTargets.filter((t) => !isCustomAgentsHandler(t.agents!));
-  const customTargets = allTargets.filter((t) => isCustomAgentsHandler(t.agents!));
+  const libraryTargets = allInstalledTargets.filter((t) => !isCustomAgentsHandler(t.agents!));
+  // Custom targets only run for active platforms (no cleanup-only path available)
+  const activeCustomTargets = activeSet
+    ? allInstalledTargets.filter((t) => isCustomAgentsHandler(t.agents!) && activeSet.has(t.id))
+    : allInstalledTargets.filter((t) => isCustomAgentsHandler(t.agents!));
+  const inactiveCustomTargets = activeSet
+    ? allInstalledTargets.filter((t) => isCustomAgentsHandler(t.agents!) && !activeSet.has(t.id))
+    : [];
 
   const handlerMap = new Map<string, TargetLibraryHandler>(
     libraryTargets.map((t) => [t.id, t.agents! as TargetLibraryHandler])
@@ -68,6 +67,8 @@ export function distributeSubagents(
   };
 
   const filterSelected = (platform: string, _allEntries: SubagentEntry[]): SubagentEntry[] => {
+    // Inactive platform: return empty to trigger orphan cleanup
+    if (activeSet && !activeSet.has(platform)) return [];
     const state = loadLibraryStateSectionForApplication('agents', platform, scope);
     const selected: SubagentEntry[] = [];
     for (const id of state.enabled) {
@@ -93,9 +94,16 @@ export function distributeSubagents(
   });
 
   const customResults: DistributionResult<string>[] = [];
-  for (const target of customTargets) {
+  for (const target of activeCustomTargets) {
     if (isCustomAgentsHandler(target.agents!)) {
       const results = target.agents.distribute(entries, byId, scope);
+      customResults.push(...results);
+    }
+  }
+  // Inactive custom targets: pass empty map to trigger cleanup (orphan removal)
+  for (const target of inactiveCustomTargets) {
+    if (target.agents && isCustomAgentsHandler(target.agents)) {
+      const results = target.agents.distribute([], new Map(), scope);
       customResults.push(...results);
     }
   }

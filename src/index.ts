@@ -18,6 +18,7 @@ import { importCommandFromFile } from './commands/importer.js';
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
 import { resolveEffectiveSectionConfig } from './config/application-config.js';
+import type { ConfigLayers } from './config/layered-config.js';
 import { updateConfigLayer } from './config/layered-config.js';
 import {
   loadMcpConfig,
@@ -37,6 +38,7 @@ import {
   getSkillsDir,
   getSourceCacheDir,
 } from './config/paths.js';
+import type { SwitchboardConfig } from './config/schemas.js';
 import type { ConfigScope } from './config/scope.js';
 import {
   loadSwitchboardConfig,
@@ -66,6 +68,7 @@ import {
 import {
   loadLibraryStateSection,
   loadMcpEnabledState,
+  resetAgentSyncCache,
   saveMcpEnabledState,
 } from './library/state.js';
 import { readMarketplace } from './marketplace/reader.js';
@@ -89,7 +92,12 @@ import type { SubagentPlatform as SubPlatform } from './subagents/importer.js';
 import { importSubagentFromFile } from './subagents/importer.js';
 import { buildSubagentInventory } from './subagents/inventory.js';
 import { initTargets } from './targets/init.js';
-import { filterInstalled, getTargetById, getTargetsForSection } from './targets/registry.js';
+import {
+  filterInstalled,
+  getTargetById,
+  getTargetsForSection,
+  registerConfigTargets,
+} from './targets/registry.js';
 import { showCommandSelector } from './ui/command-ui.js';
 import { showHookSelector } from './ui/hook-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
@@ -146,9 +154,6 @@ program
   .action(async (options: ScopeOptionInput & { update: boolean }) => {
     try {
       const scope = resolveScope(options);
-      const loadOptions = scopeToLoadOptions(scope);
-      const { config, layers } = loadSwitchboardConfigWithLayers(loadOptions);
-      await initTargets(config);
 
       console.log(chalk.yellow('⚠ Sync overwrites agent config without diff.'));
       console.log();
@@ -171,214 +176,55 @@ program
         }
       }
 
-      // Config summary: show active layers on one line
-      const activeLayers: string[] = [];
-      if (layers.user.exists) activeLayers.push(shortenPath(layers.user.path));
-      if (layers.profile?.exists) activeLayers.push(shortenPath(layers.profile.path));
-      if (layers.project?.exists) activeLayers.push(shortenPath(layers.project.path));
-      console.log(
-        `${chalk.blue('Config:')} ${activeLayers.length > 0 ? chalk.dim(activeLayers.join(' + ')) : chalk.gray('no config files')}`
-      );
-
-      const appsLabel =
-        config.applications.active.length > 0
-          ? config.applications.active
-              .map((id) => {
-                const t = getTargetById(id);
-                if (t?.isInstalled?.() === false) return chalk.gray(`${id} (not installed)`);
-                return chalk.cyan(id);
-              })
-              .join(', ')
-          : chalk.gray('none configured');
-      console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
-      console.log();
-
-      const cursorSkillsDeduped =
-        config.applications.active.includes('claude-code') &&
-        resolveEffectiveSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
-      console.log(chalk.blue('Inventory:'));
-      {
-        const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
-
-        const sectionPlatforms: Record<string, readonly string[]> = {};
-        for (const s of sections) {
-          let ids = filterInstalled(getTargetsForSection(s)).map((t) => t.id);
-          if (s === 'skills' && cursorSkillsDeduped) {
-            ids = ids.filter((id) => id !== 'cursor');
-          }
-          sectionPlatforms[s] = ids;
-        }
-
-        const termWidth = process.stdout.columns || 80;
-        const maxSectionLen = Math.max(...sections.map((s) => s.length));
-        const maxCountLen = Math.max(
-          ...sections.map((s) => `(${config[s].enabled.length})`.length)
+      if (scope?.project) {
+        // Dual sync: global first, then project
+        const { config: globalConfig, layers: globalLayers } = loadSwitchboardConfigWithLayers(
+          scopeToLoadOptions(undefined)
         );
-        const prefixPlainLen = 2 + maxSectionLen + 1 + maxCountLen + 2;
+        await initTargets(globalConfig);
 
-        const fitPreview = (ids: string[], maxWidth: number): string => {
-          if (ids.length === 0) return chalk.gray('none');
-          const full = ids.join(', ');
-          if (full.length <= maxWidth) return full;
+        console.log(chalk.blue.bold('── Global ──'));
+        const globalErrors = await runSyncPhase({
+          scope: undefined,
+          config: globalConfig,
+          layers: globalLayers,
+        });
 
-          let text = '';
-          let shown = 0;
-          for (let i = 0; i < ids.length; i++) {
-            const sep = shown > 0 ? ', ' : '';
-            const candidate = text + sep + ids[i];
-            const remaining = ids.length - (i + 1);
-            if (remaining > 0) {
-              const suffix = `, ... (+${remaining} more)`;
-              if (candidate.length + suffix.length > maxWidth && shown > 0) {
-                const left = ids.length - shown;
-                return `${text}${chalk.gray(`, ... (+${left} more)`)}`;
-              }
-            }
-            text = candidate;
-            shown++;
-          }
-          return text;
-        };
-
-        for (const section of sections) {
-          const globalActive = config[section].enabled;
-          const globalCount = globalActive.length;
-
-          const supported = new Set(sectionPlatforms[section] ?? []);
-          const applicableApps = config.applications.active.filter((id) => supported.has(id));
-
-          const effectiveByApp = new Map<string, string[]>();
-          for (const appId of applicableApps) {
-            effectiveByApp.set(appId, resolveEffectiveSectionConfig(section, appId, scope).enabled);
-          }
-
-          const perAppParts = applicableApps.map((appId) => {
-            const eff = effectiveByApp.get(appId) ?? [];
-            const delta = eff.length - globalCount;
-            const d = delta === 0 ? '' : delta > 0 ? `(+${delta})` : `(${delta})`;
-            return `${appId}:${eff.length}${d}`;
-          });
-
-          const union = new Set<string>();
-          for (const [, ids] of effectiveByApp) {
-            for (const id of ids) union.add(id);
-          }
-          const previewIds = globalActive.length > 0 ? [...globalActive] : [...union];
-
-          const paddedSection = section.padEnd(maxSectionLen);
-          const countStr = `(${globalCount})`.padStart(maxCountLen);
-          const appsStr = perAppParts.join('  ');
-          console.log(`  ${chalk.cyan(paddedSection)} ${chalk.gray(countStr)}  ${appsStr}`);
-
-          if (previewIds.length > 0) {
-            const indent = ' '.repeat(prefixPlainLen);
-            const previewWidth = Math.max(20, termWidth - prefixPlainLen - 2);
-            const preview = fitPreview(previewIds, previewWidth);
-            console.log(`${indent}${chalk.gray('→')} ${preview}`);
-          }
+        console.log();
+        resetAgentSyncCache();
+        console.log(chalk.blue.bold(`── Project: ${shortenPath(scope.project)} ──`));
+        const { config: projectConfig, layers: projectLayers } = loadSwitchboardConfigWithLayers(
+          scopeToLoadOptions(scope)
+        );
+        // Register any project-level [targets] not seen during initTargets (which only ran once)
+        const projectTargets = (projectConfig as Record<string, unknown>).targets as
+          | Record<string, Record<string, unknown>>
+          | undefined;
+        if (projectTargets && Object.keys(projectTargets).length > 0) {
+          registerConfigTargets(projectTargets);
         }
-      }
+        const projectErrors = await runSyncPhase({
+          scope,
+          config: projectConfig,
+          layers: projectLayers,
+        });
 
-      // Show enabled plugins summary
-      {
-        const pluginIndex = buildPluginIndex();
-        const enabledPluginRefs = config.plugins.enabled;
-        if (enabledPluginRefs.length > 0) {
-          const names = enabledPluginRefs
-            .map((pid) => {
-              const p = pluginIndex.get(pid);
-              return p ? pid : chalk.strikethrough(pid);
-            })
-            .join(', ');
-          console.log(
-            `  ${chalk.magenta('plugins')} ${chalk.gray(`(${enabledPluginRefs.length})`)}  ${names}`
-          );
-        } else if (pluginIndex.plugins.length > 0) {
-          console.log(
-            `  ${chalk.magenta('plugins')} ${chalk.gray('(0)')}  ${chalk.gray(`${pluginIndex.plugins.length} available`)}`
-          );
+        console.log();
+        if (globalErrors || projectErrors) {
+          console.log(chalk.red('✗ Sync completed with errors.'));
+          process.exit(1);
         }
-      }
-
-      console.log();
-      const notes: string[] = ['rules, skills also distribute to gemini'];
-      if (cursorSkillsDeduped) notes.push('cursor reads skills via claude-code');
-      for (let i = 0; i < notes.length; i++) {
-        const prefix = i === 0 ? '  Note: ' : '        ';
-        const suffix = i === notes.length - 1 ? '.' : '.';
-        console.log(chalk.gray(`${prefix}${notes[i]}${suffix}`));
-      }
-      console.log();
-
-      const activeAppIds = config.applications.active;
-      const mcpDistribution = await applyToAgents(scope, undefined, { useSpinner: false });
-      const ruleDistribution = distributeRules(undefined, { activeAppIds }, scope);
-      const commandDistribution = distributeCommands(scope, activeAppIds);
-      const agentDistribution = distributeSubagents(scope, activeAppIds);
-      const skillDistribution = distributeSkills(scope, {
-        useAgentsDir: config.distribution.use_agents_dir,
-        activeAppIds,
-      });
-      const hookDistribution = distributeHooks(scope, activeAppIds);
-
-      const distSections: CompactDistributionSection<DistributionResultLike>[] = [
-        {
-          label: 'mcp',
-          results: mcpDistribution,
-          emptyMessage: 'no apps configured',
-          getTargetLabel: (r) => (r as (typeof mcpDistribution)[number]).application,
-          getPath: (r) => (r as (typeof mcpDistribution)[number]).filePath,
-        },
-        {
-          label: 'rules',
-          results: ruleDistribution.results,
-          emptyMessage: 'none',
-          getTargetLabel: (r) => (r as (typeof ruleDistribution.results)[number]).agent,
-          getPath: (r) => (r as (typeof ruleDistribution.results)[number]).filePath,
-        },
-        {
-          label: 'commands',
-          results: commandDistribution.results,
-          emptyMessage: 'none',
-          getTargetLabel: (r) => (r as (typeof commandDistribution.results)[number]).platform,
-          getPath: (r) => (r as (typeof commandDistribution.results)[number]).filePath,
-        },
-        {
-          label: 'agents',
-          results: agentDistribution.results,
-          emptyMessage: 'none',
-          getTargetLabel: (r) => (r as (typeof agentDistribution.results)[number]).platform,
-          getPath: (r) => (r as (typeof agentDistribution.results)[number]).filePath,
-        },
-        {
-          label: 'skills',
-          results: skillDistribution.results,
-          emptyMessage: 'none',
-          getTargetLabel: (r) => {
-            const sr = r as (typeof skillDistribution.results)[number];
-            return sr.platform === 'agents' ? 'codex+gemini+opencode' : sr.platform;
-          },
-          getPath: (r) => (r as (typeof skillDistribution.results)[number]).targetDir,
-        },
-        {
-          label: 'hooks',
-          results: hookDistribution.results,
-          emptyMessage: 'none',
-          getTargetLabel: (r) => (r as (typeof hookDistribution.results)[number]).platform,
-          getPath: (r) => {
-            const hr = r as (typeof hookDistribution.results)[number];
-            return 'filePath' in hr ? hr.filePath : (hr as { targetDir: string }).targetDir;
-          },
-        },
-      ];
-
-      const { hasErrors } = printCompactDistributions(distSections);
-      console.log();
-
-      if (hasErrors) {
-        console.log(chalk.red('✗ Sync completed with errors.'));
-        process.exit(1);
+        console.log(chalk.green('✓ Sync complete.'));
       } else {
+        const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLoadOptions(scope));
+        await initTargets(config);
+
+        const hasErrors = await runSyncPhase({ scope, config, layers });
+        console.log();
+        if (hasErrors) {
+          console.log(chalk.red('✗ Sync completed with errors.'));
+          process.exit(1);
+        }
         console.log(chalk.green('✓ Sync complete.'));
       }
     } catch (error) {
@@ -388,6 +234,231 @@ program
       process.exit(1);
     }
   });
+
+interface SyncPhaseOptions {
+  scope?: ConfigScope;
+  config: SwitchboardConfig;
+  layers: ConfigLayers;
+}
+
+async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promise<boolean> {
+  // Config summary
+  const activeLayers: string[] = [];
+  if (layers.user.exists) activeLayers.push(shortenPath(layers.user.path));
+  if (layers.profile?.exists) activeLayers.push(shortenPath(layers.profile.path));
+  if (layers.project?.exists) activeLayers.push(shortenPath(layers.project.path));
+  console.log(
+    `${chalk.blue('Config:')} ${activeLayers.length > 0 ? chalk.dim(activeLayers.join(' + ')) : chalk.gray('no config files')}`
+  );
+
+  const appsLabel =
+    config.applications.active.length > 0
+      ? config.applications.active
+          .map((id) => {
+            const t = getTargetById(id);
+            if (t?.isInstalled?.() === false) return chalk.gray(`${id} (not installed)`);
+            return chalk.cyan(id);
+          })
+          .join(', ')
+      : chalk.gray('none configured');
+  console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
+  console.log();
+
+  const cursorSkillsDeduped =
+    config.applications.active.includes('claude-code') &&
+    resolveEffectiveSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
+  console.log(chalk.blue('Inventory:'));
+  {
+    const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
+
+    const sectionPlatforms: Record<string, readonly string[]> = {};
+    for (const s of sections) {
+      let ids = filterInstalled(getTargetsForSection(s)).map((t) => t.id);
+      if (s === 'skills' && cursorSkillsDeduped) {
+        ids = ids.filter((id) => id !== 'cursor');
+      }
+      sectionPlatforms[s] = ids;
+    }
+
+    const termWidth = process.stdout.columns || 80;
+    const maxSectionLen = Math.max(...sections.map((s) => s.length));
+    const maxCountLen = Math.max(...sections.map((s) => `(${config[s].enabled.length})`.length));
+    const prefixPlainLen = 2 + maxSectionLen + 1 + maxCountLen + 2;
+
+    const fitPreview = (ids: string[], maxWidth: number): string => {
+      if (ids.length === 0) return chalk.gray('none');
+      const full = ids.join(', ');
+      if (full.length <= maxWidth) return full;
+
+      let text = '';
+      let shown = 0;
+      for (let i = 0; i < ids.length; i++) {
+        const sep = shown > 0 ? ', ' : '';
+        const candidate = text + sep + ids[i];
+        const remaining = ids.length - (i + 1);
+        if (remaining > 0) {
+          const suffix = `, ... (+${remaining} more)`;
+          if (candidate.length + suffix.length > maxWidth && shown > 0) {
+            const left = ids.length - shown;
+            return `${text}${chalk.gray(`, ... (+${left} more)`)}`;
+          }
+        }
+        text = candidate;
+        shown++;
+      }
+      return text;
+    };
+
+    for (const section of sections) {
+      const globalActive = config[section].enabled;
+      const globalCount = globalActive.length;
+
+      const supported = new Set(sectionPlatforms[section] ?? []);
+      const applicableApps = config.applications.active.filter((id) => supported.has(id));
+
+      const effectiveByApp = new Map<string, string[]>();
+      for (const appId of applicableApps) {
+        effectiveByApp.set(appId, resolveEffectiveSectionConfig(section, appId, scope).enabled);
+      }
+
+      const perAppParts = applicableApps.map((appId) => {
+        const eff = effectiveByApp.get(appId) ?? [];
+        const delta = eff.length - globalCount;
+        const d = delta === 0 ? '' : delta > 0 ? `(+${delta})` : `(${delta})`;
+        return `${appId}:${eff.length}${d}`;
+      });
+
+      const union = new Set<string>();
+      for (const [, ids] of effectiveByApp) {
+        for (const id of ids) union.add(id);
+      }
+      const previewIds = globalActive.length > 0 ? [...globalActive] : [...union];
+
+      const paddedSection = section.padEnd(maxSectionLen);
+      const countStr = `(${globalCount})`.padStart(maxCountLen);
+      const appsStr = perAppParts.join('  ');
+      console.log(`  ${chalk.cyan(paddedSection)} ${chalk.gray(countStr)}  ${appsStr}`);
+
+      if (previewIds.length > 0) {
+        const indent = ' '.repeat(prefixPlainLen);
+        const previewWidth = Math.max(20, termWidth - prefixPlainLen - 2);
+        const preview = fitPreview(previewIds, previewWidth);
+        console.log(`${indent}${chalk.gray('→')} ${preview}`);
+      }
+    }
+  }
+
+  // Show enabled plugins summary
+  {
+    const pluginIndex = buildPluginIndex();
+    const enabledPluginRefs = config.plugins.enabled;
+    if (enabledPluginRefs.length > 0) {
+      const names = enabledPluginRefs
+        .map((pid) => {
+          const p = pluginIndex.get(pid);
+          return p ? pid : chalk.strikethrough(pid);
+        })
+        .join(', ');
+      console.log(
+        `  ${chalk.magenta('plugins')} ${chalk.gray(`(${enabledPluginRefs.length})`)}  ${names}`
+      );
+    } else if (pluginIndex.plugins.length > 0) {
+      console.log(
+        `  ${chalk.magenta('plugins')} ${chalk.gray('(0)')}  ${chalk.gray(`${pluginIndex.plugins.length} available`)}`
+      );
+    }
+  }
+
+  console.log();
+  const notes: string[] = [];
+  if (cursorSkillsDeduped && config.applications.active.includes('cursor')) {
+    notes.push('cursor reads skills via claude-code');
+  }
+  if (config.distribution.use_agents_dir) {
+    const agentsMembers = (['codex', 'gemini', 'opencode'] as const).filter((a) =>
+      config.applications.active.includes(a)
+    );
+    if (agentsMembers.length > 0) {
+      notes.push(`skills for ${agentsMembers.join(', ')} sync to shared .agents/skills`);
+    }
+  }
+  for (let i = 0; i < notes.length; i++) {
+    const prefix = i === 0 ? '  Note: ' : '        ';
+    console.log(chalk.gray(`${prefix}${notes[i]}.`));
+  }
+  if (notes.length > 0) console.log();
+
+  const activeAppIds = config.applications.active;
+  const mcpDistribution = await applyToAgents(scope, undefined, { useSpinner: false });
+  const ruleDistribution = distributeRules(undefined, { activeAppIds }, scope);
+  const commandDistribution = distributeCommands(scope, activeAppIds);
+  const agentDistribution = distributeSubagents(scope, activeAppIds);
+  const skillDistribution = distributeSkills(scope, {
+    useAgentsDir: config.distribution.use_agents_dir,
+    activeAppIds,
+  });
+  const hookDistribution = distributeHooks(scope, activeAppIds);
+
+  const distSections: CompactDistributionSection<DistributionResultLike>[] = [
+    {
+      label: 'mcp',
+      results: mcpDistribution,
+      emptyMessage: 'no apps configured',
+      getTargetLabel: (r) => (r as (typeof mcpDistribution)[number]).application,
+      getPath: (r) => (r as (typeof mcpDistribution)[number]).filePath,
+    },
+    {
+      label: 'rules',
+      results: ruleDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (r) => (r as (typeof ruleDistribution.results)[number]).agent,
+      getPath: (r) => (r as (typeof ruleDistribution.results)[number]).filePath,
+    },
+    {
+      label: 'commands',
+      results: commandDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (r) => (r as (typeof commandDistribution.results)[number]).platform,
+      getPath: (r) => (r as (typeof commandDistribution.results)[number]).filePath,
+    },
+    {
+      label: 'agents',
+      results: agentDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (r) => (r as (typeof agentDistribution.results)[number]).platform,
+      getPath: (r) => (r as (typeof agentDistribution.results)[number]).filePath,
+    },
+    {
+      label: 'skills',
+      results: skillDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (r) => {
+        const sr = r as (typeof skillDistribution.results)[number];
+        if (sr.platform === 'agents') {
+          const members = (['codex', 'gemini', 'opencode'] as const).filter((a) =>
+            activeAppIds.includes(a)
+          );
+          return members.length > 0 ? members.join('+') : 'agents';
+        }
+        return sr.platform;
+      },
+      getPath: (r) => (r as (typeof skillDistribution.results)[number]).targetDir,
+    },
+    {
+      label: 'hooks',
+      results: hookDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (r) => (r as (typeof hookDistribution.results)[number]).platform,
+      getPath: (r) => {
+        const hr = r as (typeof hookDistribution.results)[number];
+        return 'filePath' in hr ? hr.filePath : (hr as { targetDir: string }).targetDir;
+      },
+    },
+  ];
+
+  const { hasErrors } = printCompactDistributions(distSections);
+  return hasErrors;
+}
 
 interface ScopeOptionInput {
   profile?: string;
@@ -1239,8 +1310,15 @@ skillRoot.action(async (options: ScopeOptionInput) => {
       printDistributionResults({
         title: 'Skill distribution',
         results: out.results,
-        getTargetLabel: (result) =>
-          result.platform === 'agents' ? 'codex+gemini+opencode' : result.platform,
+        getTargetLabel: (result) => {
+          if (result.platform === 'agents') {
+            const members = (['codex', 'gemini', 'opencode'] as const).filter((a) =>
+              config.applications.active.includes(a)
+            );
+            return members.length > 0 ? members.join('+') : 'agents';
+          }
+          return result.platform;
+        },
         getPath: (result) => result.targetDir,
       });
     }
@@ -1591,7 +1669,7 @@ async function applyToAgents(
   enabledServerNames?: string[],
   options?: { useSpinner?: boolean }
 ): Promise<McpDistributionResult[]> {
-  const mcpConfig = loadMcpConfigWithPlugins();
+  const mcpConfig = loadMcpConfigWithPlugins(scope);
   const switchboardConfig = loadSwitchboardConfig(scopeToLoadOptions(scope));
   await initTargets(switchboardConfig);
   const useSpinner = options?.useSpinner ?? true;

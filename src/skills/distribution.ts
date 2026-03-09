@@ -17,11 +17,7 @@ import {
 } from '../library/distribute-bundle.js';
 import { isDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
-import {
-  filterInstalled,
-  getActiveTargetsForSection,
-  getTargetsForSection,
-} from '../targets/registry.js';
+import { filterInstalled, getTargetsForSection } from '../targets/registry.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
 export type SkillTarget = 'claude-code' | 'agents';
@@ -66,26 +62,20 @@ export function distributeSkills(
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary();
   const activeAppIds = options?.activeAppIds;
-  const skillTargets = filterInstalled(
-    activeAppIds
-      ? getActiveTargetsForSection('skills', activeAppIds)
-      : getTargetsForSection('skills')
-  );
+  // Enumerate ALL installed targets so cleanup runs for inactive platforms too
+  const allSkillTargets = filterInstalled(getTargetsForSection('skills'));
+  const activeSet = activeAppIds ? new Set(activeAppIds) : null;
 
   if (options?.useAgentsDir ?? false) {
-    const traePlatforms = skillTargets
+    const traePlatforms = allSkillTargets
       .filter((t) => t.id === 'trae' || t.id === 'trae-cn')
       .map((t) => t.id);
-    const cursorPlatform = skillTargets.find((t) => t.id === 'cursor') ? ['cursor'] : [];
-    let platforms = ['claude-code', 'agents', ...cursorPlatform, ...traePlatforms];
-    if (activeAppIds) {
-      platforms = platforms.filter((p) => {
-        if (p === 'agents') return AGENTS_TARGET_PLATFORMS.some((a) => activeAppIds.includes(a));
-        return activeAppIds.includes(p);
-      });
-    }
+    const cursorPlatform = allSkillTargets.find((t) => t.id === 'cursor') ? ['cursor'] : [];
+    // Include all platforms; filterSelected handles activity check
+    const platforms = ['claude-code', 'agents', ...cursorPlatform, ...traePlatforms];
     return distributeSkillsInternal(entries, scope, {
       platforms,
+      activeSet,
       legacyDirs: [
         { path: path.join(getGeminiDir(), 'skills'), platform: 'agents' },
         { path: path.join(getOpencodeRoot(), 'skill'), platform: 'agents' },
@@ -108,7 +98,8 @@ export function distributeSkills(
   }
 
   return distributeSkillsInternal(entries, scope, {
-    platforms: skillTargets.map((t) => t.id),
+    platforms: allSkillTargets.map((t) => t.id),
+    activeSet,
     legacyDirs: [
       { path: path.join(getOpencodeRoot(), 'skills'), platform: 'opencode' },
       ...(scope?.project
@@ -138,6 +129,7 @@ function distributeSkillsInternal(
   scope: ConfigScope | undefined,
   options: {
     platforms: string[];
+    activeSet: Set<string> | null;
     legacyDirs: LegacyDirSpec[];
   }
 ): SkillDistributionOutcome {
@@ -163,7 +155,17 @@ function distributeSkillsInternal(
     },
   };
 
+  const { activeSet } = options;
+
   const filterSelected = (target: string, allEntries: SkillEntry[]): SkillEntry[] => {
+    // Inactive platform: return empty to trigger orphan cleanup
+    if (activeSet) {
+      if (target === 'agents') {
+        if (!AGENTS_TARGET_PLATFORMS.some((a) => activeSet.has(a))) return [];
+      } else if (!activeSet.has(target)) {
+        return [];
+      }
+    }
     if (target === 'cursor') {
       if (shouldDedupCursorSkills(scope)) return [];
       const state = loadLibraryStateSectionForApplication('skills', target, scope);
@@ -171,7 +173,11 @@ function distributeSkillsInternal(
     }
     if (target === 'agents') {
       const unionIds = new Set<string>();
-      for (const agentId of AGENTS_TARGET_PLATFORMS) {
+      // Only include skills for active agent platforms
+      const activeAgentPlatforms = activeSet
+        ? AGENTS_TARGET_PLATFORMS.filter((a) => activeSet.has(a))
+        : AGENTS_TARGET_PLATFORMS;
+      for (const agentId of activeAgentPlatforms) {
         for (const id of loadLibraryStateSectionForApplication('skills', agentId, scope).enabled) {
           unionIds.add(id);
         }
