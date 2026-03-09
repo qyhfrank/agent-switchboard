@@ -61,7 +61,7 @@ export function registerExtensionTarget(target: ApplicationTarget): void {
 
 /**
  * Get all targets (built-in + extension) that support a given section,
- * regardless of whether they are in `applications.active`.
+ * regardless of whether they are in `applications.enabled`.
  * Used by distribution modules to enumerate all known platforms.
  */
 export function getTargetsForSection(section: TargetSection): ApplicationTarget[] {

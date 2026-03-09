@@ -15,7 +15,7 @@ import { scopeToLayerOptions } from './scope.js';
 export type ConfigSection = 'mcp' | 'commands' | 'agents' | 'skills' | 'hooks' | 'rules';
 
 /** Schema-level keys in [applications] that are NOT per-app override objects. */
-const APPLICATION_SCHEMA_KEYS = new Set(['active', 'assume_installed']);
+const APPLICATION_SCHEMA_KEYS = new Set(['enabled', 'active', 'assume_installed']);
 
 export interface ResolvedSectionConfig {
   enabled: string[];

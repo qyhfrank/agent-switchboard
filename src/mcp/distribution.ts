@@ -46,19 +46,19 @@ export async function distributeMcp(
     options?.assumeInstalled ?? new Set(switchboardConfig.applications.assume_installed);
   const results: McpDistributionResult[] = [];
 
-  if (switchboardConfig.applications.active.length === 0) {
+  if (switchboardConfig.applications.enabled.length === 0) {
     if (useSpinner) {
-      console.log(chalk.yellow('\n⚠ No applications found in the active configuration stack.'));
+      console.log(chalk.yellow('\n⚠ No applications found in the enabled configuration stack.'));
       console.log();
       console.log('Add applications under the relevant TOML layer (user, profile, or project).');
-      console.log(chalk.dim('  Example: [applications]\n  active = ["claude-code", "cursor"]'));
+      console.log(chalk.dim('  Example: [applications]\n  enabled = ["claude-code", "cursor"]'));
     }
     return results;
   }
 
   const globalMcpServers = enabledServerNames ?? loadMcpEnabledState(scope);
 
-  for (const agentId of switchboardConfig.applications.active) {
+  for (const agentId of switchboardConfig.applications.enabled) {
     const spinner = useSpinner ? ora({ indent: 2 }).start(`Applying to ${agentId}...`) : null;
     const persist = (symbol: string, text: string) => {
       if (!spinner) return;

@@ -4,6 +4,22 @@
 
 import { z } from 'zod';
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function normalizeApplicationsSection(value: unknown): unknown {
+  if (!isPlainObject(value)) return value;
+  const normalized = { ...value };
+  if ('active' in normalized) {
+    if (!('enabled' in normalized)) {
+      normalized.enabled = normalized.active;
+    }
+    delete normalized.active;
+  }
+  return normalized;
+}
+
 /**
  * Schema for MCP server configuration (definition only, no enabled state)
  * Allows both command-based and URL-based servers
@@ -77,11 +93,11 @@ export const applicationConfigOverrideSchema = z
   .passthrough();
 
 /**
- * Applications section schema with active list and per-application overrides.
+ * Applications section schema with enabled list and per-application overrides.
  * Lists which AI agent applications (claude-code, cursor, codex, etc.) to sync to.
  * Format in TOML:
  *   [applications]
- *   active = ["claude-code", "codex"]
+ *   enabled = ["claude-code", "codex"]
  *
  *   [applications.codex.skills]
  *   remove = ["skill-codex"]
@@ -89,19 +105,25 @@ export const applicationConfigOverrideSchema = z
  * Note: Using passthrough() instead of catchall() to allow per-application overrides.
  * The per-application overrides are validated at runtime in application-config.ts.
  */
-const applicationsSectionBaseSchema = z
-  .object({
-    active: z.array(z.string().trim().min(1)).optional(),
-    assume_installed: z.array(z.string().trim().min(1)).optional(),
-  })
-  .passthrough();
+const applicationsSectionBaseSchema = z.preprocess(
+  normalizeApplicationsSection,
+  z
+    .object({
+      enabled: z.array(z.string().trim().min(1)).optional(),
+      assume_installed: z.array(z.string().trim().min(1)).optional(),
+    })
+    .passthrough()
+);
 
-const applicationsSectionSchema = z
-  .object({
-    active: z.array(z.string().trim().min(1)).default([]),
-    assume_installed: z.array(z.string().trim().min(1)).default([]),
-  })
-  .passthrough();
+const applicationsSectionSchema = z.preprocess(
+  normalizeApplicationsSection,
+  z
+    .object({
+      enabled: z.array(z.string().trim().min(1)).default([]),
+      assume_installed: z.array(z.string().trim().min(1)).default([]),
+    })
+    .passthrough()
+);
 
 const rulesSectionBaseSchema = selectionSectionBaseSchema.extend({
   includeDelimiters: z.boolean().optional(),
@@ -320,7 +342,7 @@ export const targetSpecSchema = z.object({}).passthrough();
  */
 export const switchboardConfigSchema = z
   .object({
-    applications: applicationsSectionSchema.default({ active: [] }),
+    applications: applicationsSectionSchema.default({ enabled: [] }),
     plugins: pluginsSectionSchema.default({}),
     extensions: extensionsSectionSchema.default({}),
     targets: z.record(z.string().trim().min(1), targetSpecSchema).default({}),

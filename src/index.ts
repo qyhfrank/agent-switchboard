@@ -116,7 +116,7 @@ Examples:
   $ asb mcp                          Enable/disable MCP servers interactively
   $ asb rule                         Select and order rule snippets
   $ asb sync                         Push all libraries to every active agent
-  $ asb sync --project .             Sync with project-level overrides
+  $ asb sync -P .                    Sync with project-level overrides
 
 Alias: agent-switchboard
 Config: ~/.agent-switchboard/config.toml`
@@ -131,7 +131,7 @@ program
     'Synchronize active MCP servers, rules, commands, agents, and skills to application targets'
   )
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .option('--no-update', 'Skip updating remote sources')
   .action(async (options: ScopeOptionInput & { update: boolean }) => {
     try {
@@ -364,7 +364,7 @@ program
   .command('mcp')
   .description('Interactive UI to enable/disable MCP servers')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .action(async (options: ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
@@ -434,14 +434,14 @@ const ruleCommand = program
   .command('rule')
   .description('Select and order rule snippets interactively, then sync to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml');
+  .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
 ruleCommand
   .command('list')
   .description('Display rule snippets and sync information')
   .option('--json', 'Output inventory as JSON')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
@@ -588,7 +588,7 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
       composeActiveRules(scope),
       {
         force: !selectionChanged,
-        activeAppIds: config.applications.active,
+        activeAppIds: config.applications.enabled,
         assumeInstalled: new Set(config.applications.assume_installed),
       },
       scope
@@ -641,7 +641,7 @@ const commandRoot = program
   .command('command')
   .description('Select slash commands interactively and distribute to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml');
+  .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
 commandRoot.action(async (options: ScopeOptionInput) => {
   try {
@@ -655,7 +655,7 @@ commandRoot.action(async (options: ScopeOptionInput) => {
 
     const out = distributeCommands(
       scope,
-      config.applications.active,
+      config.applications.enabled,
       new Set(config.applications.assume_installed)
     );
     if (out.results.length > 0) {
@@ -751,7 +751,7 @@ commandRoot
   .description('Display command inventory and sync information')
   .option('--json', 'Output inventory as JSON')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
@@ -815,7 +815,7 @@ const agentRoot = program
   .command('agent')
   .description('Select agent definitions interactively and distribute to applications')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml');
+  .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
 agentRoot.action(async (options: ScopeOptionInput) => {
   try {
@@ -829,7 +829,7 @@ agentRoot.action(async (options: ScopeOptionInput) => {
 
     const out = distributeSubagents(
       scope,
-      config.applications.active,
+      config.applications.enabled,
       new Set(config.applications.assume_installed)
     );
     if (out.results.length > 0) {
@@ -923,7 +923,7 @@ agentRoot
   .description('Display agent inventory and sync information')
   .option('--json', 'Output inventory as JSON')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
@@ -988,7 +988,7 @@ const skillRoot = program
   .command('skill')
   .description('Select skill bundles interactively and distribute to agents')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml');
+  .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
 skillRoot.action(async (options: ScopeOptionInput) => {
   try {
@@ -1002,7 +1002,7 @@ skillRoot.action(async (options: ScopeOptionInput) => {
 
     const out = distributeSkills(scope, {
       useAgentsDir: config.distribution.use_agents_dir,
-      activeAppIds: config.applications.active,
+      activeAppIds: config.applications.enabled,
       assumeInstalled: new Set(config.applications.assume_installed),
     });
     if (out.results.length > 0) {
@@ -1013,7 +1013,7 @@ skillRoot.action(async (options: ScopeOptionInput) => {
         getTargetLabel: (result) => {
           if (result.platform === 'agents') {
             const members = (['codex', 'gemini', 'opencode'] as const).filter((a) =>
-              config.applications.active.includes(a)
+              config.applications.enabled.includes(a)
             );
             return members.length > 0 ? members.join('+') : 'agents';
           }
@@ -1035,7 +1035,7 @@ skillRoot
   .description('Display skill inventory and sync information')
   .option('--json', 'Output inventory as JSON')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
@@ -1173,7 +1173,7 @@ const hookRoot = program
   .command('hook')
   .description('Select hooks interactively and distribute to Claude Code')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml');
+  .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
 hookRoot.action(async (options: ScopeOptionInput) => {
   try {
@@ -1186,7 +1186,7 @@ hookRoot.action(async (options: ScopeOptionInput) => {
 
     const out = distributeHooks(
       scope,
-      config.applications.active,
+      config.applications.enabled,
       new Set(config.applications.assume_installed)
     );
     if (out.results.length > 0) {
@@ -1212,7 +1212,7 @@ hookRoot
   .description('Display hook library entries')
   .option('--json', 'Output inventory as JSON')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
@@ -1383,11 +1383,11 @@ function showSummary(selectedServers: string[], scope?: ConfigScope): void {
   }
 
   const switchboardConfig = loadSwitchboardConfig(scopeToLayerOptions(scope));
-  if (switchboardConfig.applications.active.length > 0) {
+  if (switchboardConfig.applications.enabled.length > 0) {
     console.log(
-      chalk.blue(`\nApplied to applications (${switchboardConfig.applications.active.length}):`)
+      chalk.blue(`\nApplied to applications (${switchboardConfig.applications.enabled.length}):`)
     );
-    for (const agent of switchboardConfig.applications.active) {
+    for (const agent of switchboardConfig.applications.enabled) {
       console.log(`  ${chalk.dim('•')} ${agent}`);
     }
   }
@@ -1419,7 +1419,7 @@ const pluginRoot = program
   .command('plugin')
   .description('Manage plugins: interactive selection, install/uninstall, marketplace sources')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml');
+  .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
 pluginRoot.action((_options: ScopeOptionInput) => {
   pluginRoot.outputHelp();
@@ -1430,7 +1430,7 @@ pluginRoot
   .alias('ls')
   .description('List all discoverable plugins from configured sources')
   .option('-p, --profile <name>', 'Profile configuration to use')
-  .option('--project <path>', 'Project directory containing .asb.toml')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .option('--json', 'Output as JSON')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
@@ -1585,7 +1585,7 @@ function pluginUninstallAction(id: string, options: ScopeOptionInput) {
 
 const pluginScopeOpts = [
   ['-p, --profile <name>', 'Profile configuration to use'] as const,
-  ['--project <path>', 'Project directory containing .asb.toml'] as const,
+  ['-P, --project <path>', 'Project directory containing .asb.toml'] as const,
 ];
 
 const enableCmd = pluginRoot.command('enable <id>').description('Add a plugin to the enabled list');
