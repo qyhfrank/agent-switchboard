@@ -9,11 +9,7 @@ import {
   getGeminiDir,
   getOpencodeRoot,
 } from '../src/config/paths.js';
-import {
-  clearExtensionTargets,
-  filterInstalled,
-  getTargetById,
-} from '../src/targets/registry.js';
+import { clearExtensionTargets, filterInstalled, getTargetById } from '../src/targets/registry.js';
 import type { ApplicationTarget } from '../src/targets/types.js';
 import { withTempAgentsHome } from './helpers/tmp.js';
 
