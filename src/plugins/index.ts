@@ -342,19 +342,29 @@ function buildFromPlugin(
 
 // ── Public API ─────────────────────────────────────────────────────
 
-let cachedIndex: PluginIndex | null = null;
+const cachedIndices = new Map<string, PluginIndex>();
 
-export function clearPluginIndexCache(): void {
-  cachedIndex = null;
+function getScopeCacheKey(scope?: ConfigScope): string {
+  const profile = scope?.profile?.trim() ?? '';
+  const project = scope?.project?.trim() ?? '';
+  const asbHome = process.env.ASB_HOME ?? '';
+  const agentsHome = process.env.ASB_AGENTS_HOME ?? '';
+  return JSON.stringify({ asbHome, agentsHome, profile, project });
 }
 
-export function buildPluginIndex(_scope?: ConfigScope): PluginIndex {
+export function clearPluginIndexCache(): void {
+  cachedIndices.clear();
+}
+
+export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
+  const cacheKey = getScopeCacheKey(scope);
+  const cachedIndex = cachedIndices.get(cacheKey);
   if (cachedIndex) return cachedIndex;
 
   const plugins: PluginDescriptor[] = [];
   const mcpServers: PluginMcpServer[] = [];
   const ruleSnippets: PluginRuleSnippet[] = [];
-  const sources = getSourcesRecord();
+  const sources = getSourcesRecord(scope);
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
@@ -410,6 +420,6 @@ export function buildPluginIndex(_scope?: ConfigScope): PluginIndex {
     },
   };
 
-  cachedIndex = index;
+  cachedIndices.set(cacheKey, index);
   return index;
 }

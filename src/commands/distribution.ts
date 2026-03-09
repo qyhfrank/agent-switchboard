@@ -35,7 +35,7 @@ export function distributeCommands(
   activeAppIds?: string[],
   assumeInstalled?: ReadonlySet<string>
 ): CommandDistributionOutcome {
-  const entries = loadCommandLibrary();
+  const entries = loadCommandLibrary(scope);
   const byId = new Map(entries.map((e) => [e.id, e]));
 
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too
