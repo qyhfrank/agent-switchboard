@@ -194,6 +194,46 @@ test('distributeSkills: agents mode project scope writes to <project>/.agents/sk
   });
 });
 
+test('distributeSkills: project scope removes orphan claude-code skill directories', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    createSkill(agentsHome, 'old-skill');
+    createSkill(agentsHome, 'new-skill');
+
+    const projectRoot = path.join(agentsHome, 'claude-project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    updateLibraryStateSection(
+      'skills',
+      (state) => ({
+        ...state,
+        enabled: ['old-skill'],
+      }),
+      { project: projectRoot }
+    );
+    distributeSkills({ project: projectRoot });
+
+    const oldTarget = path.join(projectRoot, '.claude', 'skills', 'old-skill');
+    assert.ok(fs.existsSync(oldTarget), 'old project skill should exist after first distribution');
+
+    updateLibraryStateSection(
+      'skills',
+      (state) => ({
+        ...state,
+        enabled: ['new-skill'],
+      }),
+      { project: projectRoot }
+    );
+    const outcome = distributeSkills({ project: projectRoot });
+
+    const deleted = outcome.results.filter(
+      (result) => result.platform === 'claude-code' && result.status === 'deleted'
+    );
+    assert.ok(deleted.some((result) => result.targetDir === oldTarget));
+    assert.ok(!fs.existsSync(oldTarget), 'orphan project skill should be removed');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills distribution: all 5 platforms receive skills (cursor deduped when claude-code is active)
 // ---------------------------------------------------------------------------
