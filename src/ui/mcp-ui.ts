@@ -3,51 +3,57 @@
  * Server definitions from mcp.json, enabled state from config.toml
  */
 
-import { checkbox } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { loadMcpConfig } from '../config/mcp-config.js';
-import type { CheckboxItem } from '../types.js';
+import type { McpServer } from '../config/schemas.js';
+import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 
 export interface McpServerUIOptions {
   pageSize?: number;
   enabled: string[];
 }
 
-/**
- * Create checkbox items for MCP servers
- * @param enabled - List of enabled server names (from config.toml)
- * @returns Array of checkbox items sorted alphabetically
- */
-export function createMcpServerItems(enabled: string[]): CheckboxItem[] {
+function buildMcpChoices(enabled: string[]): FuzzyMultiSelectChoice[] {
   const config = loadMcpConfig();
-  const items: CheckboxItem[] = [];
   const enabledSet = new Set(enabled);
+  const choices: FuzzyMultiSelectChoice[] = [];
 
-  for (const [name] of Object.entries(config.mcpServers)) {
-    const isEnabled = enabledSet.has(name);
-    const icon = isEnabled ? chalk.green('✓') : chalk.red('✗');
-    const status = isEnabled ? chalk.gray('(enabled)') : chalk.gray('(disabled)');
+  // Enabled servers first (in enabled order), then remaining alphabetically
+  const remaining = Object.keys(config.mcpServers)
+    .filter((name) => !enabledSet.has(name))
+    .sort();
 
-    items.push({
-      name: `${icon} ${name} ${status}`,
+  for (const name of [...enabled, ...remaining]) {
+    const server = config.mcpServers[name];
+    if (!server) continue;
+
+    const keywords = [name];
+    const raw = server as McpServer & Record<string, unknown>;
+    if (raw.command) keywords.push(String(raw.command));
+    if (raw.url) keywords.push(String(raw.url));
+    if (raw.type) keywords.push(String(raw.type));
+
+    const hint = raw.type ?? (raw.url ? 'http' : raw.command ? 'stdio' : undefined);
+
+    choices.push({
       value: name,
-      checked: isEnabled,
+      label: name,
+      hint: hint ? String(hint) : undefined,
+      keywords,
     });
   }
 
-  return items.sort((a, b) => a.value.localeCompare(b.value));
+  return choices;
 }
 
 /**
- * Show interactive checkbox UI for MCP server selection
- * @param options.enabled - List of currently enabled server names
- * @returns Array of selected server names
+ * Show interactive fuzzy-filterable UI for MCP server selection
  */
 export async function showMcpServerUI(options: McpServerUIOptions): Promise<string[]> {
   const pageSize = options.pageSize ?? 15;
-  const items = createMcpServerItems(options.enabled);
+  const choices = buildMcpChoices(options.enabled);
 
-  if (items.length === 0) {
+  if (choices.length === 0) {
     console.log(chalk.yellow('⚠ No MCP servers found in ~/.agent-switchboard/mcp.json'));
     console.log();
     console.log('Please add servers manually to the config file:');
@@ -68,15 +74,11 @@ export async function showMcpServerUI(options: McpServerUIOptions): Promise<stri
     return [];
   }
 
-  console.log(chalk.blue('MCP Server Management'));
-  console.log(chalk.gray('Select which MCP servers should be enabled:'));
-  console.log();
-
-  const selectedServers = await checkbox({
-    message: 'Toggle MCP servers (Space: toggle, a: all, i: invert, Enter: confirm):',
-    choices: items,
+  return fuzzyMultiSelect({
+    message: 'Select MCP servers to enable',
+    choices,
+    initialSelected: options.enabled,
     pageSize,
+    allowEmpty: true,
   });
-
-  return selectedServers;
 }
