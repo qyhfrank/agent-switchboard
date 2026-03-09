@@ -84,7 +84,8 @@ export function distributeRules(
   );
 
   for (const target of targets) {
-    const handler = target.rules!;
+    if (!target.rules) continue;
+    const handler = target.rules;
     const agent = target.id;
 
     const document = composeActiveRulesForApplication(agent, scope);
