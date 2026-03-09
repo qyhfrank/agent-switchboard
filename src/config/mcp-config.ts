@@ -9,6 +9,7 @@ import { parse } from 'jsonc-parser';
 import { buildPluginIndex } from '../plugins/index.js';
 import { getMcpConfigPath } from './paths.js';
 import { type McpConfig, type McpServer, mcpConfigSchema } from './schemas.js';
+import { type ConfigScope, scopeToLayerOptions } from './scope.js';
 import { loadSwitchboardConfig } from './switchboard-config.js';
 
 /**
@@ -62,13 +63,13 @@ export function loadMcpConfig(): McpConfig {
  * Plugin-sourced servers use namespaced IDs (e.g. "context7:context7").
  * If a plugin server ID collides with a user-defined server, the user definition wins.
  */
-export function loadMcpConfigWithPlugins(): McpConfig {
+export function loadMcpConfigWithPlugins(scope?: ConfigScope): McpConfig {
   const base = loadMcpConfig();
   const pluginIndex = buildPluginIndex();
 
   if (pluginIndex.mcpServers.length === 0) return base;
 
-  const config = loadSwitchboardConfig();
+  const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
   const enabledPlugins = new Set(config.plugins.enabled);
 
   const merged = { ...base.mcpServers };
