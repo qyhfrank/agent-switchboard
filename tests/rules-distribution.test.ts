@@ -212,6 +212,37 @@ test('distributeRules deletes distributed rule files when no rules are enabled',
   });
 });
 
+test('distributeRules project scope ignores inherited user-level rules', () => {
+  withTempAsbHome((asbHome) => {
+    simulateAppsInstalled('claude-code');
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'user-rule.md'), 'User body\n');
+
+    saveRuleState({
+      ...DEFAULT_RULE_STATE,
+      enabled: ['user-rule'],
+      agentSync: {},
+    });
+
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(path.join(projectRoot, '.claude'), { recursive: true });
+    const projectRulePath = path.join(projectRoot, '.claude', 'CLAUDE.md');
+    fs.writeFileSync(projectRulePath, 'stale rules\n', 'utf-8');
+
+    const outcome = distributeRules(
+      undefined,
+      { activeAppIds: ['claude-code'] },
+      { project: projectRoot }
+    );
+    const claudeResult = outcome.results.find((result) => result.agent === 'claude-code');
+
+    assert.ok(claudeResult);
+    assert.equal(claudeResult?.status, 'deleted');
+    assert.equal(claudeResult?.reason, 'no-rules-configured');
+    assert.equal(fs.existsSync(projectRulePath), false);
+  });
+});
+
 test('listUnsupportedAgents returns skipped agent identifiers', () => {
   const unsupported = listUnsupportedAgents();
   assert.equal(Array.isArray(unsupported), true);

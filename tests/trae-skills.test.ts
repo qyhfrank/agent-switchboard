@@ -254,10 +254,14 @@ test('distributeSkills: project scope writes to <project>/.trae/skills/', () => 
     const projectRoot = path.join(agentsHome, 'my-project');
     fs.mkdirSync(projectRoot, { recursive: true });
 
-    updateLibraryStateSection('skills', (s) => ({
-      ...s,
-      enabled: [skillId],
-    }));
+    updateLibraryStateSection(
+      'skills',
+      (s) => ({
+        ...s,
+        enabled: [skillId],
+      }),
+      { project: projectRoot }
+    );
 
     const outcome = distributeSkills({ project: projectRoot });
 

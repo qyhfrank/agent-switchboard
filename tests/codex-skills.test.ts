@@ -168,10 +168,14 @@ test('distributeSkills: agents mode project scope writes to <project>/.agents/sk
     const projectRoot = path.join(agentsHome, 'my-project');
     fs.mkdirSync(projectRoot, { recursive: true });
 
-    updateLibraryStateSection('skills', (s) => ({
-      ...s,
-      enabled: [skillId],
-    }));
+    updateLibraryStateSection(
+      'skills',
+      (s) => ({
+        ...s,
+        enabled: [skillId],
+      }),
+      { project: projectRoot }
+    );
 
     const outcome = distributeSkills({ project: projectRoot }, { useAgentsDir: true });
 
@@ -231,6 +235,46 @@ test('distributeSkills: project scope removes orphan claude-code skill directori
     );
     assert.ok(deleted.some((result) => result.targetDir === oldTarget));
     assert.ok(!fs.existsSync(oldTarget), 'orphan project skill should be removed');
+  });
+});
+
+test('distributeSkills: project scope ignores inherited user-level skills', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    createSkill(agentsHome, 'user-skill');
+    createSkill(agentsHome, 'project-skill');
+
+    const projectRoot = path.join(agentsHome, 'scoped-project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    updateLibraryStateSection('skills', (state) => ({
+      ...state,
+      enabled: ['user-skill'],
+    }));
+    updateLibraryStateSection(
+      'skills',
+      (state) => ({
+        ...state,
+        enabled: ['project-skill'],
+      }),
+      { project: projectRoot }
+    );
+
+    const outcome = distributeSkills({ project: projectRoot });
+    const projectSkillTarget = path.join(projectRoot, '.claude', 'skills', 'project-skill');
+    const inheritedSkillTarget = path.join(projectRoot, '.claude', 'skills', 'user-skill');
+
+    assert.ok(fs.existsSync(projectSkillTarget), 'project skill should be written');
+    assert.equal(
+      fs.existsSync(inheritedSkillTarget),
+      false,
+      'inherited user skill should not be written'
+    );
+    assert.ok(
+      outcome.results.some(
+        (result) => result.platform === 'claude-code' && result.targetDir === projectSkillTarget
+      )
+    );
   });
 });
 

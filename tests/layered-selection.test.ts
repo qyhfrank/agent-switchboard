@@ -142,7 +142,10 @@ test('project skill distribution does not materialize inherited enabled entries 
 
     const outcome = distributeSkills({ project: projectRoot });
 
-    assert.ok(outcome.results.some((result) => result.platform === 'claude-code'));
+    assert.equal(
+      outcome.results.some((result) => result.platform === 'claude-code'),
+      false
+    );
     assert.equal(fs.existsSync(path.join(projectRoot, '.asb.toml')), false);
   });
 });

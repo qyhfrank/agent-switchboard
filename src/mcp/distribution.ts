@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import chalk from 'chalk';
 import ora from 'ora';
-import { resolveEffectiveSectionConfig } from '../config/application-config.js';
+import { resolveScopedSectionConfig } from '../config/application-config.js';
 import { loadMcpConfigWithPlugins } from '../config/mcp-config.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
@@ -66,7 +66,7 @@ export async function distributeMcp(
     };
 
     try {
-      const agentMcpConfig = resolveEffectiveSectionConfig('mcp', agentId, scope);
+      const agentMcpConfig = resolveScopedSectionConfig('mcp', agentId, scope);
       const agentActiveServers = enabledServerNames
         ? agentMcpConfig.enabled.filter((serverName) => globalMcpServers.includes(serverName))
         : agentMcpConfig.enabled;
