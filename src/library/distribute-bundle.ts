@@ -96,6 +96,11 @@ export function distributeBundle<TEntry, Platform extends string>(
     managedProjectRoot && (opts.projectMode ?? 'exclusive') === 'managed'
       ? opts.manifest
       : undefined;
+  // First managed sync: if manifest has no entries for this section, skip
+  // conflict detection so existing directories get adopted into the manifest.
+  const sectionEntries = manifest?.sections[manifestSection];
+  const isBootstrapSync =
+    manifest != null && (!sectionEntries || Object.keys(sectionEntries).length === 0);
 
   for (const platform of opts.platforms) {
     const platformHash = createHash('sha256');
@@ -110,8 +115,9 @@ export function distributeBundle<TEntry, Platform extends string>(
       const files = opts.listFiles(entry);
       const entryId = opts.getId(entry);
 
-      // Conflict detection in managed mode: check if target dir exists but isn't owned
-      if (manifest && fs.existsSync(targetDir)) {
+      // Conflict detection in managed mode: check if target dir exists but isn't owned.
+      // Skip during bootstrap (first managed sync) to adopt pre-existing content.
+      if (manifest && !isBootstrapSync && fs.existsSync(targetDir)) {
         const manifestEntry = getLibraryEntry(
           manifest,
           manifestSection,

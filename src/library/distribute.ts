@@ -88,6 +88,11 @@ export function distributeLibrary<TEntry, Platform extends string>(
     managedProjectRoot && (opts.projectMode ?? 'exclusive') === 'managed'
       ? opts.manifest
       : undefined;
+  // First managed sync: if manifest has no entries for this section, skip
+  // conflict detection so existing files get adopted into the manifest.
+  const sectionEntries = manifest?.sections[manifestSection];
+  const isBootstrapSync =
+    manifest != null && (!sectionEntries || Object.keys(sectionEntries).length === 0);
 
   for (const platform of opts.platforms) {
     const hash = createHash('sha256');
@@ -112,8 +117,8 @@ export function distributeLibrary<TEntry, Platform extends string>(
         existing = null;
       }
 
-      // Conflict detection in managed mode
-      if (manifest && existing !== null && entryId) {
+      // Conflict detection in managed mode (skip during bootstrap to adopt pre-existing content)
+      if (manifest && !isBootstrapSync && existing !== null && entryId) {
         const manifestEntry = getLibraryEntry(
           manifest,
           manifestSection,
