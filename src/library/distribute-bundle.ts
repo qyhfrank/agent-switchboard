@@ -2,10 +2,19 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ConfigScope } from '../config/scope.js';
+import {
+  computeLibraryCleanupSet,
+  getLibraryEntry,
+  type LibraryManifestSection,
+  recordLibraryEntry,
+  removeLibraryEntry,
+} from '../manifest/store.js';
+import type { ProjectDistributionManifest } from '../manifest/types.js';
+import type { CollisionPolicy, ProjectMode } from './distribute.js';
 import { ensureParentDir, rmDirRecursive } from './fs.js';
 import { type LibrarySection, loadLibraryAgentSync, updateLibraryAgentSync } from './state.js';
 
-export type BundleDistributionStatus = 'written' | 'skipped' | 'error' | 'deleted';
+export type BundleDistributionStatus = 'written' | 'skipped' | 'error' | 'deleted' | 'conflict';
 
 export interface BundleDistributionResult<Platform extends string> {
   platform: Platform;
@@ -33,6 +42,11 @@ export interface BundleCleanupConfig<Platform extends string> {
   isReservedDir?: (id: string, platform: Platform) => boolean;
 }
 
+/** @deprecated Use ProjectMode from distribute.ts */
+export type BundleProjectMode = ProjectMode;
+/** @deprecated Use CollisionPolicy from distribute.ts */
+export type BundleCollisionPolicy = CollisionPolicy;
+
 export interface DistributeBundleOptions<TEntry, Platform extends string> {
   section: LibrarySection;
   selected: TEntry[];
@@ -51,6 +65,12 @@ export interface DistributeBundleOptions<TEntry, Platform extends string> {
    * Used for per-agent configuration where each platform may have different active items.
    */
   filterSelected?: (platform: Platform, selected: TEntry[]) => TEntry[];
+  /** Project distribution manifest for managed cleanup (project scope only) */
+  manifest?: ProjectDistributionManifest;
+  /** Project distribution mode (only used when scope.project is set) */
+  projectMode?: BundleProjectMode;
+  /** Collision policy for managed mode */
+  collision?: BundleCollisionPolicy;
 }
 
 export interface DistributeBundleOutcome<Platform extends string> {
@@ -67,6 +87,15 @@ export function distributeBundle<TEntry, Platform extends string>(
   const agentSync = loadLibraryAgentSync(opts.section);
   const results: BundleDistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
+  const collision = opts.collision ?? 'warn-skip';
+  // Safe cast: managed mode guard ensures section is never 'hooks' (hooks don't use manifest)
+  const manifestSection = opts.section as LibraryManifestSection;
+  // Extract managed context with proper narrowing (avoids non-null assertions throughout)
+  const managedProjectRoot = opts.scope?.project;
+  const manifest =
+    managedProjectRoot && (opts.projectMode ?? 'exclusive') === 'managed'
+      ? opts.manifest
+      : undefined;
 
   for (const platform of opts.platforms) {
     const platformHash = createHash('sha256');
@@ -79,6 +108,31 @@ export function distributeBundle<TEntry, Platform extends string>(
     for (const entry of platformSelected) {
       const targetDir = opts.resolveTargetDir(platform, entry);
       const files = opts.listFiles(entry);
+      const entryId = opts.getId(entry);
+
+      // Conflict detection in managed mode: check if target dir exists but isn't owned
+      if (manifest && fs.existsSync(targetDir)) {
+        const manifestEntry = getLibraryEntry(
+          manifest,
+          manifestSection,
+          entryId,
+          platform as string
+        );
+        if (!manifestEntry && collision !== 'takeover') {
+          // Foreign directory exists at target path - skip
+          results.push({
+            platform,
+            targetDir,
+            status: 'conflict',
+            reason: 'foreign directory exists',
+            entryId,
+          });
+          // Intentionally not included in aggregate hash: content was not
+          // written, so it should not affect sync-state comparison.
+          continue;
+        }
+        // 'takeover' or manifestEntry exists: fall through to overwrite
+      }
 
       let filesWritten = 0;
       let filesSkipped = 0;
@@ -131,7 +185,6 @@ export function distributeBundle<TEntry, Platform extends string>(
         cleanStaleFiles(targetDir, '', expectedFiles);
       }
 
-      const entryId = opts.getId(entry);
       if (hadError) {
         results.push({
           platform,
@@ -158,6 +211,27 @@ export function distributeBundle<TEntry, Platform extends string>(
           filesSkipped,
         });
       }
+
+      // Record in manifest after successful write or skip
+      if (manifest && managedProjectRoot) {
+        const lastResult = results[results.length - 1];
+        if (lastResult.status === 'written' || lastResult.status === 'skipped') {
+          const contentHash = createHash('sha256');
+          for (const file of files) {
+            try {
+              contentHash.update(fs.readFileSync(file.sourcePath));
+            } catch {
+              // Ignore
+            }
+          }
+          recordLibraryEntry(manifest, manifestSection, entryId, {
+            relativePath: path.relative(path.resolve(managedProjectRoot), targetDir),
+            targetId: platform as string,
+            hash: contentHash.digest('hex'),
+            updatedAt: timestamp,
+          });
+        }
+      }
     }
 
     // Update sync state
@@ -172,44 +246,81 @@ export function distributeBundle<TEntry, Platform extends string>(
       }));
     }
 
-    // Cleanup orphan directories if cleanup config is provided
+    // Cleanup orphan directories
     if (opts.cleanup) {
       const activeIds = new Set(platformSelected.map(opts.getId));
-      const parentDir = opts.cleanup.resolveParentDir(platform);
 
-      if (fs.existsSync(parentDir)) {
-        try {
-          const entries = fs.readdirSync(parentDir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (!entry.isDirectory()) continue;
+      if (manifest && managedProjectRoot) {
+        // Manifest-driven cleanup: only delete entries previously owned by ASB
+        const toRemove = computeLibraryCleanupSet(
+          manifest,
+          manifestSection,
+          activeIds,
+          platform as string
+        );
+        for (const item of toRemove) {
+          const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
+          try {
+            if (fs.existsSync(entryPath)) {
+              rmDirRecursive(entryPath);
+            }
+            results.push({
+              platform,
+              targetDir: entryPath,
+              status: 'deleted',
+              reason: 'orphan',
+              entryId: item.id,
+            });
+            removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            results.push({
+              platform,
+              targetDir: entryPath,
+              status: 'error',
+              error: `Failed to delete orphan: ${msg}`,
+              entryId: item.id,
+            });
+          }
+        }
+      } else {
+        // Exclusive mode: scan directory for orphans (existing behavior)
+        const parentDir = opts.cleanup.resolveParentDir(platform);
 
-            const id = entry.name;
-            if (opts.cleanup.isReservedDir?.(id, platform)) continue;
-            if (!activeIds.has(id)) {
-              const dirPath = path.join(parentDir, id);
-              try {
-                rmDirRecursive(dirPath);
-                results.push({
-                  platform,
-                  targetDir: dirPath,
-                  status: 'deleted',
-                  reason: 'orphan',
-                  entryId: id,
-                });
-              } catch (error) {
-                const msg = error instanceof Error ? error.message : String(error);
-                results.push({
-                  platform,
-                  targetDir: dirPath,
-                  status: 'error',
-                  error: `Failed to delete orphan: ${msg}`,
-                  entryId: id,
-                });
+        if (fs.existsSync(parentDir)) {
+          try {
+            const dirEntries = fs.readdirSync(parentDir, { withFileTypes: true });
+            for (const dirEntry of dirEntries) {
+              if (!dirEntry.isDirectory()) continue;
+
+              const id = dirEntry.name;
+              if (opts.cleanup.isReservedDir?.(id, platform)) continue;
+              if (!activeIds.has(id)) {
+                const dirPath = path.join(parentDir, id);
+                try {
+                  rmDirRecursive(dirPath);
+                  results.push({
+                    platform,
+                    targetDir: dirPath,
+                    status: 'deleted',
+                    reason: 'orphan',
+                    entryId: id,
+                  });
+                } catch (error) {
+                  const msg = error instanceof Error ? error.message : String(error);
+                  results.push({
+                    platform,
+                    targetDir: dirPath,
+                    status: 'error',
+                    error: `Failed to delete orphan: ${msg}`,
+                    entryId: id,
+                  });
+                }
               }
             }
+          } catch {
+            // Ignore errors reading directory
           }
-        } catch {
-          // Ignore errors reading directory
         }
       }
     }

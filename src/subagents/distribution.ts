@@ -5,6 +5,7 @@ import {
   type DistributeOutcome,
   type DistributionResult,
   distributeLibrary,
+  type LibraryManagedOptions,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
@@ -36,7 +37,8 @@ export function resolveSubagentFilePath(platform: string, id: string, scope?: Co
 export function distributeSubagents(
   scope?: ConfigScope,
   activeAppIds?: string[],
-  assumeInstalled?: ReadonlySet<string>
+  assumeInstalled?: ReadonlySet<string>,
+  managedOptions?: LibraryManagedOptions
 ): SubagentDistributionOutcome {
   const entries = loadSubagentLibrary(scope);
   const byId = new Map(entries.map((e) => [e.id, e]));
@@ -99,6 +101,9 @@ export function distributeSubagents(
     cleanup,
     scope,
     filterSelected,
+    manifest: managedOptions?.manifest,
+    projectMode: managedOptions?.projectMode,
+    collision: managedOptions?.collision,
   });
 
   const customResults: DistributionResult<string>[] = [];
