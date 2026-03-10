@@ -7,6 +7,8 @@ import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfigWithLayers } from '../config/switchboard-config.js';
 import { distributeHooks } from '../hooks/distribution.js';
 import { updateRemoteSources } from '../library/sources.js';
+import { loadManifest, saveManifest } from '../manifest/store.js';
+import type { ProjectDistributionManifest } from '../manifest/types.js';
 import { distributeMcp } from '../mcp/distribution.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import { distributeRules } from '../rules/distribution.js';
@@ -238,22 +240,68 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   if (notes.length > 0) console.log();
 
   const activeAppIds = config.applications.enabled;
-  const mcpDistribution = await distributeMcp(scope, undefined, {
-    useSpinner: false,
-    assumeInstalled: assumeInstalledSet,
-  });
-  const ruleDistribution = distributeRules(
-    { activeAppIds, assumeInstalled: assumeInstalledSet },
-    scope
-  );
-  const commandDistribution = distributeCommands(scope, activeAppIds, assumeInstalledSet);
-  const agentDistribution = distributeSubagents(scope, activeAppIds, assumeInstalledSet);
-  const skillDistribution = distributeSkills(scope, {
-    useAgentsDir: config.distribution.use_agents_dir,
-    activeAppIds,
-    assumeInstalled: assumeInstalledSet,
-  });
-  const hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet);
+
+  // Project-level managed distribution: load manifest and determine mode
+  const projectRoot = scope?.project;
+  const projectMode = projectRoot ? config.distribution.project.mode : undefined;
+  const isManaged = projectRoot != null && projectMode === 'managed';
+  let manifest: ProjectDistributionManifest | undefined;
+  if (isManaged) {
+    manifest = loadManifest(projectRoot);
+  }
+
+  const collision = isManaged ? config.distribution.project.collision : undefined;
+  const rulesPlacement = isManaged ? config.distribution.project.rules.placement : undefined;
+
+  let mcpDistribution: Awaited<ReturnType<typeof distributeMcp>>;
+  let ruleDistribution: ReturnType<typeof distributeRules>;
+  let commandDistribution: ReturnType<typeof distributeCommands>;
+  let agentDistribution: ReturnType<typeof distributeSubagents>;
+  let skillDistribution: ReturnType<typeof distributeSkills>;
+  let hookDistribution: ReturnType<typeof distributeHooks>;
+
+  try {
+    mcpDistribution = await distributeMcp(scope, undefined, {
+      useSpinner: false,
+      assumeInstalled: assumeInstalledSet,
+      manifest,
+      projectMode,
+    });
+    ruleDistribution = distributeRules(
+      {
+        activeAppIds,
+        assumeInstalled: assumeInstalledSet,
+        manifest,
+        projectMode,
+        rulesPlacement,
+      },
+      scope
+    );
+    commandDistribution = distributeCommands(scope, activeAppIds, assumeInstalledSet, {
+      manifest,
+      projectMode,
+      collision,
+    });
+    agentDistribution = distributeSubagents(scope, activeAppIds, assumeInstalledSet, {
+      manifest,
+      projectMode,
+      collision,
+    });
+    skillDistribution = distributeSkills(scope, {
+      useAgentsDir: config.distribution.use_agents_dir,
+      activeAppIds,
+      assumeInstalled: assumeInstalledSet,
+      manifest,
+      projectMode,
+      collision,
+    });
+    hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet);
+  } finally {
+    // Save manifest even if distribution throws, to preserve partial progress
+    if (isManaged && manifest) {
+      saveManifest(projectRoot, manifest);
+    }
+  }
 
   const distSections: CompactDistributionSection<DistributionResultLike>[] = [
     {

@@ -28,7 +28,7 @@ export function printTable(header: string[], rows: Cell[][]): void {
   });
 }
 
-export type DistributionStatus = 'written' | 'skipped' | 'error' | 'deleted';
+export type DistributionStatus = 'written' | 'skipped' | 'error' | 'deleted' | 'conflict';
 
 export interface DistributionResultLike {
   status: DistributionStatus;
