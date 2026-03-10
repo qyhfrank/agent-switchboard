@@ -128,9 +128,15 @@ export async function distributeMcp(
         const manifest = options?.manifest;
         const isManaged = manifest && (options?.projectMode ?? 'exclusive') === 'managed';
         const sanitize = mcpHandler.sanitizeServerName;
+        const ownedServers = isManaged ? getOwnedMcpServers(manifest, agentId) : new Set<string>();
         const managedOpts: ManagedMcpOptions | undefined = isManaged
-          ? { previouslyOwned: getOwnedMcpServers(manifest, agentId) }
+          ? { previouslyOwned: ownedServers }
           : undefined;
+
+        // Skip silently if no servers to apply and nothing to clean up
+        if (Object.keys(configToApply.mcpServers).length === 0 && ownedServers.size === 0) {
+          continue;
+        }
 
         mcpHandler.applyProjectConfig(scope.project, configToApply, managedOpts);
 
