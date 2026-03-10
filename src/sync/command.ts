@@ -307,7 +307,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
     {
       label: 'mcp',
       results: mcpDistribution,
-      emptyMessage: 'no apps configured',
+      emptyMessage: 'none',
       getTargetLabel: (result) => (result as (typeof mcpDistribution)[number]).application,
       getPath: (result) => (result as (typeof mcpDistribution)[number]).filePath,
     },
