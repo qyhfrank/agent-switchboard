@@ -11,12 +11,15 @@ import {
 import type { ConfigScope } from '../config/scope.js';
 import {
   type BundleCleanupConfig,
+  type BundleCollisionPolicy,
   type BundleDistributionResult,
+  type BundleProjectMode,
   type DistributeBundleOutcome,
   distributeBundle,
 } from '../library/distribute-bundle.js';
 import { isDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
+import type { ProjectDistributionManifest } from '../manifest/types.js';
 import { filterInstalled, getTargetsForSection } from '../targets/registry.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
@@ -62,6 +65,9 @@ export function distributeSkills(
     useAgentsDir?: boolean;
     activeAppIds?: string[];
     assumeInstalled?: ReadonlySet<string>;
+    manifest?: ProjectDistributionManifest;
+    projectMode?: BundleProjectMode;
+    collision?: BundleCollisionPolicy;
   }
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary(scope);
@@ -101,6 +107,9 @@ export function distributeSkills(
             ]
           : []),
       ],
+      manifest: options?.manifest,
+      projectMode: options?.projectMode,
+      collision: options?.collision,
     });
   }
 
@@ -118,6 +127,9 @@ export function distributeSkills(
           ]
         : []),
     ],
+    manifest: options?.manifest,
+    projectMode: options?.projectMode,
+    collision: options?.collision,
   });
 }
 
@@ -138,6 +150,9 @@ function distributeSkillsInternal(
     platforms: string[];
     activeSet: Set<string> | null;
     legacyDirs: LegacyDirSpec[];
+    manifest?: ProjectDistributionManifest;
+    projectMode?: BundleProjectMode;
+    collision?: BundleCollisionPolicy;
   }
 ): SkillDistributionOutcome {
   const traeActiveIds = scope?.project
@@ -205,6 +220,9 @@ function distributeSkillsInternal(
     cleanup,
     scope,
     filterSelected,
+    manifest: options.manifest,
+    projectMode: options.projectMode,
+    collision: options.collision,
   });
 
   for (const { path: legacyDir, platform } of options.legacyDirs) {
