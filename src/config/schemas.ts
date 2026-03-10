@@ -141,16 +141,52 @@ export const rulesSectionSchema = rulesSectionBaseSchema
  * Controls how skills/commands/agents are distributed to application targets.
  * - use_agents_dir: When true, skills are distributed to 2 targets (claude-code + agents).
  *   When false (default), skills use the legacy 4-target mode for backward compatibility.
+ * - project: Controls project-level distribution behavior.
+ *   - mode: "managed" (default) = only manage ASB-owned content, preserve project-native.
+ *     "exclusive" = ASB owns entire target area (current global behavior).
+ *     "none" = skip project distribution.
+ *   - collision: What to do when target path exists but isn't ASB-owned.
+ *   - drift: What to do when ASB-owned content was manually edited.
+ *   - rules.placement: Where to insert ASB rules block in shared files.
  */
+const projectRulesDistributionBaseSchema = z
+  .object({
+    placement: z.enum(['prepend', 'append']).optional(),
+  })
+  .passthrough();
+
+const projectDistributionBaseSchema = z
+  .object({
+    mode: z.enum(['managed', 'exclusive', 'none']).optional(),
+    collision: z.enum(['warn-skip', 'error', 'takeover']).optional(),
+    rules: projectRulesDistributionBaseSchema.optional(),
+  })
+  .passthrough();
+
+const projectDistributionFullSchema = projectDistributionBaseSchema
+  .extend({
+    mode: z.enum(['managed', 'exclusive', 'none']).default('managed'),
+    collision: z.enum(['warn-skip', 'error', 'takeover']).default('warn-skip'),
+    rules: projectRulesDistributionBaseSchema
+      .extend({
+        placement: z.enum(['prepend', 'append']).default('prepend'),
+      })
+      .passthrough()
+      .default({ placement: 'prepend' }),
+  })
+  .passthrough();
+
 const distributionSectionBaseSchema = z
   .object({
     use_agents_dir: z.boolean().optional(),
+    project: projectDistributionBaseSchema.optional(),
   })
   .passthrough();
 
 export const distributionSectionSchema = distributionSectionBaseSchema
   .extend({
     use_agents_dir: z.boolean().default(false),
+    project: projectDistributionFullSchema.default({}),
   })
   .passthrough();
 
@@ -388,6 +424,7 @@ export type ApplicationConfigOverride = z.infer<typeof applicationConfigOverride
 export type ApplicationsSection = z.infer<typeof applicationsSectionSchema>;
 export type RulesSection = z.infer<typeof rulesSectionSchema>;
 export type DistributionSection = z.infer<typeof distributionSectionSchema>;
+export type ProjectDistributionConfig = z.infer<typeof projectDistributionFullSchema>;
 export type UiSection = z.infer<typeof uiSectionSchema>;
 export type RemoteSource = z.infer<typeof remoteSourceSchema>;
 export type SourceValue = z.infer<typeof sourceValueSchema>;
