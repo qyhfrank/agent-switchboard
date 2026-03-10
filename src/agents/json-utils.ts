@@ -62,3 +62,32 @@ export function mergeMcpIntoAgent(
 
   return merged;
 }
+
+/**
+ * Managed merge: preserve foreign servers, only upsert/remove ASB-owned servers.
+ * Used in project scope to avoid destroying manually-configured MCP servers.
+ */
+export function managedMergeMcp(
+  agentConfig: JsonAgentConfig,
+  mcpServers: Record<string, object>,
+  previouslyOwned: ReadonlySet<string>
+): JsonAgentConfig {
+  const merged: JsonAgentConfig = { ...agentConfig };
+  const existing = { ...(agentConfig.mcpServers ?? {}) };
+
+  // Remove previously owned servers that are no longer enabled
+  for (const name of previouslyOwned) {
+    if (!(name in mcpServers)) {
+      delete existing[name];
+    }
+  }
+
+  // Upsert ASB-enabled servers
+  for (const [name, server] of Object.entries(mcpServers)) {
+    const prev = (existing[name] as Record<string, unknown>) ?? {};
+    existing[name] = { ...prev, ...server };
+  }
+
+  merged.mcpServers = existing;
+  return merged;
+}

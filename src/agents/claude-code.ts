@@ -12,6 +12,7 @@ import type { AgentAdapter } from './adapter.js';
 import {
   type JsonAgentConfig,
   loadJsonFile,
+  managedMergeMcp,
   mergeMcpIntoAgent,
   saveJsonFile,
 } from './json-utils.js';
@@ -44,13 +45,18 @@ export class ClaudeCodeAgent implements AgentAdapter {
 
   applyProjectConfig(
     projectRoot: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
     const configPath = this.projectConfigPath(projectRoot);
-    // For project-level .mcp.json, only write mcpServers (no merge with existing non-mcp fields)
     const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
-    const merged = mergeMcpIntoAgent(existing, config.mcpServers as Record<string, object>);
-    // Ensure parent directory exists
+    const merged = options?.previouslyOwned
+      ? managedMergeMcp(
+          existing,
+          config.mcpServers as Record<string, object>,
+          options.previouslyOwned
+        )
+      : mergeMcpIntoAgent(existing, config.mcpServers as Record<string, object>);
     const dir = nodePath.dirname(configPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     saveJsonFile(configPath, merged);

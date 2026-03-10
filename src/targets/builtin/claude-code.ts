@@ -16,7 +16,10 @@ export const claudeCodeTarget: ApplicationTarget = {
     configPath: () => adapter.configPath(),
     projectConfigPath: (root) => adapter.projectConfigPath(root),
     applyConfig: (config) => adapter.applyConfig(config),
-    applyProjectConfig: (root, config) => adapter.applyProjectConfig(root, config),
+    applyProjectConfig: (root, config, options) =>
+      adapter.applyProjectConfig(root, config, options),
+    // No sanitizeServerName: Claude Code's .mcp.json natively supports
+    // server names with special characters (colons, dots, etc.)
   },
 
   rules: {

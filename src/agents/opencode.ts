@@ -67,14 +67,16 @@ export class OpencodeAgent implements AgentAdapter {
 
   applyProjectConfig(
     projectRoot: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
-    this._applyToPath(this.projectConfigPath(projectRoot), config);
+    this._applyToPath(this.projectConfigPath(projectRoot), config, options?.previouslyOwned);
   }
 
   private _applyToPath(
     filePath: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    previouslyOwned?: ReadonlySet<string>
   ): void {
     // Determine if this is a JSONC file
     const isJsonc = filePath.endsWith('.jsonc');
@@ -92,9 +94,18 @@ export class OpencodeAgent implements AgentAdapter {
     }
 
     const out: OpencodeConfig = { ...current };
-    // Replace mcp entirely - only keep servers in the new config
-    // This ensures disabled servers are removed from target
-    const mcpOut: Record<string, Record<string, unknown>> = {};
+
+    // Start with empty (exclusive) or preserved foreign servers (managed)
+    let mcpOut: Record<string, Record<string, unknown>> = {};
+    if (previouslyOwned) {
+      // Managed mode: preserve foreign, remove only previously-owned that are no longer enabled
+      mcpOut = { ...(current.mcp ?? {}) };
+      for (const name of previouslyOwned) {
+        if (!(name in config.mcpServers)) {
+          delete mcpOut[name];
+        }
+      }
+    }
 
     for (const [name, server] of Object.entries(config.mcpServers)) {
       // Preserve existing server-specific settings (if any) while applying new config

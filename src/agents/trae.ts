@@ -6,6 +6,7 @@ import type { AgentAdapter } from './adapter.js';
 import {
   type JsonAgentConfig,
   loadJsonFile,
+  managedMergeMcp,
   mergeMcpIntoAgent,
   sanitizeServerKeys,
   saveJsonFile,
@@ -38,12 +39,15 @@ export class TraeAgent implements AgentAdapter {
 
   applyProjectConfig(
     projectRoot: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
     const configPath = this.projectConfigPath(projectRoot);
     const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
     const servers = sanitizeServerKeys(config.mcpServers);
-    const merged = mergeMcpIntoAgent(existing, servers as Record<string, object>);
+    const merged = options?.previouslyOwned
+      ? managedMergeMcp(existing, servers as Record<string, object>, options.previouslyOwned)
+      : mergeMcpIntoAgent(existing, servers as Record<string, object>);
     const dir = path.dirname(configPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     saveJsonFile(configPath, merged);

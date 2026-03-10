@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CodexAgent } from '../../agents/codex.js';
+import { sanitizeMcpName } from '../../agents/json-utils.js';
 import { getCodexDir, getProjectCodexSkillsDir } from '../../config/paths.js';
 import { distributeCodexSubagents } from '../../subagents/codex-distribute.js';
 import type { ApplicationTarget } from '../types.js';
@@ -16,7 +17,9 @@ export const codexTarget: ApplicationTarget = {
     configPath: () => adapter.configPath(),
     projectConfigPath: (root) => adapter.projectConfigPath(root),
     applyConfig: (config) => adapter.applyConfig(config),
-    applyProjectConfig: (root, config) => adapter.applyProjectConfig?.(root, config),
+    applyProjectConfig: (root, config, options) =>
+      adapter.applyProjectConfig?.(root, config, options),
+    sanitizeServerName: sanitizeMcpName,
   },
 
   rules: {
