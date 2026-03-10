@@ -1,12 +1,16 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ConfigScope } from '../config/scope.js';
+import { recordRulesEntry } from '../manifest/store.js';
+import type { ProjectDistributionManifest } from '../manifest/types.js';
 import {
   filterInstalled,
   getActiveTargetsForSection,
   getTargetsForSection,
 } from '../targets/registry.js';
 import { RULE_INDIRECT_AGENTS, RULE_PER_FILE_AGENTS, RULE_UNSUPPORTED_AGENTS } from './agents.js';
+import { isDedicatedAsbRulesFile, mergeRulesBlock, removeRulesBlock } from './block-merge.js';
 import type { ComposedRules } from './composer.js';
 import { composeActiveRulesForApplication } from './composer.js';
 import { loadRuleLibrary } from './library.js';
@@ -31,6 +35,12 @@ interface DistributionOptions {
   force?: boolean;
   activeAppIds?: string[];
   assumeInstalled?: ReadonlySet<string>;
+  /** Project distribution manifest for managed mode */
+  manifest?: ProjectDistributionManifest;
+  /** Project distribution mode */
+  projectMode?: 'managed' | 'exclusive' | 'none';
+  /** Rules placement in shared files */
+  rulesPlacement?: 'prepend' | 'append';
 }
 
 function ensureDirectory(filePath: string): void {
@@ -77,6 +87,9 @@ export function distributeRules(
   const agentSyncUpdates = new Map<string, { hash: string; updatedAt: string }>();
 
   let firstComposed: ComposedRules | null = null;
+  const managedProjectRoot = scope?.project;
+  const isManaged = managedProjectRoot && (options?.projectMode ?? 'exclusive') === 'managed';
+  const placement = options?.rulesPlacement ?? 'prepend';
 
   const activeAppIds = options?.activeAppIds;
   const targets = filterInstalled(
@@ -85,6 +98,10 @@ export function distributeRules(
       : getTargetsForSection('rules'),
     options?.assumeInstalled
   );
+
+  // Dedup shared physical paths: multiple targets (codex/gemini/opencode) may
+  // point to the same file (e.g. AGENTS.md). Write once per physical path.
+  const writtenPaths = new Map<string, string>();
 
   for (const target of targets) {
     if (!target.rules) continue;
@@ -97,12 +114,51 @@ export function distributeRules(
     }
 
     const filePath = handler.resolveFilePath(scope);
+    const resolvedPath = path.resolve(filePath);
+
+    // Shared-path dedup: if another target already wrote to this path, skip
+    if (writtenPaths.has(resolvedPath)) {
+      const prevContent = writtenPaths.get(resolvedPath);
+      const thisContent = handler.render(document.content);
+      if (prevContent !== thisContent && document.content.length > 0) {
+        results.push({
+          agent,
+          filePath,
+          status: 'skipped',
+          reason: `shared path already written`,
+        });
+      } else {
+        results.push({ agent, filePath, status: 'skipped', reason: 'deduped' });
+      }
+      agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
+      continue;
+    }
+
+    const useBlockMerge = isManaged && !isDedicatedAsbRulesFile(filePath);
 
     if (document.content.length === 0) {
       try {
         if (fs.existsSync(filePath)) {
-          fs.unlinkSync(filePath);
-          results.push({ agent, filePath, status: 'deleted', reason: 'no-rules-configured' });
+          if (useBlockMerge) {
+            // Shared file: only remove ASB block, preserve rest
+            const existing = fs.readFileSync(filePath, 'utf-8');
+            const cleaned = removeRulesBlock(existing);
+            if (cleaned !== existing) {
+              if (cleaned.trim().length === 0) {
+                // File would be empty after removing block - keep empty file
+                fs.writeFileSync(filePath, '', 'utf-8');
+              } else {
+                fs.writeFileSync(filePath, cleaned, 'utf-8');
+              }
+              results.push({ agent, filePath, status: 'written', reason: 'block-removed' });
+            } else {
+              results.push({ agent, filePath, status: 'skipped', reason: 'no-rules-configured' });
+            }
+          } else {
+            // Dedicated file: delete entirely
+            fs.unlinkSync(filePath);
+            results.push({ agent, filePath, status: 'deleted', reason: 'no-rules-configured' });
+          }
         } else {
           results.push({ agent, filePath, status: 'skipped', reason: 'no-rules-configured' });
         }
@@ -114,7 +170,7 @@ export function distributeRules(
       continue;
     }
 
-    const finalContent = handler.render(document.content);
+    const renderedContent = handler.render(document.content);
 
     let existingContent: string | null = null;
     try {
@@ -125,12 +181,56 @@ export function distributeRules(
       existingContent = null;
     }
 
+    if (useBlockMerge) {
+      // Block merge: insert/replace ASB block in shared file
+      const base = existingContent ?? '';
+      const merged = mergeRulesBlock(base, renderedContent, placement);
+
+      if (!forceRewrite && existingContent !== null && existingContent === merged) {
+        results.push({ agent, filePath, status: 'skipped', reason: 'up-to-date' });
+      } else {
+        try {
+          ensureDirectory(filePath);
+          fs.writeFileSync(filePath, merged, 'utf-8');
+          results.push({
+            agent,
+            filePath,
+            status: 'written',
+            reason: existingContent !== null ? 'block-updated' : 'block-created',
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          results.push({ agent, filePath, status: 'error', error: message });
+        }
+      }
+      agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
+      writtenPaths.set(resolvedPath, renderedContent);
+
+      // Record in manifest
+      if (options?.manifest && managedProjectRoot) {
+        recordRulesEntry(
+          options.manifest,
+          path.relative(path.resolve(managedProjectRoot), filePath),
+          {
+            relativePath: path.relative(path.resolve(managedProjectRoot), filePath),
+            mode: 'block',
+            targetIds: [agent],
+            hash: createHash('sha256').update(renderedContent).digest('hex'),
+            updatedAt: timestamp,
+          }
+        );
+      }
+      continue;
+    }
+
+    // Full file replace (dedicated files or exclusive mode)
     const hadExistingFile = existingContent !== null;
-    const contentMatches = existingContent !== null && existingContent === finalContent;
+    const contentMatches = existingContent !== null && existingContent === renderedContent;
 
     if (!forceRewrite && contentMatches) {
       results.push({ agent, filePath, status: 'skipped', reason: 'up-to-date' });
       agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
+      writtenPaths.set(resolvedPath, renderedContent);
       continue;
     }
 
@@ -138,9 +238,10 @@ export function distributeRules(
 
     try {
       ensureDirectory(filePath);
-      fs.writeFileSync(filePath, finalContent, 'utf-8');
+      fs.writeFileSync(filePath, renderedContent, 'utf-8');
       agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       results.push({ agent, filePath, status: 'written', reason });
+      writtenPaths.set(resolvedPath, renderedContent);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       results.push({ agent, filePath, status: 'error', error: message });
