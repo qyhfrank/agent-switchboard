@@ -5,6 +5,7 @@ import {
   type DistributeOutcome,
   type DistributionResult,
   distributeLibrary,
+  type LibraryManagedOptions,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
@@ -33,7 +34,8 @@ export function resolveCommandFilePath(platform: string, id: string, scope?: Con
 export function distributeCommands(
   scope?: ConfigScope,
   activeAppIds?: string[],
-  assumeInstalled?: ReadonlySet<string>
+  assumeInstalled?: ReadonlySet<string>,
+  managedOptions?: LibraryManagedOptions
 ): CommandDistributionOutcome {
   const entries = loadCommandLibrary(scope);
   const byId = new Map(entries.map((e) => [e.id, e]));
@@ -87,6 +89,9 @@ export function distributeCommands(
     cleanup,
     scope,
     filterSelected,
+    manifest: managedOptions?.manifest,
+    projectMode: managedOptions?.projectMode,
+    collision: managedOptions?.collision,
   }) as { results: DistributionResult<string>[] };
 
   const codexWrites = outcome.results.filter(
