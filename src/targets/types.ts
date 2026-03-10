@@ -27,6 +27,11 @@ export interface GenericLibraryEntry {
   readonly content: string;
 }
 
+export interface ManagedMcpOptions {
+  /** Server names previously owned by ASB (for managed merge) */
+  previouslyOwned?: ReadonlySet<string>;
+}
+
 /** MCP distribution handler */
 export interface TargetMcpHandler {
   configPath(): string;
@@ -34,8 +39,12 @@ export interface TargetMcpHandler {
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void;
   applyProjectConfig?(
     projectRoot: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    options?: ManagedMcpOptions
   ): void;
+  /** Transform a server name to match what this adapter writes to config.
+   *  Used by manifest recording to store the actual key written to disk. */
+  sanitizeServerName?(name: string): string;
 }
 
 /** Rules distribution handler */

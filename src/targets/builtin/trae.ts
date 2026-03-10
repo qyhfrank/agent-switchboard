@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { sanitizeMcpName } from '../../agents/json-utils.js';
 import { TraeAgent } from '../../agents/trae.js';
 import {
   getProjectTraeDir,
@@ -40,7 +41,9 @@ function createTraeTarget(variant: TraeVariant): ApplicationTarget {
       configPath: () => adapter.configPath(),
       projectConfigPath: (root) => adapter.projectConfigPath(root),
       applyConfig: (config) => adapter.applyConfig(stripMcpType(config)),
-      applyProjectConfig: (root, config) => adapter.applyProjectConfig(root, stripMcpType(config)),
+      applyProjectConfig: (root, config, options) =>
+        adapter.applyProjectConfig(root, stripMcpType(config), options),
+      sanitizeServerName: sanitizeMcpName,
     },
 
     rules: {

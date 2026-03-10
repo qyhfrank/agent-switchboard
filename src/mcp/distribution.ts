@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
 import { resolveScopedSectionConfig } from '../config/application-config.js';
@@ -8,8 +9,16 @@ import type { ConfigScope } from '../config/scope.js';
 import { scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { loadMcpEnabledState } from '../library/state.js';
+import {
+  computeMcpCleanupSet,
+  getOwnedMcpServers,
+  recordMcpEntry,
+  removeMcpEntry,
+} from '../manifest/store.js';
+import type { ProjectDistributionManifest } from '../manifest/types.js';
 import { initTargets } from '../targets/init.js';
 import { getTargetById } from '../targets/registry.js';
+import type { ManagedMcpOptions } from '../targets/types.js';
 import { shortenPath } from '../util/cli.js';
 
 export interface McpDistributionResult {
@@ -23,6 +32,10 @@ export interface McpDistributionResult {
 export interface DistributeMcpOptions {
   useSpinner?: boolean;
   assumeInstalled?: ReadonlySet<string>;
+  /** Project distribution manifest for managed merge (project scope only) */
+  manifest?: ProjectDistributionManifest;
+  /** Project distribution mode */
+  projectMode?: 'managed' | 'exclusive' | 'none';
 }
 
 function readFileSafe(filePath: string): string | null {
@@ -110,7 +123,39 @@ export async function distributeMcp(
       if (scope?.project && mcpHandler.applyProjectConfig) {
         const projectPath = mcpHandler.projectConfigPath?.(scope.project) ?? 'project config';
         const before = readFileSafe(projectPath);
-        mcpHandler.applyProjectConfig(scope.project, configToApply);
+
+        // Build managed merge options if manifest is provided
+        const manifest = options?.manifest;
+        const isManaged = manifest && (options?.projectMode ?? 'exclusive') === 'managed';
+        const sanitize = mcpHandler.sanitizeServerName;
+        const managedOpts: ManagedMcpOptions | undefined = isManaged
+          ? { previouslyOwned: getOwnedMcpServers(manifest, agentId) }
+          : undefined;
+
+        mcpHandler.applyProjectConfig(scope.project, configToApply, managedOpts);
+
+        // Record owned servers in manifest (using sanitized names to match on-disk keys)
+        if (isManaged && manifest) {
+          const timestamp = new Date().toISOString();
+          for (const serverName of Object.keys(configToApply.mcpServers)) {
+            const manifestName = sanitize ? sanitize(serverName) : serverName;
+            recordMcpEntry(manifest, manifestName, {
+              relativePath: path.relative(path.resolve(scope.project), projectPath),
+              targetId: agentId,
+              serverKey: manifestName,
+              updatedAt: timestamp,
+            });
+          }
+          // Remove no-longer-enabled servers from manifest
+          const currentDesired = new Set(
+            Object.keys(configToApply.mcpServers).map((n) => (sanitize ? sanitize(n) : n))
+          );
+          const toRemove = computeMcpCleanupSet(manifest, currentDesired, agentId);
+          for (const name of toRemove) {
+            removeMcpEntry(manifest, name);
+          }
+        }
+
         const after = readFileSafe(projectPath);
         const changed = before !== after;
         persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(projectPath))}`);

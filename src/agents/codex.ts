@@ -37,11 +37,14 @@ export class CodexAgent implements AgentAdapter {
 
   applyProjectConfig(
     projectRoot: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
     const configPath = this.projectConfigPath(projectRoot);
     const content = this._loadConfig(configPath);
-    const updated = mergeConfig(content, sanitizeServerKeys(config.mcpServers));
+    const updated = options?.previouslyOwned
+      ? managedMergeConfig(content, sanitizeServerKeys(config.mcpServers), options.previouslyOwned)
+      : mergeConfig(content, sanitizeServerKeys(config.mcpServers));
     this._saveConfig(configPath, updated);
     this._ensureProjectTrusted(projectRoot);
   }
@@ -130,6 +133,74 @@ export function mergeConfig(
     if (Object.keys(otherTopLevel).length > 0) {
       // Cast to JsonMap type expected by tomlStringify
       otherToml = tomlStringify(otherTopLevel as Record<string, string | number | boolean>);
+    }
+  } catch {
+    otherToml = '';
+  }
+
+  const parts: string[] = [];
+  if (otherToml.trim().length > 0) parts.push(otherToml.trimEnd());
+  if (mcpToml.trim().length > 0) parts.push(mcpToml.trimEnd());
+
+  return `${parts.join('\n\n')}\n`;
+}
+
+/**
+ * Managed merge for TOML: preserve foreign servers, only upsert/remove ASB-owned.
+ */
+export function managedMergeConfig(
+  content: string,
+  mcpServers: Record<string, Omit<McpServer, 'enabled'>>,
+  previouslyOwned: ReadonlySet<string>
+): string {
+  let parsed: Record<string, unknown> = {};
+  try {
+    if (content && content.trim().length > 0) {
+      parsed = parseToml(content) as Record<string, unknown>;
+    }
+  } catch {
+    parsed = {};
+  }
+
+  const { mcp_servers: existingMcp, ...rest } = parsed;
+  const existingServers = (existingMcp as Record<string, unknown>) ?? {};
+
+  // Remove previously owned servers no longer in the new config
+  for (const name of previouslyOwned) {
+    if (!(name in mcpServers)) {
+      delete existingServers[name];
+    }
+  }
+
+  // Filter out SSE servers from new config
+  const filteredServers: Record<string, Omit<McpServer, 'enabled'>> = {};
+  for (const [name, server] of Object.entries(mcpServers)) {
+    const s = server as McpServerLike;
+    if (s.type === 'sse') continue;
+    filteredServers[name] = server;
+  }
+
+  // Merge ASB servers into existing (foreign servers preserved)
+  const mergedServerNames = new Set([
+    ...Object.keys(existingServers),
+    ...Object.keys(filteredServers),
+  ]);
+  const mergedForBuild: Record<string, Omit<McpServer, 'enabled'>> = {};
+  for (const name of mergedServerNames) {
+    if (name in filteredServers) {
+      mergedForBuild[name] = filteredServers[name];
+    } else {
+      // Foreign server - preserve as-is by converting back to McpServer shape
+      mergedForBuild[name] = existingServers[name] as Omit<McpServer, 'enabled'>;
+    }
+  }
+
+  const mcpToml = buildNestedToml(mergedForBuild);
+
+  let otherToml = '';
+  try {
+    if (Object.keys(rest).length > 0) {
+      otherToml = tomlStringify(rest as Record<string, string | number | boolean>);
     }
   } catch {
     otherToml = '';

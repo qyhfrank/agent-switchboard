@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { CursorAgent } from '../../agents/cursor.js';
+import { sanitizeMcpName } from '../../agents/json-utils.js';
 import { getCursorDir, getProjectCursorDir } from '../../config/paths.js';
 import { wrapFrontmatter } from '../../util/frontmatter.js';
 import type { ApplicationTarget, GenericLibraryEntry } from '../types.js';
@@ -40,7 +41,9 @@ export const cursorTarget: ApplicationTarget = {
     configPath: () => adapter.configPath(),
     projectConfigPath: (root) => adapter.projectConfigPath?.(root),
     applyConfig: (config) => adapter.applyConfig(config),
-    applyProjectConfig: (root, config) => adapter.applyProjectConfig?.(root, config),
+    applyProjectConfig: (root, config, options) =>
+      adapter.applyProjectConfig?.(root, config, options),
+    sanitizeServerName: sanitizeMcpName,
   },
 
   rules: {
