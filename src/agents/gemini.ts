@@ -51,6 +51,33 @@ function mergeMcpForGemini(
 }
 
 /**
+ * Managed merge for Gemini: preserve foreign servers, only upsert/remove ASB-owned.
+ */
+function managedMergeMcpForGemini(
+  agentConfig: JsonAgentConfig,
+  mcpServers: Record<string, Omit<McpServer, 'enabled'>>,
+  previouslyOwned: ReadonlySet<string>
+): JsonAgentConfig {
+  const merged: JsonAgentConfig = { ...agentConfig };
+  const existing = { ...(agentConfig.mcpServers ?? {}) };
+
+  for (const name of previouslyOwned) {
+    if (!(name in mcpServers)) {
+      delete existing[name];
+    }
+  }
+
+  for (const [name, server] of Object.entries(mcpServers)) {
+    const prev = (existing[name] as Record<string, unknown>) ?? {};
+    const mapped = mapServerForGemini(server);
+    existing[name] = { ...prev, ...mapped };
+  }
+
+  merged.mcpServers = existing;
+  return merged;
+}
+
+/**
  * Gemini CLI agent adapter
  * Config location: ~/.gemini/settings.json
  */
@@ -77,12 +104,14 @@ export class GeminiAgent implements AgentAdapter {
 
   applyProjectConfig(
     projectRoot: string,
-    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }
+    config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
+    options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
     const configPath = this.projectConfigPath(projectRoot);
     const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
-    const merged = mergeMcpForGemini(existing, config.mcpServers);
-    // Ensure .gemini directory exists
+    const merged = options?.previouslyOwned
+      ? managedMergeMcpForGemini(existing, config.mcpServers, options.previouslyOwned)
+      : mergeMcpForGemini(existing, config.mcpServers);
     const dir = path.dirname(configPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     saveJsonFile(configPath, merged);

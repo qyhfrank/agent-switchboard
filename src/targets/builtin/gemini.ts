@@ -27,7 +27,8 @@ export const geminiTarget: ApplicationTarget = {
     configPath: () => adapter.configPath(),
     projectConfigPath: (root) => adapter.projectConfigPath(root),
     applyConfig: (config) => adapter.applyConfig(config),
-    applyProjectConfig: (root, config) => adapter.applyProjectConfig(root, config),
+    applyProjectConfig: (root, config, options) =>
+      adapter.applyProjectConfig(root, config, options),
   },
 
   rules: {
