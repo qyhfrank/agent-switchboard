@@ -151,17 +151,15 @@ export function distributeRules(
                 fs.writeFileSync(filePath, cleaned, 'utf-8');
               }
               results.push({ agent, filePath, status: 'written', reason: 'block-removed' });
-            } else {
-              results.push({ agent, filePath, status: 'skipped', reason: 'no-rules-configured' });
             }
+            // else: no ASB block in file, nothing to do - skip silently
           } else {
             // Dedicated file: delete entirely
             fs.unlinkSync(filePath);
             results.push({ agent, filePath, status: 'deleted', reason: 'no-rules-configured' });
           }
-        } else {
-          results.push({ agent, filePath, status: 'skipped', reason: 'no-rules-configured' });
         }
+        // else: file doesn't exist and no rules configured - skip silently
         agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
