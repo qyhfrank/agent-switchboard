@@ -20,15 +20,17 @@ import { withTempDir } from './helpers/tmp.js';
 
 test('loadManifest returns empty manifest when file does not exist', () => {
   withTempDir((dir) => {
-    const manifest = loadManifest(dir);
-    assert.equal(manifest.version, 1);
-    assert.deepStrictEqual(manifest.sections, {});
+    const result = loadManifest(dir);
+    assert.equal(result.existedOnDisk, false);
+    assert.equal(result.corrupt, false);
+    assert.equal(result.manifest.version, 1);
+    assert.deepStrictEqual(result.manifest.sections, {});
   });
 });
 
 test('saveManifest creates directory and writes manifest', () => {
   withTempDir((dir) => {
-    const manifest = loadManifest(dir);
+    const { manifest } = loadManifest(dir);
     recordLibraryEntry(manifest, 'commands', 'test-cmd', {
       relativePath: '.claude/commands/test-cmd.md',
       targetId: 'claude-code',
@@ -41,8 +43,8 @@ test('saveManifest creates directory and writes manifest', () => {
     assert.ok(fs.existsSync(filePath));
 
     const reloaded = loadManifest(dir);
-    assert.equal(reloaded.version, 1);
-    const entry = getLibraryEntry(reloaded, 'commands', 'test-cmd', 'claude-code');
+    assert.equal(reloaded.manifest.version, 1);
+    const entry = getLibraryEntry(reloaded.manifest, 'commands', 'test-cmd', 'claude-code');
     assert.ok(entry);
     assert.equal(entry.targetId, 'claude-code');
   });
@@ -253,27 +255,31 @@ test('getLibraryEntry filters by targetId', () => {
   assert.equal(getLibraryEntry(manifest, 'commands', 'my-cmd', 'claude-code'), undefined);
 });
 
-test('loadManifest handles corrupt JSON gracefully', () => {
+test('loadManifest flags corrupt JSON', () => {
   withTempDir((dir) => {
     const filePath = resolveManifestPath(dir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, 'not valid json', 'utf-8');
 
-    const manifest = loadManifest(dir);
-    assert.equal(manifest.version, 1);
-    assert.deepStrictEqual(manifest.sections, {});
+    const result = loadManifest(dir);
+    assert.equal(result.existedOnDisk, true);
+    assert.equal(result.corrupt, true);
+    assert.equal(result.manifest.version, 1);
+    assert.deepStrictEqual(result.manifest.sections, {});
   });
 });
 
-test('loadManifest rejects unsupported version', () => {
+test('loadManifest flags unsupported version as corrupt', () => {
   withTempDir((dir) => {
     const filePath = resolveManifestPath(dir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({ version: 99, sections: {} }), 'utf-8');
 
-    const manifest = loadManifest(dir);
-    assert.equal(manifest.version, 1);
-    assert.deepStrictEqual(manifest.sections, {});
+    const result = loadManifest(dir);
+    assert.equal(result.existedOnDisk, true);
+    assert.equal(result.corrupt, true);
+    assert.equal(result.manifest.version, 1);
+    assert.deepStrictEqual(result.manifest.sections, {});
   });
 });
 

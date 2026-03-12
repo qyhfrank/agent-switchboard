@@ -87,9 +87,9 @@ export class OpencodeAgent implements AgentAdapter {
       try {
         const raw = fs.readFileSync(filePath, 'utf-8');
         current = parseConfigContent(raw, isJsonc);
-      } catch {
-        // If unreadable, start fresh but do not throw to avoid blocking apply on one agent
-        current = {};
+      } catch (error) {
+        console.warn(`[opencode] Failed to parse ${filePath}: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`);
+        return;
       }
     }
 

@@ -3,12 +3,11 @@
  * Manages MCP server configuration for Gemini CLI
  */
 
-import fs from 'node:fs';
 import path from 'node:path';
 import { getGeminiSettingsPath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { AgentAdapter } from './adapter.js';
-import { type JsonAgentConfig, loadJsonFile, saveJsonFile } from './json-utils.js';
+import { applyJsonMcpConfig } from './json-utils.js';
 
 /**
  * Map MCP server config to Gemini format
@@ -16,65 +15,16 @@ import { type JsonAgentConfig, loadJsonFile, saveJsonFile } from './json-utils.j
  * - sse: {url} (no type field)
  * - http: {httpUrl} (Gemini uses httpUrl instead of url for HTTP transport)
  */
-function mapServerForGemini(server: Omit<McpServer, 'enabled'>): Record<string, unknown> {
+function mapServerForGemini(server: object): Record<string, unknown> {
   const { type, url, command, args, env, ...rest } = server as Record<string, unknown>;
 
   if (type === 'http' && typeof url === 'string') {
-    // HTTP transport uses httpUrl field in Gemini
     return { httpUrl: url, ...rest };
   }
   if ((type === 'sse' || type === undefined) && typeof url === 'string' && !command) {
-    // SSE transport (or inferred remote) uses url field
     return { url, ...rest };
   }
-  // stdio transport
   return { command, args, env, ...rest };
-}
-
-/**
- * Merge MCP servers into Gemini config with proper field mapping
- */
-function mergeMcpForGemini(
-  agentConfig: JsonAgentConfig,
-  mcpServers: Record<string, Omit<McpServer, 'enabled'>>
-): JsonAgentConfig {
-  const merged: JsonAgentConfig = { ...agentConfig };
-  merged.mcpServers = {};
-
-  for (const [name, server] of Object.entries(mcpServers)) {
-    const existing = (agentConfig.mcpServers?.[name] as Record<string, unknown>) ?? {};
-    const mapped = mapServerForGemini(server);
-    merged.mcpServers[name] = { ...existing, ...mapped };
-  }
-
-  return merged;
-}
-
-/**
- * Managed merge for Gemini: preserve foreign servers, only upsert/remove ASB-owned.
- */
-function managedMergeMcpForGemini(
-  agentConfig: JsonAgentConfig,
-  mcpServers: Record<string, Omit<McpServer, 'enabled'>>,
-  previouslyOwned: ReadonlySet<string>
-): JsonAgentConfig {
-  const merged: JsonAgentConfig = { ...agentConfig };
-  const existing = { ...(agentConfig.mcpServers ?? {}) };
-
-  for (const name of previouslyOwned) {
-    if (!(name in mcpServers)) {
-      delete existing[name];
-    }
-  }
-
-  for (const [name, server] of Object.entries(mcpServers)) {
-    const prev = (existing[name] as Record<string, unknown>) ?? {};
-    const mapped = mapServerForGemini(server);
-    existing[name] = { ...prev, ...mapped };
-  }
-
-  merged.mcpServers = existing;
-  return merged;
 }
 
 /**
@@ -96,10 +46,10 @@ export class GeminiAgent implements AgentAdapter {
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
-    const configPath = this.configPath();
-    const agentConfig = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
-    const merged = mergeMcpForGemini(agentConfig, config.mcpServers);
-    saveJsonFile(configPath, merged);
+    applyJsonMcpConfig(this.configPath(), config.mcpServers as Record<string, object>, {
+      sanitize: false,
+      serverMapper: mapServerForGemini,
+    });
   }
 
   applyProjectConfig(
@@ -107,13 +57,10 @@ export class GeminiAgent implements AgentAdapter {
     config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
     options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
-    const configPath = this.projectConfigPath(projectRoot);
-    const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
-    const merged = options?.previouslyOwned
-      ? managedMergeMcpForGemini(existing, config.mcpServers, options.previouslyOwned)
-      : mergeMcpForGemini(existing, config.mcpServers);
-    const dir = path.dirname(configPath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    saveJsonFile(configPath, merged);
+    applyJsonMcpConfig(this.projectConfigPath(projectRoot), config.mcpServers as Record<string, object>, {
+      sanitize: false,
+      serverMapper: mapServerForGemini,
+      previouslyOwned: options?.previouslyOwned,
+    });
   }
 }
