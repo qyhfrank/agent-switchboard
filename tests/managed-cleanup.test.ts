@@ -117,7 +117,7 @@ test('recordLibraryEntry updates manifest on successful write', () => {
 
 test('manifest-driven cleanup handles transition from no manifest to managed', () => {
   // When there's no prior manifest, cleanup set should be empty (no previously owned items)
-  const freshManifest = loadManifest('/nonexistent/path');
+  const { manifest: freshManifest } = loadManifest('/nonexistent/path');
   const toClean = computeLibraryCleanupSet(freshManifest, 'commands', new Set(['new-cmd']));
   assert.deepStrictEqual(toClean, []);
 });
@@ -155,7 +155,7 @@ test('bootstrap sync adopts pre-existing skill directories into manifest', () =>
     assert.ok(fs.existsSync(skillDir), 'skill should exist after initial sync');
 
     // Now run managed sync with empty manifest (simulating first managed sync)
-    const manifest = loadManifest(projectRoot);
+    const { manifest } = loadManifest(projectRoot);
     assert.deepStrictEqual(manifest.sections, {}, 'manifest should start empty');
 
     const outcome = distributeSkills(
@@ -186,7 +186,7 @@ test('bootstrap sync adopts pre-existing skill directories into manifest', () =>
     saveManifest(projectRoot, manifest);
 
     // Second managed sync: manifest is populated, conflict detection is active
-    const manifest2 = loadManifest(projectRoot);
+    const { manifest: manifest2 } = loadManifest(projectRoot);
     assert.ok(Object.keys(manifest2.sections.skills ?? {}).length > 0);
   });
 });
