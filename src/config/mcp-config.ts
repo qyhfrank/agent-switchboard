@@ -70,11 +70,18 @@ export function loadMcpConfigWithPlugins(scope?: ConfigScope): McpConfig {
   if (pluginIndex.mcpServers.length === 0) return base;
 
   const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-  const enabledPlugins = new Set(config.plugins.enabled);
+
+  // Resolve enabled plugin refs to descriptor IDs via PluginIndex.get(),
+  // which handles both bare names and name@source disambiguation.
+  const enabledPluginIds = new Set<string>();
+  for (const ref of config.plugins.enabled) {
+    const descriptor = pluginIndex.get(ref);
+    if (descriptor) enabledPluginIds.add(descriptor.id);
+  }
 
   const merged = { ...base.mcpServers };
   for (const ps of pluginIndex.mcpServers) {
-    if (!(ps.serverId in merged) && enabledPlugins.has(ps.pluginId)) {
+    if (!(ps.serverId in merged) && enabledPluginIds.has(ps.pluginId)) {
       merged[ps.serverId] = ps.server;
     }
   }
