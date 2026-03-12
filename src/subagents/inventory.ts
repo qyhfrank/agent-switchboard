@@ -1,6 +1,11 @@
 import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, type SectionState } from '../library/state.js';
-import { listExtraKeys, pickFirstPlatformArray, pickFirstPlatformString } from '../util/extras.js';
+import {
+  PLATFORM_PRIORITY,
+  listExtraKeys,
+  pickFirstPlatformArray,
+  pickFirstPlatformString,
+} from '../util/extras.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
 
 export interface SubagentInventoryRow {
@@ -43,19 +48,11 @@ function getSubagentTitle(entry: SubagentEntry): string | null {
 }
 
 function getSubagentModel(entry: SubagentEntry): string | null {
-  return pickFirstPlatformString(
-    entry.metadata.extras,
-    ['claude-code', 'opencode', 'cursor', 'codex'],
-    'model'
-  );
+  return pickFirstPlatformString(entry.metadata.extras, [...PLATFORM_PRIORITY], 'model');
 }
 
 function getSubagentTools(entry: SubagentEntry): string[] {
-  return pickFirstPlatformArray(
-    entry.metadata.extras,
-    ['claude-code', 'opencode', 'cursor', 'codex'],
-    'tools'
-  );
+  return pickFirstPlatformArray(entry.metadata.extras, [...PLATFORM_PRIORITY], 'tools');
 }
 
 function buildSubagentRow(

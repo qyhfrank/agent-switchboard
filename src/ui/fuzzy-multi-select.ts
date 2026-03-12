@@ -56,7 +56,10 @@ const prompt = createPrompt<string[], PromptConfig>((config, done) => {
   const [filter, setFilter] = useState('');
   const [active, setActive] = useState(0);
   const [error, setError] = useState<string | undefined>();
-  const selectedRef = useRef<Set<string>>(new Set(initialSelected ?? []));
+  const validChoiceIds = useMemo(() => new Set(choices.map((c) => c.value)), [choices]);
+  const selectedRef = useRef<Set<string>>(
+    new Set((initialSelected ?? []).filter((id) => validChoiceIds.has(id)))
+  );
   const [renderTick, setRenderTick] = useState(0);
 
   const prefix = usePrefix({ status });

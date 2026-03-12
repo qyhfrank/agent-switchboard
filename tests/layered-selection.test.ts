@@ -153,7 +153,6 @@ test('project skill distribution does not materialize inherited enabled entries 
 test('shouldPersistSelection requires explicit empty override when only inherited entries exist', () => {
   assert.equal(
     shouldPersistSelection({
-      currentEnabled: [],
       effectiveEnabled: ['user-skill'],
       selectedEnabled: [],
     }),
@@ -161,7 +160,6 @@ test('shouldPersistSelection requires explicit empty override when only inherite
   );
   assert.equal(
     shouldPersistSelection({
-      currentEnabled: [],
       effectiveEnabled: [],
       selectedEnabled: [],
     }),
