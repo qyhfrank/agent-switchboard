@@ -77,10 +77,21 @@ function cleanupLegacyCursorMdcFiles(scope?: ConfigScope): void {
   }
 }
 
+function shouldCleanupLegacyCursorMdcFiles(activeAppIds?: string[]): boolean {
+  return !activeAppIds || activeAppIds.includes('cursor');
+}
+
 export function distributeRules(
   options?: DistributionOptions,
   scope?: ConfigScope
 ): DistributionOutcome {
+  if (scope?.project && options?.projectMode === 'none') {
+    return {
+      composed: { content: '', hash: '', sections: [] },
+      results: [],
+    };
+  }
+
   const results: DistributionResult[] = [];
   const timestamp = new Date().toISOString();
   const forceRewrite = options?.force === true;
@@ -248,7 +259,9 @@ export function distributeRules(
     }
   }
 
-  cleanupLegacyCursorMdcFiles(scope);
+  if (shouldCleanupLegacyCursorMdcFiles(activeAppIds)) {
+    cleanupLegacyCursorMdcFiles(scope);
+  }
 
   if (agentSyncUpdates.size > 0) {
     updateRuleAgentSync((current) => {

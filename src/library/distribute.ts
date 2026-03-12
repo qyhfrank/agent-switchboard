@@ -5,6 +5,7 @@ import type { ConfigScope } from '../config/scope.js';
 import {
   computeLibraryCleanupSet,
   getLibraryEntry,
+  hasOtherLibraryEntryAtPath,
   type LibraryManifestSection,
   recordLibraryEntry,
   removeLibraryEntry,
@@ -76,6 +77,10 @@ export interface DistributeOutcome<Platform extends string> {
 export function distributeLibrary<TEntry, Platform extends string>(
   opts: DistributeOptions<TEntry, Platform>
 ): DistributeOutcome<Platform> {
+  if (opts.scope?.project && opts.projectMode === 'none') {
+    return { results: [] };
+  }
+
   const agentSync = loadLibraryAgentSync(opts.section);
   const results: DistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
@@ -128,12 +133,12 @@ export function distributeLibrary<TEntry, Platform extends string>(
           platform as string
         );
         if (!manifestEntry && collision !== 'takeover') {
-          // Foreign file exists at target path - skip (warn-skip and error both skip)
+          const isHardError = collision === 'error';
           writtenOrSkipped.push({
             platform,
             filePath,
-            status: 'conflict',
-            reason: 'foreign file exists',
+            status: isHardError ? 'error' : 'conflict',
+            ...(isHardError ? { error: 'foreign file exists' } : { reason: 'foreign file exists' }),
             entryId,
           });
           // Intentionally not included in aggregate hash: content was not
@@ -205,16 +210,39 @@ export function distributeLibrary<TEntry, Platform extends string>(
         for (const item of toRemove) {
           const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
           try {
-            if (fs.existsSync(entryPath)) {
+            const sharedPathStillOwned = hasOtherLibraryEntryAtPath(
+              manifest,
+              manifestSection,
+              item.entry.relativePath,
+              item.id,
+              platform as string
+            );
+            if (sharedPathStillOwned) {
+              results.push({
+                platform,
+                filePath: entryPath,
+                status: 'skipped',
+                reason: 'shared path still owned by another target',
+                entryId: item.id,
+              });
+            } else if (fs.existsSync(entryPath)) {
               fs.unlinkSync(entryPath);
+              results.push({
+                platform,
+                filePath: entryPath,
+                status: 'deleted',
+                reason: 'orphan',
+                entryId: item.id,
+              });
+            } else {
+              results.push({
+                platform,
+                filePath: entryPath,
+                status: 'deleted',
+                reason: 'orphan',
+                entryId: item.id,
+              });
             }
-            results.push({
-              platform,
-              filePath: entryPath,
-              status: 'deleted',
-              reason: 'orphan',
-              entryId: item.id,
-            });
             removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);

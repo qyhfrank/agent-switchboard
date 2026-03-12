@@ -403,6 +403,26 @@ test('distributeRules: cursor cleanup does not delete non-library .mdc files', (
   });
 });
 
+test('distributeRules: cursor cleanup does not run when cursor is inactive', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'keep.md'), 'Keep this.\n');
+
+    const cursorRulesDir = path.join(agentsHome, '.cursor', 'rules');
+    fs.mkdirSync(cursorRulesDir, { recursive: true });
+    fs.writeFileSync(path.join(cursorRulesDir, 'keep.mdc'), 'legacy per-rule file\n');
+
+    saveRuleState({ ...DEFAULT_RULE_STATE, enabled: ['keep'], agentSync: {} });
+    distributeRules({ activeAppIds: ['claude-code'] });
+
+    assert.ok(
+      fs.existsSync(path.join(cursorRulesDir, 'keep.mdc')),
+      'legacy keep.mdc should remain when cursor is not part of this sync'
+    );
+  });
+});
+
 test('distributeRules: cursor skips unchanged asb-rules.mdc', () => {
   withTempHomes(() => {
     simulateAppsInstalled();

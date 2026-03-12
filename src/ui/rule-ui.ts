@@ -23,7 +23,7 @@ export async function showRuleSelector(
 ): Promise<RuleSelectionResult | null> {
   const scope = options?.scope;
   const pageSize = options?.pageSize ?? 20;
-  const { rules, effectiveState } = loadRuleRuntimeContext(scope);
+  const { rules, activeState } = loadRuleRuntimeContext(scope);
 
   if (rules.length === 0) {
     console.log(chalk.yellow('⚠ No rule snippets found.'));
@@ -95,8 +95,8 @@ export async function showRuleSelector(
   while (true) {
     const selection = await fuzzyMultiSelect({
       message: 'Select rules to enable',
-      choices: buildChoiceList(effectiveState.enabled),
-      initialSelected: effectiveState.enabled,
+      choices: buildChoiceList(activeState.enabled),
+      initialSelected: activeState.enabled,
       pageSize,
       allowEmpty: true,
     });
@@ -112,7 +112,7 @@ export async function showRuleSelector(
         return {
           enabled: [],
           explicitEmpty: shouldPersistSelection({
-            effectiveEnabled: effectiveState.enabled,
+            effectiveEnabled: activeState.enabled,
             selectedEnabled: [],
           }),
         };

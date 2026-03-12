@@ -227,8 +227,13 @@ function cleanOrphanBundleDirs(
 export function distributeHooks(
   scope?: ConfigScope,
   activeAppIds?: string[],
-  assumeInstalled?: ReadonlySet<string>
+  assumeInstalled?: ReadonlySet<string>,
+  options?: { projectMode?: 'managed' | 'exclusive' | 'none' }
 ): HookDistributionOutcome {
+  if (scope?.project && options?.projectMode === 'none') {
+    return { results: [] };
+  }
+
   const results: HookDistributionOutcome['results'] = [];
   const platform: HookPlatform = 'claude-code';
 

@@ -5,6 +5,7 @@ import type { ConfigScope } from '../config/scope.js';
 import {
   computeLibraryCleanupSet,
   getLibraryEntry,
+  hasOtherLibraryEntryAtPath,
   type LibraryManifestSection,
   recordLibraryEntry,
   removeLibraryEntry,
@@ -77,6 +78,44 @@ export interface DistributeBundleOutcome<Platform extends string> {
   results: BundleDistributionResult<Platform>[];
 }
 
+function listRelativeFiles(dir: string, prefix = ''): string[] {
+  const files: string[] = [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listRelativeFiles(abs, rel));
+      continue;
+    }
+    files.push(rel);
+  }
+
+  return files;
+}
+
+function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
+  if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
+    return false;
+  }
+
+  const expected = new Map(files.map((file) => [file.relativePath, file.sourcePath]));
+  const actualFiles = listRelativeFiles(targetDir);
+  if (actualFiles.length !== files.length) return false;
+
+  for (const rel of actualFiles) {
+    const sourcePath = expected.get(rel);
+    if (!sourcePath) return false;
+
+    const sourceContent = fs.readFileSync(sourcePath);
+    const targetContent = fs.readFileSync(path.join(targetDir, rel));
+    if (Buffer.compare(sourceContent, targetContent) !== 0) return false;
+  }
+
+  return true;
+}
+
 /**
  * Distribute skill bundles (directories) to target platforms.
  * Copies all files in each skill directory, preserving structure.
@@ -84,6 +123,10 @@ export interface DistributeBundleOutcome<Platform extends string> {
 export function distributeBundle<TEntry, Platform extends string>(
   opts: DistributeBundleOptions<TEntry, Platform>
 ): DistributeBundleOutcome<Platform> {
+  if (opts.scope?.project && opts.projectMode === 'none') {
+    return { results: [] };
+  }
+
   const agentSync = loadLibraryAgentSync(opts.section);
   const results: BundleDistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
@@ -116,30 +159,33 @@ export function distributeBundle<TEntry, Platform extends string>(
       const targetDir = opts.resolveTargetDir(platform, entry);
       const files = opts.listFiles(entry);
       const entryId = opts.getId(entry);
+      const manifestEntry = manifest
+        ? getLibraryEntry(manifest, manifestSection, entryId, platform as string)
+        : undefined;
+      const canAdoptBootstrapDir =
+        manifest != null &&
+        isBootstrapSync &&
+        !manifestEntry &&
+        fs.existsSync(targetDir) &&
+        isAdoptableBundleDir(targetDir, files);
 
       // Conflict detection in managed mode: check if target dir exists but isn't owned.
-      // Skip during bootstrap (first managed sync) to adopt pre-existing content.
-      if (manifest && !isBootstrapSync && fs.existsSync(targetDir)) {
-        const manifestEntry = getLibraryEntry(
-          manifest,
-          manifestSection,
-          entryId,
-          platform as string
-        );
-        if (!manifestEntry && collision !== 'takeover') {
-          // Foreign directory exists at target path - skip
+      if (manifest && fs.existsSync(targetDir) && !manifestEntry && collision !== 'takeover') {
+        if (!canAdoptBootstrapDir) {
+          const isHardError = collision === 'error';
           results.push({
             platform,
             targetDir,
-            status: 'conflict',
-            reason: 'foreign directory exists',
+            status: isHardError ? 'error' : 'conflict',
+            ...(isHardError
+              ? { error: 'foreign directory exists' }
+              : { reason: 'foreign directory exists' }),
             entryId,
           });
           // Intentionally not included in aggregate hash: content was not
           // written, so it should not affect sync-state comparison.
           continue;
         }
-        // 'takeover' or manifestEntry exists: fall through to overwrite
       }
 
       let filesWritten = 0;
@@ -267,16 +313,39 @@ export function distributeBundle<TEntry, Platform extends string>(
         for (const item of toRemove) {
           const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
           try {
-            if (fs.existsSync(entryPath)) {
+            const sharedPathStillOwned = hasOtherLibraryEntryAtPath(
+              manifest,
+              manifestSection,
+              item.entry.relativePath,
+              item.id,
+              platform as string
+            );
+            if (sharedPathStillOwned) {
+              results.push({
+                platform,
+                targetDir: entryPath,
+                status: 'skipped',
+                reason: 'shared path still owned by another target',
+                entryId: item.id,
+              });
+            } else if (fs.existsSync(entryPath)) {
               rmDirRecursive(entryPath);
+              results.push({
+                platform,
+                targetDir: entryPath,
+                status: 'deleted',
+                reason: 'orphan',
+                entryId: item.id,
+              });
+            } else {
+              results.push({
+                platform,
+                targetDir: entryPath,
+                status: 'deleted',
+                reason: 'orphan',
+                entryId: item.id,
+              });
             }
-            results.push({
-              platform,
-              targetDir: entryPath,
-              status: 'deleted',
-              reason: 'orphan',
-              entryId: item.id,
-            });
             removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
