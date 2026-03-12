@@ -265,3 +265,33 @@ test('runSyncCommand aborts project managed sync when manifest is corrupt', asyn
     );
   });
 });
+
+test('runSyncCommand respects project distribution mode none', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    writeMcpConfig({
+      alpha: { command: 'npx', args: ['alpha'], type: 'stdio' },
+    });
+
+    const projectRoot = path.join(asbHome, 'project-none');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    writeConfig(path.join(projectRoot, '.asb.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[mcp]',
+      'enabled = ["alpha"]',
+      '',
+      '[distribution.project]',
+      'mode = "none"',
+    ]);
+
+    const { result } = await captureConsoleOutput(() =>
+      runSyncCommand({ scope: { project: projectRoot }, updateSources: false })
+    );
+
+    assert.equal(result, false);
+    assert.equal(fs.existsSync(path.join(projectRoot, '.mcp.json')), false);
+    assert.equal(fs.existsSync(path.join(projectRoot, '.claude', 'settings.local.json')), false);
+  });
+});

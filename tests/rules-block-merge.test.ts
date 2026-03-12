@@ -108,3 +108,8 @@ test('isDedicatedAsbRulesFile returns false for shared files', () => {
   assert.ok(!isDedicatedAsbRulesFile('/path/to/AGENTS.md'));
   assert.ok(!isDedicatedAsbRulesFile('/path/to/project/AGENTS.md'));
 });
+
+test('isDedicatedAsbRulesFile handles Windows paths', () => {
+  assert.ok(isDedicatedAsbRulesFile(String.raw`C:\repo\.cursor\rules\asb-rules.mdc`));
+  assert.ok(!isDedicatedAsbRulesFile(String.raw`C:\repo\.claude\CLAUDE.md`));
+});

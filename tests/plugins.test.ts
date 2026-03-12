@@ -355,6 +355,28 @@ test('plugin MCP servers are merged into config', () => {
   });
 });
 
+test('plugin MCP servers are available even when selected directly without enabling the parent plugin', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    fs.writeFileSync(path.join(asbHome, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
+
+    const mktDir = createMarketplaceFixture(asbHome, 'mkt', [
+      {
+        name: 'my-plugin',
+        mcp: { 'remote-api': { url: 'https://api.example.com/mcp', type: 'http' } },
+      },
+    ]);
+
+    writeConfigToml(
+      asbHome,
+      `[mcp]\nenabled = ["my-plugin@mkt:remote-api"]\n\n[plugins.sources]\nmkt = "${mktDir}"\n`
+    );
+
+    const config = loadMcpConfigWithPlugins();
+    assert.ok('my-plugin@mkt:remote-api' in config.mcpServers);
+  });
+});
+
 test('project-scoped plugin sources are isolated from global cache and load project content', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -658,7 +680,7 @@ test('same-name marketplace plugins keep source-qualified component IDs distinct
 
     const config = loadMcpConfigWithPlugins();
     assert.ok('demo@community:alpha' in config.mcpServers);
-    assert.ok(!('demo@internal:beta' in config.mcpServers));
+    assert.ok('demo@internal:beta' in config.mcpServers);
   });
 });
 

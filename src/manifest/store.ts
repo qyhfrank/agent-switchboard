@@ -229,6 +229,47 @@ export function getOwnedMcpServers(
   return owned;
 }
 
+export function getOwnedMcpServersForPath(
+  manifest: ProjectDistributionManifest,
+  relativePath: string
+): Set<string> {
+  const sec = manifest.sections.mcp;
+  if (!sec) return new Set();
+  const owned = new Set<string>();
+  for (const [key, entry] of Object.entries(sec)) {
+    if (entry.relativePath === relativePath) {
+      owned.add(parseManifestKey(key).id);
+    }
+  }
+  return owned;
+}
+
+export function getOwnedMcpTargetIds(manifest: ProjectDistributionManifest): Set<string> {
+  const sec = manifest.sections.mcp;
+  if (!sec) return new Set();
+  const targetIds = new Set<string>();
+  for (const entry of Object.values(sec)) {
+    targetIds.add(entry.targetId);
+  }
+  return targetIds;
+}
+
+export function getMcpEntryKeysForPath(
+  manifest: ProjectDistributionManifest,
+  relativePath: string,
+  excludeTargetIds?: ReadonlySet<string>
+): string[] {
+  const sec = manifest.sections.mcp;
+  if (!sec) return [];
+  const keys: string[] = [];
+  for (const [key, entry] of Object.entries(sec)) {
+    if (entry.relativePath !== relativePath) continue;
+    if (excludeTargetIds?.has(entry.targetId)) continue;
+    keys.push(key);
+  }
+  return keys;
+}
+
 /**
  * Get manifest entry for a library section item, if it exists.
  * When targetId is provided, looks up the composite key directly.
@@ -249,6 +290,25 @@ export function getLibraryEntry(
     if (parseManifestKey(key).id === id) return entry;
   }
   return undefined;
+}
+
+export function hasOtherLibraryEntryAtPath(
+  manifest: ProjectDistributionManifest,
+  section: LibraryManifestSection,
+  relativePath: string,
+  excludeId: string,
+  excludeTargetId: string
+): boolean {
+  const sec = manifest.sections[section] as Record<string, ManifestEntry> | undefined;
+  if (!sec) return false;
+
+  for (const [key, entry] of Object.entries(sec)) {
+    const { id, targetId } = parseManifestKey(key);
+    if (id === excludeId && targetId === excludeTargetId) continue;
+    if (entry.relativePath === relativePath) return true;
+  }
+
+  return false;
 }
 
 /**
