@@ -7,7 +7,7 @@
 
 import type { SwitchboardConfig } from '../config/schemas.js';
 import { loadExtensions } from '../extensions/loader.js';
-import { registerConfigTargets } from './registry.js';
+import { clearExtensionTargets, registerConfigTargets } from './registry.js';
 
 let initialized = false;
 
@@ -29,7 +29,8 @@ export async function initTargets(config: SwitchboardConfig): Promise<void> {
   await loadExtensions(config);
 }
 
-/** Reset initialization state (for testing) */
+/** Reset initialization state and clear extension targets (for testing) */
 export function resetTargetInit(): void {
   initialized = false;
+  clearExtensionTargets();
 }

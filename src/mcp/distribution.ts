@@ -51,8 +51,9 @@ export async function distributeMcp(
   enabledServerNames?: string[],
   options?: DistributeMcpOptions
 ): Promise<McpDistributionResult[]> {
+  const layerOpts = scopeToLayerOptions(scope);
+  const switchboardConfig = loadSwitchboardConfig(layerOpts);
   const mcpConfig = loadMcpConfigWithPlugins(scope);
-  const switchboardConfig = loadSwitchboardConfig(scopeToLayerOptions(scope));
   await initTargets(switchboardConfig);
   const useSpinner = options?.useSpinner ?? true;
   const assumeInstalled =
