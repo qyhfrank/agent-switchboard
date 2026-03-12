@@ -99,16 +99,15 @@ test('loadConfigLayers migrates applications.active to applications.enabled acro
 
     const result = loadConfigLayers({ profile: 'team', projectPath: projectRoot });
 
+    // In-memory migration: active -> enabled
     assert.deepEqual(result.user.config.applications?.enabled, ['claude-code']);
     assert.deepEqual(result.profile?.config.applications?.enabled, ['codex']);
     assert.deepEqual(result.project?.config.applications?.enabled, ['cursor']);
 
-    assert.match(fs.readFileSync(userPath, 'utf-8'), /enabled = \[\s*"claude-code"\s*\]/);
-    assert.doesNotMatch(fs.readFileSync(userPath, 'utf-8'), /active = \[/);
-    assert.match(fs.readFileSync(profilePath, 'utf-8'), /enabled = \[\s*"codex"\s*\]/);
-    assert.doesNotMatch(fs.readFileSync(profilePath, 'utf-8'), /active = \[/);
-    assert.match(fs.readFileSync(projectPath, 'utf-8'), /enabled = \[\s*"cursor"\s*\]/);
-    assert.doesNotMatch(fs.readFileSync(projectPath, 'utf-8'), /active = \[/);
+    // File should remain unchanged on disk (no implicit write-back)
+    assert.match(fs.readFileSync(userPath, 'utf-8'), /active = \[\s*"claude-code"\s*\]/);
+    assert.match(fs.readFileSync(profilePath, 'utf-8'), /active = \[\s*"codex"\s*\]/);
+    assert.match(fs.readFileSync(projectPath, 'utf-8'), /active = \[\s*"cursor"\s*\]/);
   });
 });
 

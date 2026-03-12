@@ -30,16 +30,30 @@ function emptyManifest(): ProjectDistributionManifest {
   };
 }
 
-export function loadManifest(projectRoot: string): ProjectDistributionManifest {
+export interface ManifestLoadResult {
+  manifest: ProjectDistributionManifest;
+  /** True when the manifest file existed on disk (even if corrupt). */
+  existedOnDisk: boolean;
+  /** True when the file existed but could not be parsed or had an unsupported version. */
+  corrupt: boolean;
+}
+
+export function loadManifest(projectRoot: string): ManifestLoadResult {
   const filePath = resolveManifestPath(projectRoot);
+  if (!fs.existsSync(filePath)) {
+    return { manifest: emptyManifest(), existedOnDisk: false, corrupt: false };
+  }
   try {
-    if (!fs.existsSync(filePath)) return emptyManifest();
     const content = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(content) as ProjectDistributionManifest;
-    if (parsed.version !== 1) return emptyManifest();
-    return parsed;
-  } catch {
-    return emptyManifest();
+    if (parsed.version !== 1) {
+      console.warn(`[asb] Manifest version mismatch at ${filePath} (expected 1, got ${parsed.version})`);
+      return { manifest: emptyManifest(), existedOnDisk: true, corrupt: true };
+    }
+    return { manifest: parsed, existedOnDisk: true, corrupt: false };
+  } catch (error) {
+    console.warn(`[asb] Failed to parse manifest at ${filePath}: ${error instanceof Error ? error.message : error}`);
+    return { manifest: emptyManifest(), existedOnDisk: true, corrupt: true };
   }
 }
 
@@ -50,7 +64,9 @@ export function saveManifest(projectRoot: string, manifest: ProjectDistributionM
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   manifest.updatedAt = new Date().toISOString();
-  fs.writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
 }
 
 // ── Composite key helpers ──────────────────────────────────

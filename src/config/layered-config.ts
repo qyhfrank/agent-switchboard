@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 import { parse, stringify } from '@iarna/toml';
 
 import { getProfileConfigPath, getProjectConfigPath, getSwitchboardConfigPath } from './paths.js';
@@ -89,9 +88,6 @@ function readLayerFile(filePath: string): ConfigLayerLoadResult {
     const obj = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
     const migrated = migrateLegacyConfigKeys(obj);
     const validated = switchboardConfigLayerSchema.parse(migrated);
-    if (!isDeepStrictEqual(obj, validated)) {
-      writeLayerFile(filePath, validated);
-    }
     return { path: filePath, exists: true, config: validated };
   } catch (error) {
     if (error instanceof Error) {
@@ -236,5 +232,5 @@ export function updateConfigLayer(
   const draft = JSON.parse(JSON.stringify(current.config)) as SwitchboardConfigLayer;
   const next = switchboardConfigLayerSchema.parse(mutator(draft));
   writeLayerFile(filePath, next);
-  return readLayerFile(filePath);
+  return { path: filePath, exists: true, config: next };
 }
