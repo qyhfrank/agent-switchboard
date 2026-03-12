@@ -9,8 +9,7 @@ import { parse } from 'jsonc-parser';
 import { buildPluginIndex } from '../plugins/index.js';
 import { getMcpConfigPath } from './paths.js';
 import { type McpConfig, type McpServer, mcpConfigSchema } from './schemas.js';
-import { type ConfigScope, scopeToLayerOptions } from './scope.js';
-import { loadSwitchboardConfig } from './switchboard-config.js';
+import type { ConfigScope } from './scope.js';
 
 /**
  * Loads the MCP configuration from ~/.agent-switchboard/mcp.json
@@ -58,8 +57,7 @@ export function loadMcpConfig(): McpConfig {
 }
 
 /**
- * Loads MCP server definitions from both ~/.asb/mcp.json and enabled plugins.
- * Only includes plugin MCP servers whose parent plugin is enabled in `plugins.enabled`.
+ * Loads MCP server definitions from both ~/.asb/mcp.json and discovered plugins.
  * Plugin-sourced servers use namespaced IDs (e.g. "context7:context7").
  * If a plugin server ID collides with a user-defined server, the user definition wins.
  */
@@ -69,19 +67,9 @@ export function loadMcpConfigWithPlugins(scope?: ConfigScope): McpConfig {
 
   if (pluginIndex.mcpServers.length === 0) return base;
 
-  const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-
-  // Resolve enabled plugin refs to descriptor IDs via PluginIndex.get(),
-  // which handles both bare names and name@source disambiguation.
-  const enabledPluginIds = new Set<string>();
-  for (const ref of config.plugins.enabled) {
-    const descriptor = pluginIndex.get(ref);
-    if (descriptor) enabledPluginIds.add(descriptor.id);
-  }
-
   const merged = { ...base.mcpServers };
   for (const ps of pluginIndex.mcpServers) {
-    if (!(ps.serverId in merged) && enabledPluginIds.has(ps.pluginId)) {
+    if (!(ps.serverId in merged)) {
       merged[ps.serverId] = ps.server;
     }
   }
