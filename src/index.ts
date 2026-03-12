@@ -18,7 +18,11 @@ import { importCommandFromFile } from './commands/importer.js';
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
 import { loadWritableConfigLayer, updateConfigLayer } from './config/layered-config.js';
-import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
+import {
+  loadMcpConfig,
+  loadMcpConfigWithPlugins,
+  stripLegacyEnabledFlagsFromMcpJson,
+} from './config/mcp-config.js';
 import {
   getAgentsDir,
   getAgentsHome,
@@ -59,6 +63,8 @@ import {
   validateSourcePath,
 } from './library/sources.js';
 import { loadLibraryStateSection, saveMcpEnabledState } from './library/state.js';
+import { loadManifest, saveManifest } from './manifest/store.js';
+import type { ProjectDistributionManifest } from './manifest/types.js';
 import { readMarketplace } from './marketplace/reader.js';
 import { distributeMcp } from './mcp/distribution.js';
 import { buildPluginIndex } from './plugins/index.js';
@@ -168,6 +174,51 @@ function resolveScope(input?: ScopeOptionInput): ConfigScope | undefined {
     profile: profile && profile.length > 0 ? profile : undefined,
     project: project,
   };
+}
+
+function getScopedProjectMode(
+  scope: ConfigScope | undefined,
+  config: { distribution: { project: { mode: 'managed' | 'exclusive' | 'none' } } }
+): 'managed' | 'exclusive' | 'none' | undefined {
+  return scope?.project ? config.distribution.project.mode : undefined;
+}
+
+function shouldSkipProjectDistribution(
+  scope: ConfigScope | undefined,
+  config: { distribution: { project: { mode: 'managed' | 'exclusive' | 'none' } } }
+): boolean {
+  return getScopedProjectMode(scope, config) === 'none';
+}
+
+function printProjectDistributionDisabledMessage(): void {
+  console.log(
+    chalk.gray('Project distribution is disabled by `[distribution.project].mode = "none"`.')
+  );
+}
+
+function loadManagedProjectManifest(
+  scope: ConfigScope | undefined,
+  projectMode: 'managed' | 'exclusive' | 'none' | undefined
+): ProjectDistributionManifest | undefined {
+  if (!scope?.project || projectMode !== 'managed') return undefined;
+
+  const result = loadManifest(scope.project);
+  if (result.corrupt) {
+    throw new Error(
+      `Corrupt managed manifest in ${scope.project}. Fix or remove it before retrying.`
+    );
+  }
+
+  return result.manifest;
+}
+
+function saveManagedProjectManifest(
+  scope: ConfigScope | undefined,
+  projectMode: 'managed' | 'exclusive' | 'none' | undefined,
+  manifest: ProjectDistributionManifest | undefined
+): void {
+  if (!scope?.project || projectMode !== 'managed' || !manifest) return;
+  saveManifest(scope.project, manifest);
 }
 
 function defaultCommandSourceDir(platform: CmdPlatform): string {
@@ -369,6 +420,7 @@ program
       const scope = resolveScope(options);
       const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
       const mcpConfig = loadMcpConfig();
+      const pluginIndex = buildPluginIndex(scope);
 
       // Determine initial selection:
       // - If writing to project/profile scope, only use that layer's explicit [mcp].enabled (no fallback).
@@ -392,10 +444,23 @@ program
         }
       }
 
+      const scopedPluginRefs = scope?.project
+        ? (layers.project?.config?.plugins?.enabled ?? [])
+        : scope?.profile
+          ? (layers.profile?.config?.plugins?.enabled ?? [])
+          : (layers.user.config?.plugins?.enabled ?? []);
+      const pluginMcpServers = pluginIndex.expand(scopedPluginRefs).mcp;
+      const currentActiveSet = new Set(currentActive);
+      for (const serverName of pluginMcpServers) {
+        currentActiveSet.add(serverName);
+      }
+      currentActive = [...currentActiveSet];
+
       // Step 1: Show UI and get selected servers
       const selectedServers = await showMcpServerUI({
         pageSize: config.ui.page_size,
         enabled: currentActive,
+        scope,
       });
 
       // Step 2: Save active state to config.toml (appropriate layer based on scope)
@@ -417,7 +482,17 @@ program
       }
 
       // Step 3: Apply to registered agents
-      await distributeMcp(scope, selectedServers);
+      const projectMode = getScopedProjectMode(scope, config);
+      const manifest = loadManagedProjectManifest(scope, projectMode);
+      try {
+        await distributeMcp(scope, selectedServers, { manifest, projectMode });
+      } finally {
+        saveManagedProjectManifest(scope, projectMode, manifest);
+      }
+      if (shouldSkipProjectDistribution(scope, config)) {
+        console.log();
+        printProjectDistributionDisabledMessage();
+      }
 
       // Step 4: Show summary
       showSummary(selectedServers, scope);
@@ -535,14 +610,14 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
       return;
     }
 
-    const { rules, writableState: previousState, effectiveState } = loadRuleRuntimeContext(scope);
+    const { rules, writableState: previousState, activeState } = loadRuleRuntimeContext(scope);
     const ruleMap = new Map(rules.map((rule) => [rule.id, rule]));
     const desiredEnabled = selection.enabled;
 
     const selectionChanged =
       selection.explicitEmpty ||
       shouldPersistSelection({
-        effectiveEnabled: effectiveState.enabled,
+        effectiveEnabled: activeState.enabled,
         selectedEnabled: desiredEnabled,
       });
 
@@ -579,14 +654,23 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
       }
     }
 
-    const distribution = distributeRules(
-      {
-        force: !selectionChanged,
-        activeAppIds: config.applications.enabled,
-        assumeInstalled: new Set(config.applications.assume_installed),
-      },
-      scope
-    );
+    const projectMode = getScopedProjectMode(scope, config);
+    const manifest = loadManagedProjectManifest(scope, projectMode);
+    let distribution: ReturnType<typeof distributeRules>;
+    try {
+      distribution = distributeRules(
+        {
+          force: !selectionChanged,
+          activeAppIds: config.applications.enabled,
+          assumeInstalled: new Set(config.applications.assume_installed),
+          manifest,
+          projectMode,
+        },
+        scope
+      );
+    } finally {
+      saveManagedProjectManifest(scope, projectMode, manifest);
+    }
 
     if (distribution.results.length > 0) {
       console.log();
@@ -596,6 +680,10 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
         getTargetLabel: (result) => result.agent,
         getPath: (result) => result.filePath,
       });
+    }
+    if (shouldSkipProjectDistribution(scope, config)) {
+      console.log();
+      printProjectDistributionDisabledMessage();
     }
 
     const distributionErrors = distribution.results.filter((r) => r.status === 'error');
@@ -647,11 +735,22 @@ commandRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('commands', selection.enabled);
 
-    const out = distributeCommands(
-      scope,
-      config.applications.enabled,
-      new Set(config.applications.assume_installed)
-    );
+    const projectMode = getScopedProjectMode(scope, config);
+    const manifest = loadManagedProjectManifest(scope, projectMode);
+    let out: ReturnType<typeof distributeCommands>;
+    try {
+      out = distributeCommands(
+        scope,
+        config.applications.enabled,
+        new Set(config.applications.assume_installed),
+        {
+          manifest,
+          projectMode,
+        }
+      );
+    } finally {
+      saveManagedProjectManifest(scope, projectMode, manifest);
+    }
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -660,6 +759,10 @@ commandRoot.action(async (options: ScopeOptionInput) => {
         getTargetLabel: (result) => result.platform,
         getPath: (result) => result.filePath,
       });
+    }
+    if (shouldSkipProjectDistribution(scope, config)) {
+      console.log();
+      printProjectDistributionDisabledMessage();
     }
     // Guidance: unsupported platforms for commands
     console.log();
@@ -821,11 +924,22 @@ agentRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('agents', selection.enabled);
 
-    const out = distributeSubagents(
-      scope,
-      config.applications.enabled,
-      new Set(config.applications.assume_installed)
-    );
+    const projectMode = getScopedProjectMode(scope, config);
+    const manifest = loadManagedProjectManifest(scope, projectMode);
+    let out: ReturnType<typeof distributeSubagents>;
+    try {
+      out = distributeSubagents(
+        scope,
+        config.applications.enabled,
+        new Set(config.applications.assume_installed),
+        {
+          manifest,
+          projectMode,
+        }
+      );
+    } finally {
+      saveManagedProjectManifest(scope, projectMode, manifest);
+    }
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -834,6 +948,10 @@ agentRoot.action(async (options: ScopeOptionInput) => {
         getTargetLabel: (result) => result.platform,
         getPath: (result) => result.filePath,
       });
+    }
+    if (shouldSkipProjectDistribution(scope, config)) {
+      console.log();
+      printProjectDistributionDisabledMessage();
     }
 
     console.log();
@@ -994,11 +1112,20 @@ skillRoot.action(async (options: ScopeOptionInput) => {
     console.log();
     printActiveSelection('skills', selection.enabled);
 
-    const out = distributeSkills(scope, {
-      useAgentsDir: config.distribution.use_agents_dir,
-      activeAppIds: config.applications.enabled,
-      assumeInstalled: new Set(config.applications.assume_installed),
-    });
+    const projectMode = getScopedProjectMode(scope, config);
+    const manifest = loadManagedProjectManifest(scope, projectMode);
+    let out: ReturnType<typeof distributeSkills>;
+    try {
+      out = distributeSkills(scope, {
+        useAgentsDir: config.distribution.use_agents_dir,
+        activeAppIds: config.applications.enabled,
+        assumeInstalled: new Set(config.applications.assume_installed),
+        manifest,
+        projectMode,
+      });
+    } finally {
+      saveManagedProjectManifest(scope, projectMode, manifest);
+    }
     if (out.results.length > 0) {
       console.log();
       printDistributionResults({
@@ -1015,6 +1142,10 @@ skillRoot.action(async (options: ScopeOptionInput) => {
         },
         getPath: (result) => result.targetDir,
       });
+    }
+    if (shouldSkipProjectDistribution(scope, config)) {
+      console.log();
+      printProjectDistributionDisabledMessage();
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -1181,7 +1312,10 @@ hookRoot.action(async (options: ScopeOptionInput) => {
     const out = distributeHooks(
       scope,
       config.applications.enabled,
-      new Set(config.applications.assume_installed)
+      new Set(config.applications.assume_installed),
+      {
+        projectMode: getScopedProjectMode(scope, config),
+      }
     );
     if (out.results.length > 0) {
       console.log();
@@ -1192,6 +1326,10 @@ hookRoot.action(async (options: ScopeOptionInput) => {
         getPath: (result) =>
           'filePath' in result ? result.filePath : (result as { targetDir: string }).targetDir,
       });
+    }
+    if (shouldSkipProjectDistribution(scope, config)) {
+      console.log();
+      printProjectDistributionDisabledMessage();
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -1353,7 +1491,7 @@ hookRoot
  * Show summary of enabled/disabled servers and applied agents
  */
 function showSummary(selectedServers: string[], scope?: ConfigScope): void {
-  const mcpConfig = loadMcpConfig();
+  const mcpConfig = loadMcpConfigWithPlugins(scope);
   const allServers = Object.keys(mcpConfig.mcpServers);
 
   const enabledServers = selectedServers;

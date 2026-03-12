@@ -313,7 +313,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       projectMode,
       collision,
     });
-    hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet);
+    hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet, { projectMode });
   } finally {
     // Save manifest even if distribution throws, to preserve partial progress
     if (isManaged && manifest) {

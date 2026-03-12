@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { distributeCommands } from '../src/commands/distribution.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
 import {
   computeLibraryCleanupSet,
@@ -12,7 +13,12 @@ import {
 import type { ProjectDistributionManifest } from '../src/manifest/types.js';
 import { distributeSkills } from '../src/skills/distribution.js';
 import { ensureSkillsDirectory } from '../src/skills/library.js';
-import { simulateAppsInstalled, withTempDir, withTempHomes } from './helpers/tmp.js';
+import {
+  simulateAppsInstalled,
+  simulateTraeInstalled,
+  withTempDir,
+  withTempHomes,
+} from './helpers/tmp.js';
 
 test('managed mode cleanup only removes previously owned entries', () => {
   withTempDir((dir) => {
@@ -188,5 +194,136 @@ test('bootstrap sync adopts pre-existing skill directories into manifest', () =>
     // Second managed sync: manifest is populated, conflict detection is active
     const { manifest: manifest2 } = loadManifest(projectRoot);
     assert.ok(Object.keys(manifest2.sections.skills ?? {}).length > 0);
+  });
+});
+
+test('managed command sync reports error when collision policy is error', () => {
+  withTempHomes(({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    const commandsDir = path.join(asbHome, 'commands');
+    fs.mkdirSync(commandsDir, { recursive: true });
+    fs.writeFileSync(path.join(commandsDir, 'demo.md'), '---\ndescription: demo\n---\n/demo\n');
+
+    const projectRoot = path.join(agentsHome, 'project-collision-file');
+    fs.mkdirSync(path.join(projectRoot, '.claude', 'commands'), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectRoot, '.claude', 'commands', 'demo.md'),
+      'foreign command\n',
+      'utf-8'
+    );
+
+    updateLibraryStateSection('commands', (state) => ({ ...state, enabled: ['demo'] }), {
+      project: projectRoot,
+    });
+
+    const { manifest } = loadManifest(projectRoot);
+    recordLibraryEntry(manifest, 'commands', 'existing-managed', {
+      relativePath: '.claude/commands/existing-managed.md',
+      targetId: 'claude-code',
+      hash: 'existing',
+      updatedAt: '',
+    });
+    const outcome = distributeCommands({ project: projectRoot }, ['claude-code'], undefined, {
+      manifest,
+      projectMode: 'managed',
+      collision: 'error',
+    });
+    const result = outcome.results.find((entry) => entry.platform === 'claude-code');
+
+    assert.ok(result);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /foreign file exists/);
+  });
+});
+
+test('managed skill sync reports error for non-adoptable bootstrap directories', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    createSkill('skill-collision');
+
+    const projectRoot = path.join(agentsHome, 'project-collision-bundle');
+    fs.mkdirSync(path.join(projectRoot, '.claude', 'skills', 'skill-collision'), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      path.join(projectRoot, '.claude', 'skills', 'skill-collision', 'SKILL.md'),
+      'foreign skill\n',
+      'utf-8'
+    );
+
+    updateLibraryStateSection('skills', (state) => ({ ...state, enabled: ['skill-collision'] }), {
+      project: projectRoot,
+    });
+
+    const { manifest } = loadManifest(projectRoot);
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      { manifest, projectMode: 'managed', collision: 'error' }
+    );
+    const result = outcome.results.find(
+      (entry) => entry.platform === 'claude-code' && entry.entryId === 'skill-collision'
+    );
+
+    assert.ok(result);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /foreign directory exists/);
+  });
+});
+
+test('managed skill cleanup preserves shared project path owned by another target', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateTraeInstalled();
+    createSkill('shared-skill');
+
+    const projectRoot = path.join(agentsHome, 'project-shared-trae');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectRoot, '.asb.toml'),
+      [
+        '[applications]',
+        'enabled = ["trae", "trae-cn"]',
+        '',
+        '[skills]',
+        'enabled = ["shared-skill"]',
+      ].join('\n'),
+      'utf-8'
+    );
+
+    const { manifest } = loadManifest(projectRoot);
+    distributeSkills(
+      { project: projectRoot },
+      { manifest, projectMode: 'managed', collision: 'warn-skip' }
+    );
+
+    fs.writeFileSync(
+      path.join(projectRoot, '.asb.toml'),
+      [
+        '[applications]',
+        'enabled = ["trae", "trae-cn"]',
+        '',
+        '[skills]',
+        'enabled = ["shared-skill"]',
+        '',
+        '[applications.trae-cn.skills]',
+        'enabled = []',
+      ].join('\n'),
+      'utf-8'
+    );
+
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      { manifest, projectMode: 'managed', collision: 'warn-skip' }
+    );
+    const targetDir = path.join(projectRoot, '.trae', 'skills', 'shared-skill');
+    const skipResult = outcome.results.find(
+      (entry) =>
+        entry.platform === 'trae-cn' &&
+        entry.entryId === 'shared-skill' &&
+        entry.status === 'skipped'
+    );
+
+    assert.ok(fs.existsSync(targetDir), 'shared skill directory should remain for trae');
+    assert.ok(skipResult, 'trae-cn cleanup should skip deleting a shared path still owned by trae');
   });
 });
