@@ -116,21 +116,23 @@ export function distributeRules(
     const filePath = handler.resolveFilePath(scope);
     const resolvedPath = path.resolve(filePath);
 
-    // Shared-path dedup: if another target already wrote to this path, skip
+    // Shared-path dedup: if another target already wrote to this path, check content
     if (writtenPaths.has(resolvedPath)) {
       const prevContent = writtenPaths.get(resolvedPath);
       const thisContent = handler.render(document.content);
       if (prevContent !== thisContent && document.content.length > 0) {
+        // Content differs between targets sharing the same path - report as error
         results.push({
           agent,
           filePath,
-          status: 'skipped',
-          reason: `shared path already written`,
+          status: 'error',
+          error: 'shared path conflict: rendered content differs from previously written target',
         });
+        // Do not update agentSync for a conflicting target
       } else {
         results.push({ agent, filePath, status: 'skipped', reason: 'deduped' });
+        agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       }
-      agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       continue;
     }
 

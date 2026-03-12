@@ -27,8 +27,8 @@ export interface DistributionResult<Platform extends string> {
 export interface CleanupConfig<Platform extends string> {
   /** Resolve target directory to scan for orphan files */
   resolveTargetDir: (platform: Platform) => string;
-  /** Extract entry ID from filename (without extension) */
-  extractId: (filename: string) => string | null;
+  /** Extract entry ID from filename (without extension). Platform is provided for context. */
+  extractId: (filename: string, platform?: Platform) => string | null;
 }
 
 export type ProjectMode = 'managed' | 'exclusive' | 'none';
@@ -237,7 +237,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
               // Skip directories
               if (fs.statSync(filePath).isDirectory()) continue;
 
-              const id = opts.cleanup.extractId(file);
+              const id = opts.cleanup.extractId(file, platform);
               if (id !== null && !activeIds.has(id)) {
                 try {
                   fs.unlinkSync(filePath);

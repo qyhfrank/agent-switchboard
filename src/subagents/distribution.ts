@@ -70,7 +70,11 @@ export function distributeSubagents(
 
   const cleanup: CleanupConfig<string> = {
     resolveTargetDir: (p) => getHandler(p).resolveTargetDir(scope),
-    extractId: (filename) => {
+    extractId: (filename, platform) => {
+      if (platform) {
+        const h = handlerMap.get(platform);
+        if (h) return h.extractIdFromFilename(filename);
+      }
       if (!filename.endsWith('.md')) return null;
       return filename.slice(0, -3);
     },
