@@ -72,7 +72,10 @@ function readSettingsJson(
 ): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
   try {
     if (fs.existsSync(filePath)) {
-      return { ok: true, data: JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown> };
+      return {
+        ok: true,
+        data: JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>,
+      };
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };

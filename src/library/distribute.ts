@@ -84,10 +84,12 @@ export function distributeLibrary<TEntry, Platform extends string>(
   const manifestSection = opts.section as LibraryManifestSection;
   // Extract managed context with proper narrowing (avoids non-null assertions throughout)
   const managedProjectRoot = opts.scope?.project;
-  const manifest =
-    managedProjectRoot && (opts.projectMode ?? 'exclusive') === 'managed'
-      ? opts.manifest
-      : undefined;
+  const requiresManagedManifest =
+    managedProjectRoot && (opts.projectMode ?? 'exclusive') === 'managed';
+  if (requiresManagedManifest && !opts.manifest) {
+    throw new Error('Managed project distribution requires a valid manifest');
+  }
+  const manifest = requiresManagedManifest ? opts.manifest : undefined;
   // First managed sync: if manifest has no entries for this section, skip
   // conflict detection so existing files get adopted into the manifest.
   const sectionEntries = manifest?.sections[manifestSection];
