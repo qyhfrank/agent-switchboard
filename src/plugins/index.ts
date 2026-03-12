@@ -20,6 +20,7 @@ import { loadPluginComponents } from '../marketplace/plugin-loader.js';
 import { isMarketplace, readMarketplace } from '../marketplace/reader.js';
 import type { RuleSnippet } from '../rules/library.js';
 import { parseRuleMarkdown } from '../rules/parser.js';
+import { buildComponentId, buildPluginId, splitComponentId } from './identity.js';
 
 export type PluginComponentSection = 'commands' | 'agents' | 'skills' | 'hooks' | 'rules' | 'mcp';
 
@@ -43,7 +44,9 @@ export interface PluginMeta {
 }
 
 export interface PluginDescriptor {
+  name: string;
   id: string;
+  refs: string[];
   meta: PluginMeta;
   components: PluginComponents;
 }
@@ -66,6 +69,8 @@ export interface PluginIndex {
   get(pluginId: string): PluginDescriptor | undefined;
   /** Expand a list of plugin IDs into per-section component IDs */
   expand(pluginIds: string[]): PluginComponents;
+  /** Normalize legacy or aliased component refs to canonical IDs */
+  normalizeComponentId(componentId: string): string;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────
@@ -73,6 +78,10 @@ export interface PluginIndex {
 function isMarkdownFile(name: string): boolean {
   const ext = path.extname(name).toLowerCase();
   return ext === '.md' || ext === '.markdown';
+}
+
+function byEntryName(a: fs.Dirent, b: fs.Dirent): number {
+  return a.name.localeCompare(b.name);
 }
 
 function toId(fileName: string): string {
@@ -90,7 +99,7 @@ function loadRulesFromPluginDir(
 
   const ids: string[] = [];
   const snippets: PluginRuleSnippet[] = [];
-  const entries = fs.readdirSync(rulesDir, { withFileTypes: true });
+  const entries = fs.readdirSync(rulesDir, { withFileTypes: true }).sort(byEntryName);
 
   for (const entry of entries) {
     if (!entry.isFile() || !isMarkdownFile(entry.name)) continue;
@@ -100,7 +109,7 @@ function loadRulesFromPluginDir(
     try {
       const parsed = parseRuleMarkdown(rawContent);
       const bareId = toId(entry.name);
-      const id = `${namespace}:${bareId}`;
+      const id = buildComponentId(namespace, bareId);
       ids.push(id);
       snippets.push({
         id,
@@ -141,7 +150,7 @@ function loadMcpFromPluginDir(
 
     for (const [name, serverDef] of Object.entries(entries)) {
       if (typeof serverDef !== 'object' || serverDef === null) continue;
-      const serverId = `${namespace}:${name}`;
+      const serverId = buildComponentId(namespace, name);
       ids.push(serverId);
       servers.push({
         pluginId: namespace,
@@ -165,9 +174,9 @@ function loadPluginComponentIds(
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byEntryName)) {
     if (entry.isFile() && isMarkdownFile(entry.name)) {
-      ids.push(`${namespace}:${toId(entry.name)}`);
+      ids.push(buildComponentId(namespace, toId(entry.name)));
     }
   }
   return ids;
@@ -178,9 +187,9 @@ function loadPluginSkillIds(basePath: string, namespace: string): string[] {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byEntryName)) {
     if (entry.isDirectory() && fs.existsSync(path.join(dir, entry.name, 'SKILL.md'))) {
-      ids.push(`${namespace}:${entry.name}`);
+      ids.push(buildComponentId(namespace, entry.name));
     }
   }
   return ids;
@@ -191,11 +200,11 @@ function loadPluginHookIds(basePath: string, namespace: string): string[] {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byEntryName)) {
     if (entry.isDirectory() && fs.existsSync(path.join(dir, entry.name, 'hook.json'))) {
-      ids.push(`${namespace}:${entry.name}`);
+      ids.push(buildComponentId(namespace, entry.name));
     } else if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') {
-      ids.push(`${namespace}:${toId(entry.name)}`);
+      ids.push(buildComponentId(namespace, toId(entry.name)));
     }
   }
   return ids;
@@ -206,9 +215,9 @@ function loadPluginRuleIds(basePath: string, namespace: string): string[] {
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byEntryName)) {
     if (entry.isFile() && isMarkdownFile(entry.name)) {
-      ids.push(`${namespace}:${toId(entry.name)}`);
+      ids.push(buildComponentId(namespace, toId(entry.name)));
     }
   }
   return ids;
@@ -226,26 +235,26 @@ function buildFromMarketplace(
   const result = readMarketplace(basePath);
 
   for (const plugin of result.plugins) {
-    const components = loadPluginComponents(plugin);
-    const namespace = plugin.name;
+    const pluginId = buildPluginId(plugin.name, sourceName, 'marketplace');
+    const components = loadPluginComponents(plugin, pluginId);
 
     const commandIds = components.commands.map((c) => c.id);
     const agentIds = components.agents.map((a) => a.id);
     const skillIds = components.skills.map((s) => s.id);
     const hookIds = components.hooks.map((h) => h.id);
 
-    const rulesResult = loadRulesFromPluginDir(plugin.localPath, namespace);
-    const mcpResult = loadMcpFromPluginDir(plugin.localPath, namespace);
+    const rulesResult = loadRulesFromPluginDir(plugin.localPath, pluginId);
+    const mcpResult = loadMcpFromPluginDir(plugin.localPath, pluginId);
 
     // Also pick up mcpServers declared in the marketplace entry / plugin.json
     if (plugin.mcpServers) {
       for (const [name, serverDef] of Object.entries(plugin.mcpServers)) {
         if (typeof serverDef !== 'object' || serverDef === null) continue;
-        const serverId = `${namespace}:${name}`;
+        const serverId = buildComponentId(pluginId, name);
         if (!mcpResult.ids.includes(serverId)) {
           mcpResult.ids.push(serverId);
           mcpResult.servers.push({
-            pluginId: namespace,
+            pluginId,
             serverId,
             server: serverDef as McpServer,
           });
@@ -257,7 +266,9 @@ function buildFromMarketplace(
     allRuleSnippets.push(...rulesResult.snippets);
 
     allPlugins.push({
-      id: namespace,
+      name: plugin.name,
+      id: pluginId,
+      refs: [pluginId],
       meta: {
         description: plugin.description,
         version: plugin.version,
@@ -321,7 +332,9 @@ function buildFromPlugin(
   }
 
   allPlugins.push({
+    name: namespace,
     id: namespace,
+    refs: [namespace],
     meta: {
       description,
       version,
@@ -374,30 +387,48 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     }
   }
 
-  // Build lookup maps: name@source for disambiguation, bare name when unambiguous.
-  // Same-name plugins from different sources: bare name becomes ambiguous, only name@source works.
+  // Build lookup maps: canonical IDs always work; bare names work only when unambiguous.
   const byId = new Map<string, PluginDescriptor>();
   const byName = new Map<string, PluginDescriptor[]>();
   for (const p of plugins) {
-    byId.set(`${p.id}@${p.meta.sourceName}`, p);
-    const existing = byName.get(p.id);
+    byId.set(p.id, p);
+    const existing = byName.get(p.name);
     if (existing) {
       existing.push(p);
     } else {
-      byName.set(p.id, [p]);
+      byName.set(p.name, [p]);
     }
   }
-  // Bare name resolves only when unambiguous (exactly one plugin with that name).
-  // Warn about collisions since same-name plugins produce identical component IDs.
+
   for (const [name, descriptors] of byName) {
     if (descriptors.length === 1) {
-      byId.set(name, descriptors[0]);
+      const descriptor = descriptors[0];
+      byId.set(name, descriptor);
+      if (!descriptor.refs.includes(name)) {
+        descriptor.refs.push(name);
+      }
     } else {
       const sources = descriptors.map((d) => d.meta.sourceName).join(', ');
       console.warn(
         `[plugins] Ambiguous plugin name "${name}" found in sources: ${sources}. ` +
           `Use name@source syntax (e.g., "${name}@${descriptors[0].meta.sourceName}") to disambiguate.`
       );
+    }
+  }
+
+  const componentAliases = new Map<string, string>();
+  for (const plugin of plugins) {
+    for (const section of ['commands', 'agents', 'skills', 'hooks', 'rules', 'mcp'] as const) {
+      for (const componentId of plugin.components[section]) {
+        componentAliases.set(componentId, componentId);
+
+        const parsed = splitComponentId(componentId);
+        if (!parsed) continue;
+
+        if (plugin.refs.includes(plugin.name)) {
+          componentAliases.set(buildComponentId(plugin.name, parsed.bareId), componentId);
+        }
+      }
     }
   }
 
@@ -429,6 +460,10 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
       }
 
       return result;
+    },
+
+    normalizeComponentId(componentId: string) {
+      return componentAliases.get(componentId) ?? componentId;
     },
   };
 

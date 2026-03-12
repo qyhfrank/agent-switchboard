@@ -374,3 +374,37 @@ test('distributeSkills: useAgentsDir does not write to claude-code when it is no
     assert.ok(agentsResults.length > 0, 'should still write to agents platform');
   });
 });
+
+test('distributeSkills: useAgentsDir leaves non-empty legacy Gemini skills directory in place', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    const skillId = 'shared-skill';
+    createSkill(agentsHome, skillId);
+
+    const legacySkillDir = path.join(agentsHome, '.gemini', 'skills', 'user-owned');
+    fs.mkdirSync(legacySkillDir, { recursive: true });
+    fs.writeFileSync(path.join(legacySkillDir, 'keep.txt'), 'keep\n', 'utf-8');
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    const outcome = distributeSkills(undefined, { useAgentsDir: true, activeAppIds: ['codex'] });
+
+    assert.equal(
+      fs.existsSync(path.join(agentsHome, '.gemini', 'skills', 'user-owned', 'keep.txt')),
+      true,
+      'non-empty legacy skills directory should be preserved'
+    );
+    assert.ok(
+      outcome.results.some(
+        (result) =>
+          result.platform === 'agents' &&
+          result.targetDir === path.join(agentsHome, '.gemini', 'skills') &&
+          result.status === 'skipped'
+      ),
+      'legacy path should be reported as left in place'
+    );
+  });
+});

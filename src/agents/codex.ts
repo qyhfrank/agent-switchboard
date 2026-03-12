@@ -106,7 +106,9 @@ export function mergeConfig(
       otherTopLevel = rest;
     }
   } catch (error) {
-    console.warn(`[codex] Failed to parse existing config: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`);
+    console.warn(
+      `[codex] Failed to parse existing config: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`
+    );
     return null;
   }
 
@@ -162,7 +164,9 @@ export function managedMergeConfig(
       parsed = parseToml(content) as Record<string, unknown>;
     }
   } catch (error) {
-    console.warn(`[codex] Failed to parse existing config: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`);
+    console.warn(
+      `[codex] Failed to parse existing config: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`
+    );
     return null;
   }
 

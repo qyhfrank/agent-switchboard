@@ -47,12 +47,16 @@ export function loadManifest(projectRoot: string): ManifestLoadResult {
     const content = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(content) as ProjectDistributionManifest;
     if (parsed.version !== 1) {
-      console.warn(`[asb] Manifest version mismatch at ${filePath} (expected 1, got ${parsed.version})`);
+      console.warn(
+        `[asb] Manifest version mismatch at ${filePath} (expected 1, got ${parsed.version})`
+      );
       return { manifest: emptyManifest(), existedOnDisk: true, corrupt: true };
     }
     return { manifest: parsed, existedOnDisk: true, corrupt: false };
   } catch (error) {
-    console.warn(`[asb] Failed to parse manifest at ${filePath}: ${error instanceof Error ? error.message : error}`);
+    console.warn(
+      `[asb] Failed to parse manifest at ${filePath}: ${error instanceof Error ? error.message : error}`
+    );
     return { manifest: emptyManifest(), existedOnDisk: true, corrupt: true };
   }
 }
