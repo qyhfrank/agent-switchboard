@@ -56,7 +56,11 @@ export function distributeCommands(
 
   const cleanup: CleanupConfig<string> = {
     resolveTargetDir: (p) => getHandler(p).resolveTargetDir(scope),
-    extractId: (filename) => {
+    extractId: (filename, platform) => {
+      if (platform) {
+        const h = handlerMap.get(platform);
+        if (h) return h.extractIdFromFilename(filename);
+      }
       if (filename.endsWith('.toml')) return filename.slice(0, -5);
       if (filename.endsWith('.md')) return filename.slice(0, -3);
       return null;

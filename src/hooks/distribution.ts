@@ -67,15 +67,17 @@ function resolveHookBundleTargetDir(
 // Settings.json I/O
 // ---------------------------------------------------------------------------
 
-function readSettingsJson(filePath: string): Record<string, unknown> {
+function readSettingsJson(
+  filePath: string
+): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
   try {
     if (fs.existsSync(filePath)) {
-      return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+      return { ok: true, data: JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown> };
     }
-  } catch {
-    // Corrupted or unreadable; start fresh for hooks section
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
-  return {};
+  return { ok: true, data: {} };
 }
 
 function writeSettingsJson(filePath: string, data: Record<string, unknown>): void {
@@ -227,24 +229,26 @@ export function distributeHooks(
   const results: HookDistributionOutcome['results'] = [];
   const platform: HookPlatform = 'claude-code';
 
-  if (activeAppIds && !activeAppIds.includes(platform)) {
-    return { results };
-  }
-
   // Skip if claude-code is not installed (unless assumed installed)
   const target = getTargetById(platform);
   if (target?.isInstalled?.() === false && !assumeInstalled?.has(platform)) {
     return { results };
   }
 
+  // When activeAppIds is set and doesn't include claude-code, treat as inactive:
+  // use empty selection so that cleanup/unmerge of previously injected hooks can run.
+  const isActive = !activeAppIds || activeAppIds.includes(platform);
+
   const allEntries = loadHookLibrary(scope);
   const byId = new Map(allEntries.map((e) => [e.id, e]));
 
   const state = loadLibraryStateSectionForApplication('hooks', 'claude-code', scope);
   const selected: HookEntry[] = [];
-  for (const id of state.enabled) {
-    const e = byId.get(id);
-    if (e) selected.push(e);
+  if (isActive) {
+    for (const id of state.enabled) {
+      const e = byId.get(id);
+      if (e) selected.push(e);
+    }
   }
 
   // Phase 1: Copy bundle files for bundle-type hooks
@@ -268,7 +272,20 @@ export function distributeHooks(
 
   // Phase 2: Merge hook configs into settings.json
   const settingsPath = resolveSettingsPath(scope);
-  const settings = readSettingsJson(settingsPath);
+  const settingsResult = readSettingsJson(settingsPath);
+
+  // Abort hooks config merge if settings file is unreadable (prevents data loss)
+  if (!settingsResult.ok) {
+    results.push({
+      platform,
+      filePath: settingsPath,
+      status: 'error',
+      error: `Cannot read settings.json, aborting hooks merge: ${settingsResult.error}`,
+    });
+    return { results };
+  }
+
+  const settings = settingsResult.data;
   const previouslyManaged = (settings[ASB_MANAGED_KEY] ?? []) as string[];
 
   // Also check for legacy ASB hooks (missing _asb_source marker)
