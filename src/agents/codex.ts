@@ -30,9 +30,11 @@ export class CodexAgent implements AgentAdapter {
   }
 
   applyConfig(config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> }): void {
-    const content = this._loadConfig(this.configPath());
+    const configPath = this.configPath();
+    const content = this._loadConfig(configPath);
     const updated = mergeConfig(content, sanitizeServerKeys(config.mcpServers));
-    this._saveConfig(this.configPath(), updated);
+    if (updated === null) return;
+    this._saveConfig(configPath, updated);
   }
 
   applyProjectConfig(
@@ -45,6 +47,7 @@ export class CodexAgent implements AgentAdapter {
     const updated = options?.previouslyOwned
       ? managedMergeConfig(content, sanitizeServerKeys(config.mcpServers), options.previouslyOwned)
       : mergeConfig(content, sanitizeServerKeys(config.mcpServers));
+    if (updated === null) return;
     this._saveConfig(configPath, updated);
     this._ensureProjectTrusted(projectRoot);
   }
@@ -92,7 +95,7 @@ export class CodexAgent implements AgentAdapter {
 export function mergeConfig(
   content: string,
   mcpServers: Record<string, Omit<McpServer, 'enabled'>>
-): string {
+): string | null {
   // Read existing content to preserve unrelated top-level keys (not comments)
   let otherTopLevel: Record<string, unknown> = {};
   try {
@@ -102,9 +105,9 @@ export function mergeConfig(
       const { mcp_servers: _ignored, ...rest } = (parsed ?? {}) as Record<string, unknown>;
       otherTopLevel = rest;
     }
-  } catch {
-    // If parsing fails, drop old content entirely to avoid propagating bad state
-    otherTopLevel = {};
+  } catch (error) {
+    console.warn(`[codex] Failed to parse existing config: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`);
+    return null;
   }
 
   // Filter out SSE servers - Codex only supports stdio and http
@@ -152,14 +155,15 @@ export function managedMergeConfig(
   content: string,
   mcpServers: Record<string, Omit<McpServer, 'enabled'>>,
   previouslyOwned: ReadonlySet<string>
-): string {
+): string | null {
   let parsed: Record<string, unknown> = {};
   try {
     if (content && content.trim().length > 0) {
       parsed = parseToml(content) as Record<string, unknown>;
     }
-  } catch {
-    parsed = {};
+  } catch (error) {
+    console.warn(`[codex] Failed to parse existing config: ${error instanceof Error ? error.message : error}; skipping write to avoid data loss`);
+    return null;
   }
 
   const { mcp_servers: existingMcp, ...rest } = parsed;

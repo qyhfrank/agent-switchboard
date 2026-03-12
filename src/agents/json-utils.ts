@@ -3,6 +3,7 @@
  */
 
 import fs from 'node:fs';
+import path from 'node:path';
 
 export type JsonAgentConfig = { mcpServers?: Record<string, unknown> } & Record<string, unknown>;
 
@@ -36,12 +37,51 @@ export function sanitizeServerKeys<T>(servers: Record<string, T>): Record<string
     const key = sanitizeMcpName(name);
     const prev = seen.get(key);
     if (prev !== undefined && prev !== name) {
-      console.warn(`[asb] MCP name collision: "${prev}" and "${name}" both map to "${key}"`);
+      throw new Error(
+        `MCP name collision: "${prev}" and "${name}" both sanitize to "${key}". Rename one of the servers to avoid data loss.`
+      );
     }
     seen.set(key, name);
     result[key] = server;
   }
   return result;
+}
+
+/**
+ * Common apply flow for JSON-based agent adapters.
+ * Handles: load -> sanitize -> merge (exclusive or managed) -> mkdir -> save.
+ *
+ * @param serverMapper Optional per-server transform (e.g., Gemini httpUrl mapping).
+ *   When omitted, servers are passed through as-is.
+ */
+export function applyJsonMcpConfig(
+  configPath: string,
+  mcpServers: Record<string, object>,
+  options?: {
+    previouslyOwned?: ReadonlySet<string>;
+    serverMapper?: (server: object) => Record<string, unknown>;
+    sanitize?: boolean;
+  }
+): void {
+  const existing = loadJsonFile<JsonAgentConfig>(configPath, { mcpServers: {} });
+  const sanitize = options?.sanitize !== false;
+  const servers = sanitize
+    ? (sanitizeServerKeys(mcpServers) as Record<string, object>)
+    : mcpServers;
+
+  const mapped: Record<string, object> = options?.serverMapper
+    ? Object.fromEntries(
+        Object.entries(servers).map(([name, server]) => [name, options.serverMapper!(server)])
+      )
+    : servers;
+
+  const merged = options?.previouslyOwned
+    ? managedMergeMcp(existing, mapped, options.previouslyOwned)
+    : mergeMcpIntoAgent(existing, mapped);
+
+  const dir = path.dirname(configPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  saveJsonFile(configPath, merged);
 }
 
 export function mergeMcpIntoAgent(
