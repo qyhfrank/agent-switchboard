@@ -178,7 +178,7 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       const supported = new Set(sectionPlatforms[section] ?? []);
       const applicableApps = config.applications.enabled.filter((id) => supported.has(id));
 
-      const allAppConfigs = sectionAppConfigs.get(section)!;
+      const allAppConfigs = sectionAppConfigs.get(section) ?? new Map<string, string[]>();
       const effectiveByApp = new Map<string, string[]>();
       for (const appId of applicableApps) {
         effectiveByApp.set(appId, allAppConfigs.get(appId) ?? []);
@@ -260,8 +260,9 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   if (isManaged) {
     const result = loadManifest(projectRoot);
     if (result.corrupt) {
-      console.warn(`[asb] Skipping managed sync: corrupt manifest in ${projectRoot}`);
-      manifest = undefined;
+      console.warn(`[asb] Aborting managed sync: corrupt manifest in ${projectRoot}`);
+      console.warn('[asb] Fix or remove the manifest before retrying to avoid unsafe cleanup.');
+      return true;
     } else {
       manifest = result.manifest;
     }

@@ -30,8 +30,12 @@ export class TraeAgent implements AgentAdapter {
     config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
     options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
-    applyJsonMcpConfig(this.projectConfigPath(projectRoot), config.mcpServers as Record<string, object>, {
-      previouslyOwned: options?.previouslyOwned,
-    });
+    applyJsonMcpConfig(
+      this.projectConfigPath(projectRoot),
+      config.mcpServers as Record<string, object>,
+      {
+        previouslyOwned: options?.previouslyOwned,
+      }
+    );
   }
 }

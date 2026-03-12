@@ -1,5 +1,8 @@
 import { z } from 'zod';
-import { resolveScopedSectionConfig } from '../config/application-config.js';
+import {
+  normalizeSectionEntryIds,
+  resolveScopedSectionConfig,
+} from '../config/application-config.js';
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
 import {
   loadMergedSwitchboardConfig,
@@ -30,7 +33,7 @@ export type LibrarySection = 'commands' | 'agents' | 'skills' | 'hooks';
 export function loadMcpEnabledState(scope?: ConfigScope): string[] {
   const layerOptions = scopeToLayerOptions(scope);
   const { config } = loadMergedSwitchboardConfig(layerOptions);
-  return [...config.mcp.enabled];
+  return normalizeSectionEntryIds('mcp', [...config.mcp.enabled], scope);
 }
 
 export function hasMcpEnabledInConfig(scope?: ConfigScope): boolean {
@@ -69,7 +72,10 @@ function getConfigSectionEnabled(
   options?: UpdateConfigLayerOptions
 ): string[] {
   const { config } = loadMergedSwitchboardConfig(options);
-  return [...config[section].enabled];
+  return normalizeSectionEntryIds(section, [...config[section].enabled], {
+    profile: options?.profile,
+    project: options?.projectPath,
+  });
 }
 
 function getWritableConfigSectionEnabled(
@@ -78,7 +84,12 @@ function getWritableConfigSectionEnabled(
 ): string[] {
   const layer = loadWritableConfigLayer(options);
   const sectionConfig = (layer.config[section] ?? {}) as { enabled?: string[] };
-  return Array.isArray(sectionConfig.enabled) ? [...sectionConfig.enabled] : [];
+  return Array.isArray(sectionConfig.enabled)
+    ? normalizeSectionEntryIds(section, [...sectionConfig.enabled], {
+        profile: options?.profile,
+        project: options?.projectPath,
+      })
+    : [];
 }
 
 export function loadLibraryStateSection(

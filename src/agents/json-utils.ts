@@ -69,9 +69,10 @@ export function applyJsonMcpConfig(
     ? (sanitizeServerKeys(mcpServers) as Record<string, object>)
     : mcpServers;
 
-  const mapped: Record<string, object> = options?.serverMapper
+  const serverMapper = options?.serverMapper;
+  const mapped: Record<string, object> = serverMapper
     ? Object.fromEntries(
-        Object.entries(servers).map(([name, server]) => [name, options.serverMapper!(server)])
+        Object.entries(servers).map(([name, server]) => [name, serverMapper(server)])
       )
     : servers;
 
