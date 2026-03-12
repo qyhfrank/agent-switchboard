@@ -16,6 +16,7 @@ import { extractMdId, resolveProjectRoot, wrapMdcFrontmatter } from '../builtin/
 import type {
   ApplicationTarget,
   GenericLibraryEntry,
+  ManagedMcpOptions,
   TargetLibraryHandler,
   TargetMcpHandler,
   TargetRulesHandler,
@@ -23,6 +24,7 @@ import type {
 } from '../types.js';
 import {
   type FrontmatterTransformSpec,
+  keyedArrayToRecord,
   type McpTransformPipeline,
   transformFrontmatter,
   transformMcpServers,
@@ -75,12 +77,33 @@ function parseFrontmatterSpec(
   };
 }
 
+function requireEnum<T extends string>(
+  value: string,
+  allowed: readonly T[],
+  context: string,
+  field: string
+): T {
+  if (!allowed.includes(value as T)) {
+    throw new Error(
+      `[targets.${context}] invalid "${field}": "${value}" (expected one of: ${allowed.join(', ')})`
+    );
+  }
+  return value as T;
+}
+
 function compileMcpHandler(id: string, spec: Record<string, unknown>): TargetMcpHandler {
-  const format = requireString(spec, 'format', `${id}.mcp`) as 'json' | 'yaml';
+  const formatRaw = requireString(spec, 'format', `${id}.mcp`);
+  const format = requireEnum(formatRaw, ['json', 'yaml'] as const, `${id}.mcp`, 'format');
   const configPath = requireString(spec, 'config_path', `${id}.mcp`);
   const projectConfigPath = optionalString(spec, 'project_config_path');
   const rootKey = optionalString(spec, 'root_key') ?? 'mcpServers';
-  const structure = (optionalString(spec, 'structure') ?? 'record') as 'record' | 'keyed-array';
+  const structureRaw = optionalString(spec, 'structure') ?? 'record';
+  const structure = requireEnum(
+    structureRaw,
+    ['record', 'keyed-array'] as const,
+    `${id}.mcp`,
+    'structure'
+  );
   const keyField = optionalString(spec, 'key_field') ?? 'name';
 
   const pipeline: McpTransformPipeline = {
@@ -107,38 +130,69 @@ function compileMcpHandler(id: string, spec: Record<string, unknown>): TargetMcp
       ? (content: string) => parseYaml(content) as unknown
       : (content: string) => JSON.parse(content) as unknown;
 
+  function loadExistingRoot(resolved: string): Record<string, unknown> {
+    if (!fs.existsSync(resolved)) return {};
+    let raw: unknown;
+    try {
+      raw = parseRaw(fs.readFileSync(resolved, 'utf-8'));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`[targets.${id}.mcp] Cannot parse ${resolved}: ${msg}`);
+    }
+    if (raw == null) return {};
+    if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>;
+    const kind = Array.isArray(raw) ? 'array' : typeof raw;
+    throw new Error(
+      `[targets.${id}.mcp] Config root must be an object, got ${kind} in ${resolved}`
+    );
+  }
+
   function writeConfig(
     filePath: string,
-    config: { mcpServers: Record<string, Record<string, unknown>> }
+    config: { mcpServers: Record<string, Record<string, unknown>> },
+    managedOpts?: ManagedMcpOptions
   ): void {
     const resolved = expandPath(filePath);
     const dir = path.dirname(resolved);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-    let existing: Record<string, unknown> = {};
-    if (fs.existsSync(resolved)) {
-      let raw: unknown;
-      try {
-        raw = parseRaw(fs.readFileSync(resolved, 'utf-8'));
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`[targets.${id}.mcp] Cannot parse ${resolved}: ${msg}`);
+    const existing = loadExistingRoot(resolved);
+
+    if (managedOpts?.previouslyOwned) {
+      // Managed merge: parse existing rootKey content, apply add/remove
+      const existingSection = existing[rootKey];
+      let currentRecord: Record<string, Record<string, unknown>> = {};
+
+      if (existingSection != null) {
+        if (Array.isArray(existingSection)) {
+          // keyed-array -> record for merge
+          currentRecord = keyedArrayToRecord(
+            existingSection as Array<Record<string, unknown>>,
+            keyField
+          );
+        } else if (typeof existingSection === 'object') {
+          currentRecord = { ...(existingSection as Record<string, Record<string, unknown>>) };
+        }
       }
 
-      if (raw == null) {
-        existing = {};
-      } else if (typeof raw === 'object' && !Array.isArray(raw)) {
-        existing = raw as Record<string, unknown>;
-      } else {
-        const kind = Array.isArray(raw) ? 'array' : typeof raw;
-        throw new Error(
-          `[targets.${id}.mcp] Config root must be an object, got ${kind} in ${resolved}`
-        );
+      // Remove previously-owned servers that are no longer desired
+      for (const name of managedOpts.previouslyOwned) {
+        if (!(name in config.mcpServers)) {
+          delete currentRecord[name];
+        }
       }
+
+      // Upsert new servers
+      for (const [name, server] of Object.entries(config.mcpServers)) {
+        const prev = currentRecord[name] ?? {};
+        currentRecord[name] = { ...prev, ...server };
+      }
+
+      existing[rootKey] = transformMcpServers(currentRecord, pipeline);
+    } else {
+      existing[rootKey] = transformMcpServers(config.mcpServers, pipeline);
     }
 
-    const transformed = transformMcpServers(config.mcpServers, pipeline);
-    existing[rootKey] = transformed;
     fs.writeFileSync(resolved, serialize(existing), 'utf-8');
   }
 
@@ -154,9 +208,13 @@ function compileMcpHandler(id: string, spec: Record<string, unknown>): TargetMcp
       writeConfig(configPath, config as { mcpServers: Record<string, Record<string, unknown>> }),
     ...(projectConfigPath
       ? {
-          applyProjectConfig: (root: string, config) => {
+          applyProjectConfig: (root: string, config, options) => {
             const p = path.join(path.resolve(root), expandPath(projectConfigPath));
-            writeConfig(p, config as { mcpServers: Record<string, Record<string, unknown>> });
+            writeConfig(
+              p,
+              config as { mcpServers: Record<string, Record<string, unknown>> },
+              options
+            );
           },
         }
       : {}),
@@ -164,7 +222,8 @@ function compileMcpHandler(id: string, spec: Record<string, unknown>): TargetMcp
 }
 
 function compileRulesHandler(id: string, spec: Record<string, unknown>): TargetRulesHandler {
-  const format = (optionalString(spec, 'format') ?? 'markdown') as 'markdown' | 'mdc';
+  const formatRaw = optionalString(spec, 'format') ?? 'markdown';
+  const format = requireEnum(formatRaw, ['markdown', 'mdc'] as const, `${id}.rules`, 'format');
   const filePath = requireString(spec, 'file_path', `${id}.rules`);
   const projectFilePath = optionalString(spec, 'project_file_path');
 

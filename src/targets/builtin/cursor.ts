@@ -5,7 +5,7 @@ import { sanitizeMcpName } from '../../agents/json-utils.js';
 import { getCursorDir, getProjectCursorDir } from '../../config/paths.js';
 import { wrapFrontmatter } from '../../util/frontmatter.js';
 import type { ApplicationTarget, GenericLibraryEntry } from '../types.js';
-import { extractMdId, resolveProjectRoot } from './common.js';
+import { extractMdId, resolveProjectRoot, wrapMdcFrontmatter } from './common.js';
 
 const adapter = new CursorAgent();
 
@@ -52,11 +52,7 @@ export const cursorTarget: ApplicationTarget = {
       if (root) return path.join(getProjectCursorDir(root), 'rules', 'asb-rules.mdc');
       return path.join(getCursorDir(), 'rules', 'asb-rules.mdc');
     },
-    render: (content) => {
-      const lines = ['---', 'description: Agent Switchboard Rules', 'alwaysApply: true', '---', ''];
-      if (content.length > 0) lines.push(content);
-      return lines.join('\n');
-    },
+    render: wrapMdcFrontmatter,
   },
 
   commands: {

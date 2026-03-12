@@ -17,7 +17,7 @@ import type { CommandPlatform as CmdPlatform } from './commands/importer.js';
 import { importCommandFromFile } from './commands/importer.js';
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
-import { updateConfigLayer } from './config/layered-config.js';
+import { loadWritableConfigLayer, updateConfigLayer } from './config/layered-config.js';
 import { loadMcpConfig, stripLegacyEnabledFlagsFromMcpJson } from './config/mcp-config.js';
 import {
   getAgentsDir,
@@ -542,7 +542,6 @@ ruleCommand.action(async (options: ScopeOptionInput) => {
     const selectionChanged =
       selection.explicitEmpty ||
       shouldPersistSelection({
-        currentEnabled: previousState.enabled,
         effectiveEnabled: effectiveState.enabled,
         selectedEnabled: desiredEnabled,
       });
@@ -1494,9 +1493,10 @@ pluginRoot
 function pluginEnableAction(id: string, options: ScopeOptionInput) {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-    if (config.plugins.enabled.includes(id)) {
-      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled.`));
+    const layerOpts = scopeToLayerOptions(scope);
+    const layer = loadWritableConfigLayer(layerOpts);
+    if (layer.config.plugins?.enabled?.includes(id)) {
+      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled in this config layer.`));
       return;
     }
     const index = buildPluginIndex(scope);
@@ -1506,14 +1506,14 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       process.exit(1);
     }
     updateConfigLayer(
-      (layer) => ({
-        ...layer,
+      (l) => ({
+        ...l,
         plugins: {
-          ...(layer.plugins ?? {}),
-          enabled: [...(layer.plugins?.enabled ?? []), id],
+          ...(l.plugins ?? {}),
+          enabled: [...(l.plugins?.enabled ?? []), id],
         },
       }),
-      scopeToLayerOptions(scope)
+      layerOpts
     );
     console.log(chalk.green(`✓ Plugin "${id}" enabled.`));
   } catch (error) {
@@ -1527,20 +1527,21 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
 function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string) {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-    if (!config.plugins.enabled.includes(id)) {
-      console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled.`));
+    const layerOpts = scopeToLayerOptions(scope);
+    const layer = loadWritableConfigLayer(layerOpts);
+    if (!layer.config.plugins?.enabled?.includes(id)) {
+      console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled in this config layer.`));
       return;
     }
     updateConfigLayer(
-      (layer) => ({
-        ...layer,
+      (l) => ({
+        ...l,
         plugins: {
-          ...(layer.plugins ?? {}),
-          enabled: (layer.plugins?.enabled ?? []).filter((x) => x !== id),
+          ...(l.plugins ?? {}),
+          enabled: (l.plugins?.enabled ?? []).filter((x) => x !== id),
         },
       }),
-      scopeToLayerOptions(scope)
+      layerOpts
     );
     console.log(chalk.green(`✓ Plugin "${id}" ${verb}.`));
   } catch (error) {
@@ -1814,7 +1815,7 @@ mktRoot
   });
 
 mktRoot.action(() => {
-  mktRoot.commands.find((c) => c.name() === 'list')?.parse(process.argv);
+  mktRoot.outputHelp();
 });
 
 // ── Removed: `asb source` ──────────────────────────────────────────

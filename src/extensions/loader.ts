@@ -14,7 +14,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { getConfigDir } from '../config/paths.js';
 import type { ExtensionsSection, SwitchboardConfig } from '../config/schemas.js';
-import { type AsbExtensionApi, createExtensionApi, type ExtensionModule } from './api.js';
+import { createStagingExtensionApi, type ExtensionModule } from './api.js';
 
 function getExtensionsDir(): string {
   return path.join(getConfigDir(), 'extensions');
@@ -48,6 +48,8 @@ function discoverModules(): Array<{ id: string; absolutePath: string }> {
  * Load and activate enabled extension modules.
  * Auto-discovers from `~/.asb/extensions/`, then filters by the
  * `[extensions]` enable/disable map.
+ * Uses staged registration: targets registered during activate() are only
+ * committed to the global registry if activate() succeeds.
  */
 export async function loadExtensions(config: SwitchboardConfig): Promise<void> {
   const enableMap: ExtensionsSection =
@@ -58,11 +60,9 @@ export async function loadExtensions(config: SwitchboardConfig): Promise<void> {
 
   if (toLoad.length === 0) return;
 
-  const api = createExtensionApi();
-
   for (const { id, absolutePath } of toLoad) {
     try {
-      await loadSingleExtension(absolutePath, api);
+      await loadSingleExtension(absolutePath);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       console.warn(`[extensions] Failed to load ${id}: ${msg}`);
@@ -70,7 +70,7 @@ export async function loadExtensions(config: SwitchboardConfig): Promise<void> {
   }
 }
 
-async function loadSingleExtension(absolutePath: string, api: AsbExtensionApi): Promise<void> {
+async function loadSingleExtension(absolutePath: string): Promise<void> {
   const fileUrl = pathToFileURL(absolutePath).href;
   const mod = (await import(fileUrl)) as ExtensionModule | { default: ExtensionModule };
   const ext = 'activate' in mod ? mod : (mod as { default: ExtensionModule }).default;
@@ -79,5 +79,8 @@ async function loadSingleExtension(absolutePath: string, api: AsbExtensionApi): 
     throw new Error('Extension must export an activate(api) function');
   }
 
-  await ext.activate(api);
+  // Stage registrations; only commit on success
+  const staging = createStagingExtensionApi();
+  await ext.activate(staging.api);
+  staging.commit();
 }

@@ -56,28 +56,57 @@ export interface AsbExtensionApi {
   };
 }
 
+const sharedUtil: AsbExtensionApi['util'] = {
+  yaml: { parse: parseYaml, stringify: stringifyYaml },
+  frontmatter: { wrap: wrapFrontmatter },
+  transforms: {
+    recordToKeyedArray,
+    keyedArrayToRecord,
+    envMapToKvArray,
+    kvArrayToEnvMap,
+    renameFields,
+    omitFields,
+    pickFields,
+    applyDefaults,
+    joinFields,
+    transformMcpServers,
+    transformFrontmatter,
+  },
+};
+
 export function createExtensionApi(): AsbExtensionApi {
   return {
     apiVersion: API_VERSION,
     registerTarget: (target) => {
       registerExtensionTarget(target);
     },
-    util: {
-      yaml: { parse: parseYaml, stringify: stringifyYaml },
-      frontmatter: { wrap: wrapFrontmatter },
-      transforms: {
-        recordToKeyedArray,
-        keyedArrayToRecord,
-        envMapToKvArray,
-        kvArrayToEnvMap,
-        renameFields,
-        omitFields,
-        pickFields,
-        applyDefaults,
-        joinFields,
-        transformMcpServers,
-        transformFrontmatter,
-      },
+    util: sharedUtil,
+  };
+}
+
+/**
+ * Create a staging extension API that buffers registrations.
+ * Call `commit()` after successful activate() to apply them to the global registry.
+ * If activate() throws, staged registrations are discarded.
+ */
+export function createStagingExtensionApi(): {
+  api: AsbExtensionApi;
+  commit: () => void;
+} {
+  const staged: ApplicationTarget[] = [];
+  const api: AsbExtensionApi = {
+    apiVersion: API_VERSION,
+    registerTarget: (target) => {
+      staged.push(target);
+    },
+    util: sharedUtil,
+  };
+  return {
+    api,
+    commit: () => {
+      for (const target of staged) {
+        registerExtensionTarget(target);
+      }
     },
   };
 }
