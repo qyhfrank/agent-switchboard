@@ -51,6 +51,10 @@ export async function distributeMcp(
   enabledServerNames?: string[],
   options?: DistributeMcpOptions
 ): Promise<McpDistributionResult[]> {
+  if (scope?.project && (options?.projectMode ?? 'exclusive') === 'managed' && !options?.manifest) {
+    throw new Error('Managed project distribution requires a valid manifest');
+  }
+
   const layerOpts = scopeToLayerOptions(scope);
   const switchboardConfig = loadSwitchboardConfig(layerOpts);
   const mcpConfig = loadMcpConfigWithPlugins(scope);

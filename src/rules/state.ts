@@ -1,3 +1,4 @@
+import { normalizeSectionEntryIds } from '../config/application-config.js';
 import type { UpdateConfigLayerOptions } from '../config/layered-config.js';
 import {
   loadMergedSwitchboardConfig,
@@ -31,12 +32,20 @@ function normalizeEnabled(ids: string[]): string[] {
 
 function getConfigEnabled(options?: UpdateConfigLayerOptions): string[] {
   const { config } = loadMergedSwitchboardConfig(options);
-  return [...config.rules.enabled];
+  return normalizeSectionEntryIds('rules', [...config.rules.enabled], {
+    profile: options?.profile,
+    project: options?.projectPath,
+  });
 }
 
 function getWritableConfigEnabled(options?: UpdateConfigLayerOptions): string[] {
   const layer = loadWritableConfigLayer(options);
-  return Array.isArray(layer.config.rules?.enabled) ? [...layer.config.rules.enabled] : [];
+  return Array.isArray(layer.config.rules?.enabled)
+    ? normalizeSectionEntryIds('rules', [...layer.config.rules.enabled], {
+        profile: options?.profile,
+        project: options?.projectPath,
+      })
+    : [];
 }
 
 function writeConfigEnabled(enabled: string[], options?: UpdateConfigLayerOptions): void {

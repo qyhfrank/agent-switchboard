@@ -148,6 +148,14 @@ interface LegacyDirSpec {
   platform: string;
 }
 
+function isSafeEmptyDir(dirPath: string): boolean {
+  try {
+    return fs.readdirSync(dirPath).length === 0;
+  } catch {
+    return false;
+  }
+}
+
 function distributeSkillsInternal(
   entries: SkillEntry[],
   scope: ConfigScope | undefined,
@@ -239,13 +247,25 @@ function distributeSkillsInternal(
       }
     }
     if (isDir(legacyDir)) {
-      fs.rmSync(legacyDir, { recursive: true });
-      outcome.results.push({
-        platform,
-        targetDir: legacyDir,
-        status: 'deleted',
-        reason: platform === 'agents' ? 'legacy platform-specific path' : 'legacy plural path',
-      });
+      if (isSafeEmptyDir(legacyDir)) {
+        fs.rmSync(legacyDir, { recursive: true });
+        outcome.results.push({
+          platform,
+          targetDir: legacyDir,
+          status: 'deleted',
+          reason:
+            platform === 'agents'
+              ? 'empty legacy platform-specific path'
+              : 'empty legacy plural path',
+        });
+      } else {
+        outcome.results.push({
+          platform,
+          targetDir: legacyDir,
+          status: 'skipped',
+          reason: 'legacy path not ASB-owned; left in place',
+        });
+      }
     }
   }
 

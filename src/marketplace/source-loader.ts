@@ -8,6 +8,7 @@ import type { CommandEntry } from '../commands/library.js';
 import type { ConfigScope } from '../config/scope.js';
 import type { HookEntry } from '../hooks/library.js';
 import { getSourcesRecord } from '../library/sources.js';
+import { buildPluginId } from '../plugins/identity.js';
 import type { SubagentEntry } from '../subagents/library.js';
 import { loadPluginComponents, type SkillEntryFromPlugin } from './plugin-loader.js';
 import { isMarketplace, readMarketplace } from './reader.js';
@@ -46,7 +47,8 @@ export function loadEntriesFromSources(scope?: ConfigScope): {
     if (isMarketplace(basePath)) {
       const result = readMarketplace(basePath);
       for (const plugin of result.plugins) {
-        const components = loadPluginComponents(plugin);
+        const pluginId = buildPluginId(plugin.name, namespace, 'marketplace');
+        const components = loadPluginComponents(plugin, pluginId);
         marketplaceEntries.commands.push(...components.commands);
         marketplaceEntries.agents.push(...components.agents);
         marketplaceEntries.skills.push(...components.skills);

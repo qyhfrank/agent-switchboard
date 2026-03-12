@@ -65,8 +65,8 @@ export function printPluginList(plugins: PluginDescriptor[], enabledList: string
 
   const enabledSet = new Set(enabledList);
   for (const p of plugins) {
-    const ref = p.meta.sourceKind === 'marketplace' ? `${p.id}@${p.meta.sourceName}` : p.id;
-    const isEnabled = enabledSet.has(ref);
+    const ref = p.id;
+    const isEnabled = p.refs.some((candidate) => enabledSet.has(candidate));
     const statusIcon = isEnabled ? chalk.green('●') : chalk.gray('○');
     const statusLabel = isEnabled ? chalk.green('enabled') : chalk.gray('available');
 
