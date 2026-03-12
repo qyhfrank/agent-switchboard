@@ -57,7 +57,7 @@ export function pickFirstPlatformArray(
     const platformExtras = getPlatformExtras(extras, platform);
     const value = platformExtras?.[key];
     if (Array.isArray(value)) {
-      return value as string[];
+      return pickStringArray(value);
     }
   }
   return [];
@@ -66,3 +66,6 @@ export function pickFirstPlatformArray(
 export function listExtraKeys(extras: unknown): string[] {
   return isObject(extras) ? Object.keys(extras) : [];
 }
+
+/** Shared platform priority for model/tools extraction from extras. */
+export const PLATFORM_PRIORITY = ['claude-code', 'opencode', 'cursor', 'codex'] as const;

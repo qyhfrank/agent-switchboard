@@ -42,6 +42,7 @@ export interface DistributionCounts {
   skipped: number;
   deleted: number;
   errors: number;
+  conflicts: number;
   skippedByTarget: Map<string, number>;
 }
 
@@ -53,6 +54,7 @@ export function countDistributionResults<T extends DistributionResultLike>(
   let skipped = 0;
   let deleted = 0;
   let errors = 0;
+  let conflicts = 0;
   const skippedByTarget = new Map<string, number>();
 
   for (const result of results) {
@@ -71,17 +73,21 @@ export function countDistributionResults<T extends DistributionResultLike>(
       case 'error':
         errors++;
         break;
+      case 'conflict':
+        conflicts++;
+        break;
     }
   }
-  return { written, skipped, deleted, errors, skippedByTarget };
+  return { written, skipped, deleted, errors, conflicts, skippedByTarget };
 }
 
 export function formatDistributionSummary(counts: DistributionCounts): string {
-  const { written, skipped, deleted, errors, skippedByTarget } = counts;
+  const { written, skipped, deleted, errors, conflicts, skippedByTarget } = counts;
   const parts: string[] = [];
   if (written > 0) parts.push(`${chalk.green(String(written))} written`);
   if (deleted > 0) parts.push(`${chalk.yellow(String(deleted))} deleted`);
   if (errors > 0) parts.push(`${chalk.red(String(errors))} error`);
+  if (conflicts > 0) parts.push(`${chalk.yellow(String(conflicts))} conflict`);
   if (skipped > 0) {
     const entries = [...skippedByTarget.entries()].sort(([a], [b]) => a.localeCompare(b));
     const uniqueCounts = new Set(skippedByTarget.values());
@@ -125,6 +131,7 @@ export function printDistributionResults<T extends DistributionResultLike>({
   }
 
   const summary = formatDistributionSummary(counts);
+
   if (summary) {
     console.log(`  ${chalk.gray('Summary:')} ${summary}`);
   }
@@ -147,6 +154,12 @@ function printResultLine<T extends DistributionResultLike>(
     const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
     const entryLabel = result.entryId ? ` ${result.entryId}` : '';
     console.log(`${pad}${chalk.yellow('−')} ${targetLabel}${entryLabel} ${pathLabel}${reason}`);
+  } else if (result.status === 'conflict') {
+    const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
+    const entryLabel = result.entryId ? ` ${result.entryId}` : '';
+    console.log(
+      `${pad}${chalk.yellow('⚠')} ${targetLabel}${entryLabel} ${pathLabel}${reason}`
+    );
   } else if (result.status === 'error') {
     const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
     console.log(`${pad}${chalk.red('✗')} ${targetLabel} ${pathLabel}${errorLabel}`);
@@ -179,7 +192,8 @@ export function printCompactDistributions(
     const counts = countDistributionResults(section.results, section.getTargetLabel);
     if (counts.errors > 0) hasErrors = true;
     const summary = formatDistributionSummary(counts);
-    const hasChanges = counts.written > 0 || counts.deleted > 0 || counts.errors > 0;
+    const hasChanges =
+      counts.written > 0 || counts.deleted > 0 || counts.errors > 0 || counts.conflicts > 0;
 
     if (!hasChanges) {
       console.log(`  ${chalk.gray(`${label}:`)} ${summary}`);

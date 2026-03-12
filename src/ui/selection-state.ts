@@ -1,5 +1,4 @@
 export interface SelectionPersistenceOptions {
-  currentEnabled: string[];
   effectiveEnabled: string[];
   selectedEnabled: string[];
 }
@@ -10,9 +9,6 @@ export function arraysEqual(a: string[], b: string[]): boolean {
 }
 
 export function shouldPersistSelection(options: SelectionPersistenceOptions): boolean {
-  const { currentEnabled, effectiveEnabled, selectedEnabled } = options;
-  if (selectedEnabled.length === 0) {
-    return currentEnabled.length > 0 || effectiveEnabled.length > 0;
-  }
-  return !arraysEqual(currentEnabled, selectedEnabled);
+  const { effectiveEnabled, selectedEnabled } = options;
+  return !arraysEqual(effectiveEnabled, selectedEnabled);
 }
