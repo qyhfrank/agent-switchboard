@@ -389,7 +389,7 @@ export const switchboardConfigSchema = z
     hooks: selectionSectionSchema.default({ enabled: [] }),
     rules: rulesSectionSchema.default({ enabled: [], includeDelimiters: false }),
     distribution: distributionSectionSchema.default({ use_agents_dir: false }),
-    ui: uiSectionSchema.default({ pageSize: 20 }),
+    ui: uiSectionSchema.default({}),
   })
   .passthrough();
 
