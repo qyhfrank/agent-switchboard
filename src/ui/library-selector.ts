@@ -3,7 +3,6 @@ import chalk from 'chalk';
 import type { ConfigScope } from '../config/scope.js';
 import {
   loadLibraryStateSection,
-  loadWritableLibraryStateSection,
   updateLibraryStateSection,
 } from '../library/state.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
@@ -123,7 +122,6 @@ export async function showLibrarySelector<TEntry>(
   const map = new Map<string, TEntry>();
   for (const entry of entries) map.set(opts.getId(entry), entry);
 
-  const state = loadWritableLibraryStateSection(opts.section, opts.scope);
   const effectiveState = loadLibraryStateSection(opts.section, opts.scope);
 
   const buildChoiceList = (activeIds: string[]): FuzzyMultiSelectChoice[] => {
@@ -167,7 +165,7 @@ export async function showLibrarySelector<TEntry>(
     });
   };
 
-  const currentSelection = state.enabled;
+  const currentSelection = effectiveState.enabled;
   while (true) {
     const choices = buildChoiceList(currentSelection);
     const selected = await fuzzyMultiSelect({
@@ -188,7 +186,6 @@ export async function showLibrarySelector<TEntry>(
       if (confirmed) {
         if (
           !shouldPersistSelection({
-            currentEnabled: currentSelection,
             effectiveEnabled: effectiveState.enabled,
             selectedEnabled: [],
           })
@@ -204,7 +201,6 @@ export async function showLibrarySelector<TEntry>(
     if (!allowOrdering) {
       if (
         !shouldPersistSelection({
-          currentEnabled: currentSelection,
           effectiveEnabled: effectiveState.enabled,
           selectedEnabled: sanitized,
         })
@@ -222,7 +218,6 @@ export async function showLibrarySelector<TEntry>(
     const ordered = await promptOrder(opts.noun, sanitized, map, opts.getTitle);
     if (
       !shouldPersistSelection({
-        currentEnabled: currentSelection,
         effectiveEnabled: effectiveState.enabled,
         selectedEnabled: ordered,
       })

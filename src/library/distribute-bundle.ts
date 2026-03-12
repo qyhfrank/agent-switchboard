@@ -144,6 +144,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       let filesSkipped = 0;
       let hadError = false;
       let errorMessage = '';
+      const sourceContents: Buffer[] = [];
 
       for (const file of files) {
         const targetPath = path.join(targetDir, file.relativePath);
@@ -151,6 +152,7 @@ export function distributeBundle<TEntry, Platform extends string>(
 
         try {
           const srcContent = fs.readFileSync(file.sourcePath);
+          sourceContents.push(srcContent);
           let same = false;
 
           if (fs.existsSync(targetPath)) {
@@ -218,17 +220,13 @@ export function distributeBundle<TEntry, Platform extends string>(
         });
       }
 
-      // Record in manifest after successful write or skip
+      // Record in manifest after successful write or skip (reuse cached content)
       if (manifest && managedProjectRoot) {
         const lastResult = results[results.length - 1];
         if (lastResult.status === 'written' || lastResult.status === 'skipped') {
           const contentHash = createHash('sha256');
-          for (const file of files) {
-            try {
-              contentHash.update(fs.readFileSync(file.sourcePath));
-            } catch {
-              // Ignore
-            }
+          for (const buf of sourceContents) {
+            contentHash.update(buf);
           }
           recordLibraryEntry(manifest, manifestSection, entryId, {
             relativePath: path.relative(path.resolve(managedProjectRoot), targetDir),

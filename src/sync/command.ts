@@ -114,13 +114,23 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
   console.log();
 
+  const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
+
+  // Precompute per-section per-app effective configs
+  const sectionAppConfigs = new Map<string, Map<string, string[]>>();
+  for (const section of sections) {
+    const appMap = new Map<string, string[]>();
+    for (const appId of config.applications.enabled) {
+      appMap.set(appId, resolveScopedSectionConfig(section, appId, scope).enabled);
+    }
+    sectionAppConfigs.set(section, appMap);
+  }
+
   const cursorSkillsDeduped =
     config.applications.enabled.includes('claude-code') &&
-    resolveScopedSectionConfig('skills', 'claude-code', scope).enabled.length > 0;
+    (sectionAppConfigs.get('skills')?.get('claude-code')?.length ?? 0) > 0;
   console.log(chalk.blue('Inventory:'));
   {
-    const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
-
     const sectionPlatforms: Record<string, readonly string[]> = {};
     for (const section of sections) {
       let ids = filterInstalled(getTargetsForSection(section), assumeInstalledSet).map((t) => t.id);
@@ -168,9 +178,10 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       const supported = new Set(sectionPlatforms[section] ?? []);
       const applicableApps = config.applications.enabled.filter((id) => supported.has(id));
 
+      const allAppConfigs = sectionAppConfigs.get(section)!;
       const effectiveByApp = new Map<string, string[]>();
       for (const appId of applicableApps) {
-        effectiveByApp.set(appId, resolveScopedSectionConfig(section, appId, scope).enabled);
+        effectiveByApp.set(appId, allAppConfigs.get(appId) ?? []);
       }
 
       const perAppParts = applicableApps.map((appId) => {
@@ -247,7 +258,13 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   const isManaged = projectRoot != null && projectMode === 'managed';
   let manifest: ProjectDistributionManifest | undefined;
   if (isManaged) {
-    manifest = loadManifest(projectRoot);
+    const result = loadManifest(projectRoot);
+    if (result.corrupt) {
+      console.warn(`[asb] Skipping managed sync: corrupt manifest in ${projectRoot}`);
+      manifest = undefined;
+    } else {
+      manifest = result.manifest;
+    }
   }
 
   const collision = isManaged ? config.distribution.project.collision : undefined;
