@@ -27,7 +27,12 @@ export type SkillTarget = 'claude-code' | 'agents';
 
 const AGENTS_TARGET_PLATFORMS = ['codex', 'gemini', 'opencode'] as const;
 
-function shouldDedupCursorSkills(scope?: ConfigScope): boolean {
+function shouldDedupCursorSkills(
+  scope: ConfigScope | undefined,
+  activeSet: Set<string> | null
+): boolean {
+  // Only dedup Cursor skills when claude-code is also being synced (full sync or explicit)
+  if (activeSet && !activeSet.has('claude-code')) return false;
   const claudeState = loadLibraryStateSectionForApplication('skills', 'claude-code', scope);
   return claudeState.enabled.length > 0;
 }
@@ -189,7 +194,7 @@ function distributeSkillsInternal(
       }
     }
     if (target === 'cursor') {
-      if (shouldDedupCursorSkills(scope)) return [];
+      if (shouldDedupCursorSkills(scope, activeSet)) return [];
       const state = loadLibraryStateSectionForApplication('skills', target, scope);
       return allEntries.filter((e) => new Set(state.enabled).has(e.id));
     }
@@ -226,6 +231,13 @@ function distributeSkillsInternal(
   });
 
   for (const { path: legacyDir, platform } of options.legacyDirs) {
+    // Only clean a legacy dir when the corresponding target is active (or full sync)
+    if (activeSet && !activeSet.has(platform)) {
+      // For the 'agents' virtual target, check if any agent platform is active
+      if (platform !== 'agents' || !AGENTS_TARGET_PLATFORMS.some((a) => activeSet.has(a))) {
+        continue;
+      }
+    }
     if (isDir(legacyDir)) {
       fs.rmSync(legacyDir, { recursive: true });
       outcome.results.push({
