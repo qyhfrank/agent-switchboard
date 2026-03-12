@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 /**
  * Block merge for shared rules files (CLAUDE.md, AGENTS.md).
  *
@@ -73,6 +75,6 @@ export function removeRulesBlock(content: string): string {
  * vs a shared file (needs block merge).
  */
 export function isDedicatedAsbRulesFile(filePath: string): boolean {
-  const basename = filePath.split('/').pop() ?? '';
+  const basename = path.basename(filePath).split('\\').pop() ?? '';
   return basename.startsWith('asb-rules');
 }

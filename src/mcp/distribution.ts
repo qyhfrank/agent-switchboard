@@ -11,7 +11,10 @@ import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { loadMcpEnabledState } from '../library/state.js';
 import {
   computeMcpCleanupSet,
+  getMcpEntryKeysForPath,
   getOwnedMcpServers,
+  getOwnedMcpServersForPath,
+  getOwnedMcpTargetIds,
   recordMcpEntry,
   removeMcpEntry,
 } from '../manifest/store.js';
@@ -51,6 +54,10 @@ export async function distributeMcp(
   enabledServerNames?: string[],
   options?: DistributeMcpOptions
 ): Promise<McpDistributionResult[]> {
+  if (scope?.project && options?.projectMode === 'none') {
+    return [];
+  }
+
   if (scope?.project && (options?.projectMode ?? 'exclusive') === 'managed' && !options?.manifest) {
     throw new Error('Managed project distribution requires a valid manifest');
   }
@@ -63,8 +70,12 @@ export async function distributeMcp(
   const assumeInstalled =
     options?.assumeInstalled ?? new Set(switchboardConfig.applications.assume_installed);
   const results: McpDistributionResult[] = [];
+  const managedTargetIds = options?.manifest
+    ? getOwnedMcpTargetIds(options.manifest)
+    : new Set<string>();
+  const targetIds = [...new Set([...switchboardConfig.applications.enabled, ...managedTargetIds])];
 
-  if (switchboardConfig.applications.enabled.length === 0) {
+  if (targetIds.length === 0) {
     if (useSpinner) {
       console.log(chalk.yellow('\n⚠ No applications found in the enabled configuration stack.'));
       console.log();
@@ -75,19 +86,36 @@ export async function distributeMcp(
   }
 
   const globalMcpServers = enabledServerNames ?? loadMcpEnabledState(scope);
+  const projectWrites = new Map<
+    string,
+    {
+      handler: NonNullable<NonNullable<ReturnType<typeof getTargetById>>['mcp']>;
+      agentIds: string[];
+      configs: Array<Record<string, Omit<McpServer, 'enabled'>>>;
+      previouslyOwned: Set<string>;
+      relativePath: string;
+      desiredByAgent: Map<string, Set<string>>;
+      persistByAgent: Map<string, (symbol: string, text: string) => void>;
+    }
+  >();
 
-  for (const agentId of switchboardConfig.applications.enabled) {
+  for (const agentId of targetIds) {
     const spinner = useSpinner ? ora({ indent: 2 }).start(`Applying to ${agentId}...`) : null;
     const persist = (symbol: string, text: string) => {
       if (!spinner) return;
       spinner.stopAndPersist({ symbol: `  ${symbol}`, text });
     };
+    const isActiveApplication = switchboardConfig.applications.enabled.includes(agentId);
 
     try {
-      const agentMcpConfig = resolveScopedSectionConfig('mcp', agentId, scope);
-      const agentActiveServers = enabledServerNames
-        ? agentMcpConfig.enabled.filter((serverName) => globalMcpServers.includes(serverName))
-        : agentMcpConfig.enabled;
+      const agentMcpConfig = isActiveApplication
+        ? resolveScopedSectionConfig('mcp', agentId, scope)
+        : { enabled: [] };
+      const agentActiveServers = isActiveApplication
+        ? enabledServerNames
+          ? agentMcpConfig.enabled.filter((serverName) => globalMcpServers.includes(serverName))
+          : agentMcpConfig.enabled
+        : [];
       const activeSet = new Set(agentActiveServers);
       const enabledServers: Record<string, Omit<McpServer, 'enabled'>> = {};
       for (const [serverName, server] of Object.entries(mcpConfig.mcpServers)) {
@@ -98,7 +126,9 @@ export async function distributeMcp(
       const configToApply = { mcpServers: enabledServers };
 
       const target = getTargetById(agentId);
-      if (!assumeInstalled.has(agentId) && target?.isInstalled?.() === false) {
+      const skipInstallCheck =
+        scope?.project && managedTargetIds.has(agentId) && !isActiveApplication;
+      if (!skipInstallCheck && !assumeInstalled.has(agentId) && target?.isInstalled?.() === false) {
         persist(
           chalk.gray('○'),
           `${chalk.cyan(agentId)} ${chalk.gray('(not installed, skipped)')}`
@@ -127,55 +157,44 @@ export async function distributeMcp(
 
       if (scope?.project && mcpHandler.applyProjectConfig) {
         const projectPath = mcpHandler.projectConfigPath?.(scope.project) ?? 'project config';
-        const before = readFileSafe(projectPath);
+        const relativePath = path.relative(path.resolve(scope.project), projectPath);
 
         // Build managed merge options if manifest is provided
         const manifest = options?.manifest;
         const isManaged = manifest && (options?.projectMode ?? 'exclusive') === 'managed';
         const sanitize = mcpHandler.sanitizeServerName;
         const ownedServers = isManaged ? getOwnedMcpServers(manifest, agentId) : new Set<string>();
-        const managedOpts: ManagedMcpOptions | undefined = isManaged
-          ? { previouslyOwned: ownedServers }
-          : undefined;
 
         // Skip silently if no servers to apply and nothing to clean up
         if (Object.keys(configToApply.mcpServers).length === 0 && ownedServers.size === 0) {
+          persist(chalk.gray('○'), `${chalk.cyan(agentId)} ${chalk.gray('(no MCP changes)')}`);
           continue;
         }
 
-        mcpHandler.applyProjectConfig(scope.project, configToApply, managedOpts);
-
-        // Record owned servers in manifest (using sanitized names to match on-disk keys)
-        if (isManaged && manifest) {
-          const timestamp = new Date().toISOString();
-          for (const serverName of Object.keys(configToApply.mcpServers)) {
-            const manifestName = sanitize ? sanitize(serverName) : serverName;
-            recordMcpEntry(manifest, manifestName, {
-              relativePath: path.relative(path.resolve(scope.project), projectPath),
-              targetId: agentId,
-              serverKey: manifestName,
-              updatedAt: timestamp,
-            });
-          }
-          // Remove no-longer-enabled servers from manifest
-          const currentDesired = new Set(
-            Object.keys(configToApply.mcpServers).map((n) => (sanitize ? sanitize(n) : n))
-          );
-          const toRemove = computeMcpCleanupSet(manifest, currentDesired, agentId);
-          for (const name of toRemove) {
-            removeMcpEntry(manifest, name);
-          }
+        const write = projectWrites.get(projectPath) ?? {
+          handler: mcpHandler,
+          agentIds: [],
+          configs: [],
+          previouslyOwned: isManaged
+            ? getOwnedMcpServersForPath(manifest, relativePath)
+            : new Set<string>(),
+          relativePath,
+          desiredByAgent: new Map<string, Set<string>>(),
+          persistByAgent: new Map<string, (symbol: string, text: string) => void>(),
+        };
+        write.agentIds.push(agentId);
+        write.configs.push(configToApply.mcpServers);
+        for (const name of ownedServers) {
+          write.previouslyOwned.add(name);
         }
-
-        const after = readFileSafe(projectPath);
-        const changed = before !== after;
-        persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(projectPath))}`);
-        results.push({
-          application: agentId,
-          filePath: projectPath,
-          status: changed ? 'written' : 'skipped',
-          reason: changed ? 'applied' : 'up-to-date',
-        });
+        write.desiredByAgent.set(
+          agentId,
+          new Set(
+            Object.keys(configToApply.mcpServers).map((name) => (sanitize ? sanitize(name) : name))
+          )
+        );
+        write.persistByAgent.set(agentId, persist);
+        projectWrites.set(projectPath, write);
         continue;
       }
 
@@ -200,6 +219,89 @@ export async function distributeMcp(
         status: 'error',
         error: `${msg} (skipped)`,
       });
+    }
+  }
+
+  for (const [projectPath, write] of projectWrites) {
+    const before = readFileSafe(projectPath);
+    const mergedServers: Record<string, Omit<McpServer, 'enabled'>> = {};
+    for (const config of write.configs) {
+      for (const [serverName, server] of Object.entries(config)) {
+        mergedServers[serverName] = server;
+      }
+    }
+
+    try {
+      const managedOpts: ManagedMcpOptions | undefined =
+        options?.manifest && (options?.projectMode ?? 'exclusive') === 'managed'
+          ? { previouslyOwned: write.previouslyOwned }
+          : undefined;
+      write.handler.applyProjectConfig?.(
+        scope?.project ?? '',
+        { mcpServers: mergedServers },
+        managedOpts
+      );
+
+      if (
+        options?.manifest &&
+        scope?.project &&
+        (options?.projectMode ?? 'exclusive') === 'managed'
+      ) {
+        const timestamp = new Date().toISOString();
+        for (const agentId of write.agentIds) {
+          const currentDesired = write.desiredByAgent.get(agentId) ?? new Set<string>();
+          for (const serverName of currentDesired) {
+            recordMcpEntry(options.manifest, serverName, {
+              relativePath: write.relativePath,
+              targetId: agentId,
+              serverKey: serverName,
+              updatedAt: timestamp,
+            });
+          }
+          const toRemove = computeMcpCleanupSet(options.manifest, currentDesired, agentId);
+          for (const name of toRemove) {
+            removeMcpEntry(options.manifest, name);
+          }
+        }
+
+        const inactiveOwnerKeys = getMcpEntryKeysForPath(
+          options.manifest,
+          write.relativePath,
+          new Set(write.agentIds)
+        );
+        for (const key of inactiveOwnerKeys) {
+          removeMcpEntry(options.manifest, key);
+        }
+      }
+
+      const after = readFileSafe(projectPath);
+      const changed = before !== after;
+      for (const agentId of write.agentIds) {
+        write.persistByAgent.get(agentId)?.(
+          chalk.green('✓'),
+          `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(projectPath))}`
+        );
+        results.push({
+          application: agentId,
+          filePath: projectPath,
+          status: changed ? 'written' : 'skipped',
+          reason: changed ? 'applied' : 'up-to-date',
+        });
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      for (const agentId of write.agentIds) {
+        write.persistByAgent.get(agentId)?.(
+          chalk.yellow('⚠'),
+          `${chalk.cyan(agentId)} - ${msg} (skipped)`
+        );
+        results.push({
+          application: agentId,
+          filePath: projectPath,
+          status: 'error',
+          error: `${msg} (skipped)`,
+        });
+      }
     }
   }
 

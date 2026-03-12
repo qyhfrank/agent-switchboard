@@ -1,7 +1,11 @@
 import { confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { ConfigScope } from '../config/scope.js';
-import { loadLibraryStateSection, updateLibraryStateSection } from '../library/state.js';
+import {
+  loadLibraryStateSection,
+  loadWritableLibraryStateSection,
+  updateLibraryStateSection,
+} from '../library/state.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 import { shouldPersistSelection } from './selection-state.js';
 
@@ -119,7 +123,10 @@ export async function showLibrarySelector<TEntry>(
   const map = new Map<string, TEntry>();
   for (const entry of entries) map.set(opts.getId(entry), entry);
 
-  const effectiveState = loadLibraryStateSection(opts.section, opts.scope);
+  const isScopedSelection = Boolean(opts.scope?.profile || opts.scope?.project);
+  const activeState = isScopedSelection
+    ? loadWritableLibraryStateSection(opts.section, opts.scope)
+    : loadLibraryStateSection(opts.section, opts.scope);
 
   const buildChoiceList = (activeIds: string[]): FuzzyMultiSelectChoice[] => {
     const activeSet = new Set(activeIds);
@@ -162,7 +169,7 @@ export async function showLibrarySelector<TEntry>(
     });
   };
 
-  const currentSelection = effectiveState.enabled;
+  const currentSelection = activeState.enabled;
   while (true) {
     const choices = buildChoiceList(currentSelection);
     const selected = await fuzzyMultiSelect({
@@ -183,7 +190,7 @@ export async function showLibrarySelector<TEntry>(
       if (confirmed) {
         if (
           !shouldPersistSelection({
-            effectiveEnabled: effectiveState.enabled,
+            effectiveEnabled: activeState.enabled,
             selectedEnabled: [],
           })
         ) {
@@ -198,7 +205,7 @@ export async function showLibrarySelector<TEntry>(
     if (!allowOrdering) {
       if (
         !shouldPersistSelection({
-          effectiveEnabled: effectiveState.enabled,
+          effectiveEnabled: activeState.enabled,
           selectedEnabled: sanitized,
         })
       ) {
@@ -215,7 +222,7 @@ export async function showLibrarySelector<TEntry>(
     const ordered = await promptOrder(opts.noun, sanitized, map, opts.getTitle);
     if (
       !shouldPersistSelection({
-        effectiveEnabled: effectiveState.enabled,
+        effectiveEnabled: activeState.enabled,
         selectedEnabled: ordered,
       })
     ) {
