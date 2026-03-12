@@ -183,6 +183,41 @@ asb agent -p team --project /path/to/repo     # both
 
 When `--project` is used, outputs target the project directory (e.g. `<project>/AGENTS.md`, `<project>/.claude/commands/`).
 
+Interactive selectors follow the writable layer you target:
+
+- User scope shows and edits the merged user selection.
+- `-p/--profile` shows only that profile layer's explicit selection.
+- `-P/--project` shows only that project layer's explicit selection.
+
+Inherited entries from higher-priority layers do not participate in scoped sync until you write them into that profile or project layer. Saving an empty scoped selection creates an explicit empty override for that layer.
+
+### Project Distribution Modes
+
+Project-scoped sync supports three modes under `[distribution.project]`:
+
+```toml
+[distribution.project]
+mode = "managed"          # or: "exclusive", "none"
+collision = "warn-skip"   # managed only: "warn-skip", "error", "takeover"
+
+[distribution.project.rules]
+placement = "prepend"     # or: "append"
+```
+
+| Mode        | Behavior |
+|:------------|:---------|
+| `exclusive` | ASB writes project-scoped outputs directly and cleans up inactive entries in target directories. |
+| `managed`   | Default. Uses a manifest at `<project>/.asb/state/distribution.json` so cleanup only removes files and directories previously written by ASB. Shared rule files use block merge instead of full replacement. |
+| `none`      | Disables all project-scoped writes. Selections can still be edited in `.asb.toml`, but project distribution commands and `asb sync -P <project>` skip output generation. |
+
+Managed-mode collision policy controls what happens when ASB encounters a foreign file or directory at a target path:
+
+| Policy      | Behavior |
+|:------------|:---------|
+| `warn-skip` | Report a conflict and leave the foreign path untouched. |
+| `error`     | Report a hard error and fail the affected distribution step. |
+| `takeover`  | Treat the path as ASB-managed and overwrite it. |
+
 ## Libraries
 
 All library types follow the same pattern:
@@ -345,7 +380,11 @@ asb plugin list                       # show all discovered plugins
 asb plugin info context7              # show plugin details + components
 ```
 
+Discovered plugin MCP servers appear in the MCP picker alongside locally-defined servers and can be enabled per user, profile, or project scope.
+
 Enabled plugin components are expanded into entry-level `enabled` arrays during `asb sync`. Components appear with a namespace prefix (e.g. `context7:docs-researcher`) and can be individually controlled via per-application overrides.
+
+Plugin MCP servers are also addressable directly through `[mcp].enabled` and the `asb mcp` selector. As long as the plugin source is discoverable, a plugin MCP server can be enabled directly without adding its parent plugin to `[plugins].enabled`.
 
 ## Sync
 
@@ -356,6 +395,12 @@ asb sync [-p <profile>] [-P <path>]
 ```
 
 This merges layered config, applies per-application overrides, and writes target files in place. Files are only rewritten when content changes.
+
+For project scope, sync honors `[distribution.project].mode`:
+
+- `managed` keeps a manifest and cleans up only ASB-owned project outputs
+- `exclusive` writes directly to the project targets
+- `none` skips project writes entirely
 
 ## Environment
 
