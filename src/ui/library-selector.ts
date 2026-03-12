@@ -1,10 +1,7 @@
 import { confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
 import type { ConfigScope } from '../config/scope.js';
-import {
-  loadLibraryStateSection,
-  updateLibraryStateSection,
-} from '../library/state.js';
+import { loadLibraryStateSection, updateLibraryStateSection } from '../library/state.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
 import { shouldPersistSelection } from './selection-state.js';
 

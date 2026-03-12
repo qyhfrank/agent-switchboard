@@ -57,10 +57,14 @@ export class GeminiAgent implements AgentAdapter {
     config: { mcpServers: Record<string, Omit<McpServer, 'enabled'>> },
     options?: { previouslyOwned?: ReadonlySet<string> }
   ): void {
-    applyJsonMcpConfig(this.projectConfigPath(projectRoot), config.mcpServers as Record<string, object>, {
-      sanitize: false,
-      serverMapper: mapServerForGemini,
-      previouslyOwned: options?.previouslyOwned,
-    });
+    applyJsonMcpConfig(
+      this.projectConfigPath(projectRoot),
+      config.mcpServers as Record<string, object>,
+      {
+        sanitize: false,
+        serverMapper: mapServerForGemini,
+        previouslyOwned: options?.previouslyOwned,
+      }
+    );
   }
 }

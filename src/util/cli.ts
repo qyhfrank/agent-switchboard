@@ -157,9 +157,7 @@ function printResultLine<T extends DistributionResultLike>(
   } else if (result.status === 'conflict') {
     const reason = result.reason ? chalk.gray(` (${result.reason})`) : '';
     const entryLabel = result.entryId ? ` ${result.entryId}` : '';
-    console.log(
-      `${pad}${chalk.yellow('⚠')} ${targetLabel}${entryLabel} ${pathLabel}${reason}`
-    );
+    console.log(`${pad}${chalk.yellow('⚠')} ${targetLabel}${entryLabel} ${pathLabel}${reason}`);
   } else if (result.status === 'error') {
     const errorLabel = result.error ? ` ${chalk.red(result.error)}` : '';
     console.log(`${pad}${chalk.red('✗')} ${targetLabel} ${pathLabel}${errorLabel}`);

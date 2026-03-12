@@ -1,8 +1,8 @@
 import type { ConfigScope } from '../config/scope.js';
 import { loadLibraryStateSection, type SectionState } from '../library/state.js';
 import {
-  PLATFORM_PRIORITY,
   listExtraKeys,
+  PLATFORM_PRIORITY,
   pickFirstPlatformArray,
   pickFirstPlatformString,
 } from '../util/extras.js';

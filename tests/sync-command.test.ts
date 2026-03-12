@@ -65,8 +65,12 @@ async function captureConsoleOutput<T>(
 ): Promise<{ result: T; output: string }> {
   const lines: string[] = [];
   const originalLog = console.log;
+  const originalWarn = console.warn;
 
   console.log = (...args: unknown[]) => {
+    lines.push(args.map((arg) => String(arg)).join(' '));
+  };
+  console.warn = (...args: unknown[]) => {
     lines.push(args.map((arg) => String(arg)).join(' '));
   };
 
@@ -75,6 +79,7 @@ async function captureConsoleOutput<T>(
     return { result, output: lines.join('\n') };
   } finally {
     console.log = originalLog;
+    console.warn = originalWarn;
   }
 }
 
@@ -219,5 +224,44 @@ test('runSyncCommand profile scope syncs writable profile selection to global ou
     assert.match(output, /skills\s+\(1\)\s+claude-code:1/);
     assert.match(output, /profile-skill/);
     assert.deepEqual(Object.keys(applied.mcpServers), ['beta']);
+  });
+});
+
+test('runSyncCommand aborts project managed sync when manifest is corrupt', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(path.join(projectRoot, '.claude', 'commands'), { recursive: true });
+    fs.mkdirSync(path.join(projectRoot, '.asb', 'state'), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectRoot, '.claude', 'commands', 'foreign.md'),
+      'user-owned\n',
+      'utf-8'
+    );
+    fs.writeFileSync(
+      path.join(projectRoot, '.asb', 'state', 'distribution.json'),
+      '{ not valid json',
+      'utf-8'
+    );
+    writeConfig(path.join(projectRoot, '.asb.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[distribution.project]',
+      'mode = "managed"',
+    ]);
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ scope: { project: projectRoot }, updateSources: false })
+    );
+
+    assert.equal(result, true);
+    assert.match(output, /Aborting managed sync: corrupt manifest/);
+    assert.equal(
+      fs.existsSync(path.join(projectRoot, '.claude', 'commands', 'foreign.md')),
+      true,
+      'foreign project file should not be deleted when manifest is corrupt'
+    );
   });
 });

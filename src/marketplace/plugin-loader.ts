@@ -40,19 +40,25 @@ function isMarkdownFile(name: string): boolean {
   return ext === '.md' || ext === '.markdown';
 }
 
+function byEntryName(a: fs.Dirent, b: fs.Dirent): number {
+  return a.name.localeCompare(b.name);
+}
+
 function toId(fileName: string): string {
   return path.basename(fileName, path.extname(fileName));
 }
 
 /**
  * Load all components (commands, agents, skills) from a single plugin directory.
- * The namespace is the plugin name, producing IDs like "plugin-name:component-id".
+ * The namespace defaults to the plugin name, producing IDs like "plugin-name:component-id".
  *
  * When `customPaths` is present on the plugin (from strict mode resolution),
  * commands/agents are loaded from those specific files instead of scanning directories.
  */
-export function loadPluginComponents(plugin: ResolvedPlugin): PluginComponents {
-  const namespace = plugin.name;
+export function loadPluginComponents(
+  plugin: ResolvedPlugin,
+  namespace = plugin.name
+): PluginComponents {
   const result: PluginComponents = { commands: [], agents: [], skills: [], hooks: [] };
 
   if (plugin.customPaths?.commands) {
@@ -150,7 +156,7 @@ function loadMarkdownEntries<T extends CommandEntry | SubagentEntry>(
     return [];
   }
 
-  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  const entries = fs.readdirSync(directory, { withFileTypes: true }).sort(byEntryName);
   const result: T[] = [];
 
   for (const entry of entries) {
@@ -193,7 +199,7 @@ function loadSkillEntries(pluginDir: string, namespace: string): SkillEntryFromP
   }
 
   const result: SkillEntryFromPlugin[] = [];
-  const entries = fs.readdirSync(skillsDir, { withFileTypes: true });
+  const entries = fs.readdirSync(skillsDir, { withFileTypes: true }).sort(byEntryName);
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -239,7 +245,7 @@ function loadHookEntries(pluginDir: string, namespace: string): HookEntry[] {
   }
 
   const result: HookEntry[] = [];
-  const entries = fs.readdirSync(hooksDir, { withFileTypes: true });
+  const entries = fs.readdirSync(hooksDir, { withFileTypes: true }).sort(byEntryName);
 
   for (const entry of entries) {
     if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') {

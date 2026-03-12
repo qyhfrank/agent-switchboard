@@ -94,6 +94,27 @@ function getGlobalEnabled(config: ApplicationConfigSource, section: ConfigSectio
   return Array.isArray(sectionConfig?.enabled) ? [...sectionConfig.enabled] : [];
 }
 
+function dedupeIds(ids: string[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const id of ids) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
+}
+
+export function normalizeSectionEntryIds(
+  _section: ConfigSection,
+  ids: string[],
+  scope?: ConfigScope
+): string[] {
+  if (ids.length === 0) return [];
+  const index = buildPluginIndex(scope);
+  return dedupeIds(ids.map((id) => index.normalizeComponentId(id)));
+}
+
 function getPluginEnabledRefs(config: ApplicationConfigSource): string[] {
   return Array.isArray(config.plugins?.enabled) ? [...config.plugins.enabled] : [];
 }
@@ -107,18 +128,38 @@ function getPluginExcludeList(
   return Array.isArray(excludeList) ? [...excludeList] : [];
 }
 
+function normalizeIncrementalSelection(
+  section: ConfigSection,
+  override: IncrementalSelection | undefined,
+  scope?: ConfigScope
+): IncrementalSelection | undefined {
+  if (!override) return undefined;
+
+  const normalized: IncrementalSelection = {};
+  if (override.enabled) {
+    normalized.enabled = normalizeSectionEntryIds(section, override.enabled, scope);
+  }
+  if (override.add) {
+    normalized.add = normalizeSectionEntryIds(section, override.add, scope);
+  }
+  if (override.remove) {
+    normalized.remove = normalizeSectionEntryIds(section, override.remove, scope);
+  }
+  return normalized;
+}
+
 function resolveSectionConfigFromConfig(
   config: ApplicationConfigSource,
   section: ConfigSection,
   appId: string,
   scope?: ConfigScope
 ): ResolvedSectionConfig {
-  const globalEnabled = getGlobalEnabled(config, section);
+  const globalEnabled = normalizeSectionEntryIds(section, getGlobalEnabled(config, section), scope);
   const enabledPluginRefs = getPluginEnabledRefs(config);
+  const index = buildPluginIndex(scope);
 
   let merged: string[];
   if (enabledPluginRefs.length > 0) {
-    const index = buildPluginIndex(scope);
     const expanded = index.expand(enabledPluginRefs);
     const pluginSection = section as PluginComponentSection;
     const pluginEntryIds = expanded[pluginSection] ?? [];
@@ -132,7 +173,11 @@ function resolveSectionConfigFromConfig(
       }
     }
 
-    const excludeList = getPluginExcludeList(config, pluginSection);
+    const excludeList = normalizeSectionEntryIds(
+      section,
+      getPluginExcludeList(config, pluginSection),
+      scope
+    );
     if (excludeList.length > 0) {
       const excludeSet = new Set(excludeList);
       merged = merged.filter((id) => !excludeSet.has(id));
@@ -141,7 +186,11 @@ function resolveSectionConfigFromConfig(
     merged = globalEnabled;
   }
 
-  const override = getApplicationOverrideFromConfig(config, appId, section);
+  const override = normalizeIncrementalSelection(
+    section,
+    getApplicationOverrideFromConfig(config, appId, section),
+    scope
+  );
   return {
     enabled: mergeIncrementalSelection(merged, override),
   };
