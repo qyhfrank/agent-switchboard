@@ -13,6 +13,9 @@ import { buildPlatformFrontmatter, extractMdId, resolveProjectRoot } from './com
 
 const adapter = new OpencodeAgent();
 
+/** Top-level frontmatter fields forwarded for agent entries (extras override). */
+const AGENT_PASSTHROUGH: ReadonlySet<string> = new Set(['model']);
+
 export const opencodeTarget: ApplicationTarget = {
   id: 'opencode',
   isInstalled: () => fs.existsSync(getOpencodeRoot()),
@@ -56,7 +59,7 @@ export const opencodeTarget: ApplicationTarget = {
     },
     getFilename: (id) => `${id}.md`,
     render: (entry) => {
-      const fm = buildPlatformFrontmatter(entry, 'opencode');
+      const fm = buildPlatformFrontmatter(entry, 'opencode', AGENT_PASSTHROUGH);
       return wrapFrontmatter(fm, entry.content);
     },
     extractIdFromFilename: extractMdId,

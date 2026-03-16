@@ -22,13 +22,23 @@ export function getPlatformExtras(
 /**
  * Build frontmatter by merging base description with platform-specific extras.
  * Common pattern used by claude-code, opencode, and similar markdown-based targets.
+ *
+ * @param passthroughKeys - Top-level metadata fields to forward into output
+ *   (e.g. `model` for agents). Platform extras override passthrough values.
  */
 export function buildPlatformFrontmatter(
   entry: GenericLibraryEntry,
-  platformKey: string
+  platformKey: string,
+  passthroughKeys?: ReadonlySet<string>
 ): Record<string, unknown> {
   const base: Record<string, unknown> = {};
   if (entry.metadata.description) base.description = entry.metadata.description;
+  if (passthroughKeys) {
+    const md = entry.metadata as Record<string, unknown>;
+    for (const key of passthroughKeys) {
+      if (md[key] !== undefined) base[key] = md[key];
+    }
+  }
   const extras = getPlatformExtras(entry, platformKey);
   if (extras) {
     for (const [k, v] of Object.entries(extras)) base[k] = v;
