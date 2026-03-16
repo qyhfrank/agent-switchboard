@@ -8,6 +8,9 @@ import { buildPlatformFrontmatter, extractMdId, resolveProjectRoot } from './com
 
 const adapter = new ClaudeCodeAgent();
 
+/** Top-level frontmatter fields forwarded for agent entries (extras override). */
+const AGENT_PASSTHROUGH: ReadonlySet<string> = new Set(['model']);
+
 export const claudeCodeTarget: ApplicationTarget = {
   id: 'claude-code',
   isInstalled: () => fs.existsSync(getClaudeDir()),
@@ -53,7 +56,7 @@ export const claudeCodeTarget: ApplicationTarget = {
     },
     getFilename: (id) => `${id}.md`,
     render: (entry) => {
-      const fm = buildPlatformFrontmatter(entry, 'claude-code');
+      const fm = buildPlatformFrontmatter(entry, 'claude-code', AGENT_PASSTHROUGH);
       if (typeof fm.name !== 'string' || fm.name.trim().length === 0) {
         fm.name = entry.id;
       }
