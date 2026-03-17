@@ -76,6 +76,12 @@ asb plugin marketplace add https://github.com/org/marketplace-repo
 asb sync
 ```
 
+Preview without writing:
+
+```bash
+asb sync --dry-run
+```
+
 Library content lives under `~/.agent-switchboard/` and agent configs are updated in place.
 
 ## Command Reference

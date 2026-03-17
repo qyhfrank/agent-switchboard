@@ -73,6 +73,7 @@ export function distributeSkills(
     manifest?: ProjectDistributionManifest;
     projectMode?: BundleProjectMode;
     collision?: BundleCollisionPolicy;
+    dryRun?: boolean;
   }
 ): SkillDistributionOutcome {
   const entries = loadSkillLibrary(scope);
@@ -115,6 +116,7 @@ export function distributeSkills(
       manifest: options?.manifest,
       projectMode: options?.projectMode,
       collision: options?.collision,
+      dryRun: options?.dryRun,
     });
   }
 
@@ -135,6 +137,7 @@ export function distributeSkills(
     manifest: options?.manifest,
     projectMode: options?.projectMode,
     collision: options?.collision,
+    dryRun: options?.dryRun,
   });
 }
 
@@ -166,6 +169,7 @@ function distributeSkillsInternal(
     manifest?: ProjectDistributionManifest;
     projectMode?: BundleProjectMode;
     collision?: BundleCollisionPolicy;
+    dryRun?: boolean;
   }
 ): SkillDistributionOutcome {
   const traeActiveIds = scope?.project
@@ -236,6 +240,7 @@ function distributeSkillsInternal(
     manifest: options.manifest,
     projectMode: options.projectMode,
     collision: options.collision,
+    dryRun: options.dryRun,
   });
 
   for (const { path: legacyDir, platform } of options.legacyDirs) {
@@ -248,7 +253,7 @@ function distributeSkillsInternal(
     }
     if (isDir(legacyDir)) {
       if (isSafeEmptyDir(legacyDir)) {
-        fs.rmSync(legacyDir, { recursive: true });
+        if (!options.dryRun) fs.rmSync(legacyDir, { recursive: true });
         outcome.results.push({
           platform,
           targetDir: legacyDir,

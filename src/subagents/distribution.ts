@@ -108,6 +108,7 @@ export function distributeSubagents(
     manifest: managedOptions?.manifest,
     projectMode: managedOptions?.projectMode,
     collision: managedOptions?.collision,
+    dryRun: managedOptions?.dryRun,
   });
 
   const customResults: DistributionResult<string>[] = [];

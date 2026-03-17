@@ -72,6 +72,8 @@ export interface DistributeBundleOptions<TEntry, Platform extends string> {
   projectMode?: BundleProjectMode;
   /** Collision policy for managed mode */
   collision?: BundleCollisionPolicy;
+  /** When true, compute results without writing files or updating state */
+  dryRun?: boolean;
 }
 
 export interface DistributeBundleOutcome<Platform extends string> {
@@ -127,6 +129,7 @@ export function distributeBundle<TEntry, Platform extends string>(
     return { results: [] };
   }
 
+  const dryRun = opts.dryRun === true;
   const agentSync = loadLibraryAgentSync(opts.section);
   const results: BundleDistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
@@ -196,7 +199,7 @@ export function distributeBundle<TEntry, Platform extends string>(
 
       for (const file of files) {
         const targetPath = path.join(targetDir, file.relativePath);
-        ensureParentDir(targetPath);
+        if (!dryRun) ensureParentDir(targetPath);
 
         try {
           const srcContent = fs.readFileSync(file.sourcePath);
@@ -209,18 +212,20 @@ export function distributeBundle<TEntry, Platform extends string>(
           }
 
           if (!same) {
-            fs.writeFileSync(targetPath, srcContent);
-            filesWritten++;
+            if (!dryRun) {
+              fs.writeFileSync(targetPath, srcContent);
 
-            // Preserve executable permission for scripts
-            try {
-              const srcMode = fs.statSync(file.sourcePath).mode;
-              if (srcMode & 0o111) {
-                fs.chmodSync(targetPath, srcMode & 0o777);
+              // Preserve executable permission for scripts
+              try {
+                const srcMode = fs.statSync(file.sourcePath).mode;
+                if (srcMode & 0o111) {
+                  fs.chmodSync(targetPath, srcMode & 0o777);
+                }
+              } catch {
+                // Ignore permission errors on some platforms
               }
-            } catch {
-              // Ignore permission errors on some platforms
             }
+            filesWritten++;
           } else {
             filesSkipped++;
           }
@@ -236,7 +241,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
 
       // Clean stale files: remove files in target that are no longer in source bundle
-      if (!hadError && fs.existsSync(targetDir)) {
+      if (!dryRun && !hadError && fs.existsSync(targetDir)) {
         const expectedFiles = new Set(files.map((f) => f.relativePath));
         cleanStaleFiles(targetDir, '', expectedFiles);
       }
@@ -269,7 +274,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
 
       // Record in manifest after successful write or skip (reuse cached content)
-      if (manifest && managedProjectRoot) {
+      if (!dryRun && manifest && managedProjectRoot) {
         const lastResult = results[results.length - 1];
         if (lastResult.status === 'written' || lastResult.status === 'skipped') {
           const contentHash = createHash('sha256');
@@ -291,7 +296,7 @@ export function distributeBundle<TEntry, Platform extends string>(
     const prev = agentSync[platform]?.hash;
     const hadErrors = results.some((r) => r.platform === platform && r.status === 'error');
 
-    if (!hadErrors && prev !== aggregateHash) {
+    if (!dryRun && !hadErrors && prev !== aggregateHash) {
       updateLibraryAgentSync(opts.section, (current) => ({
         ...current,
         [platform]: { hash: aggregateHash, updatedAt: timestamp },
@@ -329,7 +334,7 @@ export function distributeBundle<TEntry, Platform extends string>(
                 entryId: item.id,
               });
             } else if (fs.existsSync(entryPath)) {
-              rmDirRecursive(entryPath);
+              if (!dryRun) rmDirRecursive(entryPath);
               results.push({
                 platform,
                 targetDir: entryPath,
@@ -346,7 +351,7 @@ export function distributeBundle<TEntry, Platform extends string>(
                 entryId: item.id,
               });
             }
-            removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
+            if (!dryRun) removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             results.push({
@@ -373,7 +378,7 @@ export function distributeBundle<TEntry, Platform extends string>(
               if (!activeIds.has(id)) {
                 const dirPath = path.join(parentDir, id);
                 try {
-                  rmDirRecursive(dirPath);
+                  if (!dryRun) rmDirRecursive(dirPath);
                   results.push({
                     platform,
                     targetDir: dirPath,
