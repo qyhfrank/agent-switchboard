@@ -40,6 +40,8 @@ export interface LibraryManagedOptions {
   manifest?: ProjectDistributionManifest;
   projectMode?: ProjectMode;
   collision?: CollisionPolicy;
+  /** When true, compute results without writing files or updating state */
+  dryRun?: boolean;
 }
 
 export interface DistributeOptions<TEntry, Platform extends string> {
@@ -64,6 +66,8 @@ export interface DistributeOptions<TEntry, Platform extends string> {
   projectMode?: ProjectMode;
   /** Collision policy for managed mode */
   collision?: CollisionPolicy;
+  /** When true, compute results without writing files or updating state */
+  dryRun?: boolean;
 }
 
 export interface DistributeOutcome<Platform extends string> {
@@ -81,6 +85,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
     return { results: [] };
   }
 
+  const dryRun = opts.dryRun === true;
   const agentSync = loadLibraryAgentSync(opts.section);
   const results: DistributionResult<Platform>[] = [];
   const timestamp = new Date().toISOString();
@@ -115,7 +120,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
       const content = opts.render(platform, entry);
       const entryId = opts.getId?.(entry);
 
-      ensureParentDir(filePath);
+      if (!dryRun) ensureParentDir(filePath);
 
       let existing: string | null = null;
       try {
@@ -151,6 +156,13 @@ export function distributeLibrary<TEntry, Platform extends string>(
       const same = existing !== null && existing === content;
       if (same) {
         writtenOrSkipped.push({ platform, filePath, status: 'skipped', reason: 'up-to-date' });
+      } else if (dryRun) {
+        writtenOrSkipped.push({
+          platform,
+          filePath,
+          status: 'written',
+          reason: existing ? 'updated' : 'created',
+        });
       } else {
         try {
           fs.writeFileSync(filePath, content, 'utf-8');
@@ -167,7 +179,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
       }
 
       // Record in manifest after successful write or skip (up-to-date)
-      if (manifest && managedProjectRoot && entryId) {
+      if (!dryRun && manifest && managedProjectRoot && entryId) {
         const lastResult = writtenOrSkipped[writtenOrSkipped.length - 1];
         if (lastResult.status === 'written' || lastResult.status === 'skipped') {
           recordLibraryEntry(manifest, manifestSection, entryId, {
@@ -186,7 +198,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
     const aggregateHash = hash.digest('hex');
     const prev = agentSync[platform]?.hash;
     const hadErrors = writtenOrSkipped.some((r) => r.status === 'error');
-    if (!hadErrors && prev !== aggregateHash) {
+    if (!dryRun && !hadErrors && prev !== aggregateHash) {
       updateLibraryAgentSync(opts.section, (current) => ({
         ...current,
         [platform]: { hash: aggregateHash, updatedAt: timestamp },
@@ -226,7 +238,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
                 entryId: item.id,
               });
             } else if (fs.existsSync(entryPath)) {
-              fs.unlinkSync(entryPath);
+              if (!dryRun) fs.unlinkSync(entryPath);
               results.push({
                 platform,
                 filePath: entryPath,
@@ -243,7 +255,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
                 entryId: item.id,
               });
             }
-            removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
+            if (!dryRun) removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
             results.push({
@@ -270,7 +282,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
               const id = opts.cleanup.extractId(file, platform);
               if (id !== null && !activeIds.has(id)) {
                 try {
-                  fs.unlinkSync(filePath);
+                  if (!dryRun) fs.unlinkSync(filePath);
                   results.push({
                     platform,
                     filePath,

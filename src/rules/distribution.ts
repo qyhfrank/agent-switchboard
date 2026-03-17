@@ -41,6 +41,8 @@ interface DistributionOptions {
   projectMode?: 'managed' | 'exclusive' | 'none';
   /** Rules placement in shared files */
   rulesPlacement?: 'prepend' | 'append';
+  /** When true, compute results without writing files or updating state */
+  dryRun?: boolean;
 }
 
 function ensureDirectory(filePath: string): void {
@@ -95,6 +97,7 @@ export function distributeRules(
   const results: DistributionResult[] = [];
   const timestamp = new Date().toISOString();
   const forceRewrite = options?.force === true;
+  const dryRun = options?.dryRun === true;
   const agentSyncUpdates = new Map<string, { hash: string; updatedAt: string }>();
 
   let firstComposed: ComposedRules | null = null;
@@ -157,18 +160,19 @@ export function distributeRules(
             const existing = fs.readFileSync(filePath, 'utf-8');
             const cleaned = removeRulesBlock(existing);
             if (cleaned !== existing) {
-              if (cleaned.trim().length === 0) {
-                // File would be empty after removing block - keep empty file
-                fs.writeFileSync(filePath, '', 'utf-8');
-              } else {
-                fs.writeFileSync(filePath, cleaned, 'utf-8');
+              if (!dryRun) {
+                if (cleaned.trim().length === 0) {
+                  fs.writeFileSync(filePath, '', 'utf-8');
+                } else {
+                  fs.writeFileSync(filePath, cleaned, 'utf-8');
+                }
               }
               results.push({ agent, filePath, status: 'written', reason: 'block-removed' });
             }
             // else: no ASB block in file, nothing to do - skip silently
           } else {
             // Dedicated file: delete entirely
-            fs.unlinkSync(filePath);
+            if (!dryRun) fs.unlinkSync(filePath);
             results.push({ agent, filePath, status: 'deleted', reason: 'no-rules-configured' });
           }
         }
@@ -199,6 +203,13 @@ export function distributeRules(
 
       if (!forceRewrite && existingContent !== null && existingContent === merged) {
         results.push({ agent, filePath, status: 'skipped', reason: 'up-to-date' });
+      } else if (dryRun) {
+        results.push({
+          agent,
+          filePath,
+          status: 'written',
+          reason: existingContent !== null ? 'block-updated' : 'block-created',
+        });
       } else {
         try {
           ensureDirectory(filePath);
@@ -218,7 +229,7 @@ export function distributeRules(
       writtenPaths.set(resolvedPath, renderedContent);
 
       // Record in manifest
-      if (options?.manifest && managedProjectRoot) {
+      if (!dryRun && options?.manifest && managedProjectRoot) {
         recordRulesEntry(
           options.manifest,
           path.relative(path.resolve(managedProjectRoot), filePath),
@@ -247,23 +258,29 @@ export function distributeRules(
 
     const reason = hadExistingFile ? (contentMatches ? 'refreshed' : 'updated') : 'created';
 
-    try {
-      ensureDirectory(filePath);
-      fs.writeFileSync(filePath, renderedContent, 'utf-8');
+    if (dryRun) {
       agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
       results.push({ agent, filePath, status: 'written', reason });
       writtenPaths.set(resolvedPath, renderedContent);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      results.push({ agent, filePath, status: 'error', error: message });
+    } else {
+      try {
+        ensureDirectory(filePath);
+        fs.writeFileSync(filePath, renderedContent, 'utf-8');
+        agentSyncUpdates.set(agent, { hash: document.hash, updatedAt: timestamp });
+        results.push({ agent, filePath, status: 'written', reason });
+        writtenPaths.set(resolvedPath, renderedContent);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        results.push({ agent, filePath, status: 'error', error: message });
+      }
     }
   }
 
-  if (shouldCleanupLegacyCursorMdcFiles(activeAppIds)) {
+  if (!dryRun && shouldCleanupLegacyCursorMdcFiles(activeAppIds)) {
     cleanupLegacyCursorMdcFiles(scope);
   }
 
-  if (agentSyncUpdates.size > 0) {
+  if (!dryRun && agentSyncUpdates.size > 0) {
     updateRuleAgentSync((current) => {
       const agentSync = { ...current };
       for (const [agent, update] of agentSyncUpdates.entries()) {

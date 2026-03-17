@@ -295,3 +295,28 @@ test('runSyncCommand respects project distribution mode none', async () => {
     assert.equal(fs.existsSync(path.join(projectRoot, '.claude', 'settings.local.json')), false);
   });
 });
+
+test('runSyncCommand dry-run previews changes without writing outputs', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[mcp]',
+      'enabled = ["alpha"]',
+    ]);
+    writeMcpConfig({
+      alpha: { command: 'npx', args: ['alpha'], type: 'stdio' },
+    });
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ updateSources: false, dryRun: true })
+    );
+
+    assert.equal(result, false);
+    assert.match(output, /Distribution:/);
+    assert.match(output, /\[dry-run\] No files were modified\./);
+    assert.equal(fs.existsSync(getClaudeJsonPath()), false);
+  });
+});

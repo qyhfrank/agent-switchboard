@@ -18,7 +18,9 @@ import { initTargets } from '../targets/init.js';
 import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import {
   type CompactDistributionSection,
+  countDistributionResults,
   type DistributionResultLike,
+  formatDistributionSummary,
   printCompactDistributions,
   shortenPath,
 } from '../util/cli.js';
@@ -27,18 +29,23 @@ interface SyncPhaseOptions {
   scope?: ConfigScope;
   config: SwitchboardConfig;
   layers: ConfigLayers;
+  dryRun?: boolean;
+  showInventory?: boolean;
+}
+
+interface SyncPhaseResult {
+  hasErrors: boolean;
+  hasChanges: boolean;
 }
 
 export interface RunSyncCommandOptions {
   scope?: ConfigScope;
   updateSources?: boolean;
+  dryRun?: boolean;
 }
 
 export async function runSyncCommand(options: RunSyncCommandOptions): Promise<boolean> {
-  const { scope, updateSources = true } = options;
-
-  console.log(chalk.yellow('⚠ Sync overwrites agent config without diff.'));
-  console.log();
+  const { scope, updateSources = true, dryRun = false } = options;
 
   if (updateSources) {
     const remoteResults = updateRemoteSources(scope);
@@ -67,10 +74,24 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
     console.log(chalk.blue.bold(`── Profile: ${scope.profile} ──`));
   }
 
-  return runSyncPhase({ scope, config, layers });
+  if (dryRun) {
+    const result = await runSyncPhase({ scope, config, layers, dryRun: true });
+    console.log();
+    console.log(chalk.yellow('[dry-run] No files were modified.'));
+    return result.hasErrors;
+  }
+
+  const result = await runSyncPhase({ scope, config, layers });
+  return result.hasErrors;
 }
 
-export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions): Promise<boolean> {
+export async function runSyncPhase({
+  scope,
+  config,
+  layers,
+  dryRun,
+  showInventory = true,
+}: SyncPhaseOptions): Promise<SyncPhaseResult> {
   const writableConfig = scope?.project
     ? layers.project?.config
     : scope?.profile
@@ -89,6 +110,230 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
       ? (writableConfig?.plugins?.enabled ?? [])
       : config.plugins.enabled;
 
+  const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
+
+  // Precompute per-section per-app effective configs (needed by both inventory and distribution)
+  const sectionAppConfigs = new Map<string, Map<string, string[]>>();
+  for (const section of sections) {
+    const appMap = new Map<string, string[]>();
+    for (const appId of config.applications.enabled) {
+      appMap.set(appId, resolveScopedSectionConfig(section, appId, scope).enabled);
+    }
+    sectionAppConfigs.set(section, appMap);
+  }
+
+  const assumeInstalledSet = new Set(config.applications.assume_installed);
+  const cursorSkillsDeduped =
+    config.applications.enabled.includes('claude-code') &&
+    (sectionAppConfigs.get('skills')?.get('claude-code')?.length ?? 0) > 0;
+
+  if (showInventory) {
+    displayInventory({
+      config,
+      layers,
+      scope,
+      sections,
+      sectionAppConfigs,
+      assumeInstalledSet,
+      cursorSkillsDeduped,
+      getDisplayEnabled,
+      displayPluginRefs,
+    });
+  }
+
+  const activeAppIds = config.applications.enabled;
+
+  // Project-level managed distribution: load manifest and determine mode
+  const projectRoot = scope?.project;
+  const projectMode = projectRoot ? config.distribution.project.mode : undefined;
+  const isManaged = projectRoot != null && projectMode === 'managed';
+  let manifest: ProjectDistributionManifest | undefined;
+  if (isManaged) {
+    const result = loadManifest(projectRoot);
+    if (result.corrupt) {
+      console.warn(`[asb] Aborting managed sync: corrupt manifest in ${projectRoot}`);
+      console.warn('[asb] Fix or remove the manifest before retrying to avoid unsafe cleanup.');
+      return { hasErrors: true, hasChanges: false };
+    } else {
+      manifest = result.manifest;
+    }
+  }
+
+  const collision = isManaged ? config.distribution.project.collision : undefined;
+  const rulesPlacement = isManaged ? config.distribution.project.rules.placement : undefined;
+
+  let mcpDistribution: Awaited<ReturnType<typeof distributeMcp>>;
+  let ruleDistribution: ReturnType<typeof distributeRules>;
+  let commandDistribution: ReturnType<typeof distributeCommands>;
+  let agentDistribution: ReturnType<typeof distributeSubagents>;
+  let skillDistribution: ReturnType<typeof distributeSkills>;
+  let hookDistribution: ReturnType<typeof distributeHooks>;
+
+  try {
+    mcpDistribution = await distributeMcp(scope, undefined, {
+      useSpinner: false,
+      assumeInstalled: assumeInstalledSet,
+      manifest,
+      projectMode,
+      dryRun,
+    });
+    ruleDistribution = distributeRules(
+      {
+        activeAppIds,
+        assumeInstalled: assumeInstalledSet,
+        manifest,
+        projectMode,
+        rulesPlacement,
+        dryRun,
+      },
+      scope
+    );
+    commandDistribution = distributeCommands(scope, activeAppIds, assumeInstalledSet, {
+      manifest,
+      projectMode,
+      collision,
+      dryRun,
+    });
+    agentDistribution = distributeSubagents(scope, activeAppIds, assumeInstalledSet, {
+      manifest,
+      projectMode,
+      collision,
+      dryRun,
+    });
+    skillDistribution = distributeSkills(scope, {
+      useAgentsDir: config.distribution.use_agents_dir,
+      activeAppIds,
+      assumeInstalled: assumeInstalledSet,
+      manifest,
+      projectMode,
+      collision,
+      dryRun,
+    });
+    hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet, {
+      projectMode,
+      dryRun,
+    });
+  } finally {
+    // Save manifest even if distribution throws, to preserve partial progress
+    if (!dryRun && isManaged && manifest) {
+      saveManifest(projectRoot, manifest);
+    }
+  }
+
+  const distSections: CompactDistributionSection<DistributionResultLike>[] = [
+    {
+      label: 'mcp',
+      results: mcpDistribution,
+      emptyMessage: 'none',
+      getTargetLabel: (result) => (result as (typeof mcpDistribution)[number]).application,
+      getPath: (result) => (result as (typeof mcpDistribution)[number]).filePath,
+    },
+    {
+      label: 'rules',
+      results: ruleDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (result) => (result as (typeof ruleDistribution.results)[number]).agent,
+      getPath: (result) => (result as (typeof ruleDistribution.results)[number]).filePath,
+    },
+    {
+      label: 'commands',
+      results: commandDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (result) => (result as (typeof commandDistribution.results)[number]).platform,
+      getPath: (result) => (result as (typeof commandDistribution.results)[number]).filePath,
+    },
+    {
+      label: 'agents',
+      results: agentDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (result) => (result as (typeof agentDistribution.results)[number]).platform,
+      getPath: (result) => (result as (typeof agentDistribution.results)[number]).filePath,
+    },
+    {
+      label: 'skills',
+      results: skillDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (result) => {
+        const skillResult = result as (typeof skillDistribution.results)[number];
+        if (skillResult.platform === 'agents') {
+          const members = (['codex', 'gemini', 'opencode'] as const).filter((appId) =>
+            activeAppIds.includes(appId)
+          );
+          return members.length > 0 ? members.join('+') : 'agents';
+        }
+        return skillResult.platform;
+      },
+      getPath: (result) => (result as (typeof skillDistribution.results)[number]).targetDir,
+    },
+    {
+      label: 'hooks',
+      results: hookDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (result) => (result as (typeof hookDistribution.results)[number]).platform,
+      getPath: (result) => {
+        const hookResult = result as (typeof hookDistribution.results)[number];
+        return 'filePath' in hookResult
+          ? hookResult.filePath
+          : (hookResult as { targetDir: string }).targetDir;
+      },
+    },
+  ];
+
+  if (dryRun) {
+    // In dry-run mode, show a compact summary instead of full distribution output
+    const allResults = distSections.flatMap((s) => s.results);
+    const counts = countDistributionResults(allResults, () => '');
+    const summary = formatDistributionSummary(counts);
+    if (counts.written > 0 || counts.deleted > 0 || counts.errors > 0 || counts.conflicts > 0) {
+      // Show full distribution detail for dry-run so user can see exactly what would change
+      const { hasErrors } = printCompactDistributions(distSections);
+      return {
+        hasErrors,
+        hasChanges: counts.written > 0 || counts.deleted > 0,
+      };
+    }
+    console.log(`${chalk.blue('Distribution:')} ${summary}`);
+    return { hasErrors: false, hasChanges: false };
+  }
+
+  const { hasErrors } = printCompactDistributions(distSections);
+  const allResults = distSections.flatMap((s) => s.results);
+  const counts = countDistributionResults(allResults, () => '');
+  return {
+    hasErrors,
+    hasChanges: counts.written > 0 || counts.deleted > 0,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Inventory display (extracted for showInventory flag)
+// ---------------------------------------------------------------------------
+
+function displayInventory(opts: {
+  config: SwitchboardConfig;
+  layers: ConfigLayers;
+  scope?: ConfigScope;
+  sections: readonly ('mcp' | 'rules' | 'commands' | 'agents' | 'skills' | 'hooks')[];
+  sectionAppConfigs: Map<string, Map<string, string[]>>;
+  assumeInstalledSet: ReadonlySet<string>;
+  cursorSkillsDeduped: boolean;
+  getDisplayEnabled: (
+    section: 'mcp' | 'rules' | 'commands' | 'agents' | 'skills' | 'hooks'
+  ) => string[];
+  displayPluginRefs: string[];
+}): void {
+  const {
+    config,
+    layers,
+    scope,
+    sections,
+    sectionAppConfigs,
+    assumeInstalledSet,
+    cursorSkillsDeduped,
+    getDisplayEnabled,
+    displayPluginRefs,
+  } = opts;
+
   const activeLayers: string[] = [];
   if (layers.user.exists) activeLayers.push(shortenPath(layers.user.path));
   if (layers.profile?.exists) activeLayers.push(shortenPath(layers.profile.path));
@@ -97,7 +342,6 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
     `${chalk.blue('Config:')} ${activeLayers.length > 0 ? chalk.dim(activeLayers.join(' + ')) : chalk.gray('no config files')}`
   );
 
-  const assumeInstalledSet = new Set(config.applications.assume_installed);
   const appsLabel =
     config.applications.enabled.length > 0
       ? config.applications.enabled
@@ -114,21 +358,6 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
   console.log(`${chalk.blue('Apps:')}   ${appsLabel}`);
   console.log();
 
-  const sections = ['mcp', 'rules', 'commands', 'agents', 'skills', 'hooks'] as const;
-
-  // Precompute per-section per-app effective configs
-  const sectionAppConfigs = new Map<string, Map<string, string[]>>();
-  for (const section of sections) {
-    const appMap = new Map<string, string[]>();
-    for (const appId of config.applications.enabled) {
-      appMap.set(appId, resolveScopedSectionConfig(section, appId, scope).enabled);
-    }
-    sectionAppConfigs.set(section, appMap);
-  }
-
-  const cursorSkillsDeduped =
-    config.applications.enabled.includes('claude-code') &&
-    (sectionAppConfigs.get('skills')?.get('claude-code')?.length ?? 0) > 0;
   console.log(chalk.blue('Inventory:'));
   {
     const sectionPlatforms: Record<string, readonly string[]> = {};
@@ -249,137 +478,4 @@ export async function runSyncPhase({ scope, config, layers }: SyncPhaseOptions):
     console.log(chalk.gray(`${prefix}${notes[index]}.`));
   }
   if (notes.length > 0) console.log();
-
-  const activeAppIds = config.applications.enabled;
-
-  // Project-level managed distribution: load manifest and determine mode
-  const projectRoot = scope?.project;
-  const projectMode = projectRoot ? config.distribution.project.mode : undefined;
-  const isManaged = projectRoot != null && projectMode === 'managed';
-  let manifest: ProjectDistributionManifest | undefined;
-  if (isManaged) {
-    const result = loadManifest(projectRoot);
-    if (result.corrupt) {
-      console.warn(`[asb] Aborting managed sync: corrupt manifest in ${projectRoot}`);
-      console.warn('[asb] Fix or remove the manifest before retrying to avoid unsafe cleanup.');
-      return true;
-    } else {
-      manifest = result.manifest;
-    }
-  }
-
-  const collision = isManaged ? config.distribution.project.collision : undefined;
-  const rulesPlacement = isManaged ? config.distribution.project.rules.placement : undefined;
-
-  let mcpDistribution: Awaited<ReturnType<typeof distributeMcp>>;
-  let ruleDistribution: ReturnType<typeof distributeRules>;
-  let commandDistribution: ReturnType<typeof distributeCommands>;
-  let agentDistribution: ReturnType<typeof distributeSubagents>;
-  let skillDistribution: ReturnType<typeof distributeSkills>;
-  let hookDistribution: ReturnType<typeof distributeHooks>;
-
-  try {
-    mcpDistribution = await distributeMcp(scope, undefined, {
-      useSpinner: false,
-      assumeInstalled: assumeInstalledSet,
-      manifest,
-      projectMode,
-    });
-    ruleDistribution = distributeRules(
-      {
-        activeAppIds,
-        assumeInstalled: assumeInstalledSet,
-        manifest,
-        projectMode,
-        rulesPlacement,
-      },
-      scope
-    );
-    commandDistribution = distributeCommands(scope, activeAppIds, assumeInstalledSet, {
-      manifest,
-      projectMode,
-      collision,
-    });
-    agentDistribution = distributeSubagents(scope, activeAppIds, assumeInstalledSet, {
-      manifest,
-      projectMode,
-      collision,
-    });
-    skillDistribution = distributeSkills(scope, {
-      useAgentsDir: config.distribution.use_agents_dir,
-      activeAppIds,
-      assumeInstalled: assumeInstalledSet,
-      manifest,
-      projectMode,
-      collision,
-    });
-    hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet, { projectMode });
-  } finally {
-    // Save manifest even if distribution throws, to preserve partial progress
-    if (isManaged && manifest) {
-      saveManifest(projectRoot, manifest);
-    }
-  }
-
-  const distSections: CompactDistributionSection<DistributionResultLike>[] = [
-    {
-      label: 'mcp',
-      results: mcpDistribution,
-      emptyMessage: 'none',
-      getTargetLabel: (result) => (result as (typeof mcpDistribution)[number]).application,
-      getPath: (result) => (result as (typeof mcpDistribution)[number]).filePath,
-    },
-    {
-      label: 'rules',
-      results: ruleDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (result) => (result as (typeof ruleDistribution.results)[number]).agent,
-      getPath: (result) => (result as (typeof ruleDistribution.results)[number]).filePath,
-    },
-    {
-      label: 'commands',
-      results: commandDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (result) => (result as (typeof commandDistribution.results)[number]).platform,
-      getPath: (result) => (result as (typeof commandDistribution.results)[number]).filePath,
-    },
-    {
-      label: 'agents',
-      results: agentDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (result) => (result as (typeof agentDistribution.results)[number]).platform,
-      getPath: (result) => (result as (typeof agentDistribution.results)[number]).filePath,
-    },
-    {
-      label: 'skills',
-      results: skillDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (result) => {
-        const skillResult = result as (typeof skillDistribution.results)[number];
-        if (skillResult.platform === 'agents') {
-          const members = (['codex', 'gemini', 'opencode'] as const).filter((appId) =>
-            activeAppIds.includes(appId)
-          );
-          return members.length > 0 ? members.join('+') : 'agents';
-        }
-        return skillResult.platform;
-      },
-      getPath: (result) => (result as (typeof skillDistribution.results)[number]).targetDir,
-    },
-    {
-      label: 'hooks',
-      results: hookDistribution.results,
-      emptyMessage: 'none',
-      getTargetLabel: (result) => (result as (typeof hookDistribution.results)[number]).platform,
-      getPath: (result) => {
-        const hookResult = result as (typeof hookDistribution.results)[number];
-        return 'filePath' in hookResult
-          ? hookResult.filePath
-          : (hookResult as { targetDir: string }).targetDir;
-      },
-    },
-  ];
-
-  const { hasErrors } = printCompactDistributions(distSections);
-  return hasErrors;
 }

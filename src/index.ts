@@ -138,19 +138,23 @@ program
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .option('--no-update', 'Skip updating remote sources')
-  .action(async (options: ScopeOptionInput & { update: boolean }) => {
+  .option('-n, --dry-run', 'Preview changes without writing')
+  .action(async (options: ScopeOptionInput & { update: boolean; dryRun?: boolean }) => {
     try {
       const scope = resolveScope(options);
       const hasErrors = await runSyncCommand({
         scope,
         updateSources: options.update !== false,
+        dryRun: options.dryRun,
       });
       console.log();
       if (hasErrors) {
         console.log(chalk.red('✗ Sync completed with errors.'));
         process.exit(1);
       }
-      console.log(chalk.green('✓ Sync complete.'));
+      if (!options.dryRun) {
+        console.log(chalk.green('✓ Sync complete.'));
+      }
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
