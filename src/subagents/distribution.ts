@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { getOpencodePath, getProjectOpencodePath } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
   type CleanupConfig,
@@ -8,6 +9,7 @@ import {
   type LibraryManagedOptions,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
+import { cleanupLegacyOpencodeFiles } from '../targets/builtin/opencode-legacy.js';
 import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import { isCustomAgentsHandler, type TargetLibraryHandler } from '../targets/types.js';
 import { loadSubagentLibrary, type SubagentEntry } from './library.js';
@@ -110,6 +112,22 @@ export function distributeSubagents(
     collision: managedOptions?.collision,
     dryRun: managedOptions?.dryRun,
   });
+
+  if (handlerMap.has('opencode')) {
+    const activeIds = new Set(filterSelected('opencode', entries).map((entry) => entry.id));
+    markdownOutcome.results.push(
+      ...cleanupLegacyOpencodeFiles({
+        platform: 'opencode',
+        legacyDir: scope?.project
+          ? getProjectOpencodePath(scope.project, 'agent')
+          : getOpencodePath('agent'),
+        currentDir: getHandler('opencode').resolveTargetDir(scope),
+        activeIds,
+        extractId: (filename) => getHandler('opencode').extractIdFromFilename(filename),
+        dryRun: managedOptions?.dryRun,
+      })
+    );
+  }
 
   const customResults: DistributionResult<string>[] = [];
   for (const target of activeCustomTargets) {

@@ -20,6 +20,7 @@ import {
 import { isDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
+import { cleanupLegacyOpencodeBundles } from '../targets/builtin/opencode-legacy.js';
 import { filterInstalled, getTargetsForSection } from '../targets/registry.js';
 import { listSkillFiles, loadSkillLibrary, type SkillEntry } from './library.js';
 
@@ -97,18 +98,18 @@ export function distributeSkills(
       activeSet,
       legacyDirs: [
         { path: path.join(getGeminiDir(), 'skills'), platform: 'agents' },
-        { path: path.join(getOpencodeRoot(), 'skill'), platform: 'agents' },
-        { path: path.join(getOpencodeRoot(), 'skills'), platform: 'agents' },
+        {
+          path: path.join(getOpencodeRoot(), 'skill'),
+          platform: 'agents',
+          cleanupMode: 'duplicates' as const,
+        },
         ...(scope?.project
           ? [
               { path: path.join(getProjectGeminiDir(scope.project), 'skills'), platform: 'agents' },
               {
                 path: path.join(getProjectOpencodeRoot(scope.project), 'skill'),
                 platform: 'agents',
-              },
-              {
-                path: path.join(getProjectOpencodeRoot(scope.project), 'skills'),
-                platform: 'agents',
+                cleanupMode: 'duplicates' as const,
               },
             ]
           : []),
@@ -124,12 +125,17 @@ export function distributeSkills(
     platforms: allSkillTargets.map((t) => t.id),
     activeSet,
     legacyDirs: [
-      { path: path.join(getOpencodeRoot(), 'skills'), platform: 'opencode' },
+      {
+        path: path.join(getOpencodeRoot(), 'skill'),
+        platform: 'opencode',
+        cleanupMode: 'duplicates' as const,
+      },
       ...(scope?.project
         ? [
             {
-              path: path.join(getProjectOpencodeRoot(scope.project), 'skills'),
+              path: path.join(getProjectOpencodeRoot(scope.project), 'skill'),
               platform: 'opencode',
+              cleanupMode: 'duplicates' as const,
             },
           ]
         : []),
@@ -149,6 +155,7 @@ function isReservedDir(id: string, platform: string): boolean {
 interface LegacyDirSpec {
   path: string;
   platform: string;
+  cleanupMode?: 'empty-only' | 'duplicates';
 }
 
 function isSafeEmptyDir(dirPath: string): boolean {
@@ -243,35 +250,43 @@ function distributeSkillsInternal(
     dryRun: options.dryRun,
   });
 
-  for (const { path: legacyDir, platform } of options.legacyDirs) {
-    // Only clean a legacy dir when the corresponding target is active (or full sync)
-    if (activeSet && !activeSet.has(platform)) {
-      // For the 'agents' virtual target, check if any agent platform is active
-      if (platform !== 'agents' || !AGENTS_TARGET_PLATFORMS.some((a) => activeSet.has(a))) {
-        continue;
-      }
-    }
-    if (isDir(legacyDir)) {
-      if (isSafeEmptyDir(legacyDir)) {
-        if (!options.dryRun) fs.rmSync(legacyDir, { recursive: true });
-        outcome.results.push({
+  for (const { path: legacyDir, platform, cleanupMode } of options.legacyDirs) {
+    if (cleanupMode === 'duplicates') {
+      const activeIds = new Set(filterSelected(platform, entries).map((entry) => entry.id));
+      outcome.results.push(
+        ...cleanupLegacyOpencodeBundles({
           platform,
-          targetDir: legacyDir,
-          status: 'deleted',
-          reason:
-            platform === 'agents'
-              ? 'empty legacy platform-specific path'
-              : 'empty legacy plural path',
-        });
-      } else {
-        outcome.results.push({
-          platform,
-          targetDir: legacyDir,
-          status: 'skipped',
-          reason: 'legacy path not ASB-owned; left in place',
-        });
-      }
+          legacyParentDir: legacyDir,
+          currentParentDir: resolveSkillsParentDir(platform, scope),
+          activeIds,
+          dryRun: options.dryRun,
+          isReservedDir: (id) => cleanup.isReservedDir?.(id, platform) ?? false,
+        })
+      );
+      continue;
     }
+
+    if (!isDir(legacyDir)) continue;
+    if (isSafeEmptyDir(legacyDir)) {
+      if (!options.dryRun) fs.rmSync(legacyDir, { recursive: true });
+      outcome.results.push({
+        platform,
+        targetDir: legacyDir,
+        status: 'deleted',
+        reason:
+          platform === 'agents'
+            ? 'empty legacy platform-specific path'
+            : 'empty legacy plural path',
+      });
+      continue;
+    }
+
+    outcome.results.push({
+      platform,
+      targetDir: legacyDir,
+      status: 'skipped',
+      reason: 'legacy path not ASB-owned; left in place',
+    });
   }
 
   return summarize(outcome);
