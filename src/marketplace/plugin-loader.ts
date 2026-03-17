@@ -92,7 +92,7 @@ export function loadPluginComponents(
   }
 
   result.skills = loadSkillEntries(plugin.localPath, namespace);
-  result.hooks = loadHookEntries(plugin.localPath, namespace);
+  result.hooks = loadPluginHookEntries(plugin.localPath, namespace);
 
   return result;
 }
@@ -238,7 +238,7 @@ function loadSkillEntries(pluginDir: string, namespace: string): SkillEntryFromP
  * Supports both single-file hooks (*.json) and bundle hooks (subdirs with hook.json).
  * Claude Code plugins typically have hooks/hooks.json + script files at the same level.
  */
-function loadHookEntries(pluginDir: string, namespace: string): HookEntry[] {
+export function loadPluginHookEntries(pluginDir: string, namespace: string): HookEntry[] {
   const hooksDir = path.join(pluginDir, 'hooks');
   if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) {
     return [];
@@ -273,8 +273,10 @@ function loadHookEntries(pluginDir: string, namespace: string): HookEntry[] {
           dirPath: hasScripts ? hooksDir : undefined,
         });
       } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to parse plugin hook "${entry.name}": ${msg}`);
+        // Plugin hook directories may contain target-native hook files that are
+        // not in ASB's Claude hook format. Ignore those instead of aborting the
+        // entire plugin load.
+        void error;
       }
     } else if (entry.isDirectory()) {
       const hookJsonPath = path.join(hooksDir, entry.name, 'hook.json');
@@ -300,8 +302,9 @@ function loadHookEntries(pluginDir: string, namespace: string): HookEntry[] {
           dirPath: bundleDir,
         });
       } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to parse plugin hook bundle "${entry.name}": ${msg}`);
+        // See note above: skip plugin-local hook artifacts that do not match
+        // the ASB hook schema.
+        void error;
       }
     }
   }
