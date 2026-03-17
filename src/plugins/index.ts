@@ -16,7 +16,7 @@ import path from 'node:path';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { getSourcesRecord } from '../library/sources.js';
-import { loadPluginComponents } from '../marketplace/plugin-loader.js';
+import { loadPluginComponents, loadPluginHookEntries } from '../marketplace/plugin-loader.js';
 import { isMarketplace, readMarketplace } from '../marketplace/reader.js';
 import type { RuleSnippet } from '../rules/library.js';
 import { parseRuleMarkdown } from '../rules/parser.js';
@@ -196,18 +196,7 @@ function loadPluginSkillIds(basePath: string, namespace: string): string[] {
 }
 
 function loadPluginHookIds(basePath: string, namespace: string): string[] {
-  const dir = path.join(basePath, 'hooks');
-  if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
-
-  const ids: string[] = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byEntryName)) {
-    if (entry.isDirectory() && fs.existsSync(path.join(dir, entry.name, 'hook.json'))) {
-      ids.push(buildComponentId(namespace, entry.name));
-    } else if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') {
-      ids.push(buildComponentId(namespace, toId(entry.name)));
-    }
-  }
-  return ids;
+  return loadPluginHookEntries(basePath, namespace).map((entry) => entry.id);
 }
 
 function loadPluginRuleIds(basePath: string, namespace: string): string[] {
