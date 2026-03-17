@@ -355,6 +355,37 @@ test('plugin MCP servers are merged into config', () => {
   });
 });
 
+test('buildPluginIndex ignores plugin hook files that are not in ASB hook format', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const pluginDir = path.join(asbHome, 'external', 'cursor-hook-plugin');
+    fs.mkdirSync(path.join(pluginDir, 'commands'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'commands', 'do-thing.md'),
+      '---\ndescription: Do thing\n---\nBody'
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, 'hooks', 'hooks-cursor.json'),
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [{ command: './hooks/session-start' }],
+        },
+      })
+    );
+
+    writeConfigToml(asbHome, `[plugins.sources]\ncursor-hook-plugin = "${pluginDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('cursor-hook-plugin');
+
+    assert.ok(plugin);
+    assert.deepEqual(plugin.components.commands, ['cursor-hook-plugin:do-thing']);
+    assert.deepEqual(plugin.components.hooks, []);
+  });
+});
+
 test('plugin MCP servers are available even when selected directly without enabling the parent plugin', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
