@@ -386,6 +386,25 @@ test('buildPluginIndex ignores plugin hook files that are not in ASB hook format
   });
 });
 
+test('buildPluginIndex fails on malformed ASB-style plugin hooks', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const pluginDir = path.join(asbHome, 'external', 'broken-hook-plugin');
+    fs.mkdirSync(path.join(pluginDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'hooks', 'hooks.json'),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [{ command: './hooks/session-start' }],
+        },
+      })
+    );
+
+    writeConfigToml(asbHome, `[plugins.sources]\nbroken-hook-plugin = "${pluginDir}"\n`);
+
+    assert.throws(() => buildPluginIndex(), /Failed to parse plugin hook "hooks\.json"/);
+  });
+});
 test('plugin MCP servers are available even when selected directly without enabling the parent plugin', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();

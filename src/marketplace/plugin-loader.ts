@@ -33,6 +33,29 @@ export interface PluginComponents {
   hooks: HookEntry[];
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isLikelyForeignHookConfig(parsed: unknown): boolean {
+  if (!isPlainObject(parsed)) return false;
+  const hooks = parsed.hooks;
+  if (!isPlainObject(hooks)) return false;
+
+  const entries = Object.entries(hooks);
+  if (entries.length === 0) return false;
+
+  const allEventsLowercase = entries.every(([event]) => /^[a-z]/.test(event));
+  const allHandlersFlat = entries.every(([, groups]) => {
+    if (!Array.isArray(groups) || groups.length === 0) return false;
+    return groups.every(
+      (group) => isPlainObject(group) && !Array.isArray(group.hooks) && 'command' in group
+    );
+  });
+
+  return allEventsLowercase && allHandlersFlat;
+}
+
 const SKILL_FILE = 'SKILL.md';
 
 function isMarkdownFile(name: string): boolean {
@@ -251,9 +274,10 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
     if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') {
       const absolutePath = path.join(hooksDir, entry.name);
       const rawContent = fs.readFileSync(absolutePath, 'utf-8');
+      const parsedJson = JSON.parse(rawContent);
 
       try {
-        const parsed = hookFileSchema.parse(JSON.parse(rawContent));
+        const parsed = hookFileSchema.parse(parsedJson);
         const bareId = path.basename(entry.name, '.json');
         const id = `${namespace}:${bareId}`;
 
@@ -273,10 +297,11 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
           dirPath: hasScripts ? hooksDir : undefined,
         });
       } catch (error) {
-        // Plugin hook directories may contain target-native hook files that are
-        // not in ASB's Claude hook format. Ignore those instead of aborting the
-        // entire plugin load.
-        void error;
+        if (isLikelyForeignHookConfig(parsedJson)) {
+          continue;
+        }
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to parse plugin hook "${entry.name}": ${msg}`);
       }
     } else if (entry.isDirectory()) {
       const hookJsonPath = path.join(hooksDir, entry.name, 'hook.json');
@@ -284,7 +309,8 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
 
       try {
         const rawContent = fs.readFileSync(hookJsonPath, 'utf-8');
-        const parsed = hookFileSchema.parse(JSON.parse(rawContent));
+        const parsedJson = JSON.parse(rawContent);
+        const parsed = hookFileSchema.parse(parsedJson);
         const bareId = entry.name;
         const id = `${namespace}:${bareId}`;
         const bundleDir = path.join(hooksDir, entry.name);
@@ -302,9 +328,8 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
           dirPath: bundleDir,
         });
       } catch (error) {
-        // See note above: skip plugin-local hook artifacts that do not match
-        // the ASB hook schema.
-        void error;
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to parse plugin hook bundle "${entry.name}": ${msg}`);
       }
     }
   }

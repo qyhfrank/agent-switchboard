@@ -34,6 +34,10 @@ export interface HookDistributionOutcome {
 
 const ASB_MANAGED_KEY = '_asb_managed_hooks';
 const ASB_HOOKS_SUBDIR = 'asb';
+// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX = '${CLAUDE_PLUGIN_ROOT}/hooks';
+// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS = '${CLAUDE_PLUGIN_ROOT}\\hooks';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -103,7 +107,10 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): Matcher
       if (typeof handler.command !== 'string') return handler;
       return {
         ...handler,
-        command: handler.command.replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir),
+        command: handler.command
+          .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
+          .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
+          .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir),
       };
     }),
   }));
@@ -173,7 +180,8 @@ function mergeHooksIntoSettings(
 
 function cleanOrphanBundleDirs(
   activeIds: Set<string>,
-  scope?: ConfigScope
+  scope?: ConfigScope,
+  dryRun?: boolean
 ): Array<BundleDistributionResult<HookPlatform>> {
   const parentDir = resolveHooksBundleParentDir(scope);
   const results: Array<BundleDistributionResult<HookPlatform>> = [];
@@ -188,7 +196,7 @@ function cleanOrphanBundleDirs(
 
       const dirPath = path.join(parentDir, entry.name);
       try {
-        rmDirRecursive(dirPath);
+        if (!dryRun) rmDirRecursive(dirPath);
         results.push({
           platform: 'claude-code',
           targetDir: dirPath,
@@ -228,7 +236,10 @@ export function distributeHooks(
   scope?: ConfigScope,
   activeAppIds?: string[],
   assumeInstalled?: ReadonlySet<string>,
-  options?: { projectMode?: 'managed' | 'exclusive' | 'none' }
+  options?: {
+    projectMode?: 'managed' | 'exclusive' | 'none';
+    dryRun?: boolean;
+  }
 ): HookDistributionOutcome {
   if (scope?.project && options?.projectMode === 'none') {
     return { results: [] };
@@ -260,6 +271,7 @@ export function distributeHooks(
   }
 
   // Phase 1: Copy bundle files for bundle-type hooks
+  const dryRun = options?.dryRun === true;
   const bundleEntries = selected.filter((e) => e.isBundle);
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, HookPlatform>({
@@ -270,13 +282,14 @@ export function distributeHooks(
       listFiles: listHookBundleFiles,
       getId: (entry) => entry.id,
       scope,
+      dryRun,
     });
     results.push(...bundleOutcome.results);
   }
 
   // Clean up orphan bundle directories
   const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
-  results.push(...cleanOrphanBundleDirs(activeBundleIds, scope));
+  results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
 
   // Phase 2: Merge hook configs into settings.json
   const settingsPath = resolveSettingsPath(scope);
@@ -312,6 +325,9 @@ export function distributeHooks(
 
   if (before === after) {
     results.push({ platform, filePath: settingsPath, status: 'skipped', reason: 'up-to-date' });
+  } else if (dryRun) {
+    const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
+    results.push({ platform, filePath: settingsPath, status: 'written', reason });
   } else {
     try {
       writeSettingsJson(settingsPath, settings);
