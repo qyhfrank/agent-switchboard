@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { getOpencodePath, getProjectOpencodePath } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import {
   type CleanupConfig,
@@ -8,6 +9,7 @@ import {
   type LibraryManagedOptions,
 } from '../library/distribute.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
+import { cleanupLegacyOpencodeFiles } from '../targets/builtin/opencode-legacy.js';
 import { filterInstalled, getTargetById, getTargetsForSection } from '../targets/registry.js';
 import type { TargetLibraryHandler } from '../targets/types.js';
 import { type CommandEntry, loadCommandLibrary } from './library.js';
@@ -105,6 +107,22 @@ export function distributeCommands(
   if (codexWrites.length > 0) {
     console.warn(
       '[codex] Custom prompts are deprecated. Consider migrating to skills: https://developers.openai.com/codex/skills'
+    );
+  }
+
+  if (handlerMap.has('opencode')) {
+    const activeIds = new Set(filterSelected('opencode', entries).map((entry) => entry.id));
+    outcome.results.push(
+      ...cleanupLegacyOpencodeFiles({
+        platform: 'opencode',
+        legacyDir: scope?.project
+          ? getProjectOpencodePath(scope.project, 'command')
+          : getOpencodePath('command'),
+        currentDir: getHandler('opencode').resolveTargetDir(scope),
+        activeIds,
+        extractId: (filename) => getHandler('opencode').extractIdFromFilename(filename),
+        dryRun: managedOptions?.dryRun,
+      })
     );
   }
 
