@@ -39,6 +39,8 @@ export interface DistributeMcpOptions {
   manifest?: ProjectDistributionManifest;
   /** Project distribution mode */
   projectMode?: 'managed' | 'exclusive' | 'none';
+  /** When true, compute results without writing files or updating state */
+  dryRun?: boolean;
 }
 
 function readFileSafe(filePath: string): string | null {
@@ -200,9 +202,13 @@ export async function distributeMcp(
 
       const configPath = mcpHandler.configPath();
       const before = readFileSafe(configPath);
-      mcpHandler.applyConfig(configToApply);
-      const after = readFileSafe(configPath);
-      const changed = before !== after;
+      if (!options?.dryRun) {
+        mcpHandler.applyConfig(configToApply);
+      }
+      const after = options?.dryRun ? before : readFileSafe(configPath);
+      const changed = options?.dryRun
+        ? Object.keys(configToApply.mcpServers).length > 0
+        : before !== after;
       persist(chalk.green('✓'), `${chalk.cyan(agentId)} ${chalk.dim(shortenPath(configPath))}`);
       results.push({
         application: agentId,
@@ -236,13 +242,16 @@ export async function distributeMcp(
         options?.manifest && (options?.projectMode ?? 'exclusive') === 'managed'
           ? { previouslyOwned: write.previouslyOwned }
           : undefined;
-      write.handler.applyProjectConfig?.(
-        scope?.project ?? '',
-        { mcpServers: mergedServers },
-        managedOpts
-      );
+      if (!options?.dryRun) {
+        write.handler.applyProjectConfig?.(
+          scope?.project ?? '',
+          { mcpServers: mergedServers },
+          managedOpts
+        );
+      }
 
       if (
+        !options?.dryRun &&
         options?.manifest &&
         scope?.project &&
         (options?.projectMode ?? 'exclusive') === 'managed'
@@ -274,8 +283,8 @@ export async function distributeMcp(
         }
       }
 
-      const after = readFileSafe(projectPath);
-      const changed = before !== after;
+      const after = options?.dryRun ? before : readFileSafe(projectPath);
+      const changed = options?.dryRun ? Object.keys(mergedServers).length > 0 : before !== after;
       for (const agentId of write.agentIds) {
         write.persistByAgent.get(agentId)?.(
           chalk.green('✓'),

@@ -96,6 +96,7 @@ export function distributeCommands(
     manifest: managedOptions?.manifest,
     projectMode: managedOptions?.projectMode,
     collision: managedOptions?.collision,
+    dryRun: managedOptions?.dryRun,
   }) as { results: DistributionResult<string>[] };
 
   const codexWrites = outcome.results.filter(
