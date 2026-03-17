@@ -10,9 +10,9 @@ No `isInstalled()` gate -- always distributes when active.
 |:---------|:-----------------------------------------|:------------------------------|
 | MCP      | `~/.config/opencode/opencode.json[c]`   | `<root>/.opencode/opencode.json[c]` |
 | Rules    | `~/.config/opencode/AGENTS.md`           | `<root>/AGENTS.md`            |
-| Commands | `~/.config/opencode/command/<id>.md`     | `<root>/.opencode/command/<id>.md` |
-| Agents   | `~/.config/opencode/agent/<id>.md`       | `<root>/.opencode/agent/<id>.md` |
-| Skills   | `~/.config/opencode/skill/<id>/`         | `<root>/.opencode/skill/<id>/` |
+| Commands | `~/.config/opencode/commands/<id>.md`    | `<root>/.opencode/commands/<id>.md` |
+| Agents   | `~/.config/opencode/agents/<id>.md`      | `<root>/.opencode/agents/<id>.md` |
+| Skills   | `~/.config/opencode/skills/<id>/`        | `<root>/.opencode/skills/<id>/` |
 | Hooks    | N/A                                      | N/A                           |
 
 ## MCP Configuration
@@ -49,7 +49,7 @@ OpenCode reads Claude Code's config paths as an undocumented compatibility layer
 | Content | Claude Code Path (also read by OpenCode) | OpenCode Native Path              |
 |:--------|:-----------------------------------------|:----------------------------------|
 | Rules   | `~/.claude/CLAUDE.md`                    | `~/.config/opencode/AGENTS.md`    |
-| Skills  | `~/.claude/skills/`                      | `~/.config/opencode/skill/`       |
+| Skills  | `~/.claude/skills/`                      | `~/.config/opencode/skills/`      |
 
 Source: [OpenCode issue comment by @zeke](https://gist.github.com/zeke/9927445e67b28cd97a1afa916dbdd444).
 

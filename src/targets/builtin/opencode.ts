@@ -13,9 +13,6 @@ import { buildPlatformFrontmatter, extractMdId, resolveProjectRoot } from './com
 
 const adapter = new OpencodeAgent();
 
-/** Top-level frontmatter fields forwarded for agent entries (extras override). */
-const AGENT_PASSTHROUGH: ReadonlySet<string> = new Set(['model']);
-
 export const opencodeTarget: ApplicationTarget = {
   id: 'opencode',
   isInstalled: () => fs.existsSync(getOpencodeRoot()),
@@ -40,8 +37,8 @@ export const opencodeTarget: ApplicationTarget = {
   commands: {
     resolveTargetDir: (scope) => {
       const root = resolveProjectRoot(scope);
-      if (root) return getProjectOpencodePath(root, 'command');
-      return getOpencodePath('command');
+      if (root) return getProjectOpencodePath(root, 'commands');
+      return getOpencodePath('commands');
     },
     getFilename: (id) => `${id}.md`,
     render: (entry) => {
@@ -54,12 +51,12 @@ export const opencodeTarget: ApplicationTarget = {
   agents: {
     resolveTargetDir: (scope) => {
       const root = resolveProjectRoot(scope);
-      if (root) return getProjectOpencodePath(root, 'agent');
-      return getOpencodePath('agent');
+      if (root) return getProjectOpencodePath(root, 'agents');
+      return getOpencodePath('agents');
     },
     getFilename: (id) => `${id}.md`,
     render: (entry) => {
-      const fm = buildPlatformFrontmatter(entry, 'opencode', AGENT_PASSTHROUGH);
+      const fm = buildPlatformFrontmatter(entry, 'opencode');
       return wrapFrontmatter(fm, entry.content);
     },
     extractIdFromFilename: extractMdId,
@@ -68,13 +65,13 @@ export const opencodeTarget: ApplicationTarget = {
   skills: {
     resolveParentDir: (scope) => {
       const root = resolveProjectRoot(scope);
-      if (root) return path.join(getProjectOpencodeRoot(root), 'skill');
-      return path.join(getOpencodeRoot(), 'skill');
+      if (root) return path.join(getProjectOpencodeRoot(root), 'skills');
+      return path.join(getOpencodeRoot(), 'skills');
     },
     resolveTargetDir: (id, scope) => {
       const root = resolveProjectRoot(scope);
-      if (root) return path.join(getProjectOpencodeRoot(root), 'skill', id);
-      return path.join(getOpencodeRoot(), 'skill', id);
+      if (root) return path.join(getProjectOpencodeRoot(root), 'skills', id);
+      return path.join(getOpencodeRoot(), 'skills', id);
     },
   },
 };
