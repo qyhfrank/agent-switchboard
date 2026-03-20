@@ -85,11 +85,11 @@ test('resolveSkillTargetDir: cursor resolves to ~/.cursor/skills/<id>', () => {
   });
 });
 
-test('distributeSkills: cursor deduped when claude-code has active skills', () => {
+test('distributeSkills: cursor receives skills independently from claude-code', () => {
   withTempHomes(() => {
     simulateAppsInstalled();
     const skillsDir = ensureSkillsDirectory();
-    const skillId = 'dedup-test';
+    const skillId = 'cursor-skill';
     const skillDir = path.join(skillsDir, skillId);
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(
@@ -97,7 +97,6 @@ test('distributeSkills: cursor deduped when claude-code has active skills', () =
       `---\nname: ${skillId}\ndescription: Test\n---\nSkill body\n`
     );
 
-    // Activate globally (applies to all agents including claude-code)
     updateLibraryStateSection('skills', (s) => ({
       ...s,
       enabled: [skillId],
@@ -105,29 +104,24 @@ test('distributeSkills: cursor deduped when claude-code has active skills', () =
 
     const outcome = distributeSkills();
 
-    // Claude-code should have written the skill
+    // Both claude-code and cursor should have written the skill
     const ccWritten = outcome.results.filter(
       (r) => r.platform === 'claude-code' && r.status === 'written'
     );
     assert.ok(ccWritten.length > 0, 'claude-code should have written skills');
 
-    // Cursor should NOT have written (deduped because claude-code has active skills)
     const cursorWritten = outcome.results.filter(
       (r) => r.platform === 'cursor' && r.status === 'written'
     );
-    assert.equal(
-      cursorWritten.length,
-      0,
-      'cursor should be deduped when claude-code has active skills'
-    );
+    assert.ok(cursorWritten.length > 0, 'cursor should have written skills independently');
   });
 });
 
-test('distributeSkills: cursor deduped in agents mode too', () => {
+test('distributeSkills: cursor receives skills in agents mode', () => {
   withTempHomes(() => {
     simulateAppsInstalled();
     const skillsDir = ensureSkillsDirectory();
-    const skillId = 'agents-dedup';
+    const skillId = 'agents-cursor';
     const skillDir = path.join(skillsDir, skillId);
     fs.mkdirSync(skillDir, { recursive: true });
     fs.writeFileSync(
@@ -142,25 +136,14 @@ test('distributeSkills: cursor deduped in agents mode too', () => {
 
     const outcome = distributeSkills(undefined, { useAgentsDir: true });
 
-    // Claude-code should have results
-    const ccResults = outcome.results.filter(
-      (r) => r.platform === 'claude-code' && r.status === 'written'
-    );
-    assert.ok(ccResults.length > 0, 'claude-code should have written skills in agents mode');
-
-    // Cursor should be deduped
     const cursorWritten = outcome.results.filter(
       (r) => r.platform === 'cursor' && r.status === 'written'
     );
-    assert.equal(
-      cursorWritten.length,
-      0,
-      'cursor should be deduped in agents mode when claude-code is active'
-    );
+    assert.ok(cursorWritten.length > 0, 'cursor should receive skills in agents mode');
   });
 });
 
-test('distributeSkills: cursor NOT deduped when claude-code has no active skills', () => {
+test('distributeSkills: cursor receives skills even when claude-code has none', () => {
   withTempHomes(({ asbHome }) => {
     simulateAppsInstalled();
     const skillsDir = ensureSkillsDirectory();
@@ -190,13 +173,6 @@ test('distributeSkills: cursor NOT deduped when claude-code has no active skills
 
     const outcome = distributeSkills();
 
-    // Claude-code should have nothing (removed by per-agent override)
-    const ccWritten = outcome.results.filter(
-      (r) => r.platform === 'claude-code' && r.status === 'written'
-    );
-    assert.equal(ccWritten.length, 0, 'claude-code should have no skills after remove override');
-
-    // Cursor should NOT be deduped and should receive the skill
     const cursorWritten = outcome.results.filter(
       (r) => r.platform === 'cursor' && r.status === 'written'
     );

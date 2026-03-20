@@ -28,16 +28,6 @@ export type SkillTarget = 'claude-code' | 'agents';
 
 const AGENTS_TARGET_PLATFORMS = ['codex', 'gemini', 'opencode'] as const;
 
-function shouldDedupCursorSkills(
-  scope: ConfigScope | undefined,
-  activeSet: Set<string> | null
-): boolean {
-  // Only dedup Cursor skills when claude-code is also being synced (full sync or explicit)
-  if (activeSet && !activeSet.has('claude-code')) return false;
-  const claudeState = loadLibraryStateSectionForApplication('skills', 'claude-code', scope);
-  return claudeState.enabled.length > 0;
-}
-
 /**
  * Resolve parent directory containing all skills for a target/platform.
  * For registered targets, delegates to the target's skills handler.
@@ -213,7 +203,6 @@ function distributeSkillsInternal(
       }
     }
     if (target === 'cursor') {
-      if (shouldDedupCursorSkills(scope, activeSet)) return [];
       const state = loadLibraryStateSectionForApplication('skills', target, scope);
       return allEntries.filter((e) => new Set(state.enabled).has(e.id));
     }

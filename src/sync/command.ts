@@ -123,9 +123,6 @@ export async function runSyncPhase({
   }
 
   const assumeInstalledSet = new Set(config.applications.assume_installed);
-  const cursorSkillsDeduped =
-    config.applications.enabled.includes('claude-code') &&
-    (sectionAppConfigs.get('skills')?.get('claude-code')?.length ?? 0) > 0;
 
   if (showInventory) {
     displayInventory({
@@ -135,7 +132,6 @@ export async function runSyncPhase({
       sections,
       sectionAppConfigs,
       assumeInstalledSet,
-      cursorSkillsDeduped,
       getDisplayEnabled,
       displayPluginRefs,
     });
@@ -316,7 +312,6 @@ function displayInventory(opts: {
   sections: readonly ('mcp' | 'rules' | 'commands' | 'agents' | 'skills' | 'hooks')[];
   sectionAppConfigs: Map<string, Map<string, string[]>>;
   assumeInstalledSet: ReadonlySet<string>;
-  cursorSkillsDeduped: boolean;
   getDisplayEnabled: (
     section: 'mcp' | 'rules' | 'commands' | 'agents' | 'skills' | 'hooks'
   ) => string[];
@@ -329,7 +324,6 @@ function displayInventory(opts: {
     sections,
     sectionAppConfigs,
     assumeInstalledSet,
-    cursorSkillsDeduped,
     getDisplayEnabled,
     displayPluginRefs,
   } = opts;
@@ -363,9 +357,6 @@ function displayInventory(opts: {
     const sectionPlatforms: Record<string, readonly string[]> = {};
     for (const section of sections) {
       let ids = filterInstalled(getTargetsForSection(section), assumeInstalledSet).map((t) => t.id);
-      if (section === 'skills' && cursorSkillsDeduped) {
-        ids = ids.filter((id) => id !== 'cursor');
-      }
       sectionPlatforms[section] = ids;
     }
 
@@ -462,9 +453,6 @@ function displayInventory(opts: {
 
   console.log();
   const notes: string[] = [];
-  if (cursorSkillsDeduped && config.applications.enabled.includes('cursor')) {
-    notes.push('cursor reads skills via claude-code');
-  }
   if (config.distribution.use_agents_dir) {
     const agentsMembers = (['codex', 'gemini', 'opencode'] as const).filter((appId) =>
       config.applications.enabled.includes(appId)
