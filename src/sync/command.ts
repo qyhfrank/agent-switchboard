@@ -356,7 +356,9 @@ function displayInventory(opts: {
   {
     const sectionPlatforms: Record<string, readonly string[]> = {};
     for (const section of sections) {
-      let ids = filterInstalled(getTargetsForSection(section), assumeInstalledSet).map((t) => t.id);
+      const ids = filterInstalled(getTargetsForSection(section), assumeInstalledSet).map(
+        (t) => t.id
+      );
       sectionPlatforms[section] = ids;
     }
 
