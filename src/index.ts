@@ -8,7 +8,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { confirm } from '@inquirer/prompts';
+import { stringify as stringifyToml } from '@iarna/toml';
+import { checkbox, confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { Command } from 'commander';
 import ora from 'ora';
@@ -75,6 +76,7 @@ import {
   listUnsupportedAgents,
 } from './rules/distribution.js';
 import { buildRuleInventory } from './rules/inventory.js';
+import { loadRuleLibrary } from './rules/library.js';
 import { loadRuleRuntimeContext } from './rules/runtime.js';
 import { updateRuleState } from './rules/state.js';
 import { distributeSkills } from './skills/distribution.js';
@@ -87,7 +89,7 @@ import { importSubagentFromFile } from './subagents/importer.js';
 import { buildSubagentInventory } from './subagents/inventory.js';
 import { runSyncCommand } from './sync/command.js';
 import { initTargets } from './targets/init.js';
-import { getTargetsForSection } from './targets/registry.js';
+import { allTargetIds, getTargetsForSection } from './targets/registry.js';
 import { showCommandSelector } from './ui/command-ui.js';
 import { showHookSelector } from './ui/hook-ui.js';
 import { showMcpServerUI } from './ui/mcp-ui.js';
@@ -1959,6 +1961,151 @@ mktRoot
 mktRoot.action(() => {
   mktRoot.outputHelp();
 });
+
+// ── asb init ────────────────────────────────────────────────────────
+
+program
+  .command('init')
+  .description('Initialize a project with an .asb.toml configuration file')
+  .option('-f, --force', 'Overwrite existing .asb.toml without prompting')
+  .action(async (options: { force?: boolean }) => {
+    try {
+      const projectDir = process.cwd();
+      const configPath = path.join(projectDir, '.asb.toml');
+
+      if (fs.existsSync(configPath) && !options.force) {
+        const overwrite = await confirm({
+          message: '.asb.toml already exists. Overwrite?',
+          default: false,
+        });
+        if (!overwrite) {
+          console.log(chalk.gray('Aborted.'));
+          return;
+        }
+      }
+
+      // 1. Project name
+      const detectedName = path.basename(projectDir);
+      const projectName = await input({
+        message: 'Project name',
+        default: detectedName,
+      });
+
+      // 2. Application targets
+      const knownTargets = allTargetIds();
+      const defaultTargets = ['claude-code'];
+      const selectedApps = await checkbox({
+        message: 'Application targets to sync',
+        choices: knownTargets.map((id) => ({
+          value: id,
+          checked: defaultTargets.includes(id),
+        })),
+      });
+
+      // 3. Rules selection
+      const rules = loadRuleLibrary();
+      let selectedRules: string[] = [];
+      if (rules.length > 0) {
+        selectedRules = await checkbox({
+          message: 'Rules to enable',
+          choices: rules.map((r) => ({
+            value: r.id,
+            name: r.metadata.title ? `${r.metadata.title} (${r.id})` : r.id,
+          })),
+        });
+      } else {
+        console.log(chalk.gray('No rules found in library. Skipping rule selection.'));
+      }
+
+      // 4. Hooks
+      const hooks = loadHookLibrary();
+      let selectedHooks: string[] = [];
+      if (hooks.length > 0) {
+        const enableHooks = await confirm({
+          message: `Enable hooks? (${hooks.length} available)`,
+          default: false,
+        });
+        if (enableHooks) {
+          selectedHooks = await checkbox({
+            message: 'Hooks to enable',
+            choices: hooks.map((h) => ({
+              value: h.id,
+              name: h.name ? `${h.name} (${h.id})` : h.id,
+            })),
+          });
+        }
+      }
+
+      // 5. AGENTS.md skeleton
+      const agentsMdPath = path.join(projectDir, 'AGENTS.md');
+      let createAgentsMd = false;
+      if (!fs.existsSync(agentsMdPath)) {
+        createAgentsMd = await confirm({
+          message: 'Create AGENTS.md skeleton?',
+          default: true,
+        });
+      }
+
+      // Build config object
+      // biome-ignore lint/suspicious/noExplicitAny: TOML stringify requires JsonMap typing
+      const config: Record<string, any> = {};
+
+      if (selectedApps.length > 0) {
+        config.applications = { enabled: selectedApps };
+      }
+
+      if (selectedRules.length > 0) {
+        config.rules = { enabled: selectedRules };
+      }
+
+      if (selectedHooks.length > 0) {
+        config.hooks = { enabled: selectedHooks };
+      }
+
+      // Write .asb.toml
+      const header = `# ASB project config for ${projectName}\n`;
+      // biome-ignore lint/suspicious/noExplicitAny: TOML stringify requires JsonMap typing
+      const tomlContent = header + stringifyToml(config as any);
+      fs.writeFileSync(configPath, tomlContent, 'utf-8');
+      console.log(chalk.green(`\n✓ Created ${configPath}`));
+
+      // Write AGENTS.md skeleton
+      if (createAgentsMd) {
+        const skeleton = `# AGENTS.md
+
+This file provides guidance to AI coding agents working in this repository.
+
+## Project
+
+${projectName}
+
+## Commands
+
+\`\`\`bash
+# Add common project commands here
+\`\`\`
+
+## Architecture
+
+Describe the project structure and key design decisions here.
+
+## Code Conventions
+
+Describe coding standards and patterns used in this project.
+`;
+        fs.writeFileSync(agentsMdPath, skeleton, 'utf-8');
+        console.log(chalk.green(`✓ Created ${agentsMdPath}`));
+      }
+
+      console.log();
+      console.log(`Run ${chalk.cyan('asb sync -P .')} to distribute configuration to your agents.`);
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(chalk.red(`\n✗ Error: ${error.message}`));
+      }
+      process.exit(1);
+    }
+  });
 
 // ── Removed: `asb source` ──────────────────────────────────────────
 
