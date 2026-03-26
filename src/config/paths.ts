@@ -298,3 +298,12 @@ export function getClaudeDesktopConfigPath(): string {
       return path.join(home, '.config', 'Claude', 'claude_desktop_config.json');
   }
 }
+
+/**
+ * Expand a leading `~/` to the user's home directory.
+ * Returns the input unchanged if it does not start with `~/`.
+ */
+export function expandHome(p: string): string {
+  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
