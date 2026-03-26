@@ -486,10 +486,7 @@ test('plugin mcpServers from marketplace entry are loaded correctly', () => {
     );
 
     const config = loadMcpConfigWithPlugins();
-    assert.ok(
-      'mcp-plugin@mkt:my-server' in config.mcpServers,
-      'server from manifest should exist'
-    );
+    assert.ok('mcp-plugin@mkt:my-server' in config.mcpServers, 'server from manifest should exist');
   });
 });
 
