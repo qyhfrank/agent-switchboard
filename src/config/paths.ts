@@ -116,22 +116,30 @@ export function getPluginsDir(): string {
 }
 
 /**
- * Returns the directory for remote source clones (~/.asb/plugins/.cache/).
- * Migrates transparently from the legacy ~/.asb/marketplaces/ location.
- * Without namespace: returns the base cache dir.
+ * Returns the directory for remote source clones (~/.asb/plugins/repos/).
+ * Migrates transparently from legacy locations (~/.asb/marketplaces/, ~/.asb/plugins/.cache/).
+ * Without namespace: returns the base repos dir.
  * With namespace: returns the namespace-specific dir.
  */
 export function getSourceCacheDir(namespace?: string): string {
-  const newBase = path.join(getPluginsDir(), '.cache');
-  const legacyBase = path.join(getConfigDir(), 'marketplaces');
+  const newBase = path.join(getPluginsDir(), 'repos');
+  const legacyPaths = [
+    path.join(getPluginsDir(), '.cache'),
+    path.join(getConfigDir(), 'marketplaces'),
+  ];
 
-  if (!fs.existsSync(newBase) && fs.existsSync(legacyBase)) {
-    try {
-      fs.mkdirSync(path.dirname(newBase), { recursive: true });
-      fs.renameSync(legacyBase, newBase);
-    } catch {
-      if (!fs.existsSync(newBase))
-        throw new Error('Failed to migrate marketplaces/ to plugins/.cache/');
+  if (!fs.existsSync(newBase)) {
+    for (const legacyPath of legacyPaths) {
+      if (fs.existsSync(legacyPath)) {
+        try {
+          fs.mkdirSync(path.dirname(newBase), { recursive: true });
+          fs.renameSync(legacyPath, newBase);
+        } catch {
+          if (!fs.existsSync(newBase))
+            throw new Error(`Failed to migrate ${legacyPath} to plugins/repos/`);
+        }
+        break;
+      }
     }
   }
 
