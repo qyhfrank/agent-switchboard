@@ -1,5 +1,6 @@
 # Repo Dev
 .context
+.claude/
 AGENTS.md
 CLAUDE.md
 log/
