@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { getClaudeJsonPath, getMcpConfigPath, getProfileConfigPath } from '../src/config/paths.js';
 import { resetAgentSyncCache } from '../src/library/state.js';
+import { resolveManifestPath } from '../src/manifest/store.js';
 import { clearPluginIndexCache } from '../src/plugins/index.js';
 import { runSyncCommand } from '../src/sync/command.js';
 import { resetTargetInit } from '../src/targets/init.js';
@@ -233,17 +234,14 @@ test('runSyncCommand aborts project managed sync when manifest is corrupt', asyn
 
     const projectRoot = path.join(asbHome, 'project');
     fs.mkdirSync(path.join(projectRoot, '.claude', 'commands'), { recursive: true });
-    fs.mkdirSync(path.join(projectRoot, '.asb', 'state'), { recursive: true });
     fs.writeFileSync(
       path.join(projectRoot, '.claude', 'commands', 'foreign.md'),
       'user-owned\n',
       'utf-8'
     );
-    fs.writeFileSync(
-      path.join(projectRoot, '.asb', 'state', 'distribution.json'),
-      '{ not valid json',
-      'utf-8'
-    );
+    const manifestPath = resolveManifestPath(projectRoot);
+    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+    fs.writeFileSync(manifestPath, '{ not valid json', 'utf-8');
     writeConfig(path.join(projectRoot, '.asb.toml'), [
       '[applications]',
       'enabled = ["claude-code"]',
