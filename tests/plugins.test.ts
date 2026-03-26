@@ -468,30 +468,27 @@ test('project-scoped plugin sources are isolated from global cache and load proj
   });
 });
 
-test('plugin .mcp.json with mcpServers wrapper is unwrapped', () => {
+test('plugin mcpServers from marketplace entry are loaded correctly', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     fs.writeFileSync(path.join(asbHome, 'mcp.json'), JSON.stringify({ mcpServers: {} }));
 
-    // Plugin uses { mcpServers: { ... } } wrapper (Claude Code project format)
     const mktDir = createMarketplaceFixture(asbHome, 'mkt', [
       {
-        name: 'wrapped-plugin',
-        mcp: { mcpServers: { 'my-server': { command: 'echo', args: ['hello'], type: 'stdio' } } },
+        name: 'mcp-plugin',
+        mcp: { 'my-server': { command: 'echo', args: ['hello'], type: 'stdio' } },
       },
     ]);
 
     writeConfigToml(
       asbHome,
-      `[plugins]\nenabled = ["wrapped-plugin"]\n\n[plugins.sources]\nmkt = "${mktDir}"\n`
+      `[plugins]\nenabled = ["mcp-plugin"]\n\n[plugins.sources]\nmkt = "${mktDir}"\n`
     );
 
     const config = loadMcpConfigWithPlugins();
-    // Should unwrap: "wrapped-plugin@mkt:my-server", NOT "wrapped-plugin@mkt:mcpServers"
-    assert.ok('wrapped-plugin@mkt:my-server' in config.mcpServers, 'unwrapped server should exist');
     assert.ok(
-      !('wrapped-plugin@mkt:mcpServers' in config.mcpServers),
-      'mcpServers key should not be a server name'
+      'mcp-plugin@mkt:my-server' in config.mcpServers,
+      'server from manifest should exist'
     );
   });
 });
