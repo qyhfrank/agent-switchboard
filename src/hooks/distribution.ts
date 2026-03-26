@@ -13,6 +13,7 @@
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { getClaudeDir, getProjectClaudeDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
@@ -100,6 +101,16 @@ function writeSettingsJson(filePath: string, data: Record<string, unknown>): voi
  * Deep-clone matcher groups, replacing `${HOOK_DIR}` in command strings
  * with the absolute path to the distributed bundle directory.
  */
+/**
+ * Replace the literal homedir prefix with `$HOME` so that distributed
+ * hook commands stay portable across machines sharing the same dotfiles.
+ */
+function preferHomeVar(command: string): string {
+  const home = os.homedir();
+  if (!command.includes(home)) return command;
+  return command.replaceAll(home, '$HOME');
+}
+
 function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): MatcherGroup[] {
   return groups.map((group) => ({
     ...group,
@@ -107,10 +118,12 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): Matcher
       if (typeof handler.command !== 'string') return handler;
       return {
         ...handler,
-        command: handler.command
-          .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
-          .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
-          .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir),
+        command: preferHomeVar(
+          handler.command
+            .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
+            .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
+            .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
+        ),
       };
     }),
   }));
@@ -129,8 +142,10 @@ function isLegacyAsbGroup(group: Record<string, unknown>, scope?: ConfigScope): 
   const hooks = group.hooks;
   if (!Array.isArray(hooks)) return false;
   const asbDir = `${resolveHooksBundleParentDir(scope)}/`;
+  const portableAsbDir = preferHomeVar(asbDir);
   return hooks.some(
-    (h: Record<string, unknown>) => typeof h.command === 'string' && h.command.includes(asbDir)
+    (h: Record<string, unknown>) =>
+      typeof h.command === 'string' && (h.command.includes(asbDir) || h.command.includes(portableAsbDir))
   );
 }
 
