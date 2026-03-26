@@ -1,12 +1,15 @@
 /**
  * Project distribution manifest I/O and helpers.
  *
- * The manifest lives at `<project>/.asb/state/distribution.json` and records
- * which artifacts ASB has written, enabling manifest-driven cleanup.
+ * Manifests are stored globally at `~/.asb/state/manifests/<slug>.json`,
+ * where the slug is the project path relative to home with `/` replaced by `--`.
+ * Projects outside home use an `_abs--` prefix.
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { getConfigDir } from '../config/paths.js';
 import type {
   ManagedMcpEntry,
   ManifestEntry,
@@ -15,11 +18,34 @@ import type {
   RulesManifestEntry,
 } from './types.js';
 
-const MANIFEST_DIR = '.asb/state';
-const MANIFEST_FILENAME = 'distribution.json';
+const MANIFESTS_DIR = 'state/manifests';
+
+/**
+ * Convert a project root path into a flat filename slug.
+ * - Paths under home: strip home prefix, replace `/` with `--`.
+ * - Paths outside home: prefix with `_abs`, replace `/` with `--`.
+ *
+ * Examples:
+ *   ~/Documents/Projects/foo  →  Documents--Projects--foo
+ *   /opt/project              →  _abs--opt--project
+ */
+export function projectPathToSlug(projectRoot: string): string {
+  const resolved = path.resolve(projectRoot);
+  const home = os.homedir();
+
+  if (resolved.startsWith(`${home}/`) || resolved === home) {
+    const relative = path.relative(home, resolved);
+    return relative.replace(/\//g, '--');
+  }
+
+  // Outside home: strip leading slash, prefix with _abs
+  const stripped = resolved.startsWith('/') ? resolved.slice(1) : resolved;
+  return `_abs--${stripped.replace(/\//g, '--')}`;
+}
 
 export function resolveManifestPath(projectRoot: string): string {
-  return path.join(projectRoot, MANIFEST_DIR, MANIFEST_FILENAME);
+  const slug = projectPathToSlug(projectRoot);
+  return path.join(getConfigDir(), MANIFESTS_DIR, `${slug}.json`);
 }
 
 function emptyManifest(): ProjectDistributionManifest {
