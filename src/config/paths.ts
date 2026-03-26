@@ -116,34 +116,44 @@ export function getPluginsDir(): string {
 }
 
 /**
- * Returns the directory for remote source clones (~/.asb/plugins/repos/).
- * Migrates transparently from legacy locations (~/.asb/marketplaces/, ~/.asb/plugins/.cache/).
- * Without namespace: returns the base repos dir.
+ * Returns the directory for remote source clones (~/.asb/plugins/.repos/).
+ * Migrates transparently from legacy locations on first call per process.
+ * Without namespace: returns the base .repos dir.
  * With namespace: returns the namespace-specific dir.
  */
+let sourceCacheMigrated = false;
 export function getSourceCacheDir(namespace?: string): string {
-  const newBase = path.join(getPluginsDir(), 'repos');
-  const legacyPaths = [
-    path.join(getPluginsDir(), '.cache'),
-    path.join(getConfigDir(), 'marketplaces'),
-  ];
+  const newBase = path.join(getPluginsDir(), '.repos');
 
-  if (!fs.existsSync(newBase)) {
+  if (!sourceCacheMigrated) {
+    const legacyPaths = [
+      path.join(getPluginsDir(), 'repos'),
+      path.join(getPluginsDir(), '.cache'),
+      path.join(getConfigDir(), 'marketplaces'),
+    ];
     for (const legacyPath of legacyPaths) {
-      if (fs.existsSync(legacyPath)) {
-        try {
-          fs.mkdirSync(path.dirname(newBase), { recursive: true });
-          fs.renameSync(legacyPath, newBase);
-        } catch {
-          if (!fs.existsSync(newBase))
-            throw new Error(`Failed to migrate ${legacyPath} to plugins/repos/`);
-        }
-        break;
+      if (!fs.existsSync(legacyPath)) continue;
+      if (fs.existsSync(newBase)) {
+        fs.rmSync(legacyPath, { recursive: true, force: true });
+        continue;
+      }
+      try {
+        fs.mkdirSync(path.dirname(newBase), { recursive: true });
+        fs.renameSync(legacyPath, newBase);
+      } catch {
+        if (!fs.existsSync(newBase))
+          throw new Error(`Failed to migrate ${legacyPath} to plugins/.repos/`);
       }
     }
+    sourceCacheMigrated = true;
   }
 
   return namespace ? path.join(newBase, namespace) : newBase;
+}
+
+/** @internal Reset migration flag for testing. */
+export function _resetSourceCacheMigration(): void {
+  sourceCacheMigrated = false;
 }
 
 /**
