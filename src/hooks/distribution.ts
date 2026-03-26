@@ -145,7 +145,8 @@ function isLegacyAsbGroup(group: Record<string, unknown>, scope?: ConfigScope): 
   const portableAsbDir = preferHomeVar(asbDir);
   return hooks.some(
     (h: Record<string, unknown>) =>
-      typeof h.command === 'string' && (h.command.includes(asbDir) || h.command.includes(portableAsbDir))
+      typeof h.command === 'string' &&
+      (h.command.includes(asbDir) || h.command.includes(portableAsbDir))
   );
 }
 
