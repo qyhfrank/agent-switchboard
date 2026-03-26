@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
-import { getPluginsDir, getSourceCacheDir } from '../config/paths.js';
+import { expandHome, getPluginsDir, getSourceCacheDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
@@ -146,15 +146,12 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
     if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
     return effectivePath;
   }
-  if (path.isAbsolute(value)) return value;
-  if (value.startsWith('~/')) {
-    const home = process.env.HOME ?? process.env.USERPROFILE ?? '';
-    return path.join(home, value.slice(2));
+  const v = expandHome(value);
+  if (path.isAbsolute(v)) return v;
+  if (!v.includes('/')) {
+    return path.join(getPluginsDir(), v);
   }
-  if (!value.includes('/')) {
-    return path.join(getPluginsDir(), value);
-  }
-  return path.resolve(value);
+  return path.resolve(v);
 }
 
 // ── Validation helpers ─────────────────────────────────────────────
@@ -286,7 +283,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   ensureGitAvailable();
 
   const cacheDir = getSourceCacheDir(namespace);
-  gitClone(remote.url, cacheDir, remote.ref);
+  gitClone(expandHome(remote.url), cacheDir, remote.ref);
 
   const configValue: RemoteSource = { url: remote.url };
   if (remote.ref) configValue.ref = remote.ref;
@@ -383,6 +380,7 @@ export function validateSourcePath(libraryPath: string): {
 export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
   const raw = getRawSources(scope);
   const results: SourceUpdateResult[] = [];
+  let gitChecked = false;
 
   for (const [namespace, value] of Object.entries(raw)) {
     if (typeof value === 'string') continue;
@@ -391,9 +389,12 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
     const gitDir = path.join(cacheDir, '.git');
 
     try {
-      ensureGitAvailable();
+      if (!gitChecked) {
+        ensureGitAvailable();
+        gitChecked = true;
+      }
       if (!fs.existsSync(gitDir)) {
-        gitClone(value.url, cacheDir, value.ref);
+        gitClone(expandHome(value.url), cacheDir, value.ref);
       } else {
         gitPull(cacheDir);
       }

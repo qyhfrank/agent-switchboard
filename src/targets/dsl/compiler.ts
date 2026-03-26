@@ -7,9 +7,9 @@
  */
 
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { parse as parseYaml, stringify as toYaml } from 'yaml';
+import { expandHome } from '../../config/paths.js';
 import type { ConfigScope } from '../../config/scope.js';
 import { wrapFrontmatter } from '../../util/frontmatter.js';
 import { extractMdId, resolveProjectRoot, wrapMdcFrontmatter } from '../builtin/common.js';
@@ -30,10 +30,7 @@ import {
   transformMcpServers,
 } from './transforms.js';
 
-function expandPath(p: string): string {
-  if (p.startsWith('~/')) return path.join(os.homedir(), p.slice(2));
-  return p;
-}
+const expandPath = expandHome;
 
 function requireString(obj: Record<string, unknown>, key: string, context: string): string {
   const val = obj[key];
