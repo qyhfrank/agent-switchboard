@@ -241,7 +241,11 @@ export function getSources(scope?: ConfigScope): Source[] {
   }
 
   return [...merged.entries()].map(([namespace, entry]) => {
-    if (entry.value && typeof entry.value !== 'string' && isCloneableSource(expandHome(entry.value.url))) {
+    if (
+      entry.value &&
+      typeof entry.value !== 'string' &&
+      isCloneableSource(expandHome(entry.value.url))
+    ) {
       return { namespace, path: entry.path, remote: entry.value };
     }
     return { namespace, path: entry.path };
