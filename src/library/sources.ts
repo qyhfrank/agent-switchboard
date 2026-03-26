@@ -79,6 +79,18 @@ export function isGitUrl(source: string): boolean {
 }
 
 /**
+ * Determine whether an object-format source URL should be treated as a
+ * cloneable git source (resolved via cache) rather than a direct local path.
+ * Matches: git transport URLs, file:// URIs, and bare-repo paths (ending in .git).
+ */
+function isCloneableSource(url: string): boolean {
+  if (isGitUrl(url)) return true;
+  if (/^file:\/\//.test(url)) return true;
+  if (url.endsWith('.git')) return true;
+  return false;
+}
+
+/**
  * Parse a GitHub URL into clone URL + optional ref and subdir.
  * Supported:
  *   https://github.com/org/repo
@@ -134,24 +146,38 @@ function getRawSources(scope?: ConfigScope): Record<string, SourceValue> {
 }
 
 /**
- * Resolve the effective local path for a plugin source.
- * - Remote sources (object): resolve to cache dir
+ * Resolve a local path string using shared rules:
  * - Absolute paths: used as-is
  * - Bare names (no `/`, no `~`): resolve to `~/.asb/plugins/<name>/`
  * - Other relative paths: resolve relative to CWD (legacy)
  */
+function resolveLocalPath(expanded: string): string {
+  if (path.isAbsolute(expanded)) return expanded;
+  if (!expanded.includes('/')) {
+    return path.join(getPluginsDir(), expanded);
+  }
+  return path.resolve(expanded);
+}
+
+/**
+ * Resolve the effective local path for a plugin source.
+ * - Cloneable sources (object with git/file URL or .git suffix): resolve to cache dir
+ * - Object sources with local path URL: resolve using shared local path rules
+ * - String sources: resolve using shared local path rules
+ */
 function resolveEffectivePath(namespace: string, value: SourceValue): string {
   if (typeof value !== 'string') {
+    const expanded = expandHome(value.url);
+    if (!isCloneableSource(expanded)) {
+      let effectivePath = resolveLocalPath(expanded);
+      if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
+      return effectivePath;
+    }
     let effectivePath = getSourceCacheDir(namespace);
     if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
     return effectivePath;
   }
-  const v = expandHome(value);
-  if (path.isAbsolute(v)) return v;
-  if (!v.includes('/')) {
-    return path.join(getPluginsDir(), v);
-  }
-  return path.resolve(v);
+  return resolveLocalPath(expandHome(value));
 }
 
 // ── Validation helpers ─────────────────────────────────────────────
@@ -215,7 +241,7 @@ export function getSources(scope?: ConfigScope): Source[] {
   }
 
   return [...merged.entries()].map(([namespace, entry]) => {
-    if (entry.value && typeof entry.value !== 'string') {
+    if (entry.value && typeof entry.value !== 'string' && isCloneableSource(expandHome(entry.value.url))) {
       return { namespace, path: entry.path, remote: entry.value };
     }
     return { namespace, path: entry.path };
@@ -324,7 +350,7 @@ export function removeSource(namespace: string): void {
     };
   });
 
-  if (typeof value !== 'string') {
+  if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
     const cacheDir = getSourceCacheDir(namespace);
     if (fs.existsSync(cacheDir)) {
       fs.rmSync(cacheDir, { recursive: true, force: true });
@@ -384,6 +410,7 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
 
   for (const [namespace, value] of Object.entries(raw)) {
     if (typeof value === 'string') continue;
+    if (!isCloneableSource(expandHome(value.url))) continue;
 
     const cacheDir = getSourceCacheDir(namespace);
     const gitDir = path.join(cacheDir, '.git');
