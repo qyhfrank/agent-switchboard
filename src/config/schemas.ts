@@ -294,8 +294,14 @@ function migratePluginsSection(input: unknown): unknown {
   const sources: Record<string, unknown> = {};
   const enabled: string[] = [];
   let exclude: unknown;
+  // Non-plugin config keys that should be preserved through migration
+  const preserved: Record<string, unknown> = {};
 
   for (const [key, value] of Object.entries(obj)) {
+    if (key === 'auto_update' && typeof value === 'boolean') {
+      preserved[key] = value;
+      continue;
+    }
     if (key === 'exclude' && typeof value === 'object' && value !== null && !Array.isArray(value)) {
       const maybeExclude = value as Record<string, unknown>;
       if (!('source' in maybeExclude)) {
@@ -316,7 +322,7 @@ function migratePluginsSection(input: unknown): unknown {
     }
   }
 
-  const result: Record<string, unknown> = { sources, enabled };
+  const result: Record<string, unknown> = { sources, enabled, ...preserved };
   if (exclude !== undefined) result.exclude = exclude;
   return result;
 }
@@ -326,6 +332,7 @@ const pluginsSectionInnerBase = z
     sources: z.record(z.string().trim().min(1), sourceValueSchema).optional(),
     enabled: z.array(z.string().trim().min(1)).optional(),
     exclude: pluginExcludeSchema.optional(),
+    auto_update: z.boolean().optional(),
   })
   .passthrough();
 
@@ -334,6 +341,7 @@ const pluginsSectionInnerFull = z
     sources: z.record(z.string().trim().min(1), sourceValueSchema).default({}),
     enabled: z.array(z.string().trim().min(1)).default([]),
     exclude: pluginExcludeSchema.default({}),
+    auto_update: z.boolean().default(false),
   })
   .passthrough();
 
