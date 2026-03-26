@@ -6,6 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { getClaudeDir } from '../src/config/paths.js';
@@ -133,7 +134,8 @@ test('distributeHooks: rewrites plugin hook CLAUDE_PLUGIN_ROOT references to dis
 
     const command = settings.hooks.SessionStart[0]?.hooks[0]?.command;
     const expectedPath = path.join(getClaudeDir(), 'hooks', 'asb', hookId, 'run-hook.cmd');
+    const portablePath = expectedPath.replace(os.homedir(), '$HOME');
 
-    assert.equal(command, `"${expectedPath}" session-start`);
+    assert.equal(command, `"${portablePath}" session-start`);
   });
 });
