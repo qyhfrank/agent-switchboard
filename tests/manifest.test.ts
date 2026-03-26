@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
@@ -8,6 +9,7 @@ import {
   getLibraryEntry,
   getOwnedMcpServers,
   loadManifest,
+  projectPathToSlug,
   recordLibraryEntry,
   recordMcpEntry,
   removeLibraryEntry,
@@ -16,11 +18,25 @@ import {
   saveManifest,
 } from '../src/manifest/store.js';
 import type { ProjectDistributionManifest } from '../src/manifest/types.js';
-import { withTempDir } from './helpers/tmp.js';
+import { withTempAsbHome } from './helpers/tmp.js';
+
+test('projectPathToSlug: path under home uses -- separator', () => {
+  const home = os.homedir();
+  assert.equal(projectPathToSlug(`${home}/Documents/Projects/foo`), 'Documents--Projects--foo');
+});
+
+test('projectPathToSlug: path outside home uses _abs prefix', () => {
+  assert.equal(projectPathToSlug('/opt/project'), '_abs--opt--project');
+});
+
+test('projectPathToSlug: home root itself returns empty string', () => {
+  const home = os.homedir();
+  assert.equal(projectPathToSlug(home), '');
+});
 
 test('loadManifest returns empty manifest when file does not exist', () => {
-  withTempDir((dir) => {
-    const result = loadManifest(dir);
+  withTempAsbHome(() => {
+    const result = loadManifest('/fake/project');
     assert.equal(result.existedOnDisk, false);
     assert.equal(result.corrupt, false);
     assert.equal(result.manifest.version, 1);
@@ -29,20 +45,21 @@ test('loadManifest returns empty manifest when file does not exist', () => {
 });
 
 test('saveManifest creates directory and writes manifest', () => {
-  withTempDir((dir) => {
-    const { manifest } = loadManifest(dir);
+  withTempAsbHome(() => {
+    const projectRoot = '/fake/project';
+    const { manifest } = loadManifest(projectRoot);
     recordLibraryEntry(manifest, 'commands', 'test-cmd', {
       relativePath: '.claude/commands/test-cmd.md',
       targetId: 'claude-code',
       hash: 'abc123',
       updatedAt: new Date().toISOString(),
     });
-    saveManifest(dir, manifest);
+    saveManifest(projectRoot, manifest);
 
-    const filePath = resolveManifestPath(dir);
+    const filePath = resolveManifestPath(projectRoot);
     assert.ok(fs.existsSync(filePath));
 
-    const reloaded = loadManifest(dir);
+    const reloaded = loadManifest(projectRoot);
     assert.equal(reloaded.manifest.version, 1);
     const entry = getLibraryEntry(reloaded.manifest, 'commands', 'test-cmd', 'claude-code');
     assert.ok(entry);
@@ -256,12 +273,13 @@ test('getLibraryEntry filters by targetId', () => {
 });
 
 test('loadManifest flags corrupt JSON', () => {
-  withTempDir((dir) => {
-    const filePath = resolveManifestPath(dir);
+  withTempAsbHome(() => {
+    const projectRoot = '/fake/corrupt-project';
+    const filePath = resolveManifestPath(projectRoot);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, 'not valid json', 'utf-8');
 
-    const result = loadManifest(dir);
+    const result = loadManifest(projectRoot);
     assert.equal(result.existedOnDisk, true);
     assert.equal(result.corrupt, true);
     assert.equal(result.manifest.version, 1);
@@ -270,12 +288,13 @@ test('loadManifest flags corrupt JSON', () => {
 });
 
 test('loadManifest flags unsupported version as corrupt', () => {
-  withTempDir((dir) => {
-    const filePath = resolveManifestPath(dir);
+  withTempAsbHome(() => {
+    const projectRoot = '/fake/version-project';
+    const filePath = resolveManifestPath(projectRoot);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify({ version: 99, sections: {} }), 'utf-8');
 
-    const result = loadManifest(dir);
+    const result = loadManifest(projectRoot);
     assert.equal(result.existedOnDisk, true);
     assert.equal(result.corrupt, true);
     assert.equal(result.manifest.version, 1);
