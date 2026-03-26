@@ -94,13 +94,9 @@ function writeSettingsJson(filePath: string, data: Record<string, unknown>): voi
 }
 
 // ---------------------------------------------------------------------------
-// ${HOOK_DIR} rewriting
+// Portable path helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Deep-clone matcher groups, replacing `${HOOK_DIR}` in command strings
- * with the absolute path to the distributed bundle directory.
- */
 /**
  * Replace the literal homedir prefix with `$HOME` so that distributed
  * hook commands stay portable across machines sharing the same dotfiles.
