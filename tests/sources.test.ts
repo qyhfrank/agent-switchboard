@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { getSourceCacheDir } from '../src/config/paths.js';
+import { _resetSourceCacheMigration, getSourceCacheDir } from '../src/config/paths.js';
 import {
   addLocalSource,
   addRemoteSource,
@@ -434,6 +434,85 @@ test('updateRemoteSources skips local sources', () => {
 
     const results = updateRemoteSources();
     assert.equal(results.length, 0);
+  });
+});
+
+// ── Legacy migration ────────────────────────────────────────────────
+
+test('getSourceCacheDir migrates .cache to .repos', () => {
+  withTempAsbHome((asbHome) => {
+    _resetSourceCacheMigration();
+    const pluginsDir = path.join(asbHome, 'plugins');
+    const legacy = path.join(pluginsDir, '.cache');
+    fs.mkdirSync(path.join(legacy, 'team-a'), { recursive: true });
+    fs.writeFileSync(path.join(legacy, 'team-a', 'marker.txt'), 'hello');
+
+    const result = getSourceCacheDir();
+    assert.equal(result, path.join(pluginsDir, '.repos'));
+    assert.ok(fs.existsSync(path.join(result, 'team-a', 'marker.txt')));
+    assert.equal(fs.existsSync(legacy), false);
+  });
+});
+
+test('getSourceCacheDir migrates repos to .repos', () => {
+  withTempAsbHome((asbHome) => {
+    _resetSourceCacheMigration();
+    const pluginsDir = path.join(asbHome, 'plugins');
+    const legacy = path.join(pluginsDir, 'repos');
+    fs.mkdirSync(path.join(legacy, 'team-b'), { recursive: true });
+    fs.writeFileSync(path.join(legacy, 'team-b', 'data.txt'), 'world');
+
+    const result = getSourceCacheDir();
+    assert.equal(result, path.join(pluginsDir, '.repos'));
+    assert.ok(fs.existsSync(path.join(result, 'team-b', 'data.txt')));
+    assert.equal(fs.existsSync(legacy), false);
+  });
+});
+
+test('getSourceCacheDir migrates marketplaces to .repos', () => {
+  withTempAsbHome((asbHome) => {
+    _resetSourceCacheMigration();
+    const legacy = path.join(asbHome, 'marketplaces');
+    fs.mkdirSync(path.join(legacy, 'ns1'), { recursive: true });
+
+    const pluginsDir = path.join(asbHome, 'plugins');
+    const result = getSourceCacheDir();
+    assert.equal(result, path.join(pluginsDir, '.repos'));
+    assert.equal(fs.existsSync(legacy), false);
+  });
+});
+
+test('getSourceCacheDir cleans up all legacy paths when .repos exists', () => {
+  withTempAsbHome((asbHome) => {
+    _resetSourceCacheMigration();
+    const pluginsDir = path.join(asbHome, 'plugins');
+    const dotRepos = path.join(pluginsDir, '.repos');
+    fs.mkdirSync(path.join(dotRepos, 'active'), { recursive: true });
+
+    const legacyCache = path.join(pluginsDir, '.cache');
+    fs.mkdirSync(path.join(legacyCache, 'stale'), { recursive: true });
+
+    const legacyRepos = path.join(pluginsDir, 'repos');
+    fs.mkdirSync(path.join(legacyRepos, 'old'), { recursive: true });
+
+    const legacyMkt = path.join(asbHome, 'marketplaces');
+    fs.mkdirSync(path.join(legacyMkt, 'ancient'), { recursive: true });
+
+    const result = getSourceCacheDir();
+    assert.equal(result, dotRepos);
+    assert.ok(fs.existsSync(path.join(dotRepos, 'active')));
+    assert.equal(fs.existsSync(legacyCache), false);
+    assert.equal(fs.existsSync(legacyRepos), false);
+    assert.equal(fs.existsSync(legacyMkt), false);
+  });
+});
+
+test('getSourceCacheDir with namespace returns namespace subdir', () => {
+  withTempAsbHome((asbHome) => {
+    _resetSourceCacheMigration();
+    const pluginsDir = path.join(asbHome, 'plugins');
+    const result = getSourceCacheDir('my-team');
+    assert.equal(result, path.join(pluginsDir, '.repos', 'my-team'));
   });
 });
 
