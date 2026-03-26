@@ -2,6 +2,7 @@
 .context
 AGENTS.md
 CLAUDE.md
+log/
 
 # Created by https://www.toptal.com/developers/gitignore/api/macos,visualstudiocode,python,node
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,visualstudiocode,python,node
