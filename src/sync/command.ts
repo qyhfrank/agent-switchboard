@@ -45,9 +45,14 @@ export interface RunSyncCommandOptions {
 }
 
 export async function runSyncCommand(options: RunSyncCommandOptions): Promise<boolean> {
-  const { scope, updateSources = true, dryRun = false } = options;
+  const { scope, updateSources, dryRun = false } = options;
 
-  if (updateSources) {
+  const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
+
+  // CLI flag overrides config; config defaults to false
+  const shouldUpdate = updateSources ?? config.plugins.auto_update;
+
+  if (shouldUpdate) {
     const remoteResults = updateRemoteSources(scope);
     if (remoteResults.length > 0) {
       console.log(chalk.blue('Sources:'));
@@ -64,8 +69,6 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
       }
     }
   }
-
-  const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
   await initTargets(config);
 
   if (scope?.project) {
