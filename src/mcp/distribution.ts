@@ -167,8 +167,20 @@ export async function distributeMcp(
         const sanitize = mcpHandler.sanitizeServerName;
         const ownedServers = isManaged ? getOwnedMcpServers(manifest, agentId) : new Set<string>();
 
-        // Skip silently if no servers to apply and nothing to clean up
-        if (Object.keys(configToApply.mcpServers).length === 0 && ownedServers.size === 0) {
+        // Skip silently if no servers to apply and nothing to clean up.
+        // In managed mode, the manifest tracks owned servers precisely.
+        // In exclusive mode, check if the project config file exists on disk —
+        // exclusive mode replaces everything, so an existing file needs updating
+        // even when the new server set is empty (to remove previously distributed servers).
+        const hasProjectFileToClean =
+          !isManaged &&
+          mcpHandler.projectConfigPath != null &&
+          fs.existsSync(mcpHandler.projectConfigPath(scope.project));
+        if (
+          Object.keys(configToApply.mcpServers).length === 0 &&
+          ownedServers.size === 0 &&
+          !hasProjectFileToClean
+        ) {
           persist(chalk.gray('○'), `${chalk.cyan(agentId)} ${chalk.gray('(no MCP changes)')}`);
           continue;
         }
