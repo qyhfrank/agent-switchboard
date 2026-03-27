@@ -352,3 +352,82 @@ test('distributeMcp: managed mode cleans project MCP for disabled targets', asyn
     assert.deepEqual(Object.keys(second.manifest.sections.mcp ?? {}), []);
   });
 });
+
+test('distributeMcp: exclusive mode cleans project MCP when all servers disabled', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    resetRuntimeState();
+    simulateAppsInstalled('claude-code');
+
+    writeSwitchboardConfig(asbHome, [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[mcp]',
+      'enabled = ["alpha"]',
+    ]);
+    writeMcpConfig({
+      alpha: { command: 'npx', args: ['alpha'], type: 'stdio' },
+    });
+
+    const projectRoot = path.join(asbHome, 'project-exclusive-disable');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, '.asb.toml'), '[mcp]\nenabled = ["alpha"]\n', 'utf-8');
+
+    // Step 1: Enable in exclusive mode
+    await distributeMcp({ project: projectRoot }, ['alpha'], {
+      useSpinner: false,
+      projectMode: 'exclusive',
+    });
+
+    const projectConfigPath = path.join(projectRoot, '.mcp.json');
+    const step1 = JSON.parse(fs.readFileSync(projectConfigPath, 'utf-8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    assert.deepEqual(Object.keys(step1.mcpServers), ['alpha']);
+
+    // Step 2: Disable all servers in exclusive mode
+    fs.writeFileSync(path.join(projectRoot, '.asb.toml'), '[mcp]\nenabled = []\n', 'utf-8');
+    resetRuntimeState();
+
+    await distributeMcp({ project: projectRoot }, [], {
+      useSpinner: false,
+      projectMode: 'exclusive',
+    });
+
+    const step2 = JSON.parse(fs.readFileSync(projectConfigPath, 'utf-8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    assert.deepEqual(Object.keys(step2.mcpServers), []);
+  });
+});
+
+test('distributeMcp: exclusive mode does not create project file when none exists and no servers', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    resetRuntimeState();
+    simulateAppsInstalled('claude-code');
+
+    writeSwitchboardConfig(asbHome, [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[mcp]',
+      'enabled = []',
+    ]);
+    writeMcpConfig({});
+
+    const projectRoot = path.join(asbHome, 'project-exclusive-no-file');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(path.join(projectRoot, '.asb.toml'), '[mcp]\nenabled = []\n', 'utf-8');
+
+    await distributeMcp({ project: projectRoot }, [], {
+      useSpinner: false,
+      projectMode: 'exclusive',
+    });
+
+    assert.equal(
+      fs.existsSync(path.join(projectRoot, '.mcp.json')),
+      false,
+      'Should not create .mcp.json when no file existed and no servers to write'
+    );
+  });
+});
