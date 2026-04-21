@@ -40,6 +40,11 @@ const CODEX_SUPPORTED_EVENTS = new Set([
 
 const CODEX_SUPPORTED_HANDLER_TYPES = new Set(['command']);
 
+// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX = '${CLAUDE_PLUGIN_ROOT}/hooks';
+// biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS = '${CLAUDE_PLUGIN_ROOT}\\hooks';
+
 const ASB_MANAGED_KEY = '_asb_managed_hooks';
 const ASB_HOOKS_SUBDIR = 'asb';
 
@@ -160,7 +165,12 @@ function rewriteHookDir(
         if (typeof handler.command !== 'string') return handler;
         return {
           ...handler,
-          command: preferHomeVar(handler.command.replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)),
+          command: preferHomeVar(
+            handler.command
+              .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
+              .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
+              .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
+          ),
         };
       }),
     }));
@@ -179,9 +189,7 @@ function mergeHooksIntoFile(
   // Remove previously ASB-managed matcher groups
   const cleanedHooks: Record<string, unknown[]> = {};
   for (const [event, groups] of Object.entries(existingHooks)) {
-    const kept = (groups as Array<Record<string, unknown>>).filter(
-      (g) => g._asb_source === undefined
-    );
+    const kept = (groups as Array<Record<string, unknown>>).filter((g) => g._asb_source !== true);
     if (kept.length > 0) cleanedHooks[event] = kept;
   }
 
@@ -278,7 +286,51 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   // Filter entries for Codex compatibility
   const filteredEntries = filterForCodex(selected);
 
-  // Phase 1: Copy bundle files for bundle-type entries
+  // Pre-validate hooks.json before making any filesystem changes
+  const hooksJsonPath = resolveHooksJsonPath(scope);
+  const fileResult = readHooksJson(hooksJsonPath);
+
+  if (!fileResult.ok) {
+    results.push({
+      platform: 'codex',
+      filePath: hooksJsonPath,
+      status: 'error',
+      error: `Cannot read hooks.json, aborting merge: ${fileResult.error}`,
+    });
+    return { results };
+  }
+
+  const fileData = fileResult.data;
+
+  // Validate hooks field shape: must be a Record<string, array> or absent
+  if (fileData.hooks !== undefined) {
+    if (
+      typeof fileData.hooks !== 'object' ||
+      fileData.hooks === null ||
+      Array.isArray(fileData.hooks)
+    ) {
+      results.push({
+        platform: 'codex',
+        filePath: hooksJsonPath,
+        status: 'error',
+        error: 'hooks.json has invalid shape: "hooks" must be an object',
+      });
+      return { results };
+    }
+    for (const [event, groups] of Object.entries(fileData.hooks as Record<string, unknown>)) {
+      if (!Array.isArray(groups)) {
+        results.push({
+          platform: 'codex',
+          filePath: hooksJsonPath,
+          status: 'error',
+          error: `hooks.json has invalid shape: "hooks.${event}" must be an array`,
+        });
+        return { results };
+      }
+    }
+  }
+
+  // Phase 1: Copy bundle files (only after validation passes)
   const bundleEntries = filteredEntries.filter((f) => f.entry.isBundle).map((f) => f.entry);
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, CodexPlatform>({
@@ -299,20 +351,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
 
   // Phase 2: Merge hook configs into hooks.json
-  const hooksJsonPath = resolveHooksJsonPath(scope);
-  const fileResult = readHooksJson(hooksJsonPath);
-
-  if (!fileResult.ok) {
-    results.push({
-      platform: 'codex',
-      filePath: hooksJsonPath,
-      status: 'error',
-      error: `Cannot read hooks.json, aborting merge: ${fileResult.error}`,
-    });
-    return { results };
-  }
-
-  const fileData = fileResult.data;
   const previouslyManaged = (fileData[ASB_MANAGED_KEY] ?? []) as string[];
 
   // Check for existing ASB groups
