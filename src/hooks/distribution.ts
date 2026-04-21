@@ -239,6 +239,22 @@ function cleanOrphanBundleDirs(
 // Main distribution entry point
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Target reachability check
+// ---------------------------------------------------------------------------
+
+function isTargetReachable(
+  platformId: string,
+  _activeAppIds?: string[],
+  assumeInstalled?: ReadonlySet<string>
+): boolean {
+  const target = getTargetById(platformId);
+  if (target?.isInstalled?.() === false && !assumeInstalled?.has(platformId)) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Distribute hooks to active targets (Claude Code, Codex, etc.):
  *  1. Copy bundle files for bundle-type hooks
@@ -260,6 +276,14 @@ export function distributeHooks(
 
   const results: HookDistributionOutcome['results'] = [];
   const dryRun = options?.dryRun === true;
+
+  // Check if any hook-capable target is reachable before loading library
+  const claudeReachable = isTargetReachable('claude-code', activeAppIds, assumeInstalled);
+  const codexReachable = isTargetReachable('codex', activeAppIds, assumeInstalled);
+
+  if (!claudeReachable && !codexReachable) {
+    return { results };
+  }
 
   // Load all hook entries once (shared across targets)
   const allEntries = loadHookLibrary(scope);
