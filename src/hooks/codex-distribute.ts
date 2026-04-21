@@ -13,7 +13,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { ensureTrustEntry } from '../agents/codex.js';
 import {
+  getCodexConfigPath,
   getCodexDir,
   getCodexHooksJsonPath,
   getProjectCodexDir,
@@ -260,6 +262,57 @@ function cleanOrphanBundleDirs(
 }
 
 // ---------------------------------------------------------------------------
+// Codex prerequisites: feature flag + project trust
+// ---------------------------------------------------------------------------
+
+function ensureCodexHooksFeature(
+  results: Array<DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>>
+): void {
+  const configPath = getCodexConfigPath();
+  if (!fs.existsSync(configPath)) return;
+
+  const content = fs.readFileSync(configPath, 'utf-8');
+  if (content.includes('codex_hooks') && content.includes('true')) return;
+
+  // Feature not explicitly enabled - add warning result
+  results.push({
+    platform: 'codex',
+    filePath: configPath,
+    status: 'written',
+    reason: 'codex_hooks feature flag may not be enabled in config.toml',
+  });
+}
+
+function ensureProjectTrust(
+  projectRoot: string,
+  results: Array<DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>>
+): void {
+  const globalPath = getCodexConfigPath();
+  const globalContent = fs.existsSync(globalPath) ? fs.readFileSync(globalPath, 'utf-8') : '';
+  const trustResult = ensureTrustEntry(globalContent, projectRoot);
+
+  if (trustResult.warning) {
+    results.push({
+      platform: 'codex',
+      filePath: globalPath,
+      status: 'skipped',
+      reason: trustResult.warning,
+    });
+  }
+
+  if (trustResult.changed) {
+    ensureParentDir(globalPath);
+    fs.writeFileSync(globalPath, trustResult.content, 'utf-8');
+    results.push({
+      platform: 'codex',
+      filePath: globalPath,
+      status: 'written',
+      reason: 'added project trust entry',
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main distribution entry point
 // ---------------------------------------------------------------------------
 
@@ -282,6 +335,16 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const results: Array<
     DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>
   > = [];
+
+  // Ensure Codex hooks feature flag is enabled
+  if (!dryRun) {
+    ensureCodexHooksFeature(results);
+  }
+
+  // Ensure project trust for project-scoped distribution
+  if (!dryRun && scope?.project) {
+    ensureProjectTrust(scope.project, results);
+  }
 
   // Filter entries for Codex compatibility
   const filteredEntries = filterForCodex(selected);

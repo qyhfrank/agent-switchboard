@@ -374,3 +374,171 @@ test('distributeHooks: distributes to both claude-code and codex simultaneously'
     assert.ok(codexResults.length > 0, 'should produce codex results');
   });
 });
+
+// ---------------------------------------------------------------------------
+// F-006: Additional coverage for Codex hook distribution
+// ---------------------------------------------------------------------------
+
+function createBundleHook(id: string, event = 'UserPromptSubmit'): void {
+  const hooksDir = ensureHooksDirectory();
+  const bundleDir = path.join(hooksDir, id);
+  fs.mkdirSync(bundleDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(bundleDir, 'hook.json'),
+    JSON.stringify({
+      name: id,
+      description: `Bundle hook ${id}`,
+      hooks: {
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional placeholder
+        [event]: [{ hooks: [{ type: 'command', command: '${HOOK_DIR}/run.sh' }] }],
+      },
+    })
+  );
+  fs.writeFileSync(path.join(bundleDir, 'run.sh'), '#!/bin/sh\necho test\n');
+}
+
+function createMixedHook(id: string): void {
+  const hooksDir = ensureHooksDirectory();
+  fs.writeFileSync(
+    path.join(hooksDir, `${id}.json`),
+    JSON.stringify({
+      name: id,
+      hooks: {
+        UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo ok' }] }],
+        PreCompact: [{ hooks: [{ type: 'command', command: 'echo compact' }] }],
+        SessionStart: [
+          {
+            hooks: [
+              { type: 'command', command: 'echo start' },
+              { type: 'http', url: 'http://example.com' },
+            ],
+          },
+        ],
+      },
+    })
+  );
+}
+
+test('distributeHooks: codex bundle hook copies files and rewrites HOOK_DIR', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createBundleHook('bundle-test');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['bundle-test'],
+      agentSync: { codex: { enabled: ['bundle-test'] } },
+    }));
+
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    assert.ok(fs.existsSync(hooksJsonPath), 'hooks.json should exist');
+
+    const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<string, unknown>;
+    const hooks = content.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+    const command = hooks.UserPromptSubmit?.[0]?.hooks?.[0]?.command;
+    assert.ok(command, 'should have a command');
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal check
+    assert.ok(!command.includes('${HOOK_DIR}'), 'HOOK_DIR should be rewritten');
+    assert.ok(command.includes('bundle-test'), 'should reference bundle dir');
+  });
+});
+
+test('distributeHooks: codex mixed hook keeps supported events/handlers, drops unsupported', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createMixedHook('mixed-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['mixed-hook'],
+      agentSync: { codex: { enabled: ['mixed-hook'] } },
+    }));
+
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    assert.ok(fs.existsSync(hooksJsonPath), 'hooks.json should exist');
+
+    const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<string, unknown>;
+    const hooks = content.hooks as Record<string, unknown[]>;
+
+    // UserPromptSubmit (supported event, command handler) should be present
+    assert.ok(hooks.UserPromptSubmit, 'UserPromptSubmit should be present');
+    // PreCompact (unsupported event) should be absent
+    assert.equal(hooks.PreCompact, undefined, 'PreCompact should be filtered out');
+    // SessionStart should have only the command handler, not the http one
+    if (hooks.SessionStart) {
+      for (const group of hooks.SessionStart as Array<{ hooks: Array<{ type: string }> }>) {
+        for (const h of group.hooks) {
+          assert.notEqual(h.type, 'http', 'http handler should be filtered out');
+        }
+      }
+    }
+  });
+});
+
+test('distributeHooks: codex idempotent re-sync updates ASB hooks without duplication', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createCodexCompatibleHook('idempotent-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['idempotent-hook'],
+      agentSync: { codex: { enabled: ['idempotent-hook'] } },
+    }));
+
+    // First sync
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+    // Second sync (idempotent)
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<string, unknown>;
+    const hooks = content.hooks as Record<string, unknown[]>;
+    const groups = hooks.UserPromptSubmit as Array<Record<string, unknown>>;
+
+    const asbGroups = groups.filter((g) => g._asb_source === true);
+    assert.equal(
+      asbGroups.length,
+      1,
+      'should have exactly 1 ASB group after re-sync, not duplicated'
+    );
+  });
+});
+
+test('distributeHooks: codex dryRun does not write hooks.json', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createCodexCompatibleHook('dryrun-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['dryrun-hook'],
+      agentSync: { codex: { enabled: ['dryrun-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']), { dryRun: true });
+
+    const codexResults = outcome.results.filter((r) => r.platform === 'codex');
+    assert.ok(codexResults.length > 0, 'should produce results');
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    assert.ok(!fs.existsSync(hooksJsonPath), 'hooks.json should NOT be written in dryRun');
+  });
+});
+
+test('distributeHooks: codex returns error for malformed hooks.json shape', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    fs.writeFileSync(hooksJsonPath, JSON.stringify({ hooks: 'bad-shape' }));
+
+    createCodexCompatibleHook('shape-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['shape-hook'],
+      agentSync: { codex: { enabled: ['shape-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    const errorResults = outcome.results.filter(
+      (r) => r.platform === 'codex' && r.status === 'error'
+    );
+    assert.ok(errorResults.length > 0, 'should produce error result for malformed hooks.json');
+  });
+});
