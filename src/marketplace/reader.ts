@@ -16,7 +16,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { getSourceCacheDir } from '../config/paths.js';
+import { getPluginsDir } from '../config/paths.js';
 import {
   type MarketplaceManifest,
   marketplaceManifestSchema,
@@ -244,7 +244,7 @@ function cloneToCacheDir(
   ref?: string
 ): string | null {
   const cacheBase = path.join(
-    getSourceCacheDir(),
+    getPluginsDir(),
     '.plugin-cache',
     marketplaceNamespace,
     pluginName

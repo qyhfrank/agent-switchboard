@@ -34,8 +34,8 @@ import {
   getGeminiDir,
   getHooksDir,
   getOpencodePath,
+  getPluginsDir,
   getSkillsDir,
-  getSourceCacheDir,
 } from './config/paths.js';
 import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
 import {
@@ -1756,7 +1756,7 @@ mktRoot
           throw err;
         }
 
-        let effectivePath = getSourceCacheDir(name);
+        let effectivePath = path.join(getPluginsDir(), name);
         if (parsed.subdir) effectivePath = path.join(effectivePath, parsed.subdir);
         const validation = validateSourcePath(effectivePath);
 
