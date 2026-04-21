@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
-import { expandHome, getPluginsDir, getSourceCacheDir } from '../config/paths.js';
+import { expandHome, getPluginsDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
@@ -173,7 +173,7 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
       if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
       return effectivePath;
     }
-    let effectivePath = getSourceCacheDir(namespace);
+    let effectivePath = path.join(getPluginsDir(), namespace);
     if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
     return effectivePath;
   }
@@ -312,8 +312,8 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   ensureNamespaceAvailable(namespace);
   ensureGitAvailable();
 
-  const cacheDir = getSourceCacheDir(namespace);
-  gitClone(expandHome(remote.url), cacheDir, remote.ref);
+  const cloneDir = path.join(getPluginsDir(), namespace);
+  gitClone(expandHome(remote.url), cloneDir, remote.ref);
 
   const configValue: RemoteSource = { url: remote.url };
   if (remote.ref) configValue.ref = remote.ref;
@@ -355,9 +355,9 @@ export function removeSource(namespace: string): void {
   });
 
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
-    const cacheDir = getSourceCacheDir(namespace);
-    if (fs.existsSync(cacheDir)) {
-      fs.rmSync(cacheDir, { recursive: true, force: true });
+    const cloneDir = path.join(getPluginsDir(), namespace);
+    if (fs.existsSync(cloneDir)) {
+      fs.rmSync(cloneDir, { recursive: true, force: true });
     }
   }
 }
@@ -416,8 +416,8 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
     if (typeof value === 'string') continue;
     if (!isCloneableSource(expandHome(value.url))) continue;
 
-    const cacheDir = getSourceCacheDir(namespace);
-    const gitDir = path.join(cacheDir, '.git');
+    const cloneDir = path.join(getPluginsDir(), namespace);
+    const gitDir = path.join(cloneDir, '.git');
 
     try {
       if (!gitChecked) {
@@ -425,9 +425,9 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
         gitChecked = true;
       }
       if (!fs.existsSync(gitDir)) {
-        gitClone(expandHome(value.url), cacheDir, value.ref);
+        gitClone(expandHome(value.url), cloneDir, value.ref);
       } else {
-        gitPull(cacheDir);
+        gitPull(cloneDir);
       }
       results.push({ namespace, url: value.url, status: 'updated' });
     } catch (err) {

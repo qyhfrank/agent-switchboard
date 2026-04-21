@@ -3,7 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { _resetSourceCacheMigration, getSourceCacheDir } from '../src/config/paths.js';
+import { getPluginsDir } from '../src/config/paths.js';
 import {
   addLocalSource,
   addRemoteSource,
@@ -208,7 +208,7 @@ test('getSourcesRecord resolves remote sources to cache paths', () => {
     const record = getSourcesRecord();
     assert.equal(record.local, '/some/local/path');
 
-    const expectedCachePath = getSourceCacheDir('remote-team');
+    const expectedCachePath = path.join(getPluginsDir(), 'remote-team');
     assert.equal(record['remote-team'], expectedCachePath);
   });
 });
@@ -225,7 +225,7 @@ test('getSourcesRecord includes subdir in resolved path for remote sources', () 
     );
 
     const record = getSourcesRecord();
-    const expectedPath = path.join(getSourceCacheDir('with-subdir'), 'lib/asb');
+    const expectedPath = path.join(path.join(getPluginsDir(), 'with-subdir'), 'lib/asb');
     assert.equal(record['with-subdir'], expectedPath);
   });
 });
@@ -297,7 +297,7 @@ test('addRemoteSource clones a local git repo and saves config', () => {
 
     assert.equal(hasSource('test-remote'), true);
 
-    const cacheDir = getSourceCacheDir('test-remote');
+    const cacheDir = path.join(getPluginsDir(), 'test-remote');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'test.md')));
 
     const record = getSourcesRecord();
@@ -334,7 +334,7 @@ test('removeSource cleans up cache for remote sources', () => {
 
     addRemoteSource('cleanup-test', { url: bareRepo });
 
-    const cacheDir = getSourceCacheDir('cleanup-test');
+    const cacheDir = path.join(getPluginsDir(), 'cleanup-test');
     assert.ok(fs.existsSync(cacheDir));
 
     removeSource('cleanup-test');
@@ -367,7 +367,7 @@ test('updateRemoteSources pulls latest changes', () => {
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
     addRemoteSource('update-test', { url: bareRepo });
-    const cacheDir = getSourceCacheDir('update-test');
+    const cacheDir = path.join(getPluginsDir(), 'update-test');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
 
     fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
@@ -413,7 +413,7 @@ test('updateRemoteSources re-clones when cache is missing', () => {
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
     addRemoteSource('reclone-test', { url: bareRepo });
-    const cacheDir = getSourceCacheDir('reclone-test');
+    const cacheDir = path.join(getPluginsDir(), 'reclone-test');
 
     fs.rmSync(cacheDir, { recursive: true, force: true });
     assert.equal(fs.existsSync(cacheDir), false);
@@ -434,85 +434,6 @@ test('updateRemoteSources skips local sources', () => {
 
     const results = updateRemoteSources();
     assert.equal(results.length, 0);
-  });
-});
-
-// ── Legacy migration ────────────────────────────────────────────────
-
-test('getSourceCacheDir migrates .cache to .repos', () => {
-  withTempAsbHome((asbHome) => {
-    _resetSourceCacheMigration();
-    const pluginsDir = path.join(asbHome, 'plugins');
-    const legacy = path.join(pluginsDir, '.cache');
-    fs.mkdirSync(path.join(legacy, 'team-a'), { recursive: true });
-    fs.writeFileSync(path.join(legacy, 'team-a', 'marker.txt'), 'hello');
-
-    const result = getSourceCacheDir();
-    assert.equal(result, path.join(pluginsDir, '.repos'));
-    assert.ok(fs.existsSync(path.join(result, 'team-a', 'marker.txt')));
-    assert.equal(fs.existsSync(legacy), false);
-  });
-});
-
-test('getSourceCacheDir migrates repos to .repos', () => {
-  withTempAsbHome((asbHome) => {
-    _resetSourceCacheMigration();
-    const pluginsDir = path.join(asbHome, 'plugins');
-    const legacy = path.join(pluginsDir, 'repos');
-    fs.mkdirSync(path.join(legacy, 'team-b'), { recursive: true });
-    fs.writeFileSync(path.join(legacy, 'team-b', 'data.txt'), 'world');
-
-    const result = getSourceCacheDir();
-    assert.equal(result, path.join(pluginsDir, '.repos'));
-    assert.ok(fs.existsSync(path.join(result, 'team-b', 'data.txt')));
-    assert.equal(fs.existsSync(legacy), false);
-  });
-});
-
-test('getSourceCacheDir migrates marketplaces to .repos', () => {
-  withTempAsbHome((asbHome) => {
-    _resetSourceCacheMigration();
-    const legacy = path.join(asbHome, 'marketplaces');
-    fs.mkdirSync(path.join(legacy, 'ns1'), { recursive: true });
-
-    const pluginsDir = path.join(asbHome, 'plugins');
-    const result = getSourceCacheDir();
-    assert.equal(result, path.join(pluginsDir, '.repos'));
-    assert.equal(fs.existsSync(legacy), false);
-  });
-});
-
-test('getSourceCacheDir cleans up all legacy paths when .repos exists', () => {
-  withTempAsbHome((asbHome) => {
-    _resetSourceCacheMigration();
-    const pluginsDir = path.join(asbHome, 'plugins');
-    const dotRepos = path.join(pluginsDir, '.repos');
-    fs.mkdirSync(path.join(dotRepos, 'active'), { recursive: true });
-
-    const legacyCache = path.join(pluginsDir, '.cache');
-    fs.mkdirSync(path.join(legacyCache, 'stale'), { recursive: true });
-
-    const legacyRepos = path.join(pluginsDir, 'repos');
-    fs.mkdirSync(path.join(legacyRepos, 'old'), { recursive: true });
-
-    const legacyMkt = path.join(asbHome, 'marketplaces');
-    fs.mkdirSync(path.join(legacyMkt, 'ancient'), { recursive: true });
-
-    const result = getSourceCacheDir();
-    assert.equal(result, dotRepos);
-    assert.ok(fs.existsSync(path.join(dotRepos, 'active')));
-    assert.equal(fs.existsSync(legacyCache), false);
-    assert.equal(fs.existsSync(legacyRepos), false);
-    assert.equal(fs.existsSync(legacyMkt), false);
-  });
-});
-
-test('getSourceCacheDir with namespace returns namespace subdir', () => {
-  withTempAsbHome((asbHome) => {
-    _resetSourceCacheMigration();
-    const pluginsDir = path.join(asbHome, 'plugins');
-    const result = getSourceCacheDir('my-team');
-    assert.equal(result, path.join(pluginsDir, '.repos', 'my-team'));
   });
 });
 
@@ -541,7 +462,7 @@ test('addRemoteSource with subdir resolves effective path correctly', () => {
     addRemoteSource('subdir-test', { url: bareRepo, subdir: 'nested/lib' });
 
     const record = getSourcesRecord();
-    const expectedPath = path.join(getSourceCacheDir('subdir-test'), 'nested/lib');
+    const expectedPath = path.join(path.join(getPluginsDir(), 'subdir-test'), 'nested/lib');
     assert.equal(record['subdir-test'], expectedPath);
 
     assert.ok(fs.existsSync(path.join(expectedPath, 'rules', 'deep.md')));
