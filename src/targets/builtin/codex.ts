@@ -64,6 +64,10 @@ export const codexTarget: ApplicationTarget = {
     },
     isReservedDir: (id) => id === '.system',
   },
+
+  hooks: {
+    distribute: (_options) => ({ results: [] }),
+  },
 };
 
 export const CODEX_SKILLS_RESERVED_DIRS = new Set(['.system']);
