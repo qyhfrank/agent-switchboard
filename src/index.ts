@@ -1300,10 +1300,10 @@ skillRoot
     }
   );
 
-// Hooks library: manage and distribute hooks to Claude Code
+// Hooks library: manage and distribute hooks to supported targets
 const hookRoot = program
   .command('hook')
-  .description('Select hooks interactively and distribute to Claude Code')
+  .description('Select hooks interactively and distribute to active targets')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
