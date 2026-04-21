@@ -243,12 +243,7 @@ function cloneToCacheDir(
   cloneUrl: string,
   ref?: string
 ): string | null {
-  const cacheBase = path.join(
-    getPluginsDir(),
-    '.plugin-cache',
-    marketplaceNamespace,
-    pluginName
-  );
+  const cacheBase = path.join(getPluginsDir(), '.plugin-cache', marketplaceNamespace, pluginName);
 
   try {
     if (!fs.existsSync(path.join(cacheBase, '.git'))) {
