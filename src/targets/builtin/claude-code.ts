@@ -79,6 +79,6 @@ export const claudeCodeTarget: ApplicationTarget = {
   },
 
   hooks: {
-    distribute: () => ({ results: [] }),
+    distribute: (_options) => ({ results: [] }),
   },
 };
