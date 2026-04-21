@@ -23,11 +23,12 @@ import { distributeBundle } from '../library/distribute-bundle.js';
 import { ensureParentDir, rmDirRecursive } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { getTargetById } from '../targets/registry.js';
+import { distributeCodexHooks } from './codex-distribute.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles, loadHookLibrary } from './library.js';
 import { HOOK_DIR_PLACEHOLDER, type MatcherGroup } from './schema.js';
 
-export type HookPlatform = 'claude-code';
+export type HookPlatform = 'claude-code' | 'codex';
 
 export interface HookDistributionOutcome {
   results: Array<DistributionResult<HookPlatform> | BundleDistributionResult<HookPlatform>>;
@@ -239,9 +240,9 @@ function cleanOrphanBundleDirs(
 // ---------------------------------------------------------------------------
 
 /**
- * Distribute hooks to Claude Code:
+ * Distribute hooks to active targets (Claude Code, Codex, etc.):
  *  1. Copy bundle files for bundle-type hooks
- *  2. Merge all active hook configs into settings.json
+ *  2. Merge all active hook configs into each target's config
  *  3. Clean up orphan bundle directories
  */
 export function distributeHooks(
@@ -258,56 +259,99 @@ export function distributeHooks(
   }
 
   const results: HookDistributionOutcome['results'] = [];
-  const platform: HookPlatform = 'claude-code';
+  const dryRun = options?.dryRun === true;
 
-  // Skip if claude-code is not installed (unless assumed installed)
-  const target = getTargetById(platform);
-  if (target?.isInstalled?.() === false && !assumeInstalled?.has(platform)) {
-    return { results };
-  }
-
-  // When activeAppIds is set and doesn't include claude-code, treat as inactive:
-  // use empty selection so that cleanup/unmerge of previously injected hooks can run.
-  const isActive = !activeAppIds || activeAppIds.includes(platform);
-
+  // Load all hook entries once (shared across targets)
   const allEntries = loadHookLibrary(scope);
   const byId = new Map(allEntries.map((e) => [e.id, e]));
 
-  const state = loadLibraryStateSectionForApplication('hooks', 'claude-code', scope);
+  // --- Claude Code distribution ---
+  const claudeResults = distributeClaude({
+    scope,
+    activeAppIds,
+    assumeInstalled,
+    allEntries,
+    byId,
+    dryRun,
+    projectMode: options?.projectMode,
+  });
+  results.push(...claudeResults);
+
+  // --- Codex distribution ---
+  const codexResults = distributeCodex({
+    scope,
+    activeAppIds,
+    assumeInstalled,
+    allEntries,
+    byId,
+    dryRun,
+    projectMode: options?.projectMode,
+  });
+  results.push(...codexResults);
+
+  return { results };
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code distribution (extracted from former monolithic function)
+// ---------------------------------------------------------------------------
+
+interface TargetDistributeContext {
+  scope?: ConfigScope;
+  activeAppIds?: string[];
+  assumeInstalled?: ReadonlySet<string>;
+  allEntries: HookEntry[];
+  byId: Map<string, HookEntry>;
+  dryRun: boolean;
+  projectMode?: 'managed' | 'exclusive' | 'none';
+}
+
+function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome['results'] {
+  const platform: HookPlatform = 'claude-code';
+  const results: HookDistributionOutcome['results'] = [];
+
+  // Skip if claude-code is not installed (unless assumed installed)
+  const target = getTargetById(platform);
+  if (target?.isInstalled?.() === false && !ctx.assumeInstalled?.has(platform)) {
+    return results;
+  }
+
+  // When activeAppIds is set and doesn't include claude-code, treat as inactive
+  const isActive = !ctx.activeAppIds || ctx.activeAppIds.includes(platform);
+
+  const state = loadLibraryStateSectionForApplication('hooks', 'claude-code', ctx.scope);
   const selected: HookEntry[] = [];
   if (isActive) {
     for (const id of state.enabled) {
-      const e = byId.get(id);
+      const e = ctx.byId.get(id);
       if (e) selected.push(e);
     }
   }
 
   // Phase 1: Copy bundle files for bundle-type hooks
-  const dryRun = options?.dryRun === true;
   const bundleEntries = selected.filter((e) => e.isBundle);
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, HookPlatform>({
       section: 'hooks',
       selected: bundleEntries,
       platforms: [platform],
-      resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(_p, entry, scope),
+      resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(_p, entry, ctx.scope),
       listFiles: listHookBundleFiles,
       getId: (entry) => entry.id,
-      scope,
-      dryRun,
+      scope: ctx.scope,
+      dryRun: ctx.dryRun,
     });
     results.push(...bundleOutcome.results);
   }
 
   // Clean up orphan bundle directories
   const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
-  results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
+  results.push(...cleanOrphanBundleDirs(activeBundleIds, ctx.scope, ctx.dryRun));
 
   // Phase 2: Merge hook configs into settings.json
-  const settingsPath = resolveSettingsPath(scope);
+  const settingsPath = resolveSettingsPath(ctx.scope);
   const settingsResult = readSettingsJson(settingsPath);
 
-  // Abort hooks config merge if settings file is unreadable (prevents data loss)
   if (!settingsResult.ok) {
     results.push({
       platform,
@@ -315,29 +359,28 @@ export function distributeHooks(
       status: 'error',
       error: `Cannot read settings.json, aborting hooks merge: ${settingsResult.error}`,
     });
-    return { results };
+    return results;
   }
 
   const settings = settingsResult.data;
   const previouslyManaged = (settings[ASB_MANAGED_KEY] ?? []) as string[];
 
-  // Also check for legacy ASB hooks (missing _asb_source marker)
   const existingHooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
   const hasLegacyAsb = Object.values(existingHooks).some((groups) =>
-    (groups as Array<Record<string, unknown>>).some((g) => isLegacyAsbGroup(g, scope))
+    (groups as Array<Record<string, unknown>>).some((g) => isLegacyAsbGroup(g, ctx.scope))
   );
 
   if (selected.length === 0 && previouslyManaged.length === 0 && !hasLegacyAsb) {
-    return { results };
+    return results;
   }
 
   const before = JSON.stringify(settings);
-  mergeHooksIntoSettings(settings, selected, scope);
+  mergeHooksIntoSettings(settings, selected, ctx.scope);
   const after = JSON.stringify(settings);
 
   if (before === after) {
     results.push({ platform, filePath: settingsPath, status: 'skipped', reason: 'up-to-date' });
-  } else if (dryRun) {
+  } else if (ctx.dryRun) {
     const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
     results.push({ platform, filePath: settingsPath, status: 'written', reason });
   } else {
@@ -351,5 +394,39 @@ export function distributeHooks(
     }
   }
 
-  return { results };
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// Codex distribution (delegates to codex-distribute module)
+// ---------------------------------------------------------------------------
+
+function distributeCodex(ctx: TargetDistributeContext): HookDistributionOutcome['results'] {
+  const platform = 'codex';
+
+  // Skip if codex is not installed (unless assumed installed)
+  const target = getTargetById(platform);
+  if (target?.isInstalled?.() === false && !ctx.assumeInstalled?.has(platform)) {
+    return [];
+  }
+
+  const isActive = !ctx.activeAppIds || ctx.activeAppIds.includes(platform);
+
+  const state = loadLibraryStateSectionForApplication('hooks', 'codex', ctx.scope);
+  const selected: HookEntry[] = [];
+  if (isActive) {
+    for (const id of state.enabled) {
+      const e = ctx.byId.get(id);
+      if (e) selected.push(e);
+    }
+  }
+
+  const outcome = distributeCodexHooks({
+    scope: ctx.scope,
+    selected,
+    dryRun: ctx.dryRun,
+    projectMode: ctx.projectMode,
+  });
+
+  return outcome.results;
 }
