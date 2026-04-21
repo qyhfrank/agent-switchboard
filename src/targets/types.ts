@@ -79,18 +79,40 @@ export interface TargetSkillsHandler {
   shouldDedup?(scope?: ConfigScope): boolean;
 }
 
+/** Single hook distribution result */
+export interface HookDistributionResultItem {
+  platform: string;
+  filePath?: string;
+  targetDir?: string;
+  status: string;
+  reason?: string;
+  error?: string;
+  entryId?: string;
+}
+
+/** Options passed from the hooks orchestrator to per-target handlers */
+export interface HookDistributeOptions {
+  scope?: ConfigScope;
+  selected: ReadonlyArray<{
+    readonly id: string;
+    readonly bareId: string;
+    readonly namespace?: string;
+    readonly hooks: Record<string, unknown[]>;
+    readonly isBundle: boolean;
+    readonly dirPath?: string;
+    readonly filePath: string;
+    readonly source: string;
+    readonly name?: string;
+    readonly description?: string;
+  }>;
+  dryRun?: boolean;
+  projectMode?: 'managed' | 'exclusive' | 'none';
+}
+
 /** Hooks distribution handler (opaque - each target owns its full logic) */
 export interface TargetHooksHandler {
-  distribute(scope?: ConfigScope): {
-    results: Array<{
-      platform: string;
-      filePath?: string;
-      targetDir?: string;
-      status: string;
-      reason?: string;
-      error?: string;
-      entryId?: string;
-    }>;
+  distribute(options: HookDistributeOptions): {
+    results: HookDistributionResultItem[];
   };
 }
 
