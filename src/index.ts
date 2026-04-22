@@ -1749,6 +1749,7 @@ mktRoot
             url: parsed.url,
             ref: parsed.ref,
             subdir: parsed.subdir,
+            type: 'clone',
           });
           spinner.succeed(chalk.green(`✓ Cloned ${parsed.url}`));
         } catch (err) {

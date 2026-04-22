@@ -214,6 +214,7 @@ export const remoteSourceSchema = z.object({
   url: z.string().min(1),
   ref: z.string().optional(),
   subdir: z.string().optional(),
+  type: z.enum(['subtree', 'clone']).default('clone'),
 });
 
 export const sourceValueSchema = z.union([z.string().trim().min(1), remoteSourceSchema]);
