@@ -379,7 +379,9 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
     if (remote.type === 'subtree' && headBefore) {
       try {
         runGit(['reset', '--hard', headBefore], { cwd: getConfigDir() });
-      } catch { /* best-effort rollback */ }
+      } catch {
+        /* best-effort rollback */
+      }
     } else {
       const cloneDir = path.join(getPluginsDir(), namespace);
       if (fs.existsSync(cloneDir)) {
@@ -444,7 +446,9 @@ export function removeSource(namespace: string): void {
     if (typeof value !== 'string' && value.type === 'subtree' && isGitRepo(getConfigDir())) {
       try {
         runGit(['checkout', 'HEAD', '--', `plugins/${namespace}`], { cwd: getConfigDir() });
-      } catch { /* best-effort rollback */ }
+      } catch {
+        /* best-effort rollback */
+      }
     }
     throw configErr;
   }
@@ -533,14 +537,15 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
           } catch (pullErr) {
             // Abort merge if conflict left repo in unmerged state
             try {
-              const mergeHeadPath = runGit(
-                ['rev-parse', '--git-path', 'MERGE_HEAD'],
-                { cwd: repoRoot }
-              );
+              const mergeHeadPath = runGit(['rev-parse', '--git-path', 'MERGE_HEAD'], {
+                cwd: repoRoot,
+              });
               if (fs.existsSync(path.resolve(repoRoot, mergeHeadPath))) {
                 runGit(['merge', '--abort'], { cwd: repoRoot });
               }
-            } catch { /* best-effort cleanup */ }
+            } catch {
+              /* best-effort cleanup */
+            }
             throw pullErr;
           }
         }

@@ -521,7 +521,15 @@ test('subtree lifecycle: add → update → remove', () => {
     execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
     execFileSync(
       'git',
-      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'add source config'],
+      [
+        '-c',
+        'user.name=test',
+        '-c',
+        'user.email=test@test.com',
+        'commit',
+        '-m',
+        'add source config',
+      ],
       { cwd: asbHome, stdio: 'pipe' }
     );
 
