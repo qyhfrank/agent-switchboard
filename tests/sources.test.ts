@@ -293,7 +293,7 @@ test('addRemoteSource clones a local git repo and saves config', () => {
     );
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
-    addRemoteSource('test-remote', { url: bareRepo });
+    addRemoteSource('test-remote', { url: bareRepo, type: 'clone' });
 
     assert.equal(hasSource('test-remote'), true);
 
@@ -332,7 +332,7 @@ test('removeSource cleans up cache for remote sources', () => {
     );
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
-    addRemoteSource('cleanup-test', { url: bareRepo });
+    addRemoteSource('cleanup-test', { url: bareRepo, type: 'clone' });
 
     const cacheDir = path.join(getPluginsDir(), 'cleanup-test');
     assert.ok(fs.existsSync(cacheDir));
@@ -366,7 +366,7 @@ test('updateRemoteSources pulls latest changes', () => {
     );
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
-    addRemoteSource('update-test', { url: bareRepo });
+    addRemoteSource('update-test', { url: bareRepo, type: 'clone' });
     const cacheDir = path.join(getPluginsDir(), 'update-test');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
 
@@ -412,7 +412,7 @@ test('updateRemoteSources re-clones when cache is missing', () => {
     );
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
-    addRemoteSource('reclone-test', { url: bareRepo });
+    addRemoteSource('reclone-test', { url: bareRepo, type: 'clone' });
     const cacheDir = path.join(getPluginsDir(), 'reclone-test');
 
     fs.rmSync(cacheDir, { recursive: true, force: true });
@@ -459,12 +459,162 @@ test('addRemoteSource with subdir resolves effective path correctly', () => {
     );
     execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
 
-    addRemoteSource('subdir-test', { url: bareRepo, subdir: 'nested/lib' });
+    addRemoteSource('subdir-test', { url: bareRepo, subdir: 'nested/lib', type: 'clone' });
 
     const record = getSourcesRecord();
     const expectedPath = path.join(path.join(getPluginsDir(), 'subdir-test'), 'nested/lib');
     assert.equal(record['subdir-test'], expectedPath);
 
     assert.ok(fs.existsSync(path.join(expectedPath, 'rules', 'deep.md')));
+  });
+});
+
+// ── Subtree source lifecycle ──────────────────────────────────────
+
+/** Create a bare remote repo with one commit containing rules/v1.md */
+function createBareRemote(parentDir: string): { bareRepo: string; workDir: string } {
+  const bareRepo = path.join(parentDir, 'bare-repo.git');
+  const workDir = path.join(parentDir, 'work');
+  fs.mkdirSync(bareRepo, { recursive: true });
+  execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], { stdio: 'pipe' });
+  execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
+  fs.mkdirSync(path.join(workDir, 'rules'), { recursive: true });
+  fs.writeFileSync(path.join(workDir, 'rules', 'v1.md'), '# V1');
+  execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+  execFileSync(
+    'git',
+    ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v1'],
+    { cwd: workDir, stdio: 'pipe' }
+  );
+  execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+  return { bareRepo, workDir };
+}
+
+/** Initialize asbHome as a git repo with an empty config.toml */
+function initAsbAsGitRepo(asbHome: string): void {
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: asbHome, stdio: 'pipe' });
+  execFileSync('git', ['-C', asbHome, 'config', 'user.name', 'test'], { stdio: 'pipe' });
+  execFileSync('git', ['-C', asbHome, 'config', 'user.email', 'test@test.com'], { stdio: 'pipe' });
+  fs.writeFileSync(path.join(asbHome, 'config.toml'), '');
+  execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+  execFileSync(
+    'git',
+    ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'init'],
+    { cwd: asbHome, stdio: 'pipe' }
+  );
+}
+
+test('subtree lifecycle: add → update → remove', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+
+    // Add as subtree
+    addRemoteSource('st', { url: bareRepo, type: 'subtree', ref: 'main' });
+    assert.equal(hasSource('st'), true);
+    const pluginDir = path.join(getPluginsDir(), 'st');
+    assert.ok(fs.existsSync(path.join(pluginDir, 'rules', 'v1.md')));
+    // No .git inside (it's a subtree, not a clone)
+    assert.equal(fs.existsSync(path.join(pluginDir, '.git')), false);
+
+    // Commit the config change so the tree is clean for subtree pull
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'add source config'],
+      { cwd: asbHome, stdio: 'pipe' }
+    );
+
+    // Push v2 to remote
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+
+    // Update (subtree pull)
+    const results = updateRemoteSources();
+    assert.equal(results.length, 1);
+    assert.equal(results[0].status, 'updated');
+    assert.ok(fs.existsSync(path.join(pluginDir, 'rules', 'v2.md')));
+
+    // Remove
+    removeSource('st');
+    assert.equal(hasSource('st'), false);
+    assert.equal(fs.existsSync(pluginDir), false);
+  });
+});
+
+test('subtree requires explicit ref', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+
+    assert.throws(
+      () => addRemoteSource('no-ref', { url: bareRepo, type: 'subtree' }),
+      /explicit "ref"/
+    );
+  });
+});
+
+test('subtree errors when ASB_HOME is not a git repo', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    // asbHome is NOT a git repo
+
+    assert.throws(
+      () => addRemoteSource('no-git', { url: bareRepo, type: 'subtree', ref: 'main' }),
+      /git repo root/
+    );
+  });
+});
+
+test('subtree errors when ASB_HOME is a subdirectory of a git repo', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    // Init git in the PARENT dir, making asbHome a subdirectory
+    const parentDir = path.dirname(asbHome);
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: parentDir, stdio: 'pipe' });
+    execFileSync('git', ['-C', parentDir, 'config', 'user.name', 'test'], { stdio: 'pipe' });
+    execFileSync('git', ['-C', parentDir, 'config', 'user.email', 'test@test.com'], {
+      stdio: 'pipe',
+    });
+
+    assert.throws(
+      () => addRemoteSource('nested', { url: bareRepo, type: 'subtree', ref: 'main' }),
+      /git repo root/
+    );
+  });
+});
+
+test('subtree errors on dirty working tree', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+
+    // Dirty the tree
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), '# dirty');
+
+    assert.throws(
+      () => addRemoteSource('dirty', { url: bareRepo, type: 'subtree', ref: 'main' }),
+      /uncommitted changes/
+    );
+  });
+});
+
+test('subtree fallback persists type as requested when subtree succeeds', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+
+    addRemoteSource('persist-test', { url: bareRepo, type: 'subtree', ref: 'main' });
+
+    const sources = getSources();
+    const src = sources.find((s) => s.namespace === 'persist-test');
+    assert.ok(src?.remote);
+    assert.equal(src.remote.type, 'subtree');
   });
 });
