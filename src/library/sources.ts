@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
-import { expandHome, getPluginsDir } from '../config/paths.js';
+import { expandHome, getConfigDir, getPluginsDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
@@ -70,6 +70,32 @@ function gitClone(url: string, targetDir: string, ref?: string): void {
 
 function gitPull(repoDir: string): void {
   runGit(['pull'], { cwd: repoDir });
+}
+
+function gitSubtreeAdd(repoRoot: string, prefix: string, url: string, ref: string): void {
+  runGit(['subtree', 'add', '--prefix', prefix, url, ref], { cwd: repoRoot });
+}
+
+function gitSubtreePull(repoRoot: string, prefix: string, url: string, ref: string): void {
+  runGit(['subtree', 'pull', '--prefix', prefix, url, ref], { cwd: repoRoot });
+}
+
+function isGitRepo(dir: string): boolean {
+  try {
+    const toplevel = runGit(['rev-parse', '--show-toplevel'], { cwd: dir });
+    return fs.realpathSync.native(toplevel) === fs.realpathSync.native(dir);
+  } catch {
+    return false;
+  }
+}
+
+function ensureCleanTree(dir: string): void {
+  const status = runGit(['status', '--porcelain'], { cwd: dir });
+  if (status.length > 0) {
+    throw new Error(
+      `ASB_HOME has uncommitted changes. Commit or stash them before subtree operations.`
+    );
+  }
 }
 
 // ── URL detection and parsing ──────────────────────────────────────
@@ -312,23 +338,56 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   ensureNamespaceAvailable(namespace);
   ensureGitAvailable();
 
-  const cloneDir = path.join(getPluginsDir(), namespace);
-  gitClone(expandHome(remote.url), cloneDir, remote.ref);
+  let headBefore: string | undefined;
 
-  const configValue: RemoteSource = { url: remote.url };
+  if (remote.type === 'subtree') {
+    if (!isGitRepo(getConfigDir())) {
+      throw new Error(
+        `Subtree mode requires ASB_HOME to be a git repo root. Current ASB_HOME is not a git repo or is a subdirectory of one.`
+      );
+    }
+    if (!remote.ref) {
+      throw new Error(`Subtree sources require an explicit "ref" (e.g. ref = "main").`);
+    }
+    const repoRoot = getConfigDir();
+    ensureCleanTree(repoRoot);
+    const prefix = `plugins/${namespace}`;
+    headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
+    gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
+  } else {
+    const cloneDir = path.join(getPluginsDir(), namespace);
+    gitClone(expandHome(remote.url), cloneDir, remote.ref);
+  }
+
+  const configValue: RemoteSource = { url: remote.url, type: remote.type };
   if (remote.ref) configValue.ref = remote.ref;
   if (remote.subdir) configValue.subdir = remote.subdir;
 
-  updateConfigLayer((layer) => ({
-    ...layer,
-    plugins: {
-      ...layer.plugins,
-      sources: {
-        ...(layer.plugins?.sources ?? {}),
-        [namespace]: configValue,
+  try {
+    updateConfigLayer((layer) => ({
+      ...layer,
+      plugins: {
+        ...layer.plugins,
+        sources: {
+          ...(layer.plugins?.sources ?? {}),
+          [namespace]: configValue,
+        },
       },
-    },
-  }));
+    }));
+  } catch (configErr) {
+    // Rollback: restore repo to pre-subtree-add state
+    if (remote.type === 'subtree' && headBefore) {
+      try {
+        runGit(['reset', '--hard', headBefore], { cwd: getConfigDir() });
+      } catch { /* best-effort rollback */ }
+    } else {
+      const cloneDir = path.join(getPluginsDir(), namespace);
+      if (fs.existsSync(cloneDir)) {
+        fs.rmSync(cloneDir, { recursive: true, force: true });
+      }
+    }
+    throw configErr;
+  }
 }
 
 /**
@@ -342,23 +401,52 @@ export function removeSource(namespace: string): void {
 
   const value = raw[namespace];
 
-  updateConfigLayer((layer) => {
-    const newSources = { ...(layer.plugins?.sources ?? {}) };
-    delete newSources[namespace];
-    return {
-      ...layer,
-      plugins: {
-        ...layer.plugins,
-        sources: newSources,
-      },
-    };
-  });
-
+  // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
-    const cloneDir = path.join(getPluginsDir(), namespace);
-    if (fs.existsSync(cloneDir)) {
-      fs.rmSync(cloneDir, { recursive: true, force: true });
+    const pluginDir = path.join(getPluginsDir(), namespace);
+    if (value.type === 'subtree') {
+      if (!isGitRepo(getConfigDir())) {
+        throw new Error(
+          `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
+        );
+      }
+      if (fs.existsSync(pluginDir)) {
+        ensureCleanTree(getConfigDir());
+        try {
+          runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
+        } catch (err) {
+          throw new Error(
+            `Failed to git rm subtree "plugins/${namespace}": ${err instanceof Error ? err.message : String(err)}`
+          );
+        }
+      }
+    } else {
+      if (fs.existsSync(pluginDir)) {
+        fs.rmSync(pluginDir, { recursive: true, force: true });
+      }
     }
+  }
+
+  try {
+    updateConfigLayer((layer) => {
+      const newSources = { ...(layer.plugins?.sources ?? {}) };
+      delete newSources[namespace];
+      return {
+        ...layer,
+        plugins: {
+          ...layer.plugins,
+          sources: newSources,
+        },
+      };
+    });
+  } catch (configErr) {
+    // Rollback git rm if config write fails (subtree only)
+    if (typeof value !== 'string' && value.type === 'subtree' && isGitRepo(getConfigDir())) {
+      try {
+        runGit(['checkout', 'HEAD', '--', `plugins/${namespace}`], { cwd: getConfigDir() });
+      } catch { /* best-effort rollback */ }
+    }
+    throw configErr;
   }
 }
 
@@ -416,18 +504,54 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
     if (typeof value === 'string') continue;
     if (!isCloneableSource(expandHome(value.url))) continue;
 
-    const cloneDir = path.join(getPluginsDir(), namespace);
-    const gitDir = path.join(cloneDir, '.git');
-
     try {
       if (!gitChecked) {
         ensureGitAvailable();
         gitChecked = true;
       }
-      if (!fs.existsSync(gitDir)) {
-        gitClone(expandHome(value.url), cloneDir, value.ref);
+
+      if (value.type === 'subtree') {
+        if (!isGitRepo(getConfigDir())) {
+          throw new Error(
+            `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root.`
+          );
+        }
+        if (!value.ref) {
+          throw new Error(
+            `Subtree source "${namespace}" requires an explicit "ref" in config.toml.`
+          );
+        }
+        const repoRoot = getConfigDir();
+        ensureCleanTree(repoRoot);
+        const prefix = `plugins/${namespace}`;
+        const prefixDir = path.join(repoRoot, prefix);
+        if (!fs.existsSync(prefixDir)) {
+          gitSubtreeAdd(repoRoot, prefix, expandHome(value.url), value.ref);
+        } else {
+          try {
+            gitSubtreePull(repoRoot, prefix, expandHome(value.url), value.ref);
+          } catch (pullErr) {
+            // Abort merge if conflict left repo in unmerged state
+            try {
+              const mergeHeadPath = runGit(
+                ['rev-parse', '--git-path', 'MERGE_HEAD'],
+                { cwd: repoRoot }
+              );
+              if (fs.existsSync(path.resolve(repoRoot, mergeHeadPath))) {
+                runGit(['merge', '--abort'], { cwd: repoRoot });
+              }
+            } catch { /* best-effort cleanup */ }
+            throw pullErr;
+          }
+        }
       } else {
-        gitPull(cloneDir);
+        const cloneDir = path.join(getPluginsDir(), namespace);
+        const gitDir = path.join(cloneDir, '.git');
+        if (!fs.existsSync(gitDir)) {
+          gitClone(expandHome(value.url), cloneDir, value.ref);
+        } else {
+          gitPull(cloneDir);
+        }
       }
       results.push({ namespace, url: value.url, status: 'updated' });
     } catch (err) {
