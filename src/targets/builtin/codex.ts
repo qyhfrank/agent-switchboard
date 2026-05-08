@@ -3,6 +3,8 @@ import path from 'node:path';
 import { CodexAgent } from '../../agents/codex.js';
 import { sanitizeMcpName } from '../../agents/json-utils.js';
 import { getCodexDir, getProjectCodexSkillsDir } from '../../config/paths.js';
+import { distributeCodexHooks } from '../../hooks/codex-distribute.js';
+import type { HookEntry } from '../../hooks/library.js';
 import { distributeCodexSubagents } from '../../subagents/codex-distribute.js';
 import type { ApplicationTarget } from '../types.js';
 import { extractMdId, resolveProjectRoot } from './common.js';
@@ -66,7 +68,13 @@ export const codexTarget: ApplicationTarget = {
   },
 
   hooks: {
-    distribute: (_options) => ({ results: [] }),
+    distribute: (options) =>
+      distributeCodexHooks({
+        scope: options.scope,
+        selected: options.selected as readonly HookEntry[],
+        dryRun: options.dryRun,
+        projectMode: options.projectMode,
+      }),
   },
 };
 

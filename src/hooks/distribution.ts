@@ -1,15 +1,17 @@
 /**
  * Hook distribution: copies bundle files and merges hook configurations
- * into Claude Code's settings.json.
+ * into target-specific runtime files.
  *
- * Two-phase distribution for each active hook:
+ * Claude Code distribution:
  *  1. **Bundle copy** (bundle hooks only): copy script files to
  *     `~/.claude/hooks/asb/<hook-id>/` using the existing bundle distributor.
  *  2. **Config merge**: deep-merge all active hooks' event maps into
  *     `~/.claude/settings.json` under the `hooks` key. For bundle hooks,
  *     `${HOOK_DIR}` placeholders are resolved to the distributed path.
  *
- * Only Claude Code is supported as a distribution target.
+ * Codex distribution is delegated to `codex-distribute.ts`, which writes
+ * `hooks.json`, filters to Codex-compatible command hooks, and reports
+ * Codex-specific feature flag, project trust, and review prerequisites.
  */
 
 import fs from 'node:fs';

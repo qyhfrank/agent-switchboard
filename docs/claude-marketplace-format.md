@@ -208,6 +208,8 @@ Use `strict: false` when the marketplace operator wants full control over which 
 
 Hook types: `command` (shell script), `prompt` (LLM evaluation), `agent` (agentic verifier with tools).
 
+ASB distributes this Claude Code hook schema to each target within that target's runtime limits. Codex output is command-only and uses `~/.codex/hooks.json` or `<project>/.codex/hooks.json`. Codex-supported events are `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`; unsupported events and non-`command` hook types are filtered from Codex output.
+
 ## MCP Server Declaration
 
 Three ways to declare MCP servers in a plugin:
@@ -327,6 +329,9 @@ ASB reads and adapts the Claude Code plugin format for cross-agent distribution.
 | MCP lifecycle | Claude Code plugin enable/disable | `[plugins] enabled = [...]` array |
 | Distribution targets | Claude Code only | All active applications (Cursor, Codex, Gemini, etc.) |
 | Name sanitization | N/A | `sanitizeServerKeys()` replaces `[^a-zA-Z0-9_-]` with `-` for Cursor/Codex |
+| Hook runtime | Full Claude Code hook schema | Claude Code receives full hook config; Codex receives the command-only subset and requires `/hooks` review |
+
+Hook bundle scripts are copied to each target's ASB-owned hook directory: `~/.claude/hooks/asb/<id>/` for Claude Code and `~/.codex/hooks/asb/<id>/` or `<project>/.codex/hooks/asb/<id>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
 
 ### ASB `.mcp.json` Format Difference
 
