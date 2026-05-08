@@ -5,7 +5,7 @@
  * <project>/.codex/hooks.json (project scope). Unlike Claude Code which
  * embeds hooks inside settings.json, Codex uses a dedicated file.
  *
- * Codex only supports: command handlers, 5 event types, no ${HOOK_DIR}
+ * Codex only supports command handlers and no ${HOOK_DIR}
  * runtime expansion. ASB must filter unsupported entries and rewrite
  * bundle paths to absolute paths before writing.
  */
@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { ensureTrustEntry } from '../agents/codex.js';
+import { parse as parseToml } from '@iarna/toml';
 import {
   getCodexConfigPath,
   getCodexDir,
@@ -34,7 +34,10 @@ type CodexPlatform = 'codex';
 
 const CODEX_SUPPORTED_EVENTS = new Set([
   'PreToolUse',
+  'PermissionRequest',
   'PostToolUse',
+  'PreCompact',
+  'PostCompact',
   'SessionStart',
   'UserPromptSubmit',
   'Stop',
@@ -210,7 +213,11 @@ function mergeHooksIntoFile(
   }
 
   fileData.hooks = cleanedHooks;
-  fileData[ASB_MANAGED_KEY] = filteredEntries.map((f) => f.entry.id);
+  if (filteredEntries.length > 0) {
+    fileData[ASB_MANAGED_KEY] = filteredEntries.map((f) => f.entry.id);
+  } else {
+    delete fileData[ASB_MANAGED_KEY];
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -265,51 +272,90 @@ function cleanOrphanBundleDirs(
 // Codex prerequisites: feature flag + project trust
 // ---------------------------------------------------------------------------
 
-function ensureCodexHooksFeature(
-  results: Array<DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>>
-): void {
+type CodexDistributionResult =
+  | DistributionResult<CodexPlatform>
+  | BundleDistributionResult<CodexPlatform>;
+
+function readCodexConfigToml():
+  | { ok: true; filePath: string; data: Record<string, unknown> }
+  | { ok: false; filePath: string; error: string } {
   const configPath = getCodexConfigPath();
-  if (!fs.existsSync(configPath)) return;
+  if (!fs.existsSync(configPath)) return { ok: true, filePath: configPath, data: {} };
 
-  const content = fs.readFileSync(configPath, 'utf-8');
-  if (content.includes('codex_hooks') && content.includes('true')) return;
-
-  // Feature not explicitly enabled - add warning result
-  results.push({
-    platform: 'codex',
-    filePath: configPath,
-    status: 'written',
-    reason: 'codex_hooks feature flag may not be enabled in config.toml',
-  });
+  try {
+    const data = parseToml(fs.readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    return { ok: true, filePath: configPath, data };
+  } catch (error) {
+    return {
+      ok: false,
+      filePath: configPath,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
-function ensureProjectTrust(
-  projectRoot: string,
-  results: Array<DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>>
-): void {
-  const globalPath = getCodexConfigPath();
-  const globalContent = fs.existsSync(globalPath) ? fs.readFileSync(globalPath, 'utf-8') : '';
-  const trustResult = ensureTrustEntry(globalContent, projectRoot);
+function asBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
 
-  if (trustResult.warning) {
+function addCodexHooksFeatureResult(results: CodexDistributionResult[]): void {
+  const config = readCodexConfigToml();
+  if (!config.ok) {
     results.push({
       platform: 'codex',
-      filePath: globalPath,
-      status: 'skipped',
-      reason: trustResult.warning,
+      filePath: config.filePath,
+      status: 'conflict',
+      reason: `Cannot parse config.toml to verify features.hooks: ${config.error}`,
     });
+    return;
   }
 
-  if (trustResult.changed) {
-    ensureParentDir(globalPath);
-    fs.writeFileSync(globalPath, trustResult.content, 'utf-8');
+  const features = config.data.features as Record<string, unknown> | undefined;
+  const hooksEnabled = asBoolean(features?.hooks);
+  const legacyHooksEnabled = asBoolean(features?.codex_hooks);
+  const effectiveHooksEnabled = hooksEnabled ?? legacyHooksEnabled ?? true;
+
+  if (!effectiveHooksEnabled) {
     results.push({
       platform: 'codex',
-      filePath: globalPath,
-      status: 'written',
-      reason: 'added project trust entry',
+      filePath: config.filePath,
+      status: 'conflict',
+      reason: 'features.hooks is disabled; enable it before Codex hooks can run',
     });
   }
+}
+
+function addProjectTrustResult(projectRoot: string, results: CodexDistributionResult[]): void {
+  const config = readCodexConfigToml();
+  if (!config.ok) {
+    results.push({
+      platform: 'codex',
+      filePath: config.filePath,
+      status: 'conflict',
+      reason: `Cannot parse config.toml to verify project trust: ${config.error}`,
+    });
+    return;
+  }
+
+  const projects = config.data.projects as Record<string, Record<string, unknown>> | undefined;
+  const project = projects?.[path.resolve(projectRoot)];
+  const trustLevel = project?.trust_level;
+  if (trustLevel === 'trusted') return;
+
+  const reason =
+    typeof trustLevel === 'string'
+      ? `project is not trusted (trust_level="${trustLevel}"); Codex will ignore project hooks`
+      : 'project is not trusted; Codex will ignore project hooks until trust_level = "trusted" is configured';
+  results.push({ platform: 'codex', filePath: config.filePath, status: 'conflict', reason });
+}
+
+function addReviewResult(hooksJsonPath: string, results: CodexDistributionResult[]): void {
+  results.push({
+    platform: 'codex',
+    filePath: hooksJsonPath,
+    status: 'conflict',
+    reason: 'open /hooks in Codex to review new or modified hooks before they can run',
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -335,16 +381,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const results: Array<
     DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>
   > = [];
-
-  // Ensure Codex hooks feature flag is enabled
-  if (!dryRun) {
-    ensureCodexHooksFeature(results);
-  }
-
-  // Ensure project trust for project-scoped distribution
-  if (!dryRun && scope?.project) {
-    ensureProjectTrust(scope.project, results);
-  }
 
   // Filter entries for Codex compatibility
   const filteredEntries = filterForCodex(selected);
@@ -391,6 +427,11 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         return { results };
       }
     }
+  }
+
+  if (filteredEntries.length > 0) {
+    addCodexHooksFeatureResult(results);
+    if (scope?.project) addProjectTrustResult(scope.project, results);
   }
 
   // Phase 1: Copy bundle files (only after validation passes)
@@ -464,12 +505,14 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     const reason =
       filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
     results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
+    if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
   } else {
     try {
       writeHooksJson(hooksJsonPath, fileData);
       const reason =
         filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
+      if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });

@@ -6,7 +6,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { getClaudeDir, getCodexHooksJsonPath } from '../src/config/paths.js';
+import {
+  getClaudeDir,
+  getCodexConfigPath,
+  getCodexHooksJsonPath,
+  getProjectCodexHooksJsonPath,
+} from '../src/config/paths.js';
 import { distributeHooks } from '../src/hooks/distribution.js';
 import { ensureHooksDirectory } from '../src/hooks/library.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
@@ -159,7 +164,7 @@ function createUnsupportedEventHook(id: string): void {
     name: id,
     description: `Hook with unsupported event ${id}`,
     hooks: {
-      PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'echo compact' }] }],
+      Notification: [{ matcher: '', hooks: [{ type: 'command', command: 'echo notify' }] }],
     },
   });
   fs.writeFileSync(path.join(hooksDir, `${id}.json`), hookContent);
@@ -239,9 +244,151 @@ test('distributeHooks: filters unsupported events for codex', () => {
         unknown
       >;
       const hooks = content.hooks as Record<string, unknown[]> | undefined;
-      // PreCompact should NOT appear in codex hooks.json
-      assert.equal(hooks?.PreCompact, undefined, 'PreCompact should not be in codex hooks.json');
+      // Notification should NOT appear in codex hooks.json
+      assert.equal(
+        hooks?.Notification,
+        undefined,
+        'Notification should not be in codex hooks.json'
+      );
     }
+  });
+});
+
+test('distributeHooks: preserves current Codex supported events', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createCodexCompatibleHook('permission-hook', 'PermissionRequest');
+    createCodexCompatibleHook('pre-compact-hook', 'PreCompact');
+    createCodexCompatibleHook('post-compact-hook', 'PostCompact');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['permission-hook', 'pre-compact-hook', 'post-compact-hook'],
+      agentSync: {
+        codex: { enabled: ['permission-hook', 'pre-compact-hook', 'post-compact-hook'] },
+      },
+    }));
+
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<string, unknown>;
+    const hooks = content.hooks as Record<string, unknown[]>;
+
+    assert.ok(hooks.PermissionRequest, 'PermissionRequest should be preserved');
+    assert.ok(hooks.PreCompact, 'PreCompact should be preserved');
+    assert.ok(hooks.PostCompact, 'PostCompact should be preserved');
+  });
+});
+
+test('distributeHooks: codex canonical hooks feature does not produce legacy warning', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    fs.writeFileSync(getCodexConfigPath(), '[features]\nhooks = true\n');
+    createCodexCompatibleHook('feature-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['feature-hook'],
+      agentSync: { codex: { enabled: ['feature-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const configResults = outcome.results.filter(
+      (r) => r.platform === 'codex' && 'filePath' in r && r.filePath === getCodexConfigPath()
+    );
+
+    assert.equal(configResults.length, 0, 'canonical features.hooks=true should not warn');
+  });
+});
+
+test('distributeHooks: codex reports disabled hooks feature without claiming a write', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    fs.writeFileSync(getCodexConfigPath(), '[features]\nhooks = false\n');
+    createCodexCompatibleHook('disabled-feature-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['disabled-feature-hook'],
+      agentSync: { codex: { enabled: ['disabled-feature-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const configResults = outcome.results.filter(
+      (r) => r.platform === 'codex' && 'filePath' in r && r.filePath === getCodexConfigPath()
+    );
+
+    assert.ok(
+      configResults.some(
+        (r) =>
+          r.status === 'conflict' &&
+          r.reason?.includes('features.hooks') &&
+          !r.reason.includes('codex_hooks')
+      ),
+      'disabled features.hooks should be reported as a conflict-style warning'
+    );
+    assert.equal(
+      configResults.some((r) => r.status === 'written'),
+      false,
+      'feature warning must not be reported as written'
+    );
+  });
+});
+
+test('distributeHooks: codex project hooks do not auto-trust the project', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    const projectRoot = path.join(agentsHome, 'project-with-codex-hooks');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    createCodexCompatibleHook('project-hook');
+    updateLibraryStateSection(
+      'hooks',
+      () => ({
+        enabled: ['project-hook'],
+        agentSync: { codex: { enabled: ['project-hook'] } },
+      }),
+      { project: projectRoot }
+    );
+
+    const outcome = distributeHooks({ project: projectRoot }, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      fs.existsSync(getProjectCodexHooksJsonPath(projectRoot)),
+      'project hooks.json should be written'
+    );
+    const globalConfigPath = getCodexConfigPath();
+    const globalConfig = fs.existsSync(globalConfigPath)
+      ? fs.readFileSync(globalConfigPath, 'utf-8')
+      : '';
+    assert.equal(
+      globalConfig.includes('trust_level = "trusted"'),
+      false,
+      'hook distribution must not automatically trust project config'
+    );
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'codex' &&
+          r.status === 'conflict' &&
+          r.reason?.includes('project is not trusted')
+      ),
+      'project trust gap should be visible to the user'
+    );
+  });
+});
+
+test('distributeHooks: codex changed hooks report review requirement', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createCodexCompatibleHook('review-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['review-hook'],
+      agentSync: { codex: { enabled: ['review-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'conflict' && r.reason?.includes('/hooks')
+      ),
+      'new or changed Codex hooks should tell users to review them in /hooks'
+    );
   });
 });
 
@@ -462,8 +609,8 @@ test('distributeHooks: codex mixed hook keeps supported events/handlers, drops u
 
     // UserPromptSubmit (supported event, command handler) should be present
     assert.ok(hooks.UserPromptSubmit, 'UserPromptSubmit should be present');
-    // PreCompact (unsupported event) should be absent
-    assert.equal(hooks.PreCompact, undefined, 'PreCompact should be filtered out');
+    // PreCompact is supported by current Codex and should be present
+    assert.ok(hooks.PreCompact, 'PreCompact should be preserved');
     // SessionStart should have only the command handler, not the http one
     if (hooks.SessionStart) {
       for (const group of hooks.SessionStart as Array<{ hooks: Array<{ type: string }> }>) {
