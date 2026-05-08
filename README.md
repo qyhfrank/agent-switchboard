@@ -38,9 +38,10 @@ Library entries are agent-agnostic Markdown files (or directories for skills, JS
 | Commands         | ✓           | ✓\*   | ✓      | ✓      | ✓        |      |                |
 | Agents           | ✓           | ✓     | ✓      |        | ✓        |      |                |
 | Skills           | ✓           | ✓     | ✓      | ✓      | ✓        | ✓    |                |
-| Hooks            | ✓           |       |        |        |          |      |                |
+| Hooks            | ✓           | ✓†    |        |        |          |      |                |
 
-\* Codex commands use deprecated `~/.codex/prompts/`; prefer skills instead. Trae column applies to both `trae` and `trae-cn` variants.
+\* Codex commands use deprecated `~/.codex/prompts/`; prefer skills instead.
+† Codex hooks are command-only. ASB writes `~/.codex/hooks.json` or `<project>/.codex/hooks.json`, filters unsupported hook entries, and reports config, trust, and review prerequisites. Trae column applies to both `trae` and `trae-cn` variants.
 
 Cursor rules are composed into a single `asb-rules.mdc` file at `~/.cursor/rules/` with `alwaysApply: true`.
 
@@ -93,7 +94,7 @@ Library content lives under `~/.agent-switchboard/` and agent configs are update
 | `asb command`                   | Interactive command selector                         |
 | `asb agent`                     | Interactive agent selector                           |
 | `asb skill`                     | Interactive skill selector                           |
-| `asb hook`                      | Interactive hook selector (Claude Code only)         |
+| `asb hook`                      | Interactive hook selector (Claude Code and Codex)    |
 | `asb sync`                      | Push all libraries + MCP to applications (no UI)     |
 | `asb <lib> load`                | Import files from a platform into the library        |
 | `asb <lib> list`                | Show inventory, enabled state, and sync timestamps   |
@@ -316,7 +317,7 @@ Entire directories are copied to each agent's skill location. Deactivated skills
 
 ### Hooks
 
-JSON-based hook definitions distributed to Claude Code's `settings.json`. Two storage formats:
+JSON-based hook definitions distributed to Claude Code's `settings.json` and Codex's `hooks.json`. Two storage formats:
 
 - **Single file**: `~/.agent-switchboard/hooks/<id>.json`
 - **Bundle**: `~/.agent-switchboard/hooks/<id>/hook.json` plus script files
@@ -327,7 +328,12 @@ asb hook load /path/to/hook.json       # import a JSON file
 asb hook load /path/to/hook-dir/       # import a bundle directory
 ```
 
-Bundle scripts are copied to `~/.claude/hooks/asb/<id>/` and the `${HOOK_DIR}` placeholder in commands is resolved to the absolute path at distribution time.
+Bundle scripts are copied to the target agent's ASB hook bundle directory and the `${HOOK_DIR}` placeholder in commands is resolved to the absolute path at distribution time:
+
+- Claude Code: `~/.claude/hooks/asb/<id>/`
+- Codex: `~/.codex/hooks/asb/<id>/` or `<project>/.codex/hooks/asb/<id>/`
+
+Codex hook sync writes `~/.codex/hooks.json` for global scope or `<project>/.codex/hooks.json` for project scope. Codex accepts command handlers for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`; ASB filters unsupported events and non-command handler types from Codex output. Codex uses `[features].hooks` in `~/.codex/config.toml` (enabled by default when absent; legacy `[features].codex_hooks` is accepted for compatibility). Project-scoped hooks require the project to be trusted, and new or changed Codex hooks must be reviewed from `/hooks` in Codex before they run.
 
 ## Plugins
 
