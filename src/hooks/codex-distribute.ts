@@ -5,11 +5,12 @@
  * <project>/.codex/hooks.json (project scope). Unlike Claude Code which
  * embeds hooks inside settings.json, Codex uses a dedicated file.
  *
- * Codex only supports command handlers and no ${HOOK_DIR}
- * runtime expansion. ASB must filter unsupported entries and rewrite
+ * ASB currently distributes command handlers to Codex and Codex has no
+ * ${HOOK_DIR} runtime expansion. ASB must filter unsupported entries and rewrite
  * bundle paths to absolute paths before writing.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -96,20 +97,53 @@ interface FilteredHookEntry {
   hooks: Record<string, unknown[]>;
 }
 
-function filterForCodex(entries: readonly HookEntry[]): FilteredHookEntry[] {
+interface FilterDiagnostic {
+  entryId: string;
+  unsupportedEvents: string[];
+  unsupportedHandlerTypes: string[];
+  fullyFiltered: boolean;
+}
+
+function formatUnsupportedReason(diagnostic: FilterDiagnostic): string {
+  const parts: string[] = [];
+  if (diagnostic.unsupportedEvents.length > 0) {
+    parts.push(`unsupported events: ${diagnostic.unsupportedEvents.join(', ')}`);
+  }
+  if (diagnostic.unsupportedHandlerTypes.length > 0) {
+    parts.push(`unsupported handler types: ${diagnostic.unsupportedHandlerTypes.join(', ')}`);
+  }
+  const prefix = diagnostic.fullyFiltered
+    ? 'hook has no Codex-compatible command handlers after filtering'
+    : 'hook was partially filtered for Codex compatibility';
+  return `${prefix} (${parts.join('; ')})`;
+}
+
+function filterForCodex(entries: readonly HookEntry[]): {
+  entries: FilteredHookEntry[];
+  diagnostics: FilterDiagnostic[];
+} {
   const result: FilteredHookEntry[] = [];
+  const diagnostics: FilterDiagnostic[] = [];
 
   for (const entry of entries) {
     const filteredHooks: Record<string, unknown[]> = {};
+    const unsupportedEvents = new Set<string>();
+    const unsupportedHandlerTypes = new Set<string>();
 
     for (const [event, groups] of Object.entries(entry.hooks)) {
-      if (!CODEX_SUPPORTED_EVENTS.has(event)) continue;
+      if (!CODEX_SUPPORTED_EVENTS.has(event)) {
+        unsupportedEvents.add(event);
+        continue;
+      }
 
       const filteredGroups: unknown[] = [];
       for (const group of groups as Array<{ hooks?: Array<{ type?: string }> }>) {
-        const filteredHandlers = (group.hooks ?? []).filter((h) =>
-          CODEX_SUPPORTED_HANDLER_TYPES.has(h.type ?? '')
-        );
+        const filteredHandlers = (group.hooks ?? []).filter((h) => {
+          const type = h.type ?? 'unknown';
+          const supported = CODEX_SUPPORTED_HANDLER_TYPES.has(type);
+          if (!supported) unsupportedHandlerTypes.add(type);
+          return supported;
+        });
         if (filteredHandlers.length > 0) {
           filteredGroups.push({ ...group, hooks: filteredHandlers });
         }
@@ -123,9 +157,17 @@ function filterForCodex(entries: readonly HookEntry[]): FilteredHookEntry[] {
     if (Object.keys(filteredHooks).length > 0) {
       result.push({ entry, hooks: filteredHooks });
     }
+    if (unsupportedEvents.size > 0 || unsupportedHandlerTypes.size > 0) {
+      diagnostics.push({
+        entryId: entry.id,
+        unsupportedEvents: [...unsupportedEvents].sort(),
+        unsupportedHandlerTypes: [...unsupportedHandlerTypes].sort(),
+        fullyFiltered: Object.keys(filteredHooks).length === 0,
+      });
+    }
   }
 
-  return result;
+  return { entries: result, diagnostics };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,13 +181,20 @@ function readHooksJson(
     if (fs.existsSync(filePath)) {
       return {
         ok: true,
-        data: JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>,
+        data: parseHooksJsonRoot(JSON.parse(fs.readFileSync(filePath, 'utf-8'))),
       };
     }
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   return { ok: true, data: {} };
+}
+
+function parseHooksJsonRoot(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('hooks.json has invalid shape: root must be an object');
+  }
+  return value as Record<string, unknown>;
 }
 
 function writeHooksJson(filePath: string, data: Record<string, unknown>): void {
@@ -159,7 +208,8 @@ function writeHooksJson(filePath: string, data: Record<string, unknown>): void {
 
 function rewriteHookDir(
   hooks: Record<string, unknown[]>,
-  distributedDir: string
+  distributedDir: string,
+  bundleHash?: string
 ): Record<string, unknown[]> {
   const result: Record<string, unknown[]> = {};
 
@@ -171,10 +221,13 @@ function rewriteHookDir(
         return {
           ...handler,
           command: preferHomeVar(
-            handler.command
-              .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
-              .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
-              .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
+            annotateBundleCommand(
+              handler.command
+                .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
+                .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
+                .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir),
+              bundleHash
+            )
           ),
         };
       }),
@@ -184,10 +237,30 @@ function rewriteHookDir(
   return result;
 }
 
+function annotateBundleCommand(command: string, bundleHash?: string): string {
+  if (!bundleHash) return command;
+  return `${command}\n# asb-bundle-sha256=${bundleHash}`;
+}
+
+function computeBundleHash(entry: HookEntry): string {
+  const hash = createHash('sha256');
+  const files = listHookBundleFiles(entry).sort((a, b) =>
+    a.relativePath.localeCompare(b.relativePath)
+  );
+  for (const file of files) {
+    hash.update(file.relativePath);
+    hash.update('\0');
+    hash.update(fs.readFileSync(file.sourcePath));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
+
 function mergeHooksIntoFile(
   fileData: Record<string, unknown>,
   filteredEntries: FilteredHookEntry[],
-  scope?: ConfigScope
+  scope?: ConfigScope,
+  bundleHashes?: ReadonlyMap<string, string>
 ): void {
   const existingHooks = (fileData.hooks ?? {}) as Record<string, unknown[]>;
 
@@ -201,7 +274,7 @@ function mergeHooksIntoFile(
   // Merge filtered entries
   for (const { entry, hooks } of filteredEntries) {
     const resolvedHooks = entry.isBundle
-      ? rewriteHookDir(hooks, resolveHookBundleTargetDir(entry, scope))
+      ? rewriteHookDir(hooks, resolveHookBundleTargetDir(entry, scope), bundleHashes?.get(entry.id))
       : hooks;
 
     for (const [event, groups] of Object.entries(resolvedHooks)) {
@@ -298,22 +371,29 @@ function asBoolean(value: unknown): boolean | undefined {
   return typeof value === 'boolean' ? value : undefined;
 }
 
-function addCodexHooksFeatureResult(results: CodexDistributionResult[]): void {
-  const config = readCodexConfigToml();
-  if (!config.ok) {
-    results.push({
-      platform: 'codex',
-      filePath: config.filePath,
-      status: 'conflict',
-      reason: `Cannot parse config.toml to verify features.hooks: ${config.error}`,
-    });
-    return;
-  }
+function getHooksFeatureValue(features: Record<string, unknown> | undefined): boolean | undefined {
+  return asBoolean(features?.hooks) ?? asBoolean(features?.codex_hooks);
+}
 
-  const features = config.data.features as Record<string, unknown> | undefined;
-  const hooksEnabled = asBoolean(features?.hooks);
-  const legacyHooksEnabled = asBoolean(features?.codex_hooks);
-  const effectiveHooksEnabled = hooksEnabled ?? legacyHooksEnabled ?? true;
+function getObject(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function getEffectiveHooksEnabled(config: Record<string, unknown>): boolean {
+  const baseValue = getHooksFeatureValue(getObject(config.features));
+  const profileName = typeof config.profile === 'string' ? config.profile : undefined;
+  const profiles = getObject(config.profiles);
+  const profileConfig = profileName ? getObject(profiles?.[profileName]) : undefined;
+  const profileValue = getHooksFeatureValue(getObject(profileConfig?.features));
+  return profileValue ?? baseValue ?? true;
+}
+
+function addCodexHooksFeatureResult(
+  config: { filePath: string; data: Record<string, unknown> },
+  results: CodexDistributionResult[]
+): void {
+  const effectiveHooksEnabled = getEffectiveHooksEnabled(config.data);
 
   if (!effectiveHooksEnabled) {
     results.push({
@@ -325,20 +405,13 @@ function addCodexHooksFeatureResult(results: CodexDistributionResult[]): void {
   }
 }
 
-function addProjectTrustResult(projectRoot: string, results: CodexDistributionResult[]): void {
-  const config = readCodexConfigToml();
-  if (!config.ok) {
-    results.push({
-      platform: 'codex',
-      filePath: config.filePath,
-      status: 'conflict',
-      reason: `Cannot parse config.toml to verify project trust: ${config.error}`,
-    });
-    return;
-  }
-
-  const projects = config.data.projects as Record<string, Record<string, unknown>> | undefined;
-  const project = projects?.[path.resolve(projectRoot)];
+function addProjectTrustResult(
+  config: { filePath: string; data: Record<string, unknown> },
+  projectRoot: string,
+  results: CodexDistributionResult[]
+): void {
+  const projects = getObject(config.data.projects);
+  const project = getObject(projects?.[path.resolve(projectRoot)]);
   const trustLevel = project?.trust_level;
   if (trustLevel === 'trusted') return;
 
@@ -355,6 +428,18 @@ function addReviewResult(hooksJsonPath: string, results: CodexDistributionResult
     filePath: hooksJsonPath,
     status: 'conflict',
     reason: 'open /hooks in Codex to review new or modified hooks before they can run',
+  });
+}
+
+function addConfigParseResult(
+  config: { ok: false; filePath: string; error: string },
+  results: CodexDistributionResult[]
+): void {
+  results.push({
+    platform: 'codex',
+    filePath: config.filePath,
+    status: 'conflict',
+    reason: `Cannot parse config.toml to verify Codex hook prerequisites: ${config.error}`,
   });
 }
 
@@ -382,11 +467,20 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     DistributionResult<CodexPlatform> | BundleDistributionResult<CodexPlatform>
   > = [];
 
-  // Filter entries for Codex compatibility
-  const filteredEntries = filterForCodex(selected);
-
   // Pre-validate hooks.json before making any filesystem changes
   const hooksJsonPath = resolveHooksJsonPath(scope);
+  const filterResult = filterForCodex(selected);
+  const filteredEntries = filterResult.entries;
+  for (const diagnostic of filterResult.diagnostics) {
+    results.push({
+      platform: 'codex',
+      filePath: hooksJsonPath,
+      status: 'skipped',
+      reason: formatUnsupportedReason(diagnostic),
+      entryId: diagnostic.entryId,
+    });
+  }
+
   const fileResult = readHooksJson(hooksJsonPath);
 
   if (!fileResult.ok) {
@@ -430,12 +524,19 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   if (filteredEntries.length > 0) {
-    addCodexHooksFeatureResult(results);
-    if (scope?.project) addProjectTrustResult(scope.project, results);
+    const config = readCodexConfigToml();
+    if (!config.ok) {
+      addConfigParseResult(config, results);
+    } else {
+      addCodexHooksFeatureResult(config, results);
+      if (scope?.project) addProjectTrustResult(config, scope.project, results);
+    }
   }
 
   // Phase 1: Copy bundle files (only after validation passes)
   const bundleEntries = filteredEntries.filter((f) => f.entry.isBundle).map((f) => f.entry);
+  const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
+  const bundleHashes = new Map<string, string>();
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, CodexPlatform>({
       section: 'hooks',
@@ -448,11 +549,29 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       dryRun,
     });
     results.push(...bundleOutcome.results);
+    if (
+      bundleOutcome.results.some(
+        (result) => result.status === 'error' || result.status === 'conflict'
+      )
+    ) {
+      return { results };
+    }
+    for (const entry of bundleEntries) {
+      try {
+        bundleHashes.set(entry.id, computeBundleHash(entry));
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        results.push({
+          platform: 'codex',
+          filePath: hooksJsonPath,
+          status: 'error',
+          error: `Failed to hash bundle ${entry.id}: ${msg}`,
+          entryId: entry.id,
+        });
+        return { results };
+      }
+    }
   }
-
-  // Clean up orphan bundle directories
-  const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
-  results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
 
   // Phase 2: Merge hook configs into hooks.json
   const previouslyManaged = (fileData[ASB_MANAGED_KEY] ?? []) as string[];
@@ -468,7 +587,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   const before = JSON.stringify(fileData);
-  mergeHooksIntoFile(fileData, filteredEntries, scope);
+  mergeHooksIntoFile(fileData, filteredEntries, scope, bundleHashes);
 
   // Clean up empty state: if no hooks remain, remove the file entirely
   const mergedHooks = fileData.hooks as Record<string, unknown[]>;
@@ -488,6 +607,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         status: 'deleted',
         reason: 'no hooks remain',
       });
+      results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
       return { results };
     }
   }
@@ -501,11 +621,13 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       status: 'skipped',
       reason: 'up-to-date',
     });
+    results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
   } else if (dryRun) {
     const reason =
       filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
     results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
     if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
+    results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
   } else {
     try {
       writeHooksJson(hooksJsonPath, fileData);
@@ -513,6 +635,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
       if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
+      results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });

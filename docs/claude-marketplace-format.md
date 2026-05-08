@@ -208,7 +208,7 @@ Use `strict: false` when the marketplace operator wants full control over which 
 
 Hook types: `command` (shell script), `prompt` (LLM evaluation), `agent` (agentic verifier with tools).
 
-ASB distributes this Claude Code hook schema to each target within that target's runtime limits. Codex output is command-only and uses `~/.codex/hooks.json` or `<project>/.codex/hooks.json`. Codex-supported events are `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`; unsupported events and non-`command` hook types are filtered from Codex output.
+ASB distributes this Claude Code hook schema to each target within that target's current support boundary. Codex output is command-only and uses `~/.codex/hooks.json` or `<project>/.codex/hooks.json`. Codex-supported events are `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`; unsupported events and non-`command` hook types are filtered from Codex output and reported in sync results.
 
 ## MCP Server Declaration
 

@@ -15,6 +15,7 @@ import {
 import { distributeHooks } from '../src/hooks/distribution.js';
 import { ensureHooksDirectory } from '../src/hooks/library.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
+import { getTargetById } from '../src/targets/registry.js';
 import { simulateAppsInstalled, withTempHomes } from './helpers/tmp.js';
 
 function createHookEntry(id: string): void {
@@ -234,9 +235,17 @@ test('distributeHooks: filters unsupported events for codex', () => {
 
     const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
 
-    // Hook with only unsupported events should either produce a skip/warning result
-    // or write an empty hooks.json (no events to merge)
-    const _codexResults = outcome.results.filter((r) => r.platform === 'codex');
+    const codexResults = outcome.results.filter((r) => r.platform === 'codex');
+    assert.ok(
+      codexResults.some(
+        (r) =>
+          r.status === 'skipped' &&
+          r.entryId === 'compact-hook' &&
+          r.reason?.includes('unsupported events') &&
+          r.reason.includes('Notification')
+      ),
+      'unsupported-only hook should produce a visible Codex diagnostic'
+    );
     const hooksJsonPath = getCodexHooksJsonPath();
     if (fs.existsSync(hooksJsonPath)) {
       const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<
@@ -330,6 +339,63 @@ test('distributeHooks: codex reports disabled hooks feature without claiming a w
   });
 });
 
+test('distributeHooks: codex respects active profile hooks feature override', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    fs.writeFileSync(
+      getCodexConfigPath(),
+      'profile = "work"\n\n[profiles.work.features]\nhooks = false\n'
+    );
+    createCodexCompatibleHook('profile-disabled-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['profile-disabled-hook'],
+      agentSync: { codex: { enabled: ['profile-disabled-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'codex' &&
+          r.status === 'conflict' &&
+          r.filePath === getCodexConfigPath() &&
+          r.reason?.includes('features.hooks')
+      ),
+      'active profile features.hooks=false should be reported as disabled'
+    );
+  });
+});
+
+test('distributeHooks: codex profile hooks feature overrides top-level feature', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    fs.writeFileSync(
+      getCodexConfigPath(),
+      'profile = "work"\n\n[features]\nhooks = false\n\n[profiles.work.features]\nhooks = true\n'
+    );
+    createCodexCompatibleHook('profile-enabled-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['profile-enabled-hook'],
+      agentSync: { codex: { enabled: ['profile-enabled-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.equal(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'codex' &&
+          r.filePath === getCodexConfigPath() &&
+          r.status === 'conflict' &&
+          r.reason?.includes('features.hooks')
+      ),
+      false,
+      'profile features.hooks=true should override top-level disabled hooks'
+    );
+  });
+});
+
 test('distributeHooks: codex project hooks do not auto-trust the project', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('codex');
@@ -401,7 +467,19 @@ test('distributeHooks: filters http handlers for codex', () => {
       agentSync: { codex: { enabled: ['http-hook'] } },
     }));
 
-    distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'codex' &&
+          r.status === 'skipped' &&
+          r.entryId === 'http-hook' &&
+          r.reason?.includes('unsupported handler types') &&
+          r.reason.includes('http')
+      ),
+      'unsupported handler type should produce a visible Codex diagnostic'
+    );
 
     // http handlers must not appear in codex hooks.json
     const hooksJsonPath = getCodexHooksJsonPath();
@@ -523,7 +601,7 @@ test('distributeHooks: distributes to both claude-code and codex simultaneously'
 });
 
 // ---------------------------------------------------------------------------
-// F-006: Additional coverage for Codex hook distribution
+// Additional coverage for Codex hook distribution
 // ---------------------------------------------------------------------------
 
 function createBundleHook(id: string, event = 'UserPromptSubmit'): void {
@@ -590,6 +668,79 @@ test('distributeHooks: codex bundle hook copies files and rewrites HOOK_DIR', ()
   });
 });
 
+test('distributeHooks: codex bundle content changes update review surface', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createBundleHook('bundle-review-test');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['bundle-review-test'],
+      agentSync: { codex: { enabled: ['bundle-review-test'] } },
+    }));
+
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const firstContent = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    const firstHooks = firstContent.hooks as Record<
+      string,
+      Array<{ hooks: Array<{ command: string }> }>
+    >;
+    const firstCommand = firstHooks.UserPromptSubmit?.[0]?.hooks?.[0]?.command;
+    assert.ok(firstCommand?.includes('asb-bundle-sha256'), 'bundle command should include hash');
+
+    fs.writeFileSync(
+      path.join(ensureHooksDirectory(), 'bundle-review-test', 'run.sh'),
+      '#!/bin/sh\necho changed\n'
+    );
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const secondContent = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+    const secondHooks = secondContent.hooks as Record<
+      string,
+      Array<{ hooks: Array<{ command: string }> }>
+    >;
+    const secondCommand = secondHooks.UserPromptSubmit?.[0]?.hooks?.[0]?.command;
+
+    assert.notEqual(secondCommand, firstCommand, 'bundle content change should alter hooks.json');
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'conflict' && r.reason?.includes('/hooks')
+      ),
+      'bundle content change should report Codex review requirement'
+    );
+  });
+});
+
+test('distributeHooks: codex bundle copy failure aborts hooks.json merge', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createBundleHook('broken-bundle');
+    const bundleDir = path.join(ensureHooksDirectory(), 'broken-bundle');
+    fs.symlinkSync(path.join(bundleDir, 'missing.sh'), path.join(bundleDir, 'broken.sh'));
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['broken-bundle'],
+      agentSync: { codex: { enabled: ['broken-bundle'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some((r) => r.platform === 'codex' && r.status === 'error'),
+      'bundle copy failure should be reported'
+    );
+    assert.equal(
+      fs.existsSync(getCodexHooksJsonPath()),
+      false,
+      'hooks.json should not be written when bundle copy fails'
+    );
+  });
+});
+
 test('distributeHooks: codex mixed hook keeps supported events/handlers, drops unsupported', () => {
   withTempHomes(() => {
     simulateAppsInstalled('codex');
@@ -599,7 +750,7 @@ test('distributeHooks: codex mixed hook keeps supported events/handlers, drops u
       agentSync: { codex: { enabled: ['mixed-hook'] } },
     }));
 
-    distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
 
     const hooksJsonPath = getCodexHooksJsonPath();
     assert.ok(fs.existsSync(hooksJsonPath), 'hooks.json should exist');
@@ -619,6 +770,17 @@ test('distributeHooks: codex mixed hook keeps supported events/handlers, drops u
         }
       }
     }
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'codex' &&
+          r.status === 'skipped' &&
+          r.entryId === 'mixed-hook' &&
+          r.reason?.includes('unsupported handler types') &&
+          r.reason.includes('http')
+      ),
+      'partial filtering should produce a visible Codex diagnostic'
+    );
   });
 });
 
@@ -687,5 +849,110 @@ test('distributeHooks: codex returns error for malformed hooks.json shape', () =
       (r) => r.platform === 'codex' && r.status === 'error'
     );
     assert.ok(errorResults.length > 0, 'should produce error result for malformed hooks.json');
+  });
+});
+
+test('distributeHooks: codex returns error for malformed hooks.json root', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    fs.writeFileSync(hooksJsonPath, '[]');
+
+    createCodexCompatibleHook('root-shape-hook');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['root-shape-hook'],
+      agentSync: { codex: { enabled: ['root-shape-hook'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'codex' &&
+          r.status === 'error' &&
+          r.error?.includes('root must be an object')
+      ),
+      'array root should produce invalid-shape error'
+    );
+  });
+});
+
+test('distributeHooks: codex defers orphan cleanup until hooks.json write succeeds', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const oldBundleDir = path.join(path.dirname(hooksJsonPath), 'hooks', 'asb', 'old-bundle');
+    fs.mkdirSync(oldBundleDir, { recursive: true });
+    fs.writeFileSync(path.join(oldBundleDir, 'run.sh'), '#!/bin/sh\necho old\n');
+    fs.writeFileSync(
+      hooksJsonPath,
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: `${oldBundleDir}/run.sh` }],
+              _asb_source: true,
+            },
+          ],
+        },
+        _asb_managed_hooks: ['old-bundle'],
+        preferredNotifChannel: 'notifications_disabled',
+      })
+    );
+    fs.chmodSync(hooksJsonPath, 0o444);
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    try {
+      const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+      assert.ok(
+        outcome.results.some((r) => r.platform === 'codex' && r.status === 'error'),
+        'write failure should be reported'
+      );
+      assert.ok(
+        fs.existsSync(oldBundleDir),
+        'orphan bundle should remain when hooks.json write fails'
+      );
+    } finally {
+      fs.chmodSync(hooksJsonPath, 0o644);
+    }
+  });
+});
+
+test('codex target registry hooks handler delegates to Codex distributor', () => {
+  withTempHomes(() => {
+    const target = getTargetById('codex');
+    assert.ok(target?.hooks, 'codex target should expose hooks handler');
+
+    const outcome = target.hooks.distribute({
+      selected: [
+        {
+          id: 'registry-hook',
+          bareId: 'registry-hook',
+          source: 'test',
+          filePath: path.join(ensureHooksDirectory(), 'registry-hook.json'),
+          isBundle: false,
+          hooks: {
+            UserPromptSubmit: [
+              { matcher: '', hooks: [{ type: 'command', command: 'echo registry' }] },
+            ],
+          },
+        },
+      ],
+    });
+
+    assert.ok(fs.existsSync(getCodexHooksJsonPath()), 'registry handler should write hooks.json');
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'conflict' && r.reason?.includes('/hooks')
+      ),
+      'registry handler should return Codex review diagnostic'
+    );
   });
 });
