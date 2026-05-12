@@ -12,7 +12,6 @@ import {
 } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
 import type { CollisionPolicy, ProjectMode } from './distribute.js';
-import { ensureParentDir, rmDirRecursive } from './fs.js';
 import { type LibrarySection, loadLibraryAgentSync, updateLibraryAgentSync } from './state.js';
 
 export type BundleDistributionStatus = 'written' | 'skipped' | 'error' | 'deleted' | 'conflict';
@@ -97,8 +96,20 @@ function listRelativeFiles(dir: string, prefix = ''): string[] {
   return files;
 }
 
+function lstatIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
 function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
-  if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
+  const targetStat = lstatIfExists(targetDir);
+  if (!targetStat?.isDirectory()) {
     return false;
   }
 
@@ -110,8 +121,11 @@ function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
     const sourcePath = expected.get(rel);
     if (!sourcePath) return false;
 
+    const targetPath = path.join(targetDir, rel);
+    if (lstatIfExists(targetPath)?.isSymbolicLink()) return false;
+
     const sourceContent = fs.readFileSync(sourcePath);
-    const targetContent = fs.readFileSync(path.join(targetDir, rel));
+    const targetContent = fs.readFileSync(targetPath);
     if (Buffer.compare(sourceContent, targetContent) !== 0) return false;
   }
 
@@ -134,6 +148,51 @@ function desiredTargetMode(srcMode: number, currentMode: number): number {
     return srcMode;
   }
   return currentMode & 0o666;
+}
+
+function ensureDirectoryWithoutFollowingSymlink(
+  dirPath: string,
+  options?: { recursive?: boolean }
+): void {
+  const stat = lstatIfExists(dirPath);
+  if (!stat) {
+    fs.mkdirSync(dirPath, { recursive: options?.recursive === true });
+    return;
+  }
+
+  if (stat.isDirectory() && !stat.isSymbolicLink()) return;
+
+  fs.unlinkSync(dirPath);
+  fs.mkdirSync(dirPath);
+}
+
+function ensureBundleParentDir(targetDir: string, relativePath: string): void {
+  ensureDirectoryWithoutFollowingSymlink(targetDir, { recursive: true });
+  const parentRel = path.dirname(relativePath);
+  if (parentRel === '.') return;
+
+  let current = targetDir;
+  for (const segment of parentRel.split(path.sep)) {
+    if (!segment || segment === '.') continue;
+    current = path.join(current, segment);
+    ensureDirectoryWithoutFollowingSymlink(current);
+  }
+}
+
+function removeBundlePath(targetPath: string): void {
+  const stat = lstatIfExists(targetPath);
+  if (!stat) return;
+
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    const entries = fs.readdirSync(targetPath, { withFileTypes: true });
+    for (const entry of entries) {
+      removeBundlePath(path.join(targetPath, entry.name));
+    }
+    fs.rmdirSync(targetPath);
+    return;
+  }
+
+  fs.unlinkSync(targetPath);
 }
 
 /**
@@ -180,6 +239,9 @@ export function distributeBundle<TEntry, Platform extends string>(
       const targetDir = opts.resolveTargetDir(platform, entry);
       const files = opts.listFiles(entry);
       const entryId = opts.getId(entry);
+      const targetDirStat = lstatIfExists(targetDir);
+      const targetDirExists = targetDirStat != null;
+      const targetDirIsSymlink = targetDirStat?.isSymbolicLink() === true;
       const manifestEntry = manifest
         ? getLibraryEntry(manifest, manifestSection, entryId, platform as string)
         : undefined;
@@ -187,11 +249,11 @@ export function distributeBundle<TEntry, Platform extends string>(
         manifest != null &&
         isBootstrapSync &&
         !manifestEntry &&
-        fs.existsSync(targetDir) &&
+        targetDirExists &&
         isAdoptableBundleDir(targetDir, files);
 
       // Conflict detection in managed mode: check if target dir exists but isn't owned.
-      if (manifest && fs.existsSync(targetDir) && !manifestEntry && collision !== 'takeover') {
+      if (manifest && targetDirExists && !manifestEntry && collision !== 'takeover') {
         if (!canAdoptBootstrapDir) {
           const isHardError = collision === 'error';
           results.push({
@@ -209,6 +271,23 @@ export function distributeBundle<TEntry, Platform extends string>(
         }
       }
 
+      const replaceTargetDir = targetDirIsSymlink;
+      if (replaceTargetDir && !dryRun) {
+        try {
+          fs.unlinkSync(targetDir);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          results.push({
+            platform,
+            targetDir,
+            status: 'error',
+            error: `Failed to replace ${entryId}: ${msg}`,
+            entryId,
+          });
+          continue;
+        }
+      }
+
       let filesWritten = 0;
       let filesSkipped = 0;
       let hadError = false;
@@ -217,7 +296,7 @@ export function distributeBundle<TEntry, Platform extends string>(
 
       for (const file of files) {
         const targetPath = path.join(targetDir, file.relativePath);
-        if (!dryRun) ensureParentDir(targetPath);
+        if (!dryRun) ensureBundleParentDir(targetDir, file.relativePath);
 
         try {
           const srcContent = fs.readFileSync(file.sourcePath);
@@ -227,12 +306,12 @@ export function distributeBundle<TEntry, Platform extends string>(
           let modeSame = true;
           let replaceExistingTarget = false;
 
-          if (fs.existsSync(targetPath)) {
-            const dstStat = fs.lstatSync(targetPath);
-            replaceExistingTarget = dstStat.isSymbolicLink();
+          if (!replaceTargetDir) {
+            const dstStat = lstatIfExists(targetPath);
+            replaceExistingTarget = dstStat?.isSymbolicLink() === true;
             if (replaceExistingTarget) {
               modeSame = false;
-            } else {
+            } else if (dstStat) {
               const dstContent = fs.readFileSync(targetPath);
               same = Buffer.compare(srcContent, dstContent) === 0;
               if (dstStat.isFile()) {
@@ -268,7 +347,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
 
       // Clean stale files: remove files in target that are no longer in source bundle
-      if (!dryRun && !hadError && fs.existsSync(targetDir)) {
+      if (!dryRun && !hadError && lstatIfExists(targetDir)?.isDirectory()) {
         const expectedFiles = new Set(files.map((f) => f.relativePath));
         cleanStaleFiles(targetDir, '', expectedFiles);
       }
@@ -360,8 +439,8 @@ export function distributeBundle<TEntry, Platform extends string>(
                 reason: 'shared path still owned by another target',
                 entryId: item.id,
               });
-            } else if (fs.existsSync(entryPath)) {
-              if (!dryRun) rmDirRecursive(entryPath);
+            } else if (lstatIfExists(entryPath)) {
+              if (!dryRun) removeBundlePath(entryPath);
               results.push({
                 platform,
                 targetDir: entryPath,
@@ -398,14 +477,14 @@ export function distributeBundle<TEntry, Platform extends string>(
           try {
             const dirEntries = fs.readdirSync(parentDir, { withFileTypes: true });
             for (const dirEntry of dirEntries) {
-              if (!dirEntry.isDirectory()) continue;
+              if (!dirEntry.isDirectory() && !dirEntry.isSymbolicLink()) continue;
 
               const id = dirEntry.name;
               if (opts.cleanup.isReservedDir?.(id, platform)) continue;
               if (!activeIds.has(id)) {
                 const dirPath = path.join(parentDir, id);
                 try {
-                  if (!dryRun) rmDirRecursive(dirPath);
+                  if (!dryRun) removeBundlePath(dirPath);
                   results.push({
                     platform,
                     targetDir: dirPath,
