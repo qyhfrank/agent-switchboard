@@ -1258,6 +1258,138 @@ test('distributeHooks: codex defers orphan cleanup until hooks.json write succee
   });
 });
 
+test('distributeHooks: codex preserves cleanup marker when orphan cleanup fails', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const oldBundleDir = path.join(path.dirname(hooksJsonPath), 'hooks', 'asb', 'old-bundle');
+    const bundleParentDir = path.dirname(oldBundleDir);
+    const oldBundleScript = path.join(oldBundleDir, 'run.sh');
+    fs.mkdirSync(oldBundleDir, { recursive: true });
+    fs.writeFileSync(oldBundleScript, '#!/bin/sh\necho old\n');
+    fs.writeFileSync(
+      hooksJsonPath,
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: `${oldBundleScript}` }],
+              _asb_source: true,
+            },
+          ],
+        },
+        _asb_managed_hooks: ['old-bundle'],
+        preferredNotifChannel: 'notifications_disabled',
+      })
+    );
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    const originalReaddirSync = fs.readdirSync;
+    try {
+      fs.readdirSync = ((
+        target: fs.PathLike,
+        options?:
+          | BufferEncoding
+          | { encoding?: BufferEncoding | null; withFileTypes?: boolean; recursive?: boolean }
+      ) => {
+        if (path.resolve(String(target)).startsWith(bundleParentDir)) {
+          throw new Error('mock bundle cleanup failure');
+        }
+        return originalReaddirSync(target, options as Parameters<typeof fs.readdirSync>[1]);
+      }) as typeof fs.readdirSync;
+
+      const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+      const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+
+      assert.ok(
+        outcome.results.some(
+          (r) =>
+            r.platform === 'codex' &&
+            r.status === 'error' &&
+            r.error?.includes('mock bundle cleanup failure')
+        )
+      );
+      assert.deepEqual(content._asb_managed_hooks, ['old-bundle']);
+      assert.equal(fs.existsSync(oldBundleScript), true);
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+    }
+
+    const retryOutcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const retryContent = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
+
+    assert.ok(
+      retryOutcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'deleted' && r.entryId === 'old-bundle'
+      )
+    );
+    assert.equal(fs.existsSync(oldBundleDir), false);
+    assert.equal(retryContent._asb_managed_hooks, undefined);
+  });
+});
+
+test('distributeHooks: codex reports hooks.json delete failure as error', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    fs.writeFileSync(
+      hooksJsonPath,
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: 'echo asb' }],
+              _asb_source: true,
+            },
+          ],
+        },
+        _asb_managed_hooks: ['old-bundle'],
+      })
+    );
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    const originalUnlinkSync = fs.unlinkSync;
+    try {
+      fs.unlinkSync = ((target: fs.PathLike) => {
+        if (path.resolve(String(target)) === hooksJsonPath) {
+          throw new Error('mock hooks.json delete failure');
+        }
+        return originalUnlinkSync(target);
+      }) as typeof fs.unlinkSync;
+
+      const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+      assert.ok(
+        outcome.results.some(
+          (r) =>
+            r.platform === 'codex' &&
+            r.status === 'error' &&
+            r.error?.includes('mock hooks.json delete failure')
+        )
+      );
+      assert.equal(fs.existsSync(hooksJsonPath), true);
+    } finally {
+      fs.unlinkSync = originalUnlinkSync;
+    }
+  });
+});
+
 test('codex target registry hooks handler delegates to Codex distributor', () => {
   withTempHomes(() => {
     const target = getTargetById('codex');
