@@ -439,6 +439,36 @@ test('distributeSkills: executable mode repair replaces target directory symlink
   });
 });
 
+test('distributeSkills: executable mode repair reports target directory file blocker as error', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-file-blocker-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+    fs.writeFileSync(targetDir, 'foreign file\n');
+
+    const outcome = distributeSkills();
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.readFileSync(targetDir, 'utf-8'), 'foreign file\n');
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /not a directory/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills distribution: project scope
 // ---------------------------------------------------------------------------

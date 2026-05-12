@@ -107,6 +107,31 @@ function lstatIfExists(filePath: string): fs.Stats | undefined {
   }
 }
 
+function assertNoSymlinkAncestor(
+  rootPath: string,
+  targetPath: string,
+  options?: { allowFinalSymlink?: boolean }
+): void {
+  const root = path.resolve(rootPath);
+  const target = path.resolve(targetPath);
+  const relativePath = path.relative(root, target);
+  if (relativePath === '') return;
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    throw new Error(`target path escapes root: ${targetPath}`);
+  }
+
+  let current = root;
+  const parts = relativePath.split(path.sep).filter(Boolean);
+  for (let i = 0; i < parts.length; i++) {
+    current = path.join(current, parts[i]);
+    const stat = lstatIfExists(current);
+    if (!stat) return;
+    if (stat.isSymbolicLink() && !(options?.allowFinalSymlink === true && i === parts.length - 1)) {
+      throw new Error(`refusing to follow symlinked path: ${current}`);
+    }
+  }
+}
+
 function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
   const targetStat = lstatIfExists(targetDir);
   if (!targetStat?.isDirectory()) {
@@ -161,6 +186,10 @@ function ensureDirectoryWithoutFollowingSymlink(
   }
 
   if (stat.isDirectory() && !stat.isSymbolicLink()) return;
+
+  if (!stat.isSymbolicLink()) {
+    throw new Error(`path exists and is not a directory: ${dirPath}`);
+  }
 
   fs.unlinkSync(dirPath);
   fs.mkdirSync(dirPath);
@@ -239,6 +268,21 @@ export function distributeBundle<TEntry, Platform extends string>(
       const targetDir = opts.resolveTargetDir(platform, entry);
       const files = opts.listFiles(entry);
       const entryId = opts.getId(entry);
+      if (managedProjectRoot) {
+        try {
+          assertNoSymlinkAncestor(managedProjectRoot, targetDir, { allowFinalSymlink: true });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          results.push({
+            platform,
+            targetDir,
+            status: 'error',
+            error: `Failed to prepare ${entryId}: ${msg}`,
+            entryId,
+          });
+          continue;
+        }
+      }
       const targetDirStat = lstatIfExists(targetDir);
       const targetDirExists = targetDirStat != null;
       const targetDirIsSymlink = targetDirStat?.isSymbolicLink() === true;
@@ -296,9 +340,10 @@ export function distributeBundle<TEntry, Platform extends string>(
 
       for (const file of files) {
         const targetPath = path.join(targetDir, file.relativePath);
-        if (!dryRun) ensureBundleParentDir(targetDir, file.relativePath);
 
         try {
+          if (!dryRun) ensureBundleParentDir(targetDir, file.relativePath);
+
           const srcContent = fs.readFileSync(file.sourcePath);
           const srcMode = fs.statSync(file.sourcePath).mode & 0o777;
           sourceContents.push(srcContent);
@@ -397,17 +442,8 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
     }
 
-    // Update sync state
     const aggregateHash = platformHash.digest('hex');
     const prev = agentSync[platform]?.hash;
-    const hadErrors = results.some((r) => r.platform === platform && r.status === 'error');
-
-    if (!dryRun && !hadErrors && prev !== aggregateHash) {
-      updateLibraryAgentSync(opts.section, (current) => ({
-        ...current,
-        [platform]: { hash: aggregateHash, updatedAt: timestamp },
-      }));
-    }
 
     // Cleanup orphan directories
     if (opts.cleanup) {
@@ -424,6 +460,7 @@ export function distributeBundle<TEntry, Platform extends string>(
         for (const item of toRemove) {
           const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
           try {
+            assertNoSymlinkAncestor(managedProjectRoot, entryPath, { allowFinalSymlink: true });
             const sharedPathStillOwned = hasOtherLibraryEntryAtPath(
               manifest,
               manifestSection,
@@ -509,6 +546,16 @@ export function distributeBundle<TEntry, Platform extends string>(
           }
         }
       }
+    }
+
+    // Update sync state after cleanup, so cleanup failures do not record durable success.
+    const hadErrors = results.some((r) => r.platform === platform && r.status === 'error');
+
+    if (!dryRun && !hadErrors && prev !== aggregateHash) {
+      updateLibraryAgentSync(opts.section, (current) => ({
+        ...current,
+        [platform]: { hash: aggregateHash, updatedAt: timestamp },
+      }));
     }
   }
 
