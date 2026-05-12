@@ -25,7 +25,11 @@ import {
 import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
-import { assertNoSymlinkAncestor, distributeBundle } from '../library/distribute-bundle.js';
+import {
+  assertNoSymlinkAncestor,
+  assertUsableBundleRoot,
+  distributeBundle,
+} from '../library/distribute-bundle.js';
 import { ensureParentDir } from '../library/fs.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles } from './library.js';
@@ -365,7 +369,9 @@ function getOrphanBundleParentError(
 ): BundleDistributionResult<CodexPlatform> | undefined {
   const parentDir = resolveHooksBundleParentDir(scope);
   try {
-    assertNoSymlinkAncestor(resolveHooksBundleSafetyRoot(scope), parentDir);
+    const safetyRoot = resolveHooksBundleSafetyRoot(scope);
+    assertUsableBundleRoot(safetyRoot);
+    assertNoSymlinkAncestor(safetyRoot, parentDir);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return {
