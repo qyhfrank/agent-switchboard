@@ -670,6 +670,10 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
 
   const before = JSON.stringify(fileData);
   mergeHooksIntoFile(fileData, filteredEntries, scope, bundleHashes);
+  const preserveCleanupMarker = filteredEntries.length === 0 && previouslyManaged.length > 0;
+  if (preserveCleanupMarker) {
+    fileData[ASB_MANAGED_KEY] = previouslyManaged;
+  }
 
   // Clean up empty state: if no hooks remain, remove the file entirely
   const mergedHooks = fileData.hooks as Record<string, unknown[]>;
@@ -677,24 +681,70 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const hasNoHooks = totalGroups === 0;
 
   if (hasNoHooks && filteredEntries.length === 0) {
-    // Remove ASB tracking keys
-    delete fileData[ASB_MANAGED_KEY];
+    if (!preserveCleanupMarker) {
+      delete fileData[ASB_MANAGED_KEY];
+    }
     // If file has only hooks (now empty) and ASB keys, consider deleting
     const remainingKeys = Object.keys(fileData).filter((k) => k !== 'hooks');
     if (remainingKeys.length === 0 && fs.existsSync(hooksJsonPath) && !dryRun) {
-      fs.unlinkSync(hooksJsonPath);
-      results.push({
-        platform: 'codex',
-        filePath: hooksJsonPath,
-        status: 'deleted',
-        reason: 'no hooks remain',
-      });
-      results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
+      try {
+        fs.unlinkSync(hooksJsonPath);
+        results.push({
+          platform: 'codex',
+          filePath: hooksJsonPath,
+          status: 'deleted',
+          reason: 'no hooks remain',
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
+      }
       return { results };
     }
   }
 
   const after = JSON.stringify(fileData);
+  const appendCleanupResults = (): boolean => {
+    const cleanupResults = cleanOrphanBundleDirs(activeBundleIds, scope, dryRun);
+    results.push(...cleanupResults);
+    return cleanupResults.some((result) => result.status === 'error');
+  };
+  const finalizeCleanupMarker = (): void => {
+    if (!preserveCleanupMarker || dryRun) return;
+    delete fileData[ASB_MANAGED_KEY];
+    const finalHooks = fileData.hooks as Record<string, unknown[]>;
+    const finalTotalGroups = Object.values(finalHooks).reduce(
+      (sum, groups) => sum + groups.length,
+      0
+    );
+    const finalRemainingKeys = Object.keys(fileData).filter((k) => k !== 'hooks');
+    try {
+      if (
+        finalTotalGroups === 0 &&
+        finalRemainingKeys.length === 0 &&
+        fs.existsSync(hooksJsonPath)
+      ) {
+        fs.unlinkSync(hooksJsonPath);
+        results.push({
+          platform: 'codex',
+          filePath: hooksJsonPath,
+          status: 'deleted',
+          reason: 'no hooks remain',
+        });
+      } else {
+        writeHooksJson(hooksJsonPath, fileData);
+        results.push({
+          platform: 'codex',
+          filePath: hooksJsonPath,
+          status: 'written',
+          reason: 'cleanup finalized',
+        });
+      }
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
+    }
+  };
 
   if (before === after) {
     results.push({
@@ -703,13 +753,13 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       status: 'skipped',
       reason: 'up-to-date',
     });
-    results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
+    if (!appendCleanupResults()) finalizeCleanupMarker();
   } else if (dryRun) {
     const reason =
       filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
     results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
     if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
-    results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
+    appendCleanupResults();
   } else {
     try {
       writeHooksJson(hooksJsonPath, fileData);
@@ -717,7 +767,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
       if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
-      results.push(...cleanOrphanBundleDirs(activeBundleIds, scope, dryRun));
+      if (!appendCleanupResults()) finalizeCleanupMarker();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
