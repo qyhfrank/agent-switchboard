@@ -22,7 +22,7 @@ import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
 import { distributeBundle } from '../library/distribute-bundle.js';
-import { ensureParentDir, rmDirRecursive } from '../library/fs.js';
+import { ensureParentDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { getTargetById } from '../targets/registry.js';
 import { distributeCodexHooks } from './codex-distribute.js';
@@ -200,18 +200,37 @@ function cleanOrphanBundleDirs(
 ): Array<BundleDistributionResult<HookPlatform>> {
   const parentDir = resolveHooksBundleParentDir(scope);
   const results: Array<BundleDistributionResult<HookPlatform>> = [];
+  const parentStat = lstatIfExists(parentDir);
 
-  if (!fs.existsSync(parentDir)) return results;
+  if (!parentStat) return results;
+  if (parentStat.isSymbolicLink()) {
+    results.push({
+      platform: 'claude-code',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: refusing to use symlinked bundle root: ${parentDir}`,
+    });
+    return results;
+  }
+  if (!parentStat.isDirectory()) {
+    results.push({
+      platform: 'claude-code',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: bundle root exists and is not a directory: ${parentDir}`,
+    });
+    return results;
+  }
 
   try {
     const entries = fs.readdirSync(parentDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       if (activeIds.has(entry.name)) continue;
 
       const dirPath = path.join(parentDir, entry.name);
       try {
-        if (!dryRun) rmDirRecursive(dirPath);
+        if (!dryRun) removeHookBundlePath(dirPath);
         results.push({
           platform: 'claude-code',
           targetDir: dirPath,
@@ -230,11 +249,44 @@ function cleanOrphanBundleDirs(
         });
       }
     }
-  } catch {
-    // Ignore directory read errors
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    results.push({
+      platform: 'claude-code',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: ${msg}`,
+    });
   }
 
   return results;
+}
+
+function lstatIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function removeHookBundlePath(targetPath: string): void {
+  const stat = lstatIfExists(targetPath);
+  if (!stat) return;
+
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    const entries = fs.readdirSync(targetPath, { withFileTypes: true });
+    for (const entry of entries) {
+      removeHookBundlePath(path.join(targetPath, entry.name));
+    }
+    fs.rmdirSync(targetPath);
+    return;
+  }
+
+  fs.unlinkSync(targetPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -380,7 +432,11 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
 
   // Clean up orphan bundle directories
   const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
-  results.push(...cleanOrphanBundleDirs(activeBundleIds, ctx.scope, ctx.dryRun));
+  const cleanupResults = cleanOrphanBundleDirs(activeBundleIds, ctx.scope, ctx.dryRun);
+  results.push(...cleanupResults);
+  if (cleanupResults.some((result) => result.status === 'error')) {
+    return results;
+  }
 
   // Phase 2: Merge hook configs into settings.json
   const settingsPath = resolveSettingsPath(ctx.scope);

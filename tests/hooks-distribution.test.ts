@@ -196,6 +196,33 @@ test('distributeHooks: claude-code rejects symlinked bundle parent before settin
   });
 });
 
+test('distributeHooks: claude-code cleanup rejects symlinked bundle parent without deleting outside', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    updateLibraryStateSection('hooks', () => ({ enabled: [], agentSync: {} }));
+
+    const hooksLink = path.join(getClaudeDir(), 'hooks', 'asb');
+    const outsideDir = path.join(agentsHome, 'outside-claude-hook-cleanup');
+    const outsideStaleDir = path.join(outsideDir, 'stale-hook');
+    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
+    fs.mkdirSync(path.dirname(hooksLink), { recursive: true });
+    fs.mkdirSync(outsideStaleDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === hooksLink
+    );
+
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Codex hook distribution tests
 // ---------------------------------------------------------------------------
@@ -843,6 +870,53 @@ test('distributeHooks: codex rejects symlinked bundle parent before hooks.json m
 
     assert.equal(fs.existsSync(path.join(outsideDir, 'bundle-parent-symlink')), false);
     assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
+  });
+});
+
+test('distributeHooks: codex cleanup rejects symlinked bundle parent before hooks.json write', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    fs.writeFileSync(
+      hooksJsonPath,
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: 'echo asb' }],
+              _asb_source: true,
+            },
+          ],
+        },
+        _asb_managed_hooks: ['stale-hook'],
+        preferredNotifChannel: 'notifications_disabled',
+      })
+    );
+    const before = fs.readFileSync(hooksJsonPath, 'utf-8');
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    const hooksLink = path.join(getCodexDir(), 'hooks', 'asb');
+    const outsideDir = path.join(agentsHome, 'outside-codex-hook-cleanup');
+    const outsideStaleDir = path.join(outsideDir, 'stale-hook');
+    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
+    fs.mkdirSync(path.dirname(hooksLink), { recursive: true });
+    fs.mkdirSync(outsideStaleDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find((r) => r.platform === 'codex' && r.targetDir === hooksLink);
+
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(fs.readFileSync(hooksJsonPath, 'utf-8'), before);
     assert.equal(result?.status, 'error');
     assert.match(result?.error ?? '', /symlinked bundle root/);
   });
