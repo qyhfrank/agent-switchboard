@@ -154,6 +154,40 @@ test('distributeSkills: second run skips up-to-date agents skills', () => {
   });
 });
 
+test('distributeSkills: executable mode drift is repaired without content changes', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-drift-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills();
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+
+    fs.chmodSync(targetScript, 0o644);
+    const outcome = distributeSkills();
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+    assert.equal(result?.filesWritten, 1);
+    assert.equal(result?.filesSkipped, 1);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills distribution: project scope
 // ---------------------------------------------------------------------------
