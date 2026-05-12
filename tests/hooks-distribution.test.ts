@@ -192,7 +192,32 @@ test('distributeHooks: claude-code rejects symlinked bundle parent before settin
     assert.equal(fs.existsSync(path.join(outsideDir, hookId)), false);
     assert.equal(fs.existsSync(path.join(getClaudeDir(), 'settings.json')), false);
     assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.match(result?.error ?? '', /symlinked/);
+  });
+});
+
+test('distributeHooks: claude-code rejects symlinked hook ancestor before settings merge', () => {
+  withTempHomes(({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const { hookId } = createPluginHookSource(asbHome);
+    updateLibraryStateSection('hooks', () => ({ enabled: [hookId], agentSync: {} }));
+
+    const hooksLink = path.join(getClaudeDir(), 'hooks');
+    const outsideHooksDir = path.join(agentsHome, 'outside-claude-hooks-ancestor');
+    fs.mkdirSync(outsideHooksDir, { recursive: true });
+    fs.mkdirSync(path.join(outsideHooksDir, 'asb'), { recursive: true });
+    fs.symlinkSync(outsideHooksDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+    const targetDir = path.join(hooksLink, 'asb', hookId);
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.existsSync(path.join(outsideHooksDir, 'asb', hookId)), false);
+    assert.equal(fs.existsSync(path.join(getClaudeDir(), 'settings.json')), false);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
   });
 });
 
@@ -219,7 +244,57 @@ test('distributeHooks: claude-code cleanup rejects symlinked bundle parent witho
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
     assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
     assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.match(result?.error ?? '', /symlinked/);
+  });
+});
+
+test('distributeHooks: claude-code cleanup rejects symlinked hook ancestor without deleting outside', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    updateLibraryStateSection('hooks', () => ({ enabled: [], agentSync: {} }));
+
+    const hooksLink = path.join(getClaudeDir(), 'hooks');
+    const outsideHooksDir = path.join(agentsHome, 'outside-claude-cleanup-ancestor');
+    const outsideStaleDir = path.join(outsideHooksDir, 'asb', 'stale-hook');
+    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
+    fs.mkdirSync(outsideStaleDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideHooksDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === path.join(hooksLink, 'asb')
+    );
+
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
+  });
+});
+
+test('distributeHooks: claude-code cleanup waits for readable settings', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('claude-code');
+
+    const settingsPath = path.join(getClaudeDir(), 'settings.json');
+    const staleDir = path.join(getClaudeDir(), 'hooks', 'asb', 'stale-hook');
+    fs.mkdirSync(staleDir, { recursive: true });
+    fs.writeFileSync(path.join(staleDir, 'run.sh'), '#!/bin/sh\necho old\n');
+    fs.writeFileSync(settingsPath, '{not json');
+    updateLibraryStateSection('hooks', () => ({ enabled: [], agentSync: {} }));
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'claude-code' &&
+          r.status === 'error' &&
+          r.error?.includes('Cannot read settings.json')
+      )
+    );
+    assert.equal(fs.existsSync(staleDir), true);
   });
 });
 
@@ -871,7 +946,36 @@ test('distributeHooks: codex rejects symlinked bundle parent before hooks.json m
     assert.equal(fs.existsSync(path.join(outsideDir, 'bundle-parent-symlink')), false);
     assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
     assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.match(result?.error ?? '', /symlinked/);
+  });
+});
+
+test('distributeHooks: codex rejects symlinked hook ancestor before hooks.json merge', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    createBundleHook('bundle-ancestor-symlink');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['bundle-ancestor-symlink'],
+      agentSync: { codex: { enabled: ['bundle-ancestor-symlink'] } },
+    }));
+
+    const hooksLink = path.join(getCodexDir(), 'hooks');
+    const outsideHooksDir = path.join(agentsHome, 'outside-codex-hooks-ancestor');
+    fs.mkdirSync(outsideHooksDir, { recursive: true });
+    fs.mkdirSync(path.join(outsideHooksDir, 'asb'), { recursive: true });
+    fs.symlinkSync(outsideHooksDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const targetDir = path.join(hooksLink, 'asb', 'bundle-ancestor-symlink');
+    const result = outcome.results.find((r) => r.platform === 'codex' && r.targetDir === targetDir);
+
+    assert.equal(
+      fs.existsSync(path.join(outsideHooksDir, 'asb', 'bundle-ancestor-symlink')),
+      false
+    );
+    assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
   });
 });
 
@@ -918,7 +1022,55 @@ test('distributeHooks: codex cleanup rejects symlinked bundle parent before hook
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
     assert.equal(fs.readFileSync(hooksJsonPath, 'utf-8'), before);
     assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.match(result?.error ?? '', /symlinked/);
+  });
+});
+
+test('distributeHooks: codex cleanup rejects symlinked hook ancestor before hooks.json write', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+
+    const hooksJsonPath = getCodexHooksJsonPath();
+    fs.writeFileSync(
+      hooksJsonPath,
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: 'echo asb' }],
+              _asb_source: true,
+            },
+          ],
+        },
+        _asb_managed_hooks: ['stale-hook'],
+        preferredNotifChannel: 'notifications_disabled',
+      })
+    );
+    const before = fs.readFileSync(hooksJsonPath, 'utf-8');
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    const hooksLink = path.join(getCodexDir(), 'hooks');
+    const outsideHooksDir = path.join(agentsHome, 'outside-codex-cleanup-ancestor');
+    const outsideStaleDir = path.join(outsideHooksDir, 'asb', 'stale-hook');
+    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
+    fs.mkdirSync(outsideStaleDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideHooksDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find(
+      (r) => r.platform === 'codex' && r.targetDir === path.join(hooksLink, 'asb')
+    );
+
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(fs.readFileSync(hooksJsonPath, 'utf-8'), before);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
   });
 });
 

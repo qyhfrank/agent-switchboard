@@ -21,7 +21,7 @@ import { getClaudeDir, getProjectClaudeDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
-import { distributeBundle } from '../library/distribute-bundle.js';
+import { assertNoSymlinkAncestor, distributeBundle } from '../library/distribute-bundle.js';
 import { ensureParentDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { getTargetById } from '../targets/registry.js';
@@ -61,6 +61,14 @@ function resolveHooksBundleParentDir(scope?: ConfigScope): string {
     return path.join(getProjectClaudeDir(projectRoot), 'hooks', ASB_HOOKS_SUBDIR);
   }
   return path.join(getClaudeDir(), 'hooks', ASB_HOOKS_SUBDIR);
+}
+
+function resolveHooksBundleSafetyRoot(scope?: ConfigScope): string {
+  const projectRoot = scope?.project?.trim();
+  if (projectRoot && projectRoot.length > 0) {
+    return getProjectClaudeDir(projectRoot);
+  }
+  return getClaudeDir();
 }
 
 function resolveHookBundleTargetDir(
@@ -200,27 +208,13 @@ function cleanOrphanBundleDirs(
 ): Array<BundleDistributionResult<HookPlatform>> {
   const parentDir = resolveHooksBundleParentDir(scope);
   const results: Array<BundleDistributionResult<HookPlatform>> = [];
-  const parentStat = lstatIfExists(parentDir);
+  const parentError = getOrphanBundleParentError(scope);
 
-  if (!parentStat) return results;
-  if (parentStat.isSymbolicLink()) {
-    results.push({
-      platform: 'claude-code',
-      targetDir: parentDir,
-      status: 'error',
-      error: `Failed to scan orphan parent: refusing to use symlinked bundle root: ${parentDir}`,
-    });
+  if (parentError) {
+    results.push(parentError);
     return results;
   }
-  if (!parentStat.isDirectory()) {
-    results.push({
-      platform: 'claude-code',
-      targetDir: parentDir,
-      status: 'error',
-      error: `Failed to scan orphan parent: bundle root exists and is not a directory: ${parentDir}`,
-    });
-    return results;
-  }
+  if (!lstatIfExists(parentDir)) return results;
 
   try {
     const entries = fs.readdirSync(parentDir, { withFileTypes: true });
@@ -260,6 +254,35 @@ function cleanOrphanBundleDirs(
   }
 
   return results;
+}
+
+function getOrphanBundleParentError(
+  scope?: ConfigScope
+): BundleDistributionResult<HookPlatform> | undefined {
+  const parentDir = resolveHooksBundleParentDir(scope);
+  try {
+    assertNoSymlinkAncestor(resolveHooksBundleSafetyRoot(scope), parentDir);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return {
+      platform: 'claude-code',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: ${msg}`,
+    };
+  }
+
+  const parentStat = lstatIfExists(parentDir);
+  if (!parentStat) return undefined;
+  if (!parentStat.isDirectory()) {
+    return {
+      platform: 'claude-code',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: bundle root exists and is not a directory: ${parentDir}`,
+    };
+  }
+  return undefined;
 }
 
 function lstatIfExists(filePath: string): fs.Stats | undefined {
@@ -414,7 +437,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       selected: bundleEntries,
       platforms: [platform],
       resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(_p, entry, ctx.scope),
-      resolveBundleRootDir: (_p) => resolveHooksBundleParentDir(ctx.scope),
+      resolveBundleRootDir: (_p) => resolveHooksBundleSafetyRoot(ctx.scope),
       listFiles: listHookBundleFiles,
       getId: (entry) => entry.id,
       scope: ctx.scope,
@@ -430,11 +453,10 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     }
   }
 
-  // Clean up orphan bundle directories
   const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
-  const cleanupResults = cleanOrphanBundleDirs(activeBundleIds, ctx.scope, ctx.dryRun);
-  results.push(...cleanupResults);
-  if (cleanupResults.some((result) => result.status === 'error')) {
+  const cleanupParentError = getOrphanBundleParentError(ctx.scope);
+  if (cleanupParentError) {
+    results.push(cleanupParentError);
     return results;
   }
 
@@ -460,7 +482,12 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     (groups as Array<Record<string, unknown>>).some((g) => isLegacyAsbGroup(g, ctx.scope))
   );
 
+  const appendCleanupResults = (): void => {
+    results.push(...cleanOrphanBundleDirs(activeBundleIds, ctx.scope, ctx.dryRun));
+  };
+
   if (selected.length === 0 && previouslyManaged.length === 0 && !hasLegacyAsb) {
+    appendCleanupResults();
     return results;
   }
 
@@ -470,14 +497,17 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
 
   if (before === after) {
     results.push({ platform, filePath: settingsPath, status: 'skipped', reason: 'up-to-date' });
+    appendCleanupResults();
   } else if (ctx.dryRun) {
     const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
     results.push({ platform, filePath: settingsPath, status: 'written', reason });
+    appendCleanupResults();
   } else {
     try {
       writeSettingsJson(settingsPath, settings);
       const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
       results.push({ platform, filePath: settingsPath, status: 'written', reason });
+      appendCleanupResults();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform, filePath: settingsPath, status: 'error', error: msg });
