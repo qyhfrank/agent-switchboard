@@ -171,6 +171,31 @@ test('distributeHooks: executable mode drift is repaired for claude-code bundles
   });
 });
 
+test('distributeHooks: claude-code rejects symlinked bundle parent before settings merge', () => {
+  withTempHomes(({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const { hookId } = createPluginHookSource(asbHome);
+    updateLibraryStateSection('hooks', () => ({ enabled: [hookId], agentSync: {} }));
+
+    const hooksLink = path.join(getClaudeDir(), 'hooks', 'asb');
+    const outsideDir = path.join(agentsHome, 'outside-claude-hooks');
+    fs.mkdirSync(path.dirname(hooksLink), { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.symlinkSync(outsideDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+    const targetDir = path.join(hooksLink, hookId);
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.existsSync(path.join(outsideDir, hookId)), false);
+    assert.equal(fs.existsSync(path.join(getClaudeDir(), 'settings.json')), false);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Codex hook distribution tests
 // ---------------------------------------------------------------------------
@@ -794,6 +819,32 @@ test('distributeHooks: codex bundle copy failure aborts hooks.json merge', () =>
       false,
       'hooks.json should not be written when bundle copy fails'
     );
+  });
+});
+
+test('distributeHooks: codex rejects symlinked bundle parent before hooks.json merge', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    createBundleHook('bundle-parent-symlink');
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['bundle-parent-symlink'],
+      agentSync: { codex: { enabled: ['bundle-parent-symlink'] } },
+    }));
+
+    const hooksLink = path.join(getCodexDir(), 'hooks', 'asb');
+    const outsideDir = path.join(agentsHome, 'outside-codex-hooks');
+    fs.mkdirSync(path.dirname(hooksLink), { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.symlinkSync(outsideDir, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const targetDir = path.join(hooksLink, 'bundle-parent-symlink');
+    const result = outcome.results.find((r) => r.platform === 'codex' && r.targetDir === targetDir);
+
+    assert.equal(fs.existsSync(path.join(outsideDir, 'bundle-parent-symlink')), false);
+    assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
   });
 });
 

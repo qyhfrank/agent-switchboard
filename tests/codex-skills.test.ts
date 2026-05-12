@@ -469,6 +469,108 @@ test('distributeSkills: executable mode repair reports target directory file blo
   });
 });
 
+test('distributeSkills: executable mode repair rejects symlinked global skill parent', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
+    const skillId = 'mode-global-parent-symlink-skill';
+    createSkill(agentsHome, skillId);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    const skillsLink = path.join(agentsHome, '.agents', 'skills');
+    const outsideDir = path.join(agentsHome, 'outside-global-skills');
+    fs.mkdirSync(path.dirname(skillsLink), { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.symlinkSync(outsideDir, skillsLink);
+
+    const outcome = distributeSkills(undefined, { useAgentsDir: true });
+    const targetDir = path.join(skillsLink, skillId);
+    const result = outcome.results.find(
+      (r) => r.platform === 'agents' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.existsSync(path.join(outsideDir, skillId)), false);
+    assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
+  });
+});
+
+test('distributeSkills: orphan cleanup rejects symlinked global skill parent', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [],
+    }));
+
+    const skillsLink = path.join(agentsHome, '.agents', 'skills');
+    const outsideDir = path.join(agentsHome, 'outside-global-cleanup');
+    const outsideSkill = path.join(outsideDir, 'stale-skill');
+    fs.mkdirSync(path.dirname(skillsLink), { recursive: true });
+    fs.mkdirSync(outsideSkill, { recursive: true });
+    fs.writeFileSync(path.join(outsideSkill, 'SKILL.md'), 'keep me\n');
+    fs.symlinkSync(outsideDir, skillsLink);
+
+    const outcome = distributeSkills(undefined, { useAgentsDir: true });
+    const result = outcome.results.find(
+      (r) => r.platform === 'agents' && r.targetDir === skillsLink
+    );
+
+    assert.equal(fs.existsSync(path.join(outsideSkill, 'SKILL.md')), true);
+    assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
+  });
+});
+
+test('distributeSkills: stale cleanup failure is reported as copy error', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled();
+    const skillId = 'mode-stale-cleanup-failure-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const sourceScript = path.join(skillDir, 'scripts', 'stale.sh');
+    fs.mkdirSync(path.dirname(sourceScript), { recursive: true });
+    fs.writeFileSync(sourceScript, '#!/bin/sh\necho stale\n');
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills(undefined, { useAgentsDir: true });
+    fs.unlinkSync(sourceScript);
+
+    const targetDir = path.join(agentsHome, '.agents', 'skills', skillId);
+    const staleTarget = path.join(targetDir, 'scripts', 'stale.sh');
+    const originalUnlinkSync = fs.unlinkSync;
+    try {
+      fs.unlinkSync = ((target: fs.PathLike) => {
+        if (path.resolve(String(target)) === staleTarget) {
+          throw new Error('mock unlink failure');
+        }
+        return originalUnlinkSync(target);
+      }) as typeof fs.unlinkSync;
+
+      const outcome = distributeSkills(undefined, { useAgentsDir: true });
+      const result = outcome.results.find(
+        (r) => r.platform === 'agents' && r.targetDir === targetDir
+      );
+
+      assert.equal(fs.existsSync(staleTarget), true);
+      assert.equal(result?.status, 'error');
+      assert.match(result?.error ?? '', /Failed to clean stale files/);
+      assert.match(result?.error ?? '', /mock unlink failure/);
+    } finally {
+      fs.unlinkSync = originalUnlinkSync;
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills distribution: project scope
 // ---------------------------------------------------------------------------
