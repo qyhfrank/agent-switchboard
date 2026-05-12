@@ -654,6 +654,11 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     results.push(cleanupParentError);
     return { results };
   }
+  const appendCleanupResults = (): boolean => {
+    const cleanupResults = cleanOrphanBundleDirs(activeBundleIds, scope, dryRun);
+    results.push(...cleanupResults);
+    return cleanupResults.some((result) => result.status === 'error');
+  };
 
   // Phase 2: Merge hook configs into hooks.json
   const previouslyManaged = (fileData[ASB_MANAGED_KEY] ?? []) as string[];
@@ -665,6 +670,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   );
 
   if (filteredEntries.length === 0 && previouslyManaged.length === 0 && !hasAsbGroups) {
+    appendCleanupResults();
     return { results };
   }
 
@@ -695,6 +701,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
           status: 'deleted',
           reason: 'no hooks remain',
         });
+        appendCleanupResults();
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
@@ -704,11 +711,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   const after = JSON.stringify(fileData);
-  const appendCleanupResults = (): boolean => {
-    const cleanupResults = cleanOrphanBundleDirs(activeBundleIds, scope, dryRun);
-    results.push(...cleanupResults);
-    return cleanupResults.some((result) => result.status === 'error');
-  };
   const finalizeCleanupMarker = (): void => {
     if (!preserveCleanupMarker || dryRun) return;
     delete fileData[ASB_MANAGED_KEY];
