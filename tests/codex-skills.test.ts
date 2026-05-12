@@ -369,6 +369,76 @@ test('distributeSkills: executable mode repair replaces target symlink without t
   });
 });
 
+test('distributeSkills: executable mode repair replaces dangling target symlink', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-dangling-symlink-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills();
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    const outsideTarget = path.join(agentsHome, 'missing-outside.sh');
+    fs.unlinkSync(targetScript);
+    fs.symlinkSync(outsideTarget, targetScript);
+
+    const outcome = distributeSkills();
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.lstatSync(targetScript).isSymbolicLink(), false);
+    assert.equal(fs.existsSync(outsideTarget), false);
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+  });
+});
+
+test('distributeSkills: executable mode repair replaces target directory symlink', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-dir-symlink-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const outsideDir = path.join(agentsHome, 'outside-skill-dir');
+    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.symlinkSync(outsideDir, targetDir);
+
+    const outcome = distributeSkills();
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+
+    assert.equal(fs.lstatSync(targetDir).isSymbolicLink(), false);
+    assert.equal(fs.existsSync(path.join(outsideDir, 'scripts', 'run.sh')), false);
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills distribution: project scope
 // ---------------------------------------------------------------------------

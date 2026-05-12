@@ -244,6 +244,49 @@ test('bootstrap sync repairs executable mode drift while adopting skill director
   });
 });
 
+test('managed mode drift cleanup unlinks symlinked skill directory without following it', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    const projectRoot = path.join(agentsHome, 'managed-symlink-cleanup-project');
+    const targetDir = path.join(projectRoot, '.claude', 'skills', 'stale-skill');
+    const outsideDir = path.join(agentsHome, 'outside-stale-skill');
+    const outsideFile = path.join(outsideDir, 'protected.txt');
+    fs.mkdirSync(path.dirname(targetDir), { recursive: true });
+    fs.mkdirSync(outsideDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideDir, targetDir);
+
+    updateLibraryStateSection('skills', (state) => ({ ...state, enabled: [] }), {
+      project: projectRoot,
+    });
+
+    const { manifest } = loadManifest(projectRoot);
+    recordLibraryEntry(manifest, 'skills', 'stale-skill', {
+      relativePath: path.relative(projectRoot, targetDir),
+      targetId: 'claude-code',
+      hash: 'old',
+      updatedAt: '',
+    });
+
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      {
+        manifest,
+        projectMode: 'managed',
+      }
+    );
+    const result = outcome.results.find(
+      (entry) => entry.platform === 'claude-code' && entry.entryId === 'stale-skill'
+    );
+
+    assert.equal(fs.existsSync(targetDir), false);
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(result?.status, 'deleted');
+    assert.ok(!manifest.sections.skills?.['stale-skill::claude-code']);
+  });
+});
+
 test('managed command sync reports error when collision policy is error', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');
