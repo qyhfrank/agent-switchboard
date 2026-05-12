@@ -459,6 +459,34 @@ test('exclusive bundle cleanup reports parent scan failure without recording syn
   });
 });
 
+test('exclusive bundle cleanup rejects symlinked agents root without deleting outside', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+
+    const agentsRoot = path.join(agentsHome, '.agents');
+    const outsideRoot = path.join(agentsHome, 'outside-agents-root');
+    const outsideStaleDir = path.join(outsideRoot, 'skills', 'stale-skill');
+    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
+    fs.mkdirSync(outsideStaleDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideRoot, agentsRoot);
+
+    updateLibraryStateSection('skills', () => ({ enabled: [], agentSync: {} }));
+
+    const outcome = distributeSkills(undefined, {
+      useAgentsDir: true,
+      activeAppIds: ['codex'],
+    });
+    const result = outcome.results.find(
+      (entry) => entry.platform === 'agents' && entry.targetDir === path.join(agentsRoot, 'skills')
+    );
+
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symlinked bundle root/);
+  });
+});
+
 test('managed command sync reports error when collision policy is error', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');

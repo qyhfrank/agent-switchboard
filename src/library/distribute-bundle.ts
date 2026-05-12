@@ -134,7 +134,7 @@ export function assertNoSymlinkAncestor(
   }
 }
 
-function assertUsableBundleRoot(rootPath: string): void {
+export function assertUsableBundleRoot(rootPath: string): void {
   const stat = lstatIfExists(rootPath);
   if (!stat) return;
   if (stat.isSymbolicLink()) {
@@ -158,7 +158,10 @@ function resolveBundleRootDir<TEntry, Platform extends string>(
   opts: DistributeBundleOptions<TEntry, Platform>,
   platform: Platform
 ): string | undefined {
-  return opts.resolveBundleRootDir?.(platform) ?? opts.cleanup?.resolveParentDir(platform);
+  const explicitRoot = opts.resolveBundleRootDir?.(platform);
+  if (explicitRoot) return explicitRoot;
+  const cleanupParent = opts.cleanup?.resolveParentDir(platform);
+  return cleanupParent ? path.dirname(cleanupParent) : undefined;
 }
 
 function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
@@ -562,7 +565,11 @@ export function distributeBundle<TEntry, Platform extends string>(
         const parentDir = opts.cleanup.resolveParentDir(platform);
 
         try {
-          assertUsableBundleRoot(parentDir);
+          if (bundleRootDir) {
+            assertSafeBundleTarget(bundleRootDir, parentDir);
+          } else {
+            assertUsableBundleRoot(parentDir);
+          }
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
