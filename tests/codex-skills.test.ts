@@ -221,6 +221,154 @@ test('distributeSkills: executable mode drift is visible in dryRun without chmod
   });
 });
 
+test('distributeSkills: executable mode removal is repaired without content changes', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-removal-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills();
+    fs.chmodSync(scriptPath, 0o644);
+
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+
+    const outcome = distributeSkills();
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+    assert.equal(result?.filesWritten, 1);
+    assert.equal(result?.filesSkipped, 1);
+  });
+});
+
+test('distributeSkills: executable mode removal is visible in dryRun without chmod', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-removal-dryrun-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills();
+    fs.chmodSync(scriptPath, 0o644);
+
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    const outcome = distributeSkills(undefined, { dryRun: true });
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+    assert.equal(result?.filesWritten, 1);
+    assert.equal(result?.filesSkipped, 1);
+  });
+});
+
+test('distributeSkills: executable mode repair reports chmod failure as error', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-chmod-failure-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills();
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    fs.chmodSync(targetScript, 0o644);
+
+    const originalChmodSync = fs.chmodSync;
+    try {
+      fs.chmodSync = ((filePath, mode) => {
+        if (filePath === targetScript) {
+          throw new Error('chmod denied');
+        }
+        return originalChmodSync(filePath, mode);
+      }) as typeof fs.chmodSync;
+
+      const outcome = distributeSkills();
+      const result = outcome.results.find(
+        (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+      );
+
+      assert.equal(fs.statSync(targetScript).mode & 0o111, 0);
+      assert.equal(result?.status, 'error');
+      assert.match(result?.error ?? '', /chmod denied/);
+    } finally {
+      fs.chmodSync = originalChmodSync;
+    }
+  });
+});
+
+test('distributeSkills: executable mode repair replaces target symlink without touching target', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'mode-symlink-skill';
+    const skillDir = createSkill(agentsHome, skillId);
+    const scriptPath = path.join(skillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(scriptPath, 0o755);
+
+    updateLibraryStateSection('skills', (s) => ({
+      ...s,
+      enabled: [skillId],
+    }));
+
+    distributeSkills();
+    const targetDir = path.join(agentsHome, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    const outsideTarget = path.join(agentsHome, 'outside.sh');
+    fs.writeFileSync(outsideTarget, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(outsideTarget, 0o644);
+    fs.unlinkSync(targetScript);
+    fs.symlinkSync(outsideTarget, targetScript);
+
+    const outcome = distributeSkills();
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.lstatSync(targetScript).isSymbolicLink(), false);
+    assert.equal(fs.statSync(outsideTarget).mode & 0o111, 0);
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills distribution: project scope
 // ---------------------------------------------------------------------------
