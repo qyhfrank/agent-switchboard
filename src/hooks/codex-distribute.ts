@@ -25,7 +25,7 @@ import {
 import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
-import { distributeBundle } from '../library/distribute-bundle.js';
+import { assertNoSymlinkAncestor, distributeBundle } from '../library/distribute-bundle.js';
 import { ensureParentDir } from '../library/fs.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles } from './library.js';
@@ -72,6 +72,14 @@ function resolveHooksBundleParentDir(scope?: ConfigScope): string {
     return path.join(getProjectCodexDir(projectRoot), 'hooks', ASB_HOOKS_SUBDIR);
   }
   return path.join(getCodexDir(), 'hooks', ASB_HOOKS_SUBDIR);
+}
+
+function resolveHooksBundleSafetyRoot(scope?: ConfigScope): string {
+  const projectRoot = scope?.project?.trim();
+  if (projectRoot && projectRoot.length > 0) {
+    return getProjectCodexDir(projectRoot);
+  }
+  return getCodexDir();
 }
 
 function resolveHookBundleTargetDir(entry: HookEntry, scope?: ConfigScope): string {
@@ -304,7 +312,7 @@ function cleanOrphanBundleDirs(
 ): Array<BundleDistributionResult<CodexPlatform>> {
   const parentDir = resolveHooksBundleParentDir(scope);
   const results: Array<BundleDistributionResult<CodexPlatform>> = [];
-  const parentError = getOrphanBundleParentError(parentDir);
+  const parentError = getOrphanBundleParentError(scope);
 
   if (parentError) {
     results.push(parentError);
@@ -353,18 +361,23 @@ function cleanOrphanBundleDirs(
 }
 
 function getOrphanBundleParentError(
-  parentDir: string
+  scope?: ConfigScope
 ): BundleDistributionResult<CodexPlatform> | undefined {
-  const stat = lstatIfExists(parentDir);
-  if (!stat) return undefined;
-  if (stat.isSymbolicLink()) {
+  const parentDir = resolveHooksBundleParentDir(scope);
+  try {
+    assertNoSymlinkAncestor(resolveHooksBundleSafetyRoot(scope), parentDir);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
     return {
       platform: 'codex',
       targetDir: parentDir,
       status: 'error',
-      error: `Failed to scan orphan parent: refusing to use symlinked bundle root: ${parentDir}`,
+      error: `Failed to scan orphan parent: ${msg}`,
     };
   }
+
+  const stat = lstatIfExists(parentDir);
+  if (!stat) return undefined;
   if (!stat.isDirectory()) {
     return {
       platform: 'codex',
@@ -605,7 +618,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       selected: bundleEntries,
       platforms: ['codex'],
       resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(entry, scope),
-      resolveBundleRootDir: () => resolveHooksBundleParentDir(scope),
+      resolveBundleRootDir: () => resolveHooksBundleSafetyRoot(scope),
       listFiles: listHookBundleFiles,
       getId: (entry) => entry.id,
       scope,
@@ -636,7 +649,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     }
   }
 
-  const cleanupParentError = getOrphanBundleParentError(resolveHooksBundleParentDir(scope));
+  const cleanupParentError = getOrphanBundleParentError(scope);
   if (cleanupParentError) {
     results.push(cleanupParentError);
     return { results };

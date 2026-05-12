@@ -109,7 +109,7 @@ function lstatIfExists(filePath: string): fs.Stats | undefined {
   }
 }
 
-function assertNoSymlinkAncestor(
+export function assertNoSymlinkAncestor(
   rootPath: string,
   targetPath: string,
   options?: { allowFinalSymlink?: boolean }
@@ -288,10 +288,6 @@ export function distributeBundle<TEntry, Platform extends string>(
   for (const platform of opts.platforms) {
     const platformHash = createHash('sha256');
     const bundleRootDir = resolveBundleRootDir(opts, platform);
-    const manifestSectionExisted =
-      !dryRun && manifest ? manifest.sections[manifestSection] !== undefined : false;
-    const manifestSectionSnapshot =
-      !dryRun && manifestSectionExisted ? { ...manifest?.sections[manifestSection] } : undefined;
 
     // Apply per-platform filter if provided
     const platformSelected = opts.filterSelected
@@ -618,14 +614,6 @@ export function distributeBundle<TEntry, Platform extends string>(
 
     // Update sync state after cleanup, so cleanup failures do not record durable success.
     const hadErrors = results.some((r) => r.platform === platform && r.status === 'error');
-
-    if (!dryRun && manifest && hadErrors) {
-      if (manifestSectionExisted) {
-        manifest.sections[manifestSection] = manifestSectionSnapshot ?? {};
-      } else {
-        delete manifest.sections[manifestSection];
-      }
-    }
 
     if (!dryRun && !hadErrors && prev !== aggregateHash) {
       updateLibraryAgentSync(opts.section, (current) => ({

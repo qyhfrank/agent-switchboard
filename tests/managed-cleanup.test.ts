@@ -371,7 +371,7 @@ test('managed mode drift cleanup rejects symlinked ancestors without following t
   });
 });
 
-test('managed mode drift cleanup rolls back new manifest entries on cleanup error', () => {
+test('managed mode drift cleanup keeps new manifest entries on cleanup error', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('claude-code');
     createSkill('active-skill');
@@ -417,7 +417,7 @@ test('managed mode drift cleanup rolls back new manifest entries on cleanup erro
     assert.equal(cleanupResult?.status, 'error');
     assert.match(cleanupResult?.error ?? '', /refusing to follow symlinked path/);
     assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
-    assert.ok(!manifest.sections.skills?.['active-skill::claude-code']);
+    assert.ok(manifest.sections.skills?.['active-skill::claude-code']);
   });
 });
 
