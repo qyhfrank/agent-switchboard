@@ -1258,6 +1258,75 @@ test('distributeHooks: codex defers orphan cleanup until hooks.json write succee
   });
 });
 
+test('distributeHooks: codex cleans markerless orphan bundles after deleting empty hooks.json', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const oldBundleDir = path.join(path.dirname(hooksJsonPath), 'hooks', 'asb', 'legacy-bundle');
+    const oldBundleScript = path.join(oldBundleDir, 'run.sh');
+    fs.mkdirSync(oldBundleDir, { recursive: true });
+    fs.writeFileSync(oldBundleScript, '#!/bin/sh\necho old\n');
+    fs.writeFileSync(
+      hooksJsonPath,
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: oldBundleScript }],
+              _asb_source: true,
+            },
+          ],
+        },
+      })
+    );
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'deleted' && r.filePath === hooksJsonPath
+      )
+    );
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'deleted' && r.entryId === 'legacy-bundle'
+      )
+    );
+    assert.equal(fs.existsSync(hooksJsonPath), false);
+    assert.equal(fs.existsSync(oldBundleDir), false);
+  });
+});
+
+test('distributeHooks: codex retries markerless orphan cleanup without hooks.json state', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const oldBundleDir = path.join(path.dirname(hooksJsonPath), 'hooks', 'asb', 'retry-bundle');
+    fs.mkdirSync(oldBundleDir, { recursive: true });
+    fs.writeFileSync(path.join(oldBundleDir, 'run.sh'), '#!/bin/sh\necho retry\n');
+
+    updateLibraryStateSection('hooks', () => ({
+      enabled: [],
+      agentSync: { codex: { enabled: [] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'codex' && r.status === 'deleted' && r.entryId === 'retry-bundle'
+      )
+    );
+    assert.equal(fs.existsSync(oldBundleDir), false);
+  });
+});
+
 test('distributeHooks: codex preserves cleanup marker when orphan cleanup fails', () => {
   withTempHomes(() => {
     simulateAppsInstalled('codex');

@@ -605,8 +605,14 @@ export function distributeBundle<TEntry, Platform extends string>(
                 }
               }
             }
-          } catch {
-            // Ignore errors reading directory
+          } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            results.push({
+              platform,
+              targetDir: parentDir,
+              status: 'error',
+              error: `Failed to scan orphan parent: ${msg}`,
+            });
           }
         }
       }

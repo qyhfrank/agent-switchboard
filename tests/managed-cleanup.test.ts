@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { distributeCommands } from '../src/commands/distribution.js';
-import { updateLibraryStateSection } from '../src/library/state.js';
+import { loadLibraryAgentSync, updateLibraryStateSection } from '../src/library/state.js';
 import {
   computeLibraryCleanupSet,
   loadManifest,
@@ -418,6 +418,44 @@ test('managed mode drift cleanup keeps new manifest entries on cleanup error', (
     assert.match(cleanupResult?.error ?? '', /refusing to follow symlinked path/);
     assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
     assert.ok(manifest.sections.skills?.['active-skill::claude-code']);
+  });
+});
+
+test('exclusive bundle cleanup reports parent scan failure without recording sync state', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    const projectRoot = path.join(agentsHome, 'exclusive-cleanup-scan-project');
+    const parentDir = path.join(projectRoot, '.claude', 'skills');
+    const staleDir = path.join(parentDir, 'stale-skill');
+    fs.mkdirSync(staleDir, { recursive: true });
+    fs.writeFileSync(path.join(staleDir, 'SKILL.md'), 'stale\n');
+
+    updateLibraryStateSection('skills', () => ({ enabled: [], agentSync: {} }), {
+      project: projectRoot,
+    });
+
+    const originalReaddirSync = fs.readdirSync;
+    try {
+      fs.readdirSync = ((target: fs.PathLike, options?: Parameters<typeof fs.readdirSync>[1]) => {
+        if (path.resolve(String(target)) === path.resolve(parentDir)) {
+          throw new Error('mock parent scan failure');
+        }
+        return originalReaddirSync(target, options);
+      }) as typeof fs.readdirSync;
+
+      const outcome = distributeSkills({ project: projectRoot });
+      const cleanupResult = outcome.results.find(
+        (entry) => entry.platform === 'claude-code' && entry.targetDir === parentDir
+      );
+
+      assert.equal(cleanupResult?.status, 'error');
+      assert.match(cleanupResult?.error ?? '', /mock parent scan failure/);
+      assert.equal(loadLibraryAgentSync('skills')['claude-code'], undefined);
+      assert.equal(fs.existsSync(staleDir), true);
+    } finally {
+      fs.readdirSync = originalReaddirSync;
+    }
   });
 });
 
