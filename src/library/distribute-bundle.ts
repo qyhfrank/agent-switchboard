@@ -203,24 +203,28 @@ export function distributeBundle<TEntry, Platform extends string>(
 
         try {
           const srcContent = fs.readFileSync(file.sourcePath);
+          const srcMode = fs.statSync(file.sourcePath).mode & 0o777;
+          const srcExecutable = (srcMode & 0o111) !== 0;
           sourceContents.push(srcContent);
           let same = false;
+          let modeSame = true;
 
           if (fs.existsSync(targetPath)) {
             const dstContent = fs.readFileSync(targetPath);
             same = Buffer.compare(srcContent, dstContent) === 0;
+            if (srcExecutable) {
+              const dstMode = fs.statSync(targetPath).mode & 0o777;
+              modeSame = dstMode === srcMode;
+            }
           }
 
-          if (!same) {
+          if (!same || !modeSame) {
             if (!dryRun) {
-              fs.writeFileSync(targetPath, srcContent);
+              if (!same) fs.writeFileSync(targetPath, srcContent);
 
               // Preserve executable permission for scripts
               try {
-                const srcMode = fs.statSync(file.sourcePath).mode;
-                if (srcMode & 0o111) {
-                  fs.chmodSync(targetPath, srcMode & 0o777);
-                }
+                if (srcExecutable) fs.chmodSync(targetPath, srcMode);
               } catch {
                 // Ignore permission errors on some platforms
               }
