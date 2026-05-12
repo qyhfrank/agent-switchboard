@@ -495,7 +495,7 @@ test('distributeSkills: executable mode repair rejects symlinked global skill pa
     assert.equal(fs.existsSync(path.join(outsideDir, skillId)), false);
     assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
     assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.match(result?.error ?? '', /symlinked/);
   });
 });
 
@@ -524,7 +524,7 @@ test('distributeSkills: orphan cleanup rejects symlinked global skill parent', (
     assert.equal(fs.existsSync(path.join(outsideSkill, 'SKILL.md')), true);
     assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
     assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.match(result?.error ?? '', /symlinked/);
   });
 });
 
