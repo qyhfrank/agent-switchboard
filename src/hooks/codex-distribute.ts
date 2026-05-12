@@ -26,7 +26,7 @@ import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
 import { distributeBundle } from '../library/distribute-bundle.js';
-import { ensureParentDir, rmDirRecursive } from '../library/fs.js';
+import { ensureParentDir } from '../library/fs.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles } from './library.js';
 import { HOOK_DIR_PLACEHOLDER } from './schema.js';
@@ -304,18 +304,23 @@ function cleanOrphanBundleDirs(
 ): Array<BundleDistributionResult<CodexPlatform>> {
   const parentDir = resolveHooksBundleParentDir(scope);
   const results: Array<BundleDistributionResult<CodexPlatform>> = [];
+  const parentError = getOrphanBundleParentError(parentDir);
 
-  if (!fs.existsSync(parentDir)) return results;
+  if (parentError) {
+    results.push(parentError);
+    return results;
+  }
+  if (!lstatIfExists(parentDir)) return results;
 
   try {
     const entries = fs.readdirSync(parentDir, { withFileTypes: true });
     for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
       if (activeIds.has(entry.name)) continue;
 
       const dirPath = path.join(parentDir, entry.name);
       try {
-        if (!dryRun) rmDirRecursive(dirPath);
+        if (!dryRun) removeHookBundlePath(dirPath);
         results.push({
           platform: 'codex',
           targetDir: dirPath,
@@ -334,11 +339,68 @@ function cleanOrphanBundleDirs(
         });
       }
     }
-  } catch {
-    // Ignore directory read errors
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    results.push({
+      platform: 'codex',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: ${msg}`,
+    });
   }
 
   return results;
+}
+
+function getOrphanBundleParentError(
+  parentDir: string
+): BundleDistributionResult<CodexPlatform> | undefined {
+  const stat = lstatIfExists(parentDir);
+  if (!stat) return undefined;
+  if (stat.isSymbolicLink()) {
+    return {
+      platform: 'codex',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: refusing to use symlinked bundle root: ${parentDir}`,
+    };
+  }
+  if (!stat.isDirectory()) {
+    return {
+      platform: 'codex',
+      targetDir: parentDir,
+      status: 'error',
+      error: `Failed to scan orphan parent: bundle root exists and is not a directory: ${parentDir}`,
+    };
+  }
+  return undefined;
+}
+
+function lstatIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function removeHookBundlePath(targetPath: string): void {
+  const stat = lstatIfExists(targetPath);
+  if (!stat) return;
+
+  if (stat.isDirectory() && !stat.isSymbolicLink()) {
+    const entries = fs.readdirSync(targetPath, { withFileTypes: true });
+    for (const entry of entries) {
+      removeHookBundlePath(path.join(targetPath, entry.name));
+    }
+    fs.rmdirSync(targetPath);
+    return;
+  }
+
+  fs.unlinkSync(targetPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +634,12 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         return { results };
       }
     }
+  }
+
+  const cleanupParentError = getOrphanBundleParentError(resolveHooksBundleParentDir(scope));
+  if (cleanupParentError) {
+    results.push(cleanupParentError);
+    return { results };
   }
 
   // Phase 2: Merge hook configs into hooks.json

@@ -371,6 +371,56 @@ test('managed mode drift cleanup rejects symlinked ancestors without following t
   });
 });
 
+test('managed mode drift cleanup rolls back new manifest entries on cleanup error', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    createSkill('active-skill');
+
+    const projectRoot = path.join(agentsHome, 'managed-cleanup-rollback-project');
+    const staleParentLink = path.join(projectRoot, '.claude', 'stale-parent');
+    const outsideDir = path.join(agentsHome, 'outside-cleanup-rollback');
+    const outsideStaleDir = path.join(outsideDir, 'stale-skill');
+    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
+    fs.mkdirSync(path.dirname(staleParentLink), { recursive: true });
+    fs.mkdirSync(outsideStaleDir, { recursive: true });
+    fs.writeFileSync(outsideFile, 'keep me\n');
+    fs.symlinkSync(outsideDir, staleParentLink);
+
+    updateLibraryStateSection('skills', (state) => ({ ...state, enabled: ['active-skill'] }), {
+      project: projectRoot,
+    });
+
+    const { manifest } = loadManifest(projectRoot);
+    recordLibraryEntry(manifest, 'skills', 'stale-skill', {
+      relativePath: path.join('.claude', 'stale-parent', 'stale-skill'),
+      targetId: 'claude-code',
+      hash: 'old',
+      updatedAt: '',
+    });
+
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      {
+        manifest,
+        projectMode: 'managed',
+      }
+    );
+    const cleanupResult = outcome.results.find(
+      (entry) => entry.platform === 'claude-code' && entry.entryId === 'stale-skill'
+    );
+
+    assert.equal(
+      fs.existsSync(path.join(projectRoot, '.claude', 'skills', 'active-skill', 'SKILL.md')),
+      true
+    );
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(cleanupResult?.status, 'error');
+    assert.match(cleanupResult?.error ?? '', /refusing to follow symlinked path/);
+    assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
+    assert.ok(!manifest.sections.skills?.['active-skill::claude-code']);
+  });
+});
+
 test('managed command sync reports error when collision policy is error', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');
