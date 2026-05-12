@@ -543,6 +543,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       selected: bundleEntries,
       platforms: ['codex'],
       resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(entry, scope),
+      resolveBundleRootDir: () => resolveHooksBundleParentDir(scope),
       listFiles: listHookBundleFiles,
       getId: (entry) => entry.id,
       scope,

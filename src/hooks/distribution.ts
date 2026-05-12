@@ -362,12 +362,20 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       selected: bundleEntries,
       platforms: [platform],
       resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(_p, entry, ctx.scope),
+      resolveBundleRootDir: (_p) => resolveHooksBundleParentDir(ctx.scope),
       listFiles: listHookBundleFiles,
       getId: (entry) => entry.id,
       scope: ctx.scope,
       dryRun: ctx.dryRun,
     });
     results.push(...bundleOutcome.results);
+    if (
+      bundleOutcome.results.some(
+        (result) => result.status === 'error' || result.status === 'conflict'
+      )
+    ) {
+      return results;
+    }
   }
 
   // Clean up orphan bundle directories
