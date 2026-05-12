@@ -53,6 +53,8 @@ export interface DistributeBundleOptions<TEntry, Platform extends string> {
   platforms: Platform[];
   /** Resolve target directory for a platform and entry */
   resolveTargetDir: (platform: Platform, entry: TEntry) => string;
+  /** Resolve the parent directory that owns bundle entry directories */
+  resolveBundleRootDir?: (platform: Platform) => string;
   /** List all files in an entry bundle */
   listFiles: (entry: TEntry) => BundleFile[];
   /** Get entry ID for logging */
@@ -130,6 +132,33 @@ function assertNoSymlinkAncestor(
       throw new Error(`refusing to follow symlinked path: ${current}`);
     }
   }
+}
+
+function assertUsableBundleRoot(rootPath: string): void {
+  const stat = lstatIfExists(rootPath);
+  if (!stat) return;
+  if (stat.isSymbolicLink()) {
+    throw new Error(`refusing to use symlinked bundle root: ${rootPath}`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`bundle root exists and is not a directory: ${rootPath}`);
+  }
+}
+
+function assertSafeBundleTarget(
+  rootPath: string,
+  targetPath: string,
+  options?: { allowFinalSymlink?: boolean }
+): void {
+  assertUsableBundleRoot(rootPath);
+  assertNoSymlinkAncestor(rootPath, targetPath, options);
+}
+
+function resolveBundleRootDir<TEntry, Platform extends string>(
+  opts: DistributeBundleOptions<TEntry, Platform>,
+  platform: Platform
+): string | undefined {
+  return opts.resolveBundleRootDir?.(platform) ?? opts.cleanup?.resolveParentDir(platform);
 }
 
 function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
@@ -258,6 +287,7 @@ export function distributeBundle<TEntry, Platform extends string>(
 
   for (const platform of opts.platforms) {
     const platformHash = createHash('sha256');
+    const bundleRootDir = resolveBundleRootDir(opts, platform);
 
     // Apply per-platform filter if provided
     const platformSelected = opts.filterSelected
@@ -271,6 +301,21 @@ export function distributeBundle<TEntry, Platform extends string>(
       if (managedProjectRoot) {
         try {
           assertNoSymlinkAncestor(managedProjectRoot, targetDir, { allowFinalSymlink: true });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          results.push({
+            platform,
+            targetDir,
+            status: 'error',
+            error: `Failed to prepare ${entryId}: ${msg}`,
+            entryId,
+          });
+          continue;
+        }
+      }
+      if (bundleRootDir) {
+        try {
+          assertSafeBundleTarget(bundleRootDir, targetDir, { allowFinalSymlink: true });
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -394,7 +439,13 @@ export function distributeBundle<TEntry, Platform extends string>(
       // Clean stale files: remove files in target that are no longer in source bundle
       if (!dryRun && !hadError && lstatIfExists(targetDir)?.isDirectory()) {
         const expectedFiles = new Set(files.map((f) => f.relativePath));
-        cleanStaleFiles(targetDir, '', expectedFiles);
+        try {
+          cleanStaleFiles(targetDir, '', expectedFiles);
+        } catch (error) {
+          hadError = true;
+          const msg = error instanceof Error ? error.message : String(error);
+          errorMessage = `Failed to clean stale files: ${msg}`;
+        }
       }
 
       if (hadError) {
@@ -510,6 +561,19 @@ export function distributeBundle<TEntry, Platform extends string>(
         // Exclusive mode: scan directory for orphans (existing behavior)
         const parentDir = opts.cleanup.resolveParentDir(platform);
 
+        try {
+          assertUsableBundleRoot(parentDir);
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          results.push({
+            platform,
+            targetDir: parentDir,
+            status: 'error',
+            error: `Failed to scan orphan parent: ${msg}`,
+          });
+          continue;
+        }
+
         if (fs.existsSync(parentDir)) {
           try {
             const dirEntries = fs.readdirSync(parentDir, { withFileTypes: true });
@@ -564,29 +628,16 @@ export function distributeBundle<TEntry, Platform extends string>(
 
 /** Recursively remove files in targetDir not present in expectedFiles (relative paths). */
 function cleanStaleFiles(dir: string, prefix: string, expectedFiles: Set<string>): void {
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const abs = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        cleanStaleFiles(abs, rel, expectedFiles);
-        // Remove empty directories left after cleaning
-        try {
-          const remaining = fs.readdirSync(abs);
-          if (remaining.length === 0) fs.rmdirSync(abs);
-        } catch {
-          // Ignore
-        }
-      } else if (!expectedFiles.has(rel)) {
-        try {
-          fs.unlinkSync(abs);
-        } catch {
-          // Ignore permission errors
-        }
-      }
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const abs = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      cleanStaleFiles(abs, rel, expectedFiles);
+      const remaining = fs.readdirSync(abs);
+      if (remaining.length === 0) fs.rmdirSync(abs);
+    } else if (!expectedFiles.has(rel)) {
+      fs.unlinkSync(abs);
     }
-  } catch {
-    // Ignore errors reading directory
   }
 }
