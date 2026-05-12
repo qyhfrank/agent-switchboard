@@ -197,6 +197,53 @@ test('bootstrap sync adopts pre-existing skill directories into manifest', () =>
   });
 });
 
+test('bootstrap sync repairs executable mode drift while adopting skill directories', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const skillId = 'skill-mode-drift';
+    const sourceSkillDir = createSkill(skillId);
+    const sourceScript = path.join(sourceSkillDir, 'scripts', 'run.sh');
+    fs.mkdirSync(path.dirname(sourceScript), { recursive: true });
+    fs.writeFileSync(sourceScript, '#!/bin/sh\necho ok\n');
+    fs.chmodSync(sourceScript, 0o755);
+
+    const projectRoot = path.join(agentsHome, 'bootstrap-mode-project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+
+    updateLibraryStateSection('skills', (state) => ({ ...state, enabled: [skillId] }), {
+      project: projectRoot,
+    });
+
+    distributeSkills({ project: projectRoot });
+    const targetDir = path.join(projectRoot, '.claude', 'skills', skillId);
+    const targetScript = path.join(targetDir, 'scripts', 'run.sh');
+    fs.chmodSync(targetScript, 0o644);
+
+    const { manifest } = loadManifest(projectRoot);
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      {
+        manifest,
+        projectMode: 'managed',
+      }
+    );
+    const result = outcome.results.find(
+      (entry) => entry.platform === 'claude-code' && entry.targetDir === targetDir
+    );
+
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+    assert.equal(result?.filesWritten, 1);
+    assert.equal(result?.filesSkipped, 1);
+    assert.ok(manifest.sections.skills, 'manifest should have skills section after adoption');
+    assert.ok(
+      Object.keys(manifest.sections.skills).some((key) => key.startsWith(`${skillId}::`)),
+      'manifest should adopt mode-drifted skill directory'
+    );
+  });
+});
+
 test('managed command sync reports error when collision policy is error', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');

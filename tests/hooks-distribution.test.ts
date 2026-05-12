@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import {
   getClaudeDir,
   getCodexConfigPath,
+  getCodexDir,
   getCodexHooksJsonPath,
   getProjectCodexHooksJsonPath,
 } from '../src/config/paths.js';
@@ -140,6 +141,33 @@ test('distributeHooks: rewrites plugin hook CLAUDE_PLUGIN_ROOT references to dis
     const portablePath = expectedPath.replace(os.homedir(), '$HOME');
 
     assert.equal(command, `"${portablePath}" session-start`);
+  });
+});
+
+test('distributeHooks: executable mode drift is repaired for claude-code bundles', () => {
+  withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const { pluginDir, hookId } = createPluginHookSource(asbHome);
+    const sourceScript = path.join(pluginDir, 'hooks', 'run-hook.cmd');
+    fs.chmodSync(sourceScript, 0o755);
+    updateLibraryStateSection('hooks', () => ({ enabled: [hookId], agentSync: {} }));
+
+    distributeHooks(undefined, ['claude-code']);
+    const targetDir = path.join(getClaudeDir(), 'hooks', 'asb', hookId);
+    const targetScript = path.join(targetDir, 'run-hook.cmd');
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+
+    fs.chmodSync(targetScript, 0o644);
+    const outcome = distributeHooks(undefined, ['claude-code']);
+    const result = outcome.results.find(
+      (r) => r.platform === 'claude-code' && r.targetDir === targetDir
+    );
+
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+    assert.equal(result?.filesWritten, 1);
+    assert.equal(result?.filesSkipped, 1);
   });
 });
 
@@ -713,6 +741,34 @@ test('distributeHooks: codex bundle content changes update review surface', () =
       ),
       'bundle content change should report Codex review requirement'
     );
+  });
+});
+
+test('distributeHooks: executable mode drift is repaired for codex bundles', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    createBundleHook('bundle-mode-test');
+    const sourceScript = path.join(ensureHooksDirectory(), 'bundle-mode-test', 'run.sh');
+    fs.chmodSync(sourceScript, 0o755);
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['bundle-mode-test'],
+      agentSync: { codex: { enabled: ['bundle-mode-test'] } },
+    }));
+
+    distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const targetDir = path.join(getCodexDir(), 'hooks', 'asb', 'bundle-mode-test');
+    const targetScript = path.join(targetDir, 'run.sh');
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+
+    fs.chmodSync(targetScript, 0o644);
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find((r) => r.platform === 'codex' && r.targetDir === targetDir);
+
+    assert.equal(fs.statSync(targetScript).mode & 0o111, 0o111);
+    assert.equal(result?.status, 'written');
+    assert.equal(result?.reason, 'updated');
+    assert.equal(result?.filesWritten, 1);
+    assert.equal(result?.filesSkipped, 1);
   });
 });
 
