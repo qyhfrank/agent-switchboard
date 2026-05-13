@@ -29,6 +29,7 @@ import {
   assertNoSymlinkAncestor,
   assertUsableBundleRoot,
   distributeBundle,
+  resolvedHomeDir,
 } from '../library/distribute-bundle.js';
 import { ensureParentDir } from '../library/fs.js';
 import type { HookEntry } from './library.js';
@@ -371,7 +372,9 @@ function getOrphanBundleParentError(
   try {
     const safetyRoot = resolveHooksBundleSafetyRoot(scope);
     assertUsableBundleRoot(safetyRoot);
-    assertNoSymlinkAncestor(safetyRoot, parentDir);
+    assertNoSymlinkAncestor(safetyRoot, parentDir, {
+      trustedRoots: scope?.project ? undefined : [resolvedHomeDir()],
+    });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return {
