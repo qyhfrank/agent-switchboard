@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type { ConfigScope } from '../config/scope.js';
 import {
@@ -109,10 +110,19 @@ function lstatIfExists(filePath: string): fs.Stats | undefined {
   }
 }
 
+export function resolvedHomeDir(): string {
+  return fs.realpathSync(os.homedir());
+}
+
+function isUnderTrustedRoot(resolved: string, trustedRoots?: readonly string[]): boolean {
+  if (!trustedRoots || trustedRoots.length === 0) return false;
+  return trustedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+}
+
 export function assertNoSymlinkAncestor(
   rootPath: string,
   targetPath: string,
-  options?: { allowFinalSymlink?: boolean }
+  options?: { allowFinalSymlink?: boolean; trustedRoots?: readonly string[] }
 ): void {
   const root = path.resolve(rootPath);
   const target = path.resolve(targetPath);
@@ -129,7 +139,15 @@ export function assertNoSymlinkAncestor(
     const stat = lstatIfExists(current);
     if (!stat) return;
     if (stat.isSymbolicLink() && !(options?.allowFinalSymlink === true && i === parts.length - 1)) {
-      throw new Error(`refusing to follow symlinked path: ${current}`);
+      let resolved: string;
+      try {
+        resolved = fs.realpathSync(current);
+      } catch {
+        throw new Error(`refusing to follow symlinked path: ${current}`);
+      }
+      if (!isUnderTrustedRoot(resolved, options?.trustedRoots)) {
+        throw new Error(`refusing to follow symlinked path: ${current}`);
+      }
     }
   }
 }
@@ -148,7 +166,7 @@ export function assertUsableBundleRoot(rootPath: string): void {
 function assertSafeBundleTarget(
   rootPath: string,
   targetPath: string,
-  options?: { allowFinalSymlink?: boolean }
+  options?: { allowFinalSymlink?: boolean; trustedRoots?: readonly string[] }
 ): void {
   assertUsableBundleRoot(rootPath);
   assertNoSymlinkAncestor(rootPath, targetPath, options);
@@ -318,7 +336,13 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
       if (bundleRootDir) {
         try {
-          assertSafeBundleTarget(bundleRootDir, targetDir, { allowFinalSymlink: true });
+          const bundleOpts: { allowFinalSymlink: boolean; trustedRoots?: readonly string[] } = {
+            allowFinalSymlink: true,
+          };
+          if (!managedProjectRoot) {
+            bundleOpts.trustedRoots = [resolvedHomeDir()];
+          }
+          assertSafeBundleTarget(bundleRootDir, targetDir, bundleOpts);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -566,7 +590,9 @@ export function distributeBundle<TEntry, Platform extends string>(
 
         try {
           if (bundleRootDir) {
-            assertSafeBundleTarget(bundleRootDir, parentDir);
+            assertSafeBundleTarget(bundleRootDir, parentDir, {
+              trustedRoots: [resolvedHomeDir()],
+            });
           } else {
             assertUsableBundleRoot(parentDir);
           }
