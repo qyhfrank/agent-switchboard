@@ -110,13 +110,13 @@ function lstatIfExists(filePath: string): fs.Stats | undefined {
   }
 }
 
-function resolvedHomeDir(): string {
+export function resolvedHomeDir(): string {
   return fs.realpathSync(os.homedir());
 }
 
 function isUnderTrustedRoot(resolved: string, trustedRoots?: readonly string[]): boolean {
-  const roots = trustedRoots ?? [resolvedHomeDir()];
-  return roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+  if (!trustedRoots || trustedRoots.length === 0) return false;
+  return trustedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
 }
 
 export function assertNoSymlinkAncestor(
@@ -166,7 +166,7 @@ export function assertUsableBundleRoot(rootPath: string): void {
 function assertSafeBundleTarget(
   rootPath: string,
   targetPath: string,
-  options?: { allowFinalSymlink?: boolean }
+  options?: { allowFinalSymlink?: boolean; trustedRoots?: readonly string[] }
 ): void {
   assertUsableBundleRoot(rootPath);
   assertNoSymlinkAncestor(rootPath, targetPath, options);
@@ -336,7 +336,13 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
       if (bundleRootDir) {
         try {
-          assertSafeBundleTarget(bundleRootDir, targetDir, { allowFinalSymlink: true });
+          const bundleOpts: { allowFinalSymlink: boolean; trustedRoots?: readonly string[] } = {
+            allowFinalSymlink: true,
+          };
+          if (!managedProjectRoot) {
+            bundleOpts.trustedRoots = [resolvedHomeDir()];
+          }
+          assertSafeBundleTarget(bundleRootDir, targetDir, bundleOpts);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -584,7 +590,9 @@ export function distributeBundle<TEntry, Platform extends string>(
 
         try {
           if (bundleRootDir) {
-            assertSafeBundleTarget(bundleRootDir, parentDir);
+            assertSafeBundleTarget(bundleRootDir, parentDir, {
+              trustedRoots: [resolvedHomeDir()],
+            });
           } else {
             assertUsableBundleRoot(parentDir);
           }
