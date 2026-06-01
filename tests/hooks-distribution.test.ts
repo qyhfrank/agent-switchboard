@@ -325,6 +325,9 @@ test('distributeHooks: claude-code cleanup waits for readable settings', () => {
 // Codex hook distribution tests
 // ---------------------------------------------------------------------------
 
+const CODEX_ASB_MANAGED_MARKER = '# asb-managed-by=agent-switchboard';
+const CODEX_ASB_HOOK_ID_MARKER_PREFIX = '# asb-hook-id=';
+
 function createCodexCompatibleHook(id: string, event = 'UserPromptSubmit'): void {
   const hooksDir = ensureHooksDirectory();
   const hookContent = JSON.stringify({
@@ -335,6 +338,20 @@ function createCodexCompatibleHook(id: string, event = 'UserPromptSubmit'): void
     },
   });
   fs.writeFileSync(path.join(hooksDir, `${id}.json`), hookContent);
+}
+
+function codexGroupCommands(groups: Array<Record<string, unknown>>): string[] {
+  return groups.flatMap((group) =>
+    Array.isArray(group.hooks)
+      ? group.hooks
+          .map((hook) => (hook as Record<string, unknown>).command)
+          .filter((command): command is string => typeof command === 'string')
+      : []
+  );
+}
+
+function codexAsbHookIdMarker(id: string): string {
+  return `${CODEX_ASB_HOOK_ID_MARKER_PREFIX}${encodeURIComponent(id)}`;
 }
 
 function createUnsupportedEventHook(id: string): void {
@@ -380,9 +397,14 @@ test('distributeHooks: writes hooks.json for codex when installed', () => {
 
     const content = JSON.parse(fs.readFileSync(hooksJsonPath, 'utf-8')) as Record<string, unknown>;
     const hooks = content.hooks as Record<string, unknown[]>;
+    assert.equal(content._asb_managed_hooks, undefined);
+    assert.ok(!JSON.stringify(content).includes('_asb_source'));
     assert.ok(hooks.UserPromptSubmit, 'should have UserPromptSubmit event');
     assert.ok(Array.isArray(hooks.UserPromptSubmit), 'UserPromptSubmit should be an array');
     assert.ok(hooks.UserPromptSubmit.length > 0, 'should have at least one matcher group');
+    const commands = codexGroupCommands(hooks.UserPromptSubmit as Array<Record<string, unknown>>);
+    assert.ok(commands.some((command) => command.includes(CODEX_ASB_MANAGED_MARKER)));
+    assert.ok(commands.some((command) => command.includes(codexAsbHookIdMarker('codex-hook'))));
   });
 });
 
@@ -710,11 +732,10 @@ test('distributeHooks: preserves existing user hooks in codex hooks.json', () =>
     const hooks = content.hooks as Record<string, unknown[]>;
     const groups = hooks.UserPromptSubmit as Array<Record<string, unknown>>;
 
-    // Should have both: user hook (without _asb_source) and ASB hook (with _asb_source)
-    const userGroups = groups.filter((g) => g._asb_source === undefined);
-    const asbGroups = groups.filter((g) => g._asb_source === true);
-    assert.ok(userGroups.length > 0, 'should preserve user hooks');
-    assert.ok(asbGroups.length > 0, 'should add ASB-managed hooks');
+    const commands = codexGroupCommands(groups);
+    assert.ok(!JSON.stringify(content).includes('_asb_source'));
+    assert.ok(commands.some((command) => command.includes('echo user-hook')));
+    assert.ok(commands.some((command) => command.includes(codexAsbHookIdMarker('asb-hook'))));
   });
 });
 
@@ -729,7 +750,20 @@ test('distributeHooks: cleans ASB hooks from codex when selection is empty', () 
       JSON.stringify({
         hooks: {
           UserPromptSubmit: [
-            { matcher: '', hooks: [{ type: 'command', command: 'echo asb' }], _asb_source: true },
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: `echo asb\n${CODEX_ASB_MANAGED_MARKER}\n${codexAsbHookIdMarker('old-hook')}`,
+                },
+              ],
+            },
+            {
+              matcher: '',
+              hooks: [{ type: 'command', command: 'echo legacy' }],
+              _asb_source: true,
+            },
             { matcher: '', hooks: [{ type: 'command', command: 'echo user' }] },
           ],
         },
@@ -749,11 +783,10 @@ test('distributeHooks: cleans ASB hooks from codex when selection is empty', () 
     const hooks = content.hooks as Record<string, unknown[]>;
     const groups = hooks.UserPromptSubmit as Array<Record<string, unknown>>;
 
-    // ASB groups should be removed, user group preserved
-    const asbGroups = groups.filter((g) => g._asb_source === true);
-    const userGroups = groups.filter((g) => g._asb_source === undefined);
-    assert.equal(asbGroups.length, 0, 'ASB hooks should be cleaned up');
-    assert.ok(userGroups.length > 0, 'user hooks should be preserved');
+    const commands = codexGroupCommands(groups);
+    assert.ok(!JSON.stringify(content).includes('_asb_source'));
+    assert.ok(!JSON.stringify(content).includes('_asb_managed_hooks'));
+    assert.deepEqual(commands, ['echo user']);
   });
 });
 
@@ -843,6 +876,9 @@ test('distributeHooks: codex bundle hook copies files and rewrites HOOK_DIR', ()
     // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal check
     assert.ok(!command.includes('${HOOK_DIR}'), 'HOOK_DIR should be rewritten');
     assert.ok(command.includes('bundle-test'), 'should reference bundle dir');
+    assert.ok(command.includes(CODEX_ASB_MANAGED_MARKER));
+    assert.ok(command.includes(codexAsbHookIdMarker('bundle-test')));
+    assert.ok(!JSON.stringify(content).includes('_asb_source'));
   });
 });
 
@@ -867,6 +903,7 @@ test('distributeHooks: codex bundle content changes update review surface', () =
     >;
     const firstCommand = firstHooks.UserPromptSubmit?.[0]?.hooks?.[0]?.command;
     assert.ok(firstCommand?.includes('asb-bundle-sha256'), 'bundle command should include hash');
+    assert.ok(firstCommand?.includes(codexAsbHookIdMarker('bundle-review-test')));
 
     fs.writeFileSync(
       path.join(ensureHooksDirectory(), 'bundle-review-test', 'run.sh'),
@@ -1185,7 +1222,12 @@ test('distributeHooks: codex idempotent re-sync updates ASB hooks without duplic
     const hooks = content.hooks as Record<string, unknown[]>;
     const groups = hooks.UserPromptSubmit as Array<Record<string, unknown>>;
 
-    const asbGroups = groups.filter((g) => g._asb_source === true);
+    const asbGroups = groups.filter((g) =>
+      codexGroupCommands([g]).some((command) =>
+        command.includes(codexAsbHookIdMarker('idempotent-hook'))
+      )
+    );
+    assert.ok(!JSON.stringify(content).includes('_asb_source'));
     assert.equal(
       asbGroups.length,
       1,
@@ -1323,7 +1365,6 @@ test('distributeHooks: codex cleans markerless orphan bundles after deleting emp
             {
               matcher: '',
               hooks: [{ type: 'command', command: oldBundleScript }],
-              _asb_source: true,
             },
           ],
         },
@@ -1376,7 +1417,7 @@ test('distributeHooks: codex retries markerless orphan cleanup without hooks.jso
   });
 });
 
-test('distributeHooks: codex preserves cleanup marker when orphan cleanup fails', () => {
+test('distributeHooks: codex removes legacy cleanup marker when orphan cleanup fails', () => {
   withTempHomes(() => {
     simulateAppsInstalled('codex');
     const hooksJsonPath = getCodexHooksJsonPath();
@@ -1435,7 +1476,7 @@ test('distributeHooks: codex preserves cleanup marker when orphan cleanup fails'
             r.error?.includes('mock bundle cleanup failure')
         )
       );
-      assert.deepEqual(content._asb_managed_hooks, ['old-bundle']);
+      assert.equal(content._asb_managed_hooks, undefined);
       assert.equal(fs.existsSync(oldBundleScript), true);
     } finally {
       fs.readdirSync = originalReaddirSync;
