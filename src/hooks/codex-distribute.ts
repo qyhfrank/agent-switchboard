@@ -58,6 +58,9 @@ const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS = '${CLAUDE_PLUGIN_ROOT}\\hooks';
 
 const ASB_MANAGED_KEY = '_asb_managed_hooks';
 const ASB_HOOKS_SUBDIR = 'asb';
+const ASB_COMMAND_MARKER = '# asb-managed-by=agent-switchboard';
+const ASB_HOOK_ID_MARKER_PREFIX = '# asb-hook-id=';
+const ASB_BUNDLE_HASH_MARKER_PREFIX = '# asb-bundle-sha256=';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -219,29 +222,29 @@ function writeHooksJson(filePath: string, data: Record<string, unknown>): void {
 // Config merge
 // ---------------------------------------------------------------------------
 
-function rewriteHookDir(
+function annotateHookCommands(
   hooks: Record<string, unknown[]>,
-  distributedDir: string,
+  entry: HookEntry,
+  scope?: ConfigScope,
   bundleHash?: string
 ): Record<string, unknown[]> {
   const result: Record<string, unknown[]> = {};
+  const distributedDir = entry.isBundle ? resolveHookBundleTargetDir(entry, scope) : undefined;
 
   for (const [event, groups] of Object.entries(hooks)) {
     result[event] = (groups as Array<{ hooks?: Array<{ command?: string }> }>).map((group) => ({
       ...group,
       hooks: (group.hooks ?? []).map((handler) => {
         if (typeof handler.command !== 'string') return handler;
+        const command = distributedDir
+          ? handler.command
+              .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
+              .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
+              .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
+          : handler.command;
         return {
           ...handler,
-          command: preferHomeVar(
-            annotateBundleCommand(
-              handler.command
-                .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
-                .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
-                .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir),
-              bundleHash
-            )
-          ),
+          command: preferHomeVar(annotateAsbCommand(command, entry.id, bundleHash)),
         };
       }),
     }));
@@ -250,9 +253,29 @@ function rewriteHookDir(
   return result;
 }
 
-function annotateBundleCommand(command: string, bundleHash?: string): string {
-  if (!bundleHash) return command;
-  return `${command}\n# asb-bundle-sha256=${bundleHash}`;
+function annotateAsbCommand(command: string, entryId: string, bundleHash?: string): string {
+  const cleaned = stripAsbCommandMarkers(command).trimEnd();
+  const markers = [
+    ASB_COMMAND_MARKER,
+    `${ASB_HOOK_ID_MARKER_PREFIX}${encodeURIComponent(entryId)}`,
+  ];
+  if (bundleHash) markers.push(`${ASB_BUNDLE_HASH_MARKER_PREFIX}${bundleHash}`);
+  return [cleaned, ...markers].filter(Boolean).join('\n');
+}
+
+function stripAsbCommandMarkers(command: string): string {
+  return command
+    .split(/\r?\n/)
+    .filter((line) => !isAsbCommandMarkerLine(line.trim()))
+    .join('\n');
+}
+
+function isAsbCommandMarkerLine(line: string): boolean {
+  return (
+    line === ASB_COMMAND_MARKER ||
+    line.startsWith(ASB_HOOK_ID_MARKER_PREFIX) ||
+    line.startsWith(ASB_BUNDLE_HASH_MARKER_PREFIX)
+  );
 }
 
 function computeBundleHash(entry: HookEntry): string {
@@ -280,30 +303,56 @@ function mergeHooksIntoFile(
   // Remove previously ASB-managed matcher groups
   const cleanedHooks: Record<string, unknown[]> = {};
   for (const [event, groups] of Object.entries(existingHooks)) {
-    const kept = (groups as Array<Record<string, unknown>>).filter((g) => g._asb_source !== true);
+    const kept = (groups as Array<Record<string, unknown>>).filter(
+      (g) => !isAsbManagedCodexGroup(g, scope)
+    );
     if (kept.length > 0) cleanedHooks[event] = kept;
   }
 
   // Merge filtered entries
   for (const { entry, hooks } of filteredEntries) {
-    const resolvedHooks = entry.isBundle
-      ? rewriteHookDir(hooks, resolveHookBundleTargetDir(entry, scope), bundleHashes?.get(entry.id))
-      : hooks;
+    const resolvedHooks = annotateHookCommands(hooks, entry, scope, bundleHashes?.get(entry.id));
 
     for (const [event, groups] of Object.entries(resolvedHooks)) {
       if (!cleanedHooks[event]) cleanedHooks[event] = [];
       for (const group of groups) {
-        cleanedHooks[event].push({ ...(group as Record<string, unknown>), _asb_source: true });
+        const cleanGroup = { ...(group as Record<string, unknown>) };
+        delete cleanGroup._asb_source;
+        cleanedHooks[event].push(cleanGroup);
       }
     }
   }
 
   fileData.hooks = cleanedHooks;
-  if (filteredEntries.length > 0) {
-    fileData[ASB_MANAGED_KEY] = filteredEntries.map((f) => f.entry.id);
-  } else {
-    delete fileData[ASB_MANAGED_KEY];
-  }
+  delete fileData[ASB_MANAGED_KEY];
+}
+
+function isAsbManagedCodexGroup(group: Record<string, unknown>, scope?: ConfigScope): boolean {
+  if (group._asb_source === true) return true;
+  const hooks = group.hooks;
+  if (!Array.isArray(hooks)) return false;
+  const asbBundleParent = `${resolveHooksBundleParentDir(scope)}${path.sep}`;
+  const portableAsbBundleParent = preferHomeVar(asbBundleParent);
+  return hooks.some((hook: Record<string, unknown>) => {
+    const command = hook.command;
+    if (typeof command !== 'string') return false;
+    return (
+      commandHasAsbMarker(command) ||
+      command.includes(asbBundleParent) ||
+      command.includes(portableAsbBundleParent)
+    );
+  });
+}
+
+function commandHasAsbMarker(command: string): boolean {
+  return command.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    return (
+      trimmed === ASB_COMMAND_MARKER ||
+      trimmed.startsWith(ASB_HOOK_ID_MARKER_PREFIX) ||
+      trimmed.startsWith(ASB_BUNDLE_HASH_MARKER_PREFIX)
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -670,25 +719,22 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   };
 
   // Phase 2: Merge hook configs into hooks.json
-  const previouslyManaged = (fileData[ASB_MANAGED_KEY] ?? []) as string[];
+  const before = JSON.stringify(fileData);
+  const hadLegacyManagedKey = Object.hasOwn(fileData, ASB_MANAGED_KEY);
+  delete fileData[ASB_MANAGED_KEY];
 
   // Check for existing ASB groups
   const existingHooks = (fileData.hooks ?? {}) as Record<string, unknown[]>;
   const hasAsbGroups = Object.values(existingHooks).some((groups) =>
-    (groups as Array<Record<string, unknown>>).some((g) => g._asb_source === true)
+    (groups as Array<Record<string, unknown>>).some((g) => isAsbManagedCodexGroup(g, scope))
   );
 
-  if (filteredEntries.length === 0 && previouslyManaged.length === 0 && !hasAsbGroups) {
+  if (filteredEntries.length === 0 && !hadLegacyManagedKey && !hasAsbGroups) {
     appendCleanupResults();
     return { results };
   }
 
-  const before = JSON.stringify(fileData);
   mergeHooksIntoFile(fileData, filteredEntries, scope, bundleHashes);
-  const preserveCleanupMarker = filteredEntries.length === 0 && previouslyManaged.length > 0;
-  if (preserveCleanupMarker) {
-    fileData[ASB_MANAGED_KEY] = previouslyManaged;
-  }
 
   // Clean up empty state: if no hooks remain, remove the file entirely
   const mergedHooks = fileData.hooks as Record<string, unknown[]>;
@@ -696,10 +742,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const hasNoHooks = totalGroups === 0;
 
   if (hasNoHooks && filteredEntries.length === 0) {
-    if (!preserveCleanupMarker) {
-      delete fileData[ASB_MANAGED_KEY];
-    }
-    // If file has only hooks (now empty) and ASB keys, consider deleting
+    // If file has only hooks and they are now empty, consider deleting it.
     const remainingKeys = Object.keys(fileData).filter((k) => k !== 'hooks');
     if (remainingKeys.length === 0 && fs.existsSync(hooksJsonPath) && !dryRun) {
       try {
@@ -720,42 +763,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   const after = JSON.stringify(fileData);
-  const finalizeCleanupMarker = (): void => {
-    if (!preserveCleanupMarker || dryRun) return;
-    delete fileData[ASB_MANAGED_KEY];
-    const finalHooks = fileData.hooks as Record<string, unknown[]>;
-    const finalTotalGroups = Object.values(finalHooks).reduce(
-      (sum, groups) => sum + groups.length,
-      0
-    );
-    const finalRemainingKeys = Object.keys(fileData).filter((k) => k !== 'hooks');
-    try {
-      if (
-        finalTotalGroups === 0 &&
-        finalRemainingKeys.length === 0 &&
-        fs.existsSync(hooksJsonPath)
-      ) {
-        fs.unlinkSync(hooksJsonPath);
-        results.push({
-          platform: 'codex',
-          filePath: hooksJsonPath,
-          status: 'deleted',
-          reason: 'no hooks remain',
-        });
-      } else {
-        writeHooksJson(hooksJsonPath, fileData);
-        results.push({
-          platform: 'codex',
-          filePath: hooksJsonPath,
-          status: 'written',
-          reason: 'cleanup finalized',
-        });
-      }
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
-    }
-  };
 
   if (before === after) {
     results.push({
@@ -764,7 +771,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       status: 'skipped',
       reason: 'up-to-date',
     });
-    if (!appendCleanupResults()) finalizeCleanupMarker();
+    appendCleanupResults();
   } else if (dryRun) {
     const reason =
       filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
@@ -778,7 +785,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         filteredEntries.length === 0 ? 'hooks cleared' : `${filteredEntries.length} hook(s) merged`;
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
       if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
-      if (!appendCleanupResults()) finalizeCleanupMarker();
+      appendCleanupResults();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
