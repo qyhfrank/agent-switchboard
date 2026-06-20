@@ -113,7 +113,7 @@ test('composeActiveRules honours includeDelimiters flag from config', () => {
   });
 });
 
-test('composeActiveRules project scope uses writable layer config for includeDelimiters', () => {
+test('composeActiveRules project scope inherits includeDelimiters from user config', () => {
   withTempAsbHome((asbHome) => {
     const configDir = getConfigDir();
     fs.mkdirSync(configDir, { recursive: true });
@@ -128,6 +128,38 @@ test('composeActiveRules project scope uses writable layer config for includeDel
     const projectRoot = path.join(asbHome, 'project');
     fs.mkdirSync(projectRoot, { recursive: true });
     fs.writeFileSync(path.join(projectRoot, '.asb.toml'), '[rules]\nenabled = ["alpha"]\n');
+
+    saveRuleState({
+      ...DEFAULT_RULE_STATE,
+      enabled: ['alpha'],
+      agentSync: {},
+    });
+
+    const composed = composeActiveRules({ project: projectRoot });
+    const expected = ['<!-- alpha:start -->', 'Alpha body', '<!-- alpha:end -->', ''].join('\n');
+
+    assert.equal(composed.content, expected);
+  });
+});
+
+test('composeActiveRules project scope can explicitly override inherited includeDelimiters', () => {
+  withTempAsbHome((asbHome) => {
+    const configDir = getConfigDir();
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(configDir, 'config.toml'),
+      '[applications]\nenabled = []\n[rules]\nincludeDelimiters = true\n'
+    );
+
+    const rulesDir = ensureRulesDirectory();
+    fs.writeFileSync(path.join(rulesDir, 'alpha.md'), 'Alpha body\n');
+
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectRoot, '.asb.toml'),
+      '[rules]\nenabled = ["alpha"]\nincludeDelimiters = false\n'
+    );
 
     saveRuleState({
       ...DEFAULT_RULE_STATE,
