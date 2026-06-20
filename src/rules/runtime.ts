@@ -1,6 +1,4 @@
-import { loadWritableConfigLayer } from '../config/layered-config.js';
 import type { ConfigScope } from '../config/scope.js';
-import { scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { loadRuleLibrary, type RuleSnippet } from './library.js';
 import type { RuleState } from './schema.js';
@@ -19,17 +17,14 @@ export function hasWritableRuleScope(scope?: ConfigScope): boolean {
 }
 
 export function loadRuleIncludeDelimiters(scope?: ConfigScope): boolean {
-  const config = hasWritableRuleScope(scope)
-    ? loadWritableConfigLayer(scopeToLayerOptions(scope)).config
-    : loadSwitchboardConfig(
-        scope
-          ? {
-              profile: scope.profile ?? undefined,
-              projectPath: scope.project ?? undefined,
-            }
-          : undefined
-      );
-
+  const config = loadSwitchboardConfig(
+    scope
+      ? {
+          profile: scope.profile ?? undefined,
+          projectPath: scope.project ?? undefined,
+        }
+      : undefined
+  );
   return config.rules?.includeDelimiters === true;
 }
 
