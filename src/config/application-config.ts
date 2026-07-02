@@ -10,6 +10,7 @@ import { buildPluginIndex, type PluginComponentSection } from '../plugins/index.
 import { loadMergedSwitchboardConfig, loadWritableConfigLayer } from './layered-config.js';
 import type {
   IncrementalSelection,
+  NativePluginSelection,
   PluginExclude,
   SwitchboardConfig,
   SwitchboardConfigLayer,
@@ -24,6 +25,13 @@ const APPLICATION_SCHEMA_KEYS = new Set(['enabled', 'active', 'assume_installed'
 
 export interface ResolvedSectionConfig {
   enabled: string[];
+}
+
+export type NativePluginScope = 'user' | 'project' | 'local';
+
+export interface ResolvedNativePluginConfig {
+  enabled: string[];
+  scope: NativePluginScope;
 }
 
 type ApplicationConfigSource = SwitchboardConfig | SwitchboardConfigLayer;
@@ -89,6 +97,20 @@ function getApplicationOverrideFromConfig(
   return overrideObj[section] as IncrementalSelection | undefined;
 }
 
+function getApplicationNativePluginsOverrideFromConfig(
+  config: ApplicationConfigSource,
+  appId: string
+): NativePluginSelection | undefined {
+  const applications = (config.applications ?? {}) as Record<string, unknown>;
+  const appOverrides = applications[appId];
+  if (!appOverrides || typeof appOverrides !== 'object') {
+    return undefined;
+  }
+
+  const overrideObj = appOverrides as Record<string, unknown>;
+  return overrideObj.native_plugins as NativePluginSelection | undefined;
+}
+
 function getGlobalEnabled(config: ApplicationConfigSource, section: ConfigSection): string[] {
   const sectionConfig = config[section] as { enabled?: string[] } | undefined;
   return Array.isArray(sectionConfig?.enabled) ? [...sectionConfig.enabled] : [];
@@ -148,6 +170,39 @@ function normalizeIncrementalSelection(
   return normalized;
 }
 
+function normalizeNativePluginRefs(ids: string[], scope?: ConfigScope): string[] {
+  if (ids.length === 0) return [];
+  const index = buildPluginIndex(scope);
+  return dedupeIds(
+    ids.map((id) => {
+      const plugin = index.get(id);
+      return plugin?.meta.native?.installRef ?? id;
+    })
+  );
+}
+
+function normalizeNativePluginSelection(
+  override: NativePluginSelection | undefined,
+  scope?: ConfigScope
+): NativePluginSelection | undefined {
+  if (!override) return undefined;
+
+  const normalized: NativePluginSelection = {};
+  if (override.enabled) {
+    normalized.enabled = normalizeNativePluginRefs(override.enabled, scope);
+  }
+  if (override.add) {
+    normalized.add = normalizeNativePluginRefs(override.add, scope);
+  }
+  if (override.remove) {
+    normalized.remove = normalizeNativePluginRefs(override.remove, scope);
+  }
+  if (override.scope) {
+    normalized.scope = override.scope;
+  }
+  return normalized;
+}
+
 function resolveSectionConfigFromConfig(
   config: ApplicationConfigSource,
   section: ConfigSection,
@@ -193,6 +248,21 @@ function resolveSectionConfigFromConfig(
   );
   return {
     enabled: mergeIncrementalSelection(merged, override),
+  };
+}
+
+function resolveNativePluginConfigFromConfig(
+  config: ApplicationConfigSource,
+  appId: string,
+  scope?: ConfigScope
+): ResolvedNativePluginConfig {
+  const override = normalizeNativePluginSelection(
+    getApplicationNativePluginsOverrideFromConfig(config, appId),
+    scope
+  );
+  return {
+    enabled: mergeIncrementalSelection([], override),
+    scope: override?.scope ?? 'user',
   };
 }
 
@@ -257,6 +327,20 @@ export function resolveEffectiveSectionConfig(
   return resolveSectionConfigFromConfig(config, section, appId, scope);
 }
 
+/**
+ * Resolve target-native plugin selections for a specific application.
+ * Native plugins are application-owned lifecycle objects and are not expanded
+ * through global `[plugins].enabled`.
+ */
+export function resolveApplicationNativePluginConfig(
+  appId: string,
+  scope?: ConfigScope
+): ResolvedNativePluginConfig {
+  const layerOptions = scopeToLayerOptions(scope);
+  const { config } = loadMergedSwitchboardConfig(layerOptions);
+  return resolveNativePluginConfigFromConfig(config, appId, scope);
+}
+
 export function resolveScopedSectionConfig(
   section: ConfigSection,
   appId: string,
@@ -268,4 +352,16 @@ export function resolveScopedSectionConfig(
 
   const layer = loadWritableConfigLayer(scopeToLayerOptions(scope));
   return resolveSectionConfigFromConfig(layer.config, section, appId, scope);
+}
+
+export function resolveScopedNativePluginConfig(
+  appId: string,
+  scope?: ConfigScope
+): ResolvedNativePluginConfig {
+  if (!scope?.profile && !scope?.project) {
+    return resolveApplicationNativePluginConfig(appId, scope);
+  }
+
+  const layer = loadWritableConfigLayer(scopeToLayerOptions(scope));
+  return resolveNativePluginConfigFromConfig(layer.config, appId, scope);
 }
