@@ -72,6 +72,10 @@ export const incrementalSelectionSchema = z
   })
   .passthrough();
 
+export const nativePluginSelectionSchema = incrementalSelectionSchema.extend({
+  scope: z.enum(['user', 'project', 'local']).optional(),
+});
+
 const incrementalRulesSchema = incrementalSelectionSchema.extend({
   includeDelimiters: z.boolean().optional(),
 });
@@ -83,6 +87,7 @@ const incrementalRulesSchema = incrementalSelectionSchema.extend({
 export const applicationConfigOverrideSchema = z
   .object({
     plugins: incrementalSelectionSchema.optional(),
+    native_plugins: nativePluginSelectionSchema.optional(),
     mcp: incrementalSelectionSchema.optional(),
     commands: incrementalSelectionSchema.optional(),
     agents: incrementalSelectionSchema.optional(),
@@ -429,6 +434,7 @@ export type McpServer = z.infer<typeof mcpServerSchema>;
 export type McpConfig = z.infer<typeof mcpConfigSchema>;
 export type SelectionSection = z.infer<typeof selectionSectionSchema>;
 export type IncrementalSelection = z.infer<typeof incrementalSelectionSchema>;
+export type NativePluginSelection = z.infer<typeof nativePluginSelectionSchema>;
 export type ApplicationConfigOverride = z.infer<typeof applicationConfigOverrideSchema>;
 export type ApplicationsSection = z.infer<typeof applicationsSectionSchema>;
 export type RulesSection = z.infer<typeof rulesSectionSchema>;

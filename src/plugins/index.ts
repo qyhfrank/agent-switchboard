@@ -41,6 +41,13 @@ export interface PluginMeta {
   sourceKind: 'marketplace' | 'plugin';
   /** Namespace of the source this plugin came from (for @source disambiguation) */
   sourceName: string;
+  native?: {
+    target: 'claude-code';
+    marketplaceName: string;
+    marketplacePath: string;
+    pluginName: string;
+    installRef: string;
+  };
 }
 
 export interface PluginDescriptor {
@@ -265,6 +272,13 @@ function buildFromMarketplace(
         sourcePath: plugin.localPath,
         sourceKind: 'marketplace',
         sourceName,
+        native: {
+          target: 'claude-code',
+          marketplaceName: result.name,
+          marketplacePath: basePath,
+          pluginName: plugin.name,
+          installRef: `${plugin.name}@${result.name}`,
+        },
       },
       components: {
         commands: commandIds,
@@ -379,8 +393,17 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   // Build lookup maps: canonical IDs always work; bare names work only when unambiguous.
   const byId = new Map<string, PluginDescriptor>();
   const byName = new Map<string, PluginDescriptor[]>();
+  const nativeRefAliases = new Map<string, PluginDescriptor[]>();
   for (const p of plugins) {
     byId.set(p.id, p);
+    if (p.meta.native) {
+      const existing = nativeRefAliases.get(p.meta.native.installRef);
+      if (existing) {
+        existing.push(p);
+      } else {
+        nativeRefAliases.set(p.meta.native.installRef, [p]);
+      }
+    }
     const existing = byName.get(p.name);
     if (existing) {
       existing.push(p);
@@ -401,6 +424,22 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
       console.warn(
         `[plugins] Ambiguous plugin name "${name}" found in sources: ${sources}. ` +
           `Use name@source syntax (e.g., "${name}@${descriptors[0].meta.sourceName}") to disambiguate.`
+      );
+    }
+  }
+
+  for (const [nativeRef, descriptors] of nativeRefAliases) {
+    if (descriptors.length === 1) {
+      const descriptor = descriptors[0];
+      byId.set(nativeRef, descriptor);
+      if (!descriptor.refs.includes(nativeRef)) {
+        descriptor.refs.push(nativeRef);
+      }
+    } else {
+      const sources = descriptors.map((d) => d.meta.sourceName).join(', ');
+      console.warn(
+        `[plugins] Ambiguous native plugin ref "${nativeRef}" found in sources: ${sources}. ` +
+          `Use the ASB source-qualified ref for the intended source.`
       );
     }
   }

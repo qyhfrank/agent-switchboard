@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
+  resolveApplicationNativePluginConfig,
   resolveApplicationSectionConfig,
   resolveEffectiveSectionConfig,
 } from '../src/config/application-config.js';
@@ -742,6 +743,59 @@ test('marketplace plugins carry sourceName from their source namespace', () => {
     assert.ok(plugin);
     assert.equal(plugin.meta.sourceKind, 'marketplace');
     assert.equal(plugin.meta.sourceName, 'acme-marketplace');
+  });
+});
+
+test('marketplace plugins expose Claude Code native install metadata', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'openai-codex', [
+      { name: 'codex', description: 'Codex', commands: ['setup'] },
+    ]);
+
+    writeConfigToml(asbHome, `[plugins.sources]\nlocal-source = "${mktDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('codex@local-source');
+    assert.ok(plugin);
+    assert.equal(plugin.meta.native?.target, 'claude-code');
+    assert.equal(plugin.meta.native.marketplaceName, 'openai-codex');
+    assert.equal(plugin.meta.native.marketplacePath, mktDir);
+    assert.equal(plugin.meta.native.installRef, 'codex@openai-codex');
+    assert.equal(index.get('codex@openai-codex')?.id, 'codex@local-source');
+  });
+});
+
+test('resolveApplicationNativePluginConfig keeps native plugins out of generic plugin expansion', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'openai-codex', [
+      { name: 'codex', description: 'Codex', commands: ['setup'] },
+    ]);
+
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications]',
+        'enabled = ["claude-code", "codex"]',
+        '',
+        '[plugins.sources]',
+        `source-alias = "${mktDir}"`,
+        '',
+        '[applications.claude-code.native_plugins]',
+        'enabled = ["codex@source-alias"]',
+        'scope = "user"',
+      ].join('\n')
+    );
+
+    const nativeConfig = resolveApplicationNativePluginConfig('claude-code');
+    assert.deepEqual(nativeConfig.enabled, ['codex@openai-codex']);
+    assert.equal(nativeConfig.scope, 'user');
+
+    const claudeCommands = resolveEffectiveSectionConfig('commands', 'claude-code');
+    const codexCommands = resolveEffectiveSectionConfig('commands', 'codex');
+    assert.deepEqual(claudeCommands.enabled, []);
+    assert.deepEqual(codexCommands.enabled, []);
   });
 });
 
