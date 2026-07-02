@@ -149,6 +149,23 @@ All entry-level sections (`rules`, `commands`, `agents`, `skills`, `hooks`, `plu
 
 The `[plugins.sources]` sub-table declares explicit plugin locations. Local plugins in `~/.asb/plugins/` are auto-discovered without configuration.
 
+Claude Code native plugins use the Claude plugin lifecycle instead of generic ASB component expansion. Keep the marketplace in `[plugins.sources]` or `~/.asb/plugins/`, then enable it only under `applications.claude-code.native_plugins`:
+
+```toml
+[applications]
+enabled = ["claude-code", "codex"]
+
+[plugins.sources.openai-codex]
+url = "https://github.com/openai/codex-plugin-cc.git"
+type = "clone"
+
+[applications.claude-code.native_plugins]
+enabled = ["codex@openai-codex"]
+scope = "user"
+```
+
+Do not also add the same plugin to `[plugins].enabled`; that path expands portable ASB components to every active target.
+
 ### Per-Application Overrides
 
 Fine-tune which library entries reach each application using `add` / `remove` / `enabled`:
@@ -397,6 +414,25 @@ Discovered plugin MCP servers appear in the MCP picker alongside locally-defined
 Enabled plugin components are expanded into entry-level `enabled` arrays during `asb sync`. Components appear with a namespace prefix (e.g. `context7:docs-researcher`) and can be individually controlled via per-application overrides.
 
 Plugin MCP servers are also addressable directly through `[mcp].enabled` and the `asb mcp` selector. As long as the plugin source is discoverable, a plugin MCP server can be enabled directly without adding its parent plugin to `[plugins].enabled`.
+
+### Claude Code Native Plugins
+
+Claude Code marketplaces can be managed as target-native plugins when the plugin depends on Claude's plugin runtime, `${CLAUDE_PLUGIN_ROOT}`, native commands, agents, hooks, or setup flow.
+
+```toml
+[applications]
+enabled = ["claude-code", "codex"]
+
+[plugins.sources.openai-codex]
+url = "https://github.com/openai/codex-plugin-cc.git"
+type = "clone"
+
+[applications.claude-code.native_plugins]
+enabled = ["codex@openai-codex"]
+scope = "user" # user, project, or local
+```
+
+`asb sync --dry-run` reports the planned Claude native plugin action. A real `asb sync` validates the marketplace, adds it to Claude Code if needed, installs the plugin if missing, and enables it if Claude reports it disabled. Native plugins are sent only to Claude Code and are rejected if the same plugin is also enabled through `[plugins].enabled`.
 
 ## Sync
 
