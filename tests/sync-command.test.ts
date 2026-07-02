@@ -365,8 +365,9 @@ test('runSyncCommand dry-run previews Claude native plugins without generic expa
       '[applications]',
       'enabled = ["claude-code", "codex"]',
       '',
-      '[plugins.sources]',
-      `openai-codex = "${mktDir}"`,
+      '[plugins.sources.openai-codex]',
+      `url = "${mktDir}"`,
+      'type = "clone"',
       '',
       '[applications.claude-code.native_plugins]',
       'enabled = ["codex@openai-codex"]',
@@ -382,6 +383,34 @@ test('runSyncCommand dry-run previews Claude native plugins without generic expa
     assert.match(output, /codex@openai-codex/);
     assert.doesNotMatch(output, /codex@openai-codex:setup/);
     assert.equal(fs.existsSync(path.join(getClaudeJsonPath(), '..', 'commands')), false);
+    assert.equal(fs.existsSync(path.join(getCodexDir(), 'prompts')), false);
+  });
+});
+
+test('runSyncCommand rejects native refs before generic plugin writes', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const mktDir = createClaudeMarketplaceFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code", "codex"]',
+      '',
+      '[plugins]',
+      'enabled = ["codex@openai-codex"]',
+      '',
+      '[plugins.sources]',
+      `openai-codex = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ updateSources: false })
+    );
+
+    assert.equal(result, true);
+    assert.match(output, /also enabled through \[plugins\]\.enabled/);
     assert.equal(fs.existsSync(path.join(getCodexDir(), 'prompts')), false);
   });
 });
@@ -433,6 +462,85 @@ test('distributeClaudeNativePlugins installs missing marketplace plugin through 
       ['plugin', 'marketplace', 'add', '--scope', 'user', mktDir],
       ['plugin', 'list', '--json'],
       ['plugin', 'install', '--scope', 'user', 'codex@openai-codex'],
+    ]);
+  });
+});
+
+test('distributeClaudeNativePlugins dry-run does not invoke Claude CLI runner', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mktDir = createClaudeMarketplaceFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins.sources]',
+      `openai-codex = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    let called = false;
+    const runner: ClaudePluginCommandRunner = () => {
+      called = true;
+      return { status: 1, stdout: '', stderr: 'should not run' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      dryRun: true,
+      runner,
+    });
+
+    assert.equal(called, false);
+    assert.equal(outcome.results[0]?.status, 'written');
+    assert.equal(outcome.results[0]?.reason, 'would sync native plugin (user)');
+  });
+});
+
+test('distributeClaudeNativePlugins skips installed enabled plugins as up-to-date', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mktDir = createClaudeMarketplaceFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins.sources]',
+      `openai-codex = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    const calls: string[][] = [];
+    const runner: ClaudePluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return { status: 0, stdout: '[{"name":"openai-codex"}]', stderr: '' };
+      }
+      if (args.join(' ') === 'plugin list --json') {
+        return {
+          status: 0,
+          stdout: '[{"pluginId":"codex@openai-codex","enabled":true}]',
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'skipped');
+    assert.equal(outcome.results[0]?.reason, 'up-to-date');
+    assert.deepEqual(calls, [
+      ['plugin', 'validate', mktDir],
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'list', '--json'],
     ]);
   });
 });
@@ -510,5 +618,92 @@ test('distributeClaudeNativePlugins rejects refs also enabled as generic plugins
 
     assert.equal(outcome.results[0]?.status, 'error');
     assert.match(outcome.results[0]?.error ?? '', /also enabled through \[plugins\]\.enabled/);
+  });
+});
+
+test('distributeClaudeNativePlugins reports unknown native refs as errors', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["missing-plugin"]',
+    ]);
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      dryRun: true,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'error');
+    assert.match(outcome.results[0]?.error ?? '', /Unknown native plugin ref: missing-plugin/);
+  });
+});
+
+test('distributeClaudeNativePlugins reports malformed Claude JSON as an error result', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mktDir = createClaudeMarketplaceFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins.sources]',
+      `openai-codex = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    const runner: ClaudePluginCommandRunner = (args) => {
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return { status: 0, stdout: '', stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'error');
+    assert.match(outcome.results[0]?.error ?? '', /returned invalid JSON/);
+  });
+});
+
+test('distributeClaudeNativePlugins skips project mode none before runner calls', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const projectRoot = path.join(asbHome, 'project-native-none');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    writeConfig(path.join(projectRoot, '.asb.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[distribution.project]',
+      'mode = "none"',
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    let called = false;
+    const runner: ClaudePluginCommandRunner = () => {
+      called = true;
+      return { status: 1, stdout: '', stderr: 'should not run' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      scope: { project: projectRoot },
+      activeAppIds: ['claude-code'],
+      projectMode: 'none',
+      runner,
+    });
+
+    assert.equal(called, false);
+    assert.deepEqual(outcome.results, []);
   });
 });

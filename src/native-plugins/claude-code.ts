@@ -1,5 +1,4 @@
 import { spawnSync } from 'node:child_process';
-import type { NativePluginScope } from '../config/application-config.js';
 import { resolveScopedNativePluginConfig } from '../config/application-config.js';
 import type { ConfigScope } from '../config/scope.js';
 import { buildPluginIndex, type PluginDescriptor } from '../plugins/index.js';
@@ -31,6 +30,7 @@ export interface DistributeClaudeNativePluginsOptions {
   assumeInstalled?: ReadonlySet<string>;
   dryRun?: boolean;
   genericPluginRefs?: string[];
+  projectMode?: 'managed' | 'exclusive' | 'none';
   runner?: ClaudePluginCommandRunner;
 }
 
@@ -68,13 +68,6 @@ function isClaudeCodeAvailable(
   return target?.isInstalled?.() !== false || assumeInstalled?.has('claude-code') === true;
 }
 
-function commandCwd(nativeScope: NativePluginScope, scope?: ConfigScope): string | undefined {
-  if ((nativeScope === 'project' || nativeScope === 'local') && scope?.project) {
-    return scope.project;
-  }
-  return undefined;
-}
-
 function resultError(
   pluginRef: string,
   filePath: string,
@@ -105,7 +98,7 @@ function runRequired(
 function readJson(runner: ClaudePluginCommandRunner, args: string[], cwd?: string): unknown {
   const result = runRequired(runner, args, cwd);
   const text = result.stdout.trim();
-  if (!text) return null;
+  if (!text) throw new Error(`claude ${args.join(' ')} returned invalid JSON: empty stdout`);
   try {
     return JSON.parse(text);
   } catch (error) {
@@ -177,25 +170,30 @@ function resolveNativeMeta(
   return plugin.meta.native;
 }
 
-export function distributeClaudeNativePlugins({
+function shouldSkipProjectModeNone(
+  scope?: ConfigScope,
+  projectMode?: 'managed' | 'exclusive' | 'none'
+): boolean {
+  return scope?.project !== undefined && projectMode === 'none';
+}
+
+export function validateClaudeNativePlugins({
   scope,
   activeAppIds,
-  assumeInstalled,
-  dryRun = false,
   genericPluginRefs = [],
-  runner = defaultClaudeRunner,
+  projectMode,
 }: DistributeClaudeNativePluginsOptions): { results: ClaudeNativePluginDistributionResult[] } {
-  if (!isClaudeCodeAvailable(activeAppIds, assumeInstalled)) return { results: [] };
+  if (shouldSkipProjectModeNone(scope, projectMode)) return { results: [] };
+  if (!activeAppIds.includes('claude-code')) return { results: [] };
 
   const nativeConfig = resolveScopedNativePluginConfig('claude-code', scope);
   if (nativeConfig.enabled.length === 0) return { results: [] };
 
   const index = buildPluginIndex(scope);
-  const cwd = commandCwd(nativeConfig.scope, scope);
   const results: ClaudeNativePluginDistributionResult[] = [];
 
   for (const pluginRef of nativeConfig.enabled) {
-    const plugin = index.get(pluginRef);
+    const plugin = index.getNative(pluginRef);
     const nativeMeta = resolveNativeMeta(pluginRef, plugin);
     if (typeof nativeMeta === 'string') {
       results.push(resultError(pluginRef, pluginRef, nativeMeta));
@@ -211,6 +209,43 @@ export function distributeClaudeNativePlugins({
           `Native plugin "${nativeMeta.installRef}" is also enabled through [plugins].enabled`
         )
       );
+    }
+  }
+
+  return { results };
+}
+
+export function distributeClaudeNativePlugins({
+  scope,
+  activeAppIds,
+  assumeInstalled,
+  dryRun = false,
+  genericPluginRefs = [],
+  projectMode,
+  runner = defaultClaudeRunner,
+}: DistributeClaudeNativePluginsOptions): { results: ClaudeNativePluginDistributionResult[] } {
+  const validation = validateClaudeNativePlugins({
+    scope,
+    activeAppIds,
+    assumeInstalled,
+    genericPluginRefs,
+    projectMode,
+  });
+  if (validation.results.some((result) => result.status === 'error')) return validation;
+  if (shouldSkipProjectModeNone(scope, projectMode)) return { results: [] };
+  if (!isClaudeCodeAvailable(activeAppIds, assumeInstalled)) return { results: [] };
+
+  const nativeConfig = resolveScopedNativePluginConfig('claude-code', scope);
+  if (nativeConfig.enabled.length === 0) return { results: [] };
+
+  const index = buildPluginIndex(scope);
+  const results: ClaudeNativePluginDistributionResult[] = [];
+
+  for (const pluginRef of nativeConfig.enabled) {
+    const plugin = index.getNative(pluginRef);
+    const nativeMeta = resolveNativeMeta(pluginRef, plugin);
+    if (typeof nativeMeta === 'string') {
+      results.push(resultError(pluginRef, pluginRef, nativeMeta));
       continue;
     }
 
@@ -226,41 +261,41 @@ export function distributeClaudeNativePlugins({
     }
 
     try {
-      runRequired(runner, ['plugin', 'validate', nativeMeta.marketplacePath], cwd);
+      runRequired(runner, ['plugin', 'validate', nativeMeta.marketplacePath]);
 
       const actions: string[] = [];
-      const marketplaces = readJson(runner, ['plugin', 'marketplace', 'list', '--json'], cwd);
+      const marketplaces = readJson(runner, ['plugin', 'marketplace', 'list', '--json']);
       if (!hasMarketplace(marketplaces, nativeMeta.marketplaceName)) {
-        runRequired(
-          runner,
-          [
-            'plugin',
-            'marketplace',
-            'add',
-            '--scope',
-            nativeConfig.scope,
-            nativeMeta.marketplacePath,
-          ],
-          cwd
-        );
+        runRequired(runner, [
+          'plugin',
+          'marketplace',
+          'add',
+          '--scope',
+          nativeConfig.scope,
+          nativeMeta.marketplacePath,
+        ]);
         actions.push('marketplace added');
       }
 
-      const installed = readJson(runner, ['plugin', 'list', '--json'], cwd);
+      const installed = readJson(runner, ['plugin', 'list', '--json']);
       const installedPlugin = findPlugin(installed, nativeMeta);
       if (!installedPlugin) {
-        runRequired(
-          runner,
-          ['plugin', 'install', '--scope', nativeConfig.scope, nativeMeta.installRef],
-          cwd
-        );
+        runRequired(runner, [
+          'plugin',
+          'install',
+          '--scope',
+          nativeConfig.scope,
+          nativeMeta.installRef,
+        ]);
         actions.push('installed');
       } else if (pluginIsDisabled(installedPlugin)) {
-        runRequired(
-          runner,
-          ['plugin', 'enable', '--scope', nativeConfig.scope, nativeMeta.installRef],
-          cwd
-        );
+        runRequired(runner, [
+          'plugin',
+          'enable',
+          '--scope',
+          nativeConfig.scope,
+          nativeMeta.installRef,
+        ]);
         actions.push('enabled');
       }
 
