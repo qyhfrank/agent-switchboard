@@ -762,7 +762,9 @@ test('marketplace plugins expose Claude Code native install metadata', () => {
     assert.equal(plugin.meta.native.marketplaceName, 'openai-codex');
     assert.equal(plugin.meta.native.marketplacePath, mktDir);
     assert.equal(plugin.meta.native.installRef, 'codex@openai-codex');
-    assert.equal(index.get('codex@openai-codex')?.id, 'codex@local-source');
+    assert.equal(index.getNative('codex@openai-codex')?.id, 'codex@local-source');
+    assert.equal(index.get('codex@openai-codex'), undefined);
+    assert.equal(plugin.refs.includes('codex@openai-codex'), false);
   });
 });
 
@@ -789,13 +791,68 @@ test('resolveApplicationNativePluginConfig keeps native plugins out of generic p
     );
 
     const nativeConfig = resolveApplicationNativePluginConfig('claude-code');
-    assert.deepEqual(nativeConfig.enabled, ['codex@openai-codex']);
+    assert.deepEqual(nativeConfig.enabled, ['codex@source-alias']);
     assert.equal(nativeConfig.scope, 'user');
 
     const claudeCommands = resolveEffectiveSectionConfig('commands', 'claude-code');
     const codexCommands = resolveEffectiveSectionConfig('commands', 'codex');
     assert.deepEqual(claudeCommands.enabled, []);
     assert.deepEqual(codexCommands.enabled, []);
+  });
+});
+
+test('resolveApplicationNativePluginConfig preserves source-qualified refs for duplicate native install refs', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const sourceOne = createMarketplaceFixture(asbHome, 'openai-codex', [
+      { name: 'codex', description: 'Codex', commands: ['setup'] },
+    ]);
+    const sourceTwo = createMarketplaceFixture(asbHome, 'openai-codex-copy', [
+      { name: 'codex', description: 'Codex', commands: ['setup'] },
+    ]);
+    fs.writeFileSync(
+      path.join(sourceTwo, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'openai-codex',
+        owner: { name: 'test-owner' },
+        metadata: {},
+        plugins: [{ name: 'codex', source: './plugins/codex' }],
+      })
+    );
+
+    writeConfigToml(
+      asbHome,
+      [
+        '[plugins.sources]',
+        `source-one = "${sourceOne}"`,
+        `source-two = "${sourceTwo}"`,
+        '',
+        '[applications.claude-code.native_plugins]',
+        'enabled = ["codex@source-two"]',
+      ].join('\n')
+    );
+
+    const nativeConfig = resolveApplicationNativePluginConfig('claude-code');
+    assert.deepEqual(nativeConfig.enabled, ['codex@source-two']);
+  });
+});
+
+test('resolveApplicationNativePluginConfig rejects unsupported native plugin scopes', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications.claude-code.native_plugins]',
+        'enabled = ["codex@openai-codex"]',
+        'scope = "project"',
+      ].join('\n')
+    );
+
+    assert.throws(
+      () => resolveApplicationNativePluginConfig('claude-code'),
+      /Only "user" is currently supported/
+    );
   });
 });
 

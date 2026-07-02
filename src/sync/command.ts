@@ -13,7 +13,10 @@ import { updateRemoteSources } from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
 import { distributeMcp } from '../mcp/distribution.js';
-import { distributeClaudeNativePlugins } from '../native-plugins/claude-code.js';
+import {
+  distributeClaudeNativePlugins,
+  validateClaudeNativePlugins,
+} from '../native-plugins/claude-code.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import { distributeRules } from '../rules/distribution.js';
 import { distributeSkills } from '../skills/distribution.js';
@@ -164,6 +167,26 @@ export async function runSyncPhase({
 
   const collision = isManaged ? config.distribution.project.collision : undefined;
   const rulesPlacement = isManaged ? config.distribution.project.rules.placement : undefined;
+  const nativePluginPreflight = validateClaudeNativePlugins({
+    scope,
+    activeAppIds,
+    assumeInstalled: assumeInstalledSet,
+    genericPluginRefs: displayPluginRefs,
+    projectMode,
+  });
+  if (nativePluginPreflight.results.some((result) => result.status === 'error')) {
+    printCompactDistributions([
+      {
+        label: 'native plugins',
+        results: nativePluginPreflight.results,
+        emptyMessage: 'none',
+        getTargetLabel: (result) =>
+          (result as (typeof nativePluginPreflight.results)[number]).platform,
+        getPath: (result) => (result as (typeof nativePluginPreflight.results)[number]).filePath,
+      },
+    ]);
+    return { hasErrors: true, hasChanges: false };
+  }
 
   let mcpDistribution: Awaited<ReturnType<typeof distributeMcp>>;
   let ruleDistribution: ReturnType<typeof distributeRules>;
@@ -223,6 +246,7 @@ export async function runSyncPhase({
       assumeInstalled: assumeInstalledSet,
       dryRun,
       genericPluginRefs: displayPluginRefs,
+      projectMode,
     });
   } finally {
     // Save manifest even if distribution throws, to preserve partial progress
