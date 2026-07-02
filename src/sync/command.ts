@@ -1,6 +1,9 @@
 import chalk from 'chalk';
 import { distributeCommands } from '../commands/distribution.js';
-import { resolveScopedSectionConfig } from '../config/application-config.js';
+import {
+  resolveScopedNativePluginConfig,
+  resolveScopedSectionConfig,
+} from '../config/application-config.js';
 import type { ConfigLayers } from '../config/layered-config.js';
 import type { SwitchboardConfig } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
@@ -10,6 +13,7 @@ import { updateRemoteSources } from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
 import { distributeMcp } from '../mcp/distribution.js';
+import { distributeClaudeNativePlugins } from '../native-plugins/claude-code.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import { distributeRules } from '../rules/distribution.js';
 import { distributeSkills } from '../skills/distribution.js';
@@ -167,6 +171,7 @@ export async function runSyncPhase({
   let agentDistribution: ReturnType<typeof distributeSubagents>;
   let skillDistribution: ReturnType<typeof distributeSkills>;
   let hookDistribution: ReturnType<typeof distributeHooks>;
+  let nativePluginDistribution: ReturnType<typeof distributeClaudeNativePlugins>;
 
   try {
     mcpDistribution = await distributeMcp(scope, undefined, {
@@ -211,6 +216,13 @@ export async function runSyncPhase({
     hookDistribution = distributeHooks(scope, activeAppIds, assumeInstalledSet, {
       projectMode,
       dryRun,
+    });
+    nativePluginDistribution = distributeClaudeNativePlugins({
+      scope,
+      activeAppIds,
+      assumeInstalled: assumeInstalledSet,
+      dryRun,
+      genericPluginRefs: displayPluginRefs,
     });
   } finally {
     // Save manifest even if distribution throws, to preserve partial progress
@@ -277,6 +289,17 @@ export async function runSyncPhase({
       },
     },
   ];
+
+  if (nativePluginDistribution.results.length > 0) {
+    distSections.push({
+      label: 'native plugins',
+      results: nativePluginDistribution.results,
+      emptyMessage: 'none',
+      getTargetLabel: (result) =>
+        (result as (typeof nativePluginDistribution.results)[number]).platform,
+      getPath: (result) => (result as (typeof nativePluginDistribution.results)[number]).filePath,
+    });
+  }
 
   if (dryRun) {
     // In dry-run mode, show a compact summary instead of full distribution output
@@ -453,6 +476,20 @@ function displayInventory(opts: {
       console.log(
         `  ${chalk.magenta('plugins')} ${chalk.gray('(0)')}  ${chalk.gray(`${pluginIndex.plugins.length} available`)}`
       );
+    }
+
+    const nativePlugins = resolveScopedNativePluginConfig('claude-code', scope);
+    if (nativePlugins.enabled.length > 0) {
+      const names = nativePlugins.enabled
+        .map((pluginId) => {
+          const plugin = pluginIndex.get(pluginId);
+          return plugin ? pluginId : chalk.strikethrough(pluginId);
+        })
+        .join(', ');
+      console.log(
+        `  ${chalk.magenta('native plugins')} ${chalk.gray(`(${nativePlugins.enabled.length})`)}  claude-code:${nativePlugins.enabled.length} ${chalk.gray(`scope:${nativePlugins.scope}`)}`
+      );
+      console.log(`                     ${chalk.gray('→')} ${names}`);
     }
   }
 
