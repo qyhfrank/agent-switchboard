@@ -27,7 +27,7 @@ export interface ResolvedSectionConfig {
   enabled: string[];
 }
 
-export type NativePluginScope = 'user' | 'project' | 'local';
+export type NativePluginScope = 'user';
 
 export interface ResolvedNativePluginConfig {
   enabled: string[];
@@ -175,32 +175,10 @@ function normalizeNativePluginRefs(ids: string[], scope?: ConfigScope): string[]
   const index = buildPluginIndex(scope);
   return dedupeIds(
     ids.map((id) => {
-      const plugin = index.get(id);
-      return plugin?.meta.native?.installRef ?? id;
+      const plugin = index.getNative(id);
+      return plugin?.id ?? id;
     })
   );
-}
-
-function normalizeNativePluginSelection(
-  override: NativePluginSelection | undefined,
-  scope?: ConfigScope
-): NativePluginSelection | undefined {
-  if (!override) return undefined;
-
-  const normalized: NativePluginSelection = {};
-  if (override.enabled) {
-    normalized.enabled = normalizeNativePluginRefs(override.enabled, scope);
-  }
-  if (override.add) {
-    normalized.add = normalizeNativePluginRefs(override.add, scope);
-  }
-  if (override.remove) {
-    normalized.remove = normalizeNativePluginRefs(override.remove, scope);
-  }
-  if (override.scope) {
-    normalized.scope = override.scope;
-  }
-  return normalized;
 }
 
 function resolveSectionConfigFromConfig(
@@ -256,13 +234,16 @@ function resolveNativePluginConfigFromConfig(
   appId: string,
   scope?: ConfigScope
 ): ResolvedNativePluginConfig {
-  const override = normalizeNativePluginSelection(
-    getApplicationNativePluginsOverrideFromConfig(config, appId),
-    scope
-  );
+  const override = getApplicationNativePluginsOverrideFromConfig(config, appId);
+  const nativeScope = (override as { scope?: unknown } | undefined)?.scope;
+  if (nativeScope !== undefined && nativeScope !== 'user') {
+    throw new Error(
+      `Unsupported native plugin scope "${nativeScope}". Only "user" is currently supported.`
+    );
+  }
   return {
-    enabled: mergeIncrementalSelection([], override),
-    scope: override?.scope ?? 'user',
+    enabled: normalizeNativePluginRefs(override?.enabled ?? [], scope),
+    scope: 'user',
   };
 }
 

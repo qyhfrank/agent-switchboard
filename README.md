@@ -166,6 +166,8 @@ scope = "user"
 
 Do not also add the same plugin to `[plugins].enabled`; that path expands portable ASB components to every active target.
 
+When a remote source is written directly into `config.toml`, run `asb sync --update` once so the checkout exists under `~/.asb/plugins/`. If the marketplace is already present at `~/.asb/plugins/openai-codex`, the `[plugins.sources.openai-codex]` table is optional.
+
 ### Per-Application Overrides
 
 Fine-tune which library entries reach each application using `add` / `remove` / `enabled`:
@@ -429,7 +431,7 @@ type = "clone"
 
 [applications.claude-code.native_plugins]
 enabled = ["codex@openai-codex"]
-scope = "user" # user, project, or local
+scope = "user"
 ```
 
 `asb sync --dry-run` reports the planned Claude native plugin action. A real `asb sync` validates the marketplace, adds it to Claude Code if needed, installs the plugin if missing, and enables it if Claude reports it disabled. Native plugins are sent only to Claude Code and are rejected if the same plugin is also enabled through `[plugins].enabled`.

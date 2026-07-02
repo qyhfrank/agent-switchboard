@@ -74,6 +74,8 @@ export interface PluginIndex {
   ruleSnippets: PluginRuleSnippet[];
   /** Look up a plugin by ID */
   get(pluginId: string): PluginDescriptor | undefined;
+  /** Look up a Claude Code native plugin by ASB ref or unambiguous Claude install ref */
+  getNative(pluginId: string): PluginDescriptor | undefined;
   /** Expand a list of plugin IDs into per-section component IDs */
   expand(pluginIds: string[]): PluginComponents;
   /** Normalize legacy or aliased component refs to canonical IDs */
@@ -428,13 +430,11 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     }
   }
 
+  const byNativeRef = new Map<string, PluginDescriptor>();
   for (const [nativeRef, descriptors] of nativeRefAliases) {
     if (descriptors.length === 1) {
       const descriptor = descriptors[0];
-      byId.set(nativeRef, descriptor);
-      if (!descriptor.refs.includes(nativeRef)) {
-        descriptor.refs.push(nativeRef);
-      }
+      byNativeRef.set(nativeRef, descriptor);
     } else {
       const sources = descriptors.map((d) => d.meta.sourceName).join(', ');
       console.warn(
@@ -467,6 +467,10 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
 
     get(pluginId: string) {
       return byId.get(pluginId);
+    },
+
+    getNative(pluginId: string) {
+      return byId.get(pluginId) ?? byNativeRef.get(pluginId);
     },
 
     expand(pluginIds: string[]): PluginComponents {

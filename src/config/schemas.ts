@@ -72,9 +72,12 @@ export const incrementalSelectionSchema = z
   })
   .passthrough();
 
-export const nativePluginSelectionSchema = incrementalSelectionSchema.extend({
-  scope: z.enum(['user', 'project', 'local']).optional(),
-});
+export const nativePluginSelectionSchema = z
+  .object({
+    enabled: z.array(z.string().trim().min(1)).optional(),
+    scope: z.literal('user').optional(),
+  })
+  .passthrough();
 
 const incrementalRulesSchema = incrementalSelectionSchema.extend({
   includeDelimiters: z.boolean().optional(),
