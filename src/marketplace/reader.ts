@@ -1,9 +1,9 @@
 /**
- * Marketplace reader: detects and parses Claude Code marketplace repositories.
+ * Marketplace reader: detects and parses native plugin marketplace repositories.
  *
- * A marketplace is a repository containing `.claude-plugin/marketplace.json`.
+ * A marketplace is a repository containing a supported marketplace manifest.
  * Each plugin is either a relative path within the same repo or a standalone
- * directory with `.claude-plugin/plugin.json`.
+ * directory with a supported native plugin manifest.
  *
  * PhaseB additions:
  *   - `github` / `git` URL source types resolve via shallow clone + cache
@@ -25,13 +25,15 @@ import {
   pluginManifestSchema,
 } from './schemas.js';
 
+export type NativePluginTarget = 'claude-code' | 'codex';
+
 export interface ResolvedPlugin {
   name: string;
   description?: string;
   version?: string;
   /** Absolute path to the plugin root directory */
   localPath: string;
-  /** Plugin manifest if `.claude-plugin/plugin.json` exists */
+  /** Plugin manifest if a supported native plugin manifest exists */
   manifest?: PluginManifest;
   /** Whether plugin is in strict mode */
   strict: boolean;
@@ -51,36 +53,75 @@ export interface ResolvedPlugin {
 export interface MarketplaceReadResult {
   name: string;
   owner: { name: string; email?: string };
+  nativeTarget: NativePluginTarget;
   plugins: ResolvedPlugin[];
   warnings: string[];
 }
 
-const MARKETPLACE_MANIFEST = '.claude-plugin/marketplace.json';
-const PLUGIN_MANIFEST = '.claude-plugin/plugin.json';
+const MARKETPLACE_MANIFESTS: Array<{ relativePath: string; nativeTarget: NativePluginTarget }> = [
+  { relativePath: '.claude-plugin/marketplace.json', nativeTarget: 'claude-code' },
+  { relativePath: '.agents/plugins/marketplace.json', nativeTarget: 'codex' },
+  { relativePath: '.agents/plugins/api_marketplace.json', nativeTarget: 'codex' },
+];
 
-/**
- * Check whether a local path is a Claude Code marketplace (has .claude-plugin/marketplace.json).
- */
-export function isMarketplace(localPath: string): boolean {
-  const manifestPath = path.join(localPath, MARKETPLACE_MANIFEST);
-  return fs.existsSync(manifestPath);
+const PLUGIN_MANIFESTS: Array<{ relativePath: string; nativeTarget: NativePluginTarget }> = [
+  { relativePath: '.claude-plugin/plugin.json', nativeTarget: 'claude-code' },
+  { relativePath: '.codex-plugin/plugin.json', nativeTarget: 'codex' },
+];
+
+export interface NativeManifestInfo {
+  manifestPath: string;
+  nativeTarget: NativePluginTarget;
+}
+
+export function getMarketplaceManifestInfo(localPath: string): NativeManifestInfo | undefined {
+  for (const manifest of MARKETPLACE_MANIFESTS) {
+    const manifestPath = path.join(localPath, manifest.relativePath);
+    if (fs.existsSync(manifestPath)) {
+      return { manifestPath, nativeTarget: manifest.nativeTarget };
+    }
+  }
+  return undefined;
+}
+
+export function getPluginManifestInfo(
+  localPath: string,
+  nativeTarget?: NativePluginTarget
+): NativeManifestInfo | undefined {
+  for (const manifest of PLUGIN_MANIFESTS) {
+    if (nativeTarget && manifest.nativeTarget !== nativeTarget) continue;
+    const manifestPath = path.join(localPath, manifest.relativePath);
+    if (fs.existsSync(manifestPath)) {
+      return { manifestPath, nativeTarget: manifest.nativeTarget };
+    }
+  }
+  return undefined;
 }
 
 /**
- * Check whether a local path is a formal single plugin (has .claude-plugin/plugin.json
- * but NOT marketplace.json).
+ * Check whether a local path is a supported native marketplace.
+ */
+export function isMarketplace(localPath: string): boolean {
+  return getMarketplaceManifestInfo(localPath) !== undefined;
+}
+
+/**
+ * Check whether a local path is a formal single plugin but NOT marketplace.json.
  */
 export function isFormalPlugin(localPath: string): boolean {
   if (isMarketplace(localPath)) return false;
-  const pluginPath = path.join(localPath, PLUGIN_MANIFEST);
-  return fs.existsSync(pluginPath);
+  return getPluginManifestInfo(localPath) !== undefined;
 }
 
 /**
  * Read and resolve a marketplace, returning all resolvable plugins with metadata.
  */
 export function readMarketplace(localPath: string): MarketplaceReadResult {
-  const manifestPath = path.join(localPath, MARKETPLACE_MANIFEST);
+  const manifestInfo = getMarketplaceManifestInfo(localPath);
+  if (!manifestInfo) {
+    throw new Error(`No supported marketplace manifest found in ${localPath}`);
+  }
+  const manifestPath = manifestInfo.manifestPath;
   const warnings: string[] = [];
 
   const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
@@ -117,7 +158,8 @@ export function readMarketplace(localPath: string): MarketplaceReadResult {
 
   return {
     name: manifest.name,
-    owner: manifest.owner,
+    owner: manifest.owner ?? { name: manifest.name },
+    nativeTarget: manifestInfo.nativeTarget,
     plugins,
     warnings,
   };
@@ -199,6 +241,13 @@ function resolvePluginDir(
     return null;
   }
 
+  if (source.url && typeof source.url === 'string') {
+    const ref = pinRef ?? (source.ref as string | undefined);
+    const subdir = typeof source.path === 'string' ? source.path : undefined;
+    const cloned = cloneToCacheDir(marketplaceNamespace, pluginName, source.url, ref);
+    return cloned && subdir ? resolveInside(cloned, subdir) : cloned;
+  }
+
   // Local path source
   if (source.path && typeof source.path === 'string') {
     return path.resolve(marketplaceRoot, pluginRoot, source.path);
@@ -243,9 +292,15 @@ function cloneToCacheDir(
   cloneUrl: string,
   ref?: string
 ): string | null {
-  const cacheBase = path.join(getPluginsDir(), '.plugin-cache', marketplaceNamespace, pluginName);
+  const cacheRoot = path.resolve(getPluginsDir(), '.plugin-cache');
+  const cacheBase = path.resolve(
+    cacheRoot,
+    safeCacheSegment(marketplaceNamespace),
+    safeCacheSegment(pluginName)
+  );
 
   try {
+    assertInsideCache(cacheRoot, cacheBase);
     if (!fs.existsSync(path.join(cacheBase, '.git'))) {
       fs.mkdirSync(path.dirname(cacheBase), { recursive: true });
       const args = ['clone', '--depth', '1'];
@@ -254,6 +309,33 @@ function cloneToCacheDir(
       runGit(args);
     }
     return cacheBase;
+  } catch {
+    return null;
+  }
+}
+
+function safeCacheSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-') || 'entry';
+}
+
+function assertInsideCache(cacheRoot: string, cacheBase: string): void {
+  const relative = path.relative(cacheRoot, cacheBase);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Plugin cache path escapes cache root: ${cacheBase}`);
+  }
+}
+
+function resolveInside(root: string, subpath: string): string | null {
+  const resolved = path.resolve(root, subpath);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return null;
+
+  try {
+    const rootReal = fs.realpathSync(root);
+    const resolvedReal = fs.realpathSync(resolved);
+    const realRelative = path.relative(rootReal, resolvedReal);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) return null;
+    return resolved;
   } catch {
     return null;
   }
@@ -270,12 +352,15 @@ function runGit(args: string[], options?: { cwd?: string }): string {
 
 // ── Plugin manifest ────────────────────────────────────────────────
 
-function readPluginManifest(pluginDir: string): PluginManifest | null {
-  const manifestPath = path.join(pluginDir, PLUGIN_MANIFEST);
-  if (!fs.existsSync(manifestPath)) return null;
+export function readPluginManifest(
+  pluginDir: string,
+  nativeTarget?: NativePluginTarget
+): PluginManifest | null {
+  const manifestInfo = getPluginManifestInfo(pluginDir, nativeTarget);
+  if (!manifestInfo) return null;
 
   try {
-    const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    const raw = JSON.parse(fs.readFileSync(manifestInfo.manifestPath, 'utf-8'));
     return pluginManifestSchema.parse(raw);
   } catch {
     return null;

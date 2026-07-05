@@ -12,6 +12,7 @@ import { expandHome, getConfigDir, getPluginsDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
+import { getMarketplaceManifestInfo, getPluginManifestInfo } from '../marketplace/reader.js';
 
 export interface Source {
   namespace: string;
@@ -457,7 +458,7 @@ export function removeSource(namespace: string): void {
 /**
  * Validate a local path has expected library structure.
  * Recognizes plugin layout (rules/, commands/, etc.)
- * and Claude Code marketplace layout (.claude-plugin/marketplace.json).
+ * and native marketplace layouts.
  */
 export type SourceKind = 'marketplace' | 'plugin';
 
@@ -469,13 +470,11 @@ export function validateSourcePath(libraryPath: string): {
 } {
   const resolvedPath = path.resolve(libraryPath);
 
-  const marketplaceManifest = path.join(resolvedPath, '.claude-plugin', 'marketplace.json');
-  if (fs.existsSync(marketplaceManifest)) {
+  if (getMarketplaceManifestInfo(resolvedPath)) {
     return { valid: true, found: ['marketplace'], missing: [], kind: 'marketplace' };
   }
 
-  const pluginJson = path.join(resolvedPath, '.claude-plugin', 'plugin.json');
-  if (fs.existsSync(pluginJson)) {
+  if (getPluginManifestInfo(resolvedPath)) {
     return { valid: true, found: ['plugin'], missing: [], kind: 'plugin' };
   }
 
