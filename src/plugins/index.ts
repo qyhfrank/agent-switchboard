@@ -13,11 +13,17 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { getConfigDir } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { getSourcesRecord } from '../library/sources.js';
 import { loadPluginComponents, loadPluginHookEntries } from '../marketplace/plugin-loader.js';
-import { isMarketplace, readMarketplace } from '../marketplace/reader.js';
+import {
+  isMarketplace,
+  type NativePluginTarget,
+  readMarketplace,
+  readPluginManifest,
+} from '../marketplace/reader.js';
 import type { RuleSnippet } from '../rules/library.js';
 import { parseRuleMarkdown } from '../rules/parser.js';
 import { buildComponentId, buildPluginId, splitComponentId } from './identity.js';
@@ -41,13 +47,18 @@ export interface PluginMeta {
   sourceKind: 'marketplace' | 'plugin';
   /** Namespace of the source this plugin came from (for @source disambiguation) */
   sourceName: string;
-  native?: {
-    target: 'claude-code';
-    marketplaceName: string;
-    marketplacePath: string;
-    pluginName: string;
-    installRef: string;
-  };
+  native?: NativePluginMeta;
+}
+
+export interface NativePluginMeta {
+  target: NativePluginTarget;
+  marketplaceName: string;
+  marketplacePath: string;
+  pluginName: string;
+  installRef: string;
+  version?: string;
+  /** Original plugin root for bare Codex plugins wrapped as ASB-owned local marketplaces. */
+  sourcePath?: string;
 }
 
 export interface PluginDescriptor {
@@ -74,8 +85,8 @@ export interface PluginIndex {
   ruleSnippets: PluginRuleSnippet[];
   /** Look up a plugin by ID */
   get(pluginId: string): PluginDescriptor | undefined;
-  /** Look up a Claude Code native plugin by ASB ref or unambiguous Claude install ref */
-  getNative(pluginId: string): PluginDescriptor | undefined;
+  /** Look up a native plugin by ASB ref or unambiguous native install ref */
+  getNative(pluginId: string, target?: NativePluginTarget): PluginDescriptor | undefined;
   /** Expand a list of plugin IDs into per-section component IDs */
   expand(pluginIds: string[]): PluginComponents;
   /** Normalize legacy or aliased component refs to canonical IDs */
@@ -95,6 +106,14 @@ function byEntryName(a: fs.Dirent, b: fs.Dirent): number {
 
 function toId(fileName: string): string {
   return path.basename(fileName, path.extname(fileName));
+}
+
+function safePathSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '-') || 'plugin';
+}
+
+function getCodexNativeWrapperPath(namespace: string): string {
+  return path.join(getConfigDir(), 'state', 'native-plugins', 'codex', safePathSegment(namespace));
 }
 
 function loadRulesFromPluginDir(
@@ -275,11 +294,12 @@ function buildFromMarketplace(
         sourceKind: 'marketplace',
         sourceName,
         native: {
-          target: 'claude-code',
+          target: result.nativeTarget,
           marketplaceName: result.name,
           marketplacePath: basePath,
           pluginName: plugin.name,
           installRef: `${plugin.name}@${result.name}`,
+          version: plugin.version,
         },
       },
       components: {
@@ -321,31 +341,33 @@ function buildFromPlugin(
     ruleIds.length > 0 ||
     mcpResult.ids.length > 0;
 
-  if (!hasAny) return;
+  const codexManifest = readPluginManifest(basePath, 'codex');
+  const manifest = readPluginManifest(basePath, 'claude-code') ?? codexManifest;
+  const native = codexManifest
+    ? {
+        target: 'codex' as const,
+        marketplaceName: namespace,
+        marketplacePath: getCodexNativeWrapperPath(namespace),
+        pluginName: codexManifest.name,
+        installRef: `${codexManifest.name}@${namespace}`,
+        version: codexManifest.version,
+        sourcePath: basePath,
+      }
+    : undefined;
 
-  let description: string | undefined;
-  let version: string | undefined;
-  const manifestPath = path.join(basePath, '.claude-plugin', 'plugin.json');
-  if (fs.existsSync(manifestPath)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-      description = raw.description;
-      version = raw.version;
-    } catch {
-      // ignore unparseable manifest
-    }
-  }
+  if (!hasAny && !native) return;
 
   allPlugins.push({
-    name: namespace,
+    name: native?.pluginName ?? namespace,
     id: namespace,
     refs: [namespace],
     meta: {
-      description,
-      version,
+      description: manifest?.description,
+      version: manifest?.version,
       sourcePath: basePath,
       sourceKind: 'plugin',
       sourceName: namespace,
+      native,
     },
     components: {
       commands: commandIds,
@@ -399,11 +421,12 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   for (const p of plugins) {
     byId.set(p.id, p);
     if (p.meta.native) {
-      const existing = nativeRefAliases.get(p.meta.native.installRef);
+      const key = `${p.meta.native.target}\0${p.meta.native.installRef}`;
+      const existing = nativeRefAliases.get(key);
       if (existing) {
         existing.push(p);
       } else {
-        nativeRefAliases.set(p.meta.native.installRef, [p]);
+        nativeRefAliases.set(key, [p]);
       }
     }
     const existing = byName.get(p.name);
@@ -431,11 +454,12 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   }
 
   const byNativeRef = new Map<string, PluginDescriptor>();
-  for (const [nativeRef, descriptors] of nativeRefAliases) {
+  for (const [nativeKey, descriptors] of nativeRefAliases) {
     if (descriptors.length === 1) {
       const descriptor = descriptors[0];
-      byNativeRef.set(nativeRef, descriptor);
+      byNativeRef.set(nativeKey, descriptor);
     } else {
+      const [, nativeRef] = nativeKey.split('\0');
       const sources = descriptors.map((d) => d.meta.sourceName).join(', ');
       console.warn(
         `[plugins] Ambiguous native plugin ref "${nativeRef}" found in sources: ${sources}. ` +
@@ -469,8 +493,17 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
       return byId.get(pluginId);
     },
 
-    getNative(pluginId: string) {
-      return byId.get(pluginId) ?? byNativeRef.get(pluginId);
+    getNative(pluginId: string, target?: NativePluginTarget) {
+      const direct = byId.get(pluginId);
+      if (direct?.meta.native && (!target || direct.meta.native.target === target)) return direct;
+      if (!target) {
+        for (const nativeTarget of ['claude-code', 'codex'] as const) {
+          const candidate = byNativeRef.get(`${nativeTarget}\0${pluginId}`);
+          if (candidate) return candidate;
+        }
+        return undefined;
+      }
+      return byNativeRef.get(`${target}\0${pluginId}`);
     },
 
     expand(pluginIds: string[]): PluginComponents {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -110,6 +111,25 @@ function createMarketplaceFixture(
     }
   }
 
+  return mktDir;
+}
+
+function createCodexMarketplaceFixture(asbHome: string, marketplaceName: string): string {
+  const mktDir = path.join(asbHome, 'marketplaces', marketplaceName);
+  const pluginDir = path.join(mktDir, 'plugins', 'cowart');
+  fs.mkdirSync(path.join(mktDir, '.agents', 'plugins'), { recursive: true });
+  fs.mkdirSync(path.join(pluginDir, '.codex-plugin'), { recursive: true });
+  fs.writeFileSync(
+    path.join(mktDir, '.agents', 'plugins', 'marketplace.json'),
+    JSON.stringify({
+      name: marketplaceName,
+      plugins: [{ name: 'cowart', source: { source: 'local', path: './plugins/cowart' } }],
+    })
+  );
+  fs.writeFileSync(
+    path.join(pluginDir, '.codex-plugin', 'plugin.json'),
+    JSON.stringify({ name: 'cowart', description: 'Cowart', version: '0.1.0' })
+  );
   return mktDir;
 }
 
@@ -768,6 +788,164 @@ test('marketplace plugins expose Claude Code native install metadata', () => {
   });
 });
 
+test('Codex marketplace plugins expose Codex native install metadata', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createCodexMarketplaceFixture(asbHome, 'codex-canvas');
+
+    writeConfigToml(asbHome, `[plugins.sources]\ncanvas = "${mktDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('cowart@canvas');
+    assert.ok(plugin);
+    assert.equal(plugin.meta.native?.target, 'codex');
+    assert.equal(plugin.meta.native.marketplaceName, 'codex-canvas');
+    assert.equal(plugin.meta.native.marketplacePath, mktDir);
+    assert.equal(plugin.meta.native.installRef, 'cowart@codex-canvas');
+    assert.equal(index.getNative('cowart@codex-canvas', 'codex')?.id, 'cowart@canvas');
+    assert.equal(index.getNative('cowart@codex-canvas', 'claude-code'), undefined);
+  });
+});
+
+test('remote marketplace cache paths do not use raw plugin names', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'unsafe-cache');
+    fs.mkdirSync(path.join(mktDir, '.agents', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(mktDir, '.agents', 'plugins', 'marketplace.json'),
+      JSON.stringify({
+        name: 'unsafe-cache',
+        plugins: [
+          {
+            name: '../../escape/plugin',
+            source: { git: 'file:///not-a-real-repo.git' },
+          },
+        ],
+      })
+    );
+
+    writeConfigToml(asbHome, `[plugins.sources]\nunsafe-cache = "${mktDir}"\n`);
+
+    const index = buildPluginIndex();
+    assert.equal(index.plugins.length, 0);
+    assert.equal(fs.existsSync(path.join(asbHome, 'plugins', 'escape')), false);
+  });
+});
+
+test('remote marketplace source paths stay inside the cloned cache root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const remoteRepo = path.join(asbHome, 'remote-plugin-repo');
+    fs.mkdirSync(remoteRepo, { recursive: true });
+    execFileSync('git', ['init'], { cwd: remoteRepo, stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: remoteRepo,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: remoteRepo,
+      stdio: 'ignore',
+    });
+    fs.writeFileSync(path.join(remoteRepo, 'README.md'), 'remote plugin\n');
+    fs.symlinkSync('../escaped-plugin', path.join(remoteRepo, 'plugin-link'));
+    execFileSync('git', ['add', 'README.md'], { cwd: remoteRepo, stdio: 'ignore' });
+    execFileSync('git', ['add', 'plugin-link'], { cwd: remoteRepo, stdio: 'ignore' });
+    execFileSync('git', ['commit', '-m', 'init'], { cwd: remoteRepo, stdio: 'ignore' });
+
+    const escapedDir = path.join(
+      asbHome,
+      'plugins',
+      '.plugin-cache',
+      'escape-source',
+      'escaped-plugin'
+    );
+    fs.mkdirSync(path.join(escapedDir, '.codex-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(escapedDir, '.codex-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'escaped-plugin' })
+    );
+
+    const mktDir = path.join(asbHome, 'marketplaces', 'escape-source');
+    fs.mkdirSync(path.join(mktDir, '.agents', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(mktDir, '.agents', 'plugins', 'marketplace.json'),
+      JSON.stringify({
+        name: 'escape-source',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { url: remoteRepo, path: '../escaped-plugin' },
+          },
+          {
+            name: 'remote-symlink',
+            source: { url: remoteRepo, path: 'plugin-link' },
+          },
+        ],
+      })
+    );
+
+    writeConfigToml(asbHome, `[plugins.sources]\nescape-source = "${mktDir}"\n`);
+
+    const index = buildPluginIndex();
+    assert.equal(index.plugins.length, 0);
+  });
+});
+
+test('bare Codex plugin sources expose Codex native install metadata', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const pluginDir = path.join(asbHome, 'external', 'cowart');
+    fs.mkdirSync(path.join(pluginDir, '.codex-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, '.codex-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'cowart', description: 'Canvas', version: '0.1.0' })
+    );
+
+    writeConfigToml(asbHome, `[plugins.sources]\ncowart = "${pluginDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('cowart');
+    assert.ok(plugin);
+    assert.equal(plugin.meta.description, 'Canvas');
+    assert.equal(plugin.meta.native?.target, 'codex');
+    assert.equal(plugin.meta.native.marketplaceName, 'cowart');
+    assert.equal(
+      plugin.meta.native.marketplacePath,
+      path.join(asbHome, 'state', 'native-plugins', 'codex', 'cowart')
+    );
+    assert.equal(plugin.meta.native.sourcePath, pluginDir);
+    assert.equal(plugin.meta.native.installRef, 'cowart@cowart');
+  });
+});
+
+test('bare plugin sources can carry both Claude metadata and Codex native metadata', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const pluginDir = path.join(asbHome, 'external', 'dual-native');
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.codex-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'claude-name', description: 'Claude metadata' })
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.codex-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'codex-name', version: '0.2.0' })
+    );
+
+    writeConfigToml(asbHome, `[plugins.sources]\ndual-native = "${pluginDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('dual-native');
+    assert.ok(plugin);
+    assert.equal(plugin.meta.description, 'Claude metadata');
+    assert.equal(plugin.meta.native?.target, 'codex');
+    assert.equal(plugin.meta.native.pluginName, 'codex-name');
+    assert.equal(plugin.meta.native.installRef, 'codex-name@dual-native');
+  });
+});
+
 test('resolveApplicationNativePluginConfig keeps native plugins out of generic plugin expansion', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -798,6 +976,32 @@ test('resolveApplicationNativePluginConfig keeps native plugins out of generic p
     const codexCommands = resolveEffectiveSectionConfig('commands', 'codex');
     assert.deepEqual(claudeCommands.enabled, []);
     assert.deepEqual(codexCommands.enabled, []);
+  });
+});
+
+test('resolveApplicationNativePluginConfig resolves Codex native refs by target', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const pluginDir = path.join(asbHome, 'external', 'cowart');
+    fs.mkdirSync(path.join(pluginDir, '.codex-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, '.codex-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'cowart' })
+    );
+
+    writeConfigToml(
+      asbHome,
+      [
+        '[plugins.sources]',
+        `cowart-source = "${pluginDir}"`,
+        '',
+        '[applications.codex.native_plugins]',
+        'enabled = ["cowart@cowart-source"]',
+      ].join('\n')
+    );
+
+    const nativeConfig = resolveApplicationNativePluginConfig('codex');
+    assert.deepEqual(nativeConfig.enabled, ['cowart-source']);
   });
 });
 

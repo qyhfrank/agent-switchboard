@@ -6,6 +6,7 @@
  * that ASB distributes library entries to.
  */
 
+import type { NativePluginTarget } from '../marketplace/reader.js';
 import { buildPluginIndex, type PluginComponentSection } from '../plugins/index.js';
 import { loadMergedSwitchboardConfig, loadWritableConfigLayer } from './layered-config.js';
 import type {
@@ -170,12 +171,17 @@ function normalizeIncrementalSelection(
   return normalized;
 }
 
-function normalizeNativePluginRefs(ids: string[], scope?: ConfigScope): string[] {
+function toNativePluginTarget(appId: string): NativePluginTarget | undefined {
+  return appId === 'claude-code' || appId === 'codex' ? appId : undefined;
+}
+
+function normalizeNativePluginRefs(appId: string, ids: string[], scope?: ConfigScope): string[] {
   if (ids.length === 0) return [];
   const index = buildPluginIndex(scope);
+  const target = toNativePluginTarget(appId);
   return dedupeIds(
     ids.map((id) => {
-      const plugin = index.getNative(id);
+      const plugin = index.getNative(id, target);
       return plugin?.id ?? id;
     })
   );
@@ -242,7 +248,7 @@ function resolveNativePluginConfigFromConfig(
     );
   }
   return {
-    enabled: normalizeNativePluginRefs(override?.enabled ?? [], scope),
+    enabled: normalizeNativePluginRefs(appId, override?.enabled ?? [], scope),
     scope: 'user',
   };
 }

@@ -149,7 +149,7 @@ All entry-level sections (`rules`, `commands`, `agents`, `skills`, `hooks`, `plu
 
 The `[plugins.sources]` sub-table declares explicit plugin locations. Local plugins in `~/.asb/plugins/` are auto-discovered without configuration.
 
-Claude Code native plugins use the Claude plugin lifecycle instead of generic ASB component expansion. Keep the marketplace in `[plugins.sources]` or `~/.asb/plugins/`, then enable it only under `applications.claude-code.native_plugins`:
+Native plugins use the target application's plugin lifecycle instead of generic ASB component expansion. Keep the plugin or marketplace in `[plugins.sources]` or `~/.asb/plugins/`, then enable it only under the target's `native_plugins` section:
 
 ```toml
 [applications]
@@ -161,6 +161,20 @@ type = "clone"
 
 [applications.claude-code.native_plugins]
 enabled = ["codex@openai-codex"]
+scope = "user"
+```
+
+Codex native plugins can be a Codex marketplace (`.agents/plugins/marketplace.json`) or a bare plugin (`.codex-plugin/plugin.json`). Bare plugins are wrapped into an ASB-owned local marketplace during sync because the Codex CLI installs plugins through marketplace refs:
+
+```toml
+[applications]
+enabled = ["codex"]
+
+[plugins.sources]
+cowart = "/path/to/cowart"
+
+[applications.codex.native_plugins]
+enabled = ["cowart"]
 scope = "user"
 ```
 
@@ -365,7 +379,9 @@ A plugin is a directory with component subdirectories and an optional manifest:
 ```
 my-plugin/
 ├── .claude-plugin/
-│   └── plugin.json       # optional metadata (name, version, description)
+│   └── plugin.json       # optional Claude metadata
+├── .codex-plugin/
+│   └── plugin.json       # optional Codex native metadata
 ├── rules/                # rule .md files
 ├── commands/             # command .md files
 ├── agents/               # agent .md files
@@ -374,7 +390,7 @@ my-plugin/
 └── .mcp.json             # MCP server definitions
 ```
 
-No manifest is required. A bare directory with just `rules/` and `skills/` subdirectories works as an informal plugin. Adding `.claude-plugin/plugin.json` provides name, version, and description metadata. This format is compatible with Claude Code's plugin system (see `docs/claude-marketplace-format.md` for the full spec).
+No manifest is required. A bare directory with just `rules/` and `skills/` subdirectories works as an informal plugin. Adding `.claude-plugin/plugin.json` provides Claude metadata. Adding `.codex-plugin/plugin.json` makes the directory selectable as a Codex native plugin. The Claude format is compatible with Claude Code's plugin system (see `docs/claude-marketplace-format.md` for the full spec).
 
 ### Sources
 
@@ -391,10 +407,10 @@ Local plugins placed in `~/.asb/plugins/` are auto-discovered without explicit c
 
 agent-switchboard auto-detects two source kinds:
 
-| Kind          | Detection                                  | Structure                                      |
-|:--------------|:-------------------------------------------|:-----------------------------------------------|
-| `marketplace` | Contains `.claude-plugin/marketplace.json` | Multiple plugins, each in its own subdirectory |
-| `plugin`      | Everything else                            | Single plugin (with or without `plugin.json`)  |
+| Kind          | Detection                                                                                       | Structure                                      |
+|:--------------|:------------------------------------------------------------------------------------------------|:-----------------------------------------------|
+| `marketplace` | Contains `.claude-plugin/marketplace.json` or `.agents/plugins/marketplace.json`                 | Multiple plugins, each in its own subdirectory |
+| `plugin`      | Everything else, including formal `.claude-plugin/plugin.json` or `.codex-plugin/plugin.json`    | Single plugin                                  |
 
 ### CLI
 
@@ -417,9 +433,9 @@ Enabled plugin components are expanded into entry-level `enabled` arrays during 
 
 Plugin MCP servers are also addressable directly through `[mcp].enabled` and the `asb mcp` selector. As long as the plugin source is discoverable, a plugin MCP server can be enabled directly without adding its parent plugin to `[plugins].enabled`.
 
-### Claude Code Native Plugins
+### Native Plugins
 
-Claude Code marketplaces can be managed as target-native plugins when the plugin depends on Claude's plugin runtime, `${CLAUDE_PLUGIN_ROOT}`, native commands, agents, hooks, or setup flow.
+Target-native plugins stay inside the owning application's plugin lifecycle instead of being expanded into portable ASB components.
 
 ```toml
 [applications]
@@ -434,7 +450,19 @@ enabled = ["codex@openai-codex"]
 scope = "user"
 ```
 
-`asb sync --dry-run` reports the planned Claude native plugin action. A real `asb sync` validates the marketplace, adds it to Claude Code if needed, installs the plugin if missing, and enables it if Claude reports it disabled. Native plugins are sent only to Claude Code and are rejected if the same plugin is also enabled through `[plugins].enabled`.
+```toml
+[applications]
+enabled = ["codex"]
+
+[plugins.sources]
+cowart = "/path/to/cowart"
+
+[applications.codex.native_plugins]
+enabled = ["cowart"]
+scope = "user"
+```
+
+`asb sync --dry-run` reports the planned native plugin action. A real `asb sync` validates Claude marketplaces before installing them through Claude Code. For Codex, ASB registers the marketplace with the Codex CLI and installs the plugin ref; bare `.codex-plugin` directories are first wrapped in `ASB_HOME/state/native-plugins/codex/`. Native plugins are rejected if the same plugin is also enabled through `[plugins].enabled`.
 
 ## Sync
 
