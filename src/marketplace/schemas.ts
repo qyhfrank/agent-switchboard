@@ -1,13 +1,15 @@
 /**
- * Zod schemas for Claude Code marketplace and plugin manifests.
+ * Zod schemas for native marketplace and plugin manifests.
  */
 
 import { z } from 'zod';
 
 export const pluginSourceSchema = z
   .object({
+    source: z.string().optional(),
     github: z.string().optional(),
     git: z.string().optional(),
+    url: z.string().optional(),
     npm: z.string().optional(),
     pip: z.string().optional(),
     path: z.string().optional(),
@@ -47,7 +49,7 @@ export const marketplaceMetadataSchema = z
 export const marketplaceManifestSchema = z
   .object({
     name: z.string().min(1),
-    owner: marketplaceOwnerSchema,
+    owner: marketplaceOwnerSchema.optional(),
     metadata: marketplaceMetadataSchema.optional(),
     plugins: z.array(pluginEntrySchema).default([]),
   })

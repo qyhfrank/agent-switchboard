@@ -180,6 +180,38 @@ test('validateSourcePath detects library folders', () => {
   });
 });
 
+test('validateSourcePath detects Codex native plugin manifests', () => {
+  withTempAsbHome((asbHome) => {
+    const pluginDir = path.join(asbHome, 'codex-plugin');
+    fs.mkdirSync(path.join(pluginDir, '.codex-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, '.codex-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'cowart' })
+    );
+
+    const result = validateSourcePath(pluginDir);
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.found, ['plugin']);
+    assert.equal(result.kind, 'plugin');
+  });
+});
+
+test('validateSourcePath detects Codex native marketplace manifests', () => {
+  withTempAsbHome((asbHome) => {
+    const marketplaceDir = path.join(asbHome, 'codex-marketplace');
+    fs.mkdirSync(path.join(marketplaceDir, '.agents', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.agents', 'plugins', 'marketplace.json'),
+      JSON.stringify({ name: 'codex-marketplace', plugins: [] })
+    );
+
+    const result = validateSourcePath(marketplaceDir);
+    assert.equal(result.valid, true);
+    assert.deepEqual(result.found, ['marketplace']);
+    assert.equal(result.kind, 'marketplace');
+  });
+});
+
 test('validateSourcePath reports invalid when no library folders', () => {
   withTempAsbHome((asbHome) => {
     const emptyDir = path.join(asbHome, 'empty');

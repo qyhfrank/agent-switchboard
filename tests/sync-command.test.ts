@@ -15,6 +15,10 @@ import {
   type ClaudePluginCommandRunner,
   distributeClaudeNativePlugins,
 } from '../src/native-plugins/claude-code.js';
+import {
+  type CodexPluginCommandRunner,
+  distributeCodexNativePlugins,
+} from '../src/native-plugins/codex.js';
 import { clearPluginIndexCache } from '../src/plugins/index.js';
 import { runSyncCommand } from '../src/sync/command.js';
 import { resetTargetInit } from '../src/targets/init.js';
@@ -97,6 +101,17 @@ function createClaudeMarketplaceFixture(asbHome: string): string {
     'utf-8'
   );
   return mktDir;
+}
+
+function createCodexPluginFixture(asbHome: string): string {
+  const pluginDir = path.join(asbHome, 'plugins', 'cowart');
+  fs.mkdirSync(path.join(pluginDir, '.codex-plugin'), { recursive: true });
+  fs.writeFileSync(
+    path.join(pluginDir, '.codex-plugin', 'plugin.json'),
+    JSON.stringify({ name: 'cowart', version: '0.1.0' }),
+    'utf-8'
+  );
+  return pluginDir;
 }
 
 async function captureConsoleOutput<T>(
@@ -387,6 +402,33 @@ test('runSyncCommand dry-run previews Claude native plugins without generic expa
   });
 });
 
+test('runSyncCommand dry-run previews Codex native plugins without generic expansion', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+      'scope = "user"',
+    ]);
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ updateSources: false, dryRun: true })
+    );
+
+    assert.equal(result, false);
+    assert.match(output, /native plugins/);
+    assert.match(output, /cowart/);
+    assert.equal(fs.existsSync(path.join(getCodexDir(), 'prompts')), false);
+  });
+});
+
 test('runSyncCommand rejects native refs before generic plugin writes', async () => {
   await withTempHomesAsync(async ({ asbHome }) => {
     simulateAppsInstalled('codex');
@@ -411,6 +453,31 @@ test('runSyncCommand rejects native refs before generic plugin writes', async ()
 
     assert.equal(result, true);
     assert.match(output, /also enabled through \[plugins\]\.enabled/);
+    assert.equal(fs.existsSync(path.join(getCodexDir(), 'prompts')), false);
+  });
+});
+
+test('runSyncCommand rejects Codex native plugins enabled through generic plugins', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins]',
+      'enabled = ["cowart"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+    ]);
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ updateSources: false })
+    );
+
+    assert.equal(result, true);
+    assert.match(output, /use \[applications\.codex\.native_plugins\] instead/);
     assert.equal(fs.existsSync(path.join(getCodexDir(), 'prompts')), false);
   });
 });
@@ -496,6 +563,329 @@ test('distributeClaudeNativePlugins dry-run does not invoke Claude CLI runner', 
     assert.equal(called, false);
     assert.equal(outcome.results[0]?.status, 'written');
     assert.equal(outcome.results[0]?.reason, 'would sync native plugin (user)');
+  });
+});
+
+test('distributeCodexNativePlugins installs bare plugin through Codex CLI', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    const calls: string[][] = [];
+    const runner: CodexPluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return { status: 0, stdout: '{"marketplaces":[]}', stderr: '' };
+      }
+      if (args.join(' ') === 'plugin list --marketplace cowart --json') {
+        return { status: 0, stdout: '{"installed":[],"available":[]}', stderr: '' };
+      }
+      return { status: 0, stdout: '{}', stderr: '' };
+    };
+
+    const wrapperDir = path.join(asbHome, 'state', 'native-plugins', 'codex', 'cowart');
+    fs.mkdirSync(path.join(wrapperDir, 'plugins'), { recursive: true });
+    fs.symlinkSync(
+      path.join(asbHome, 'missing-cowart'),
+      path.join(wrapperDir, 'plugins', 'cowart'),
+      'dir'
+    );
+
+    const outcome = distributeCodexNativePlugins({
+      activeAppIds: ['codex'],
+      runner,
+    });
+
+    const manifest = JSON.parse(
+      fs.readFileSync(path.join(wrapperDir, '.agents', 'plugins', 'marketplace.json'), 'utf-8')
+    ) as { name: string; plugins: Array<{ name: string; source: string }> };
+
+    assert.deepEqual(outcome.results, [
+      {
+        platform: 'codex',
+        pluginRef: 'cowart@cowart',
+        filePath: wrapperDir,
+        status: 'written',
+        reason: 'marketplace added, installed',
+      },
+    ]);
+    assert.deepEqual(manifest, {
+      name: 'cowart',
+      plugins: [{ name: 'cowart', source: './plugins/cowart' }],
+    });
+    assert.equal(fs.lstatSync(path.join(wrapperDir, 'plugins', 'cowart')).isSymbolicLink(), true);
+    assert.deepEqual(calls, [
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'marketplace', 'add', wrapperDir, '--json'],
+      ['plugin', 'list', '--marketplace', 'cowart', '--json'],
+      ['plugin', 'add', 'cowart@cowart', '--json'],
+    ]);
+  });
+});
+
+test('distributeCodexNativePlugins dry-run does not invoke Codex CLI runner', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    let called = false;
+    const runner: CodexPluginCommandRunner = () => {
+      called = true;
+      return { status: 1, stdout: '', stderr: 'should not run' };
+    };
+
+    const outcome = distributeCodexNativePlugins({
+      activeAppIds: ['codex'],
+      dryRun: true,
+      runner,
+    });
+
+    assert.equal(called, false);
+    assert.equal(outcome.results[0]?.status, 'written');
+    assert.equal(outcome.results[0]?.reason, 'would sync native plugin (user)');
+  });
+});
+
+test('distributeCodexNativePlugins skips installed matching plugins as up-to-date', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    const wrapperDir = path.join(asbHome, 'state', 'native-plugins', 'codex', 'cowart');
+    const calls: string[][] = [];
+    const runner: CodexPluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({ marketplaces: [{ name: 'cowart', root: wrapperDir }] }),
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'plugin list --marketplace cowart --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            installed: [
+              {
+                pluginId: 'cowart@cowart',
+                marketplaceName: 'cowart',
+                version: '0.1.0',
+                installed: true,
+                enabled: true,
+              },
+            ],
+            available: [],
+          }),
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '{}', stderr: '' };
+    };
+
+    const outcome = distributeCodexNativePlugins({
+      activeAppIds: ['codex'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'skipped');
+    assert.equal(outcome.results[0]?.reason, 'up-to-date');
+    assert.deepEqual(calls, [
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'list', '--marketplace', 'cowart', '--json'],
+    ]);
+  });
+});
+
+test('distributeCodexNativePlugins re-adds disabled installed plugins', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    const wrapperDir = path.join(asbHome, 'state', 'native-plugins', 'codex', 'cowart');
+    const calls: string[][] = [];
+    const runner: CodexPluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({ marketplaces: [{ name: 'cowart', root: wrapperDir }] }),
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'plugin list --marketplace cowart --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            installed: [
+              {
+                pluginId: 'cowart@cowart',
+                marketplaceName: 'cowart',
+                version: '0.1.0',
+                installed: true,
+                enabled: false,
+              },
+            ],
+            available: [],
+          }),
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '{}', stderr: '' };
+    };
+
+    const outcome = distributeCodexNativePlugins({
+      activeAppIds: ['codex'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'written');
+    assert.equal(outcome.results[0]?.reason, 'enabled');
+    assert.deepEqual(calls, [
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'list', '--marketplace', 'cowart', '--json'],
+      ['plugin', 'add', 'cowart@cowart', '--json'],
+    ]);
+  });
+});
+
+test('distributeCodexNativePlugins updates stale installed plugin versions', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    const wrapperDir = path.join(asbHome, 'state', 'native-plugins', 'codex', 'cowart');
+    const calls: string[][] = [];
+    const runner: CodexPluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({ marketplaces: [{ name: 'cowart', root: wrapperDir }] }),
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'plugin list --marketplace cowart --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            installed: [
+              {
+                pluginId: 'cowart@cowart',
+                marketplaceName: 'cowart',
+                version: '0.0.9',
+                installed: true,
+                enabled: true,
+              },
+            ],
+            available: [],
+          }),
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '{}', stderr: '' };
+    };
+
+    const outcome = distributeCodexNativePlugins({
+      activeAppIds: ['codex'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'written');
+    assert.equal(outcome.results[0]?.reason, 'updated');
+    assert.deepEqual(calls, [
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'list', '--marketplace', 'cowart', '--json'],
+      ['plugin', 'add', 'cowart@cowart', '--json'],
+    ]);
+  });
+});
+
+test('distributeCodexNativePlugins rejects same-name marketplace from another root', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const pluginDir = createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `cowart = "${pluginDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    const runner: CodexPluginCommandRunner = (args) => {
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify({
+            marketplaces: [{ name: 'cowart', root: path.join(asbHome, 'other-cowart') }],
+          }),
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '{}', stderr: '' };
+    };
+
+    const outcome = distributeCodexNativePlugins({
+      activeAppIds: ['codex'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'error');
+    assert.match(outcome.results[0]?.error ?? '', /different source/);
   });
 });
 

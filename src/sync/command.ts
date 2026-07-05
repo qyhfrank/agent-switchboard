@@ -17,6 +17,10 @@ import {
   distributeClaudeNativePlugins,
   validateClaudeNativePlugins,
 } from '../native-plugins/claude-code.js';
+import {
+  distributeCodexNativePlugins,
+  validateCodexNativePlugins,
+} from '../native-plugins/codex.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import { distributeRules } from '../rules/distribution.js';
 import { distributeSkills } from '../skills/distribution.js';
@@ -44,6 +48,10 @@ interface SyncPhaseResult {
   hasErrors: boolean;
   hasChanges: boolean;
 }
+
+type NativePluginDistributionResult =
+  | ReturnType<typeof distributeClaudeNativePlugins>['results'][number]
+  | ReturnType<typeof distributeCodexNativePlugins>['results'][number];
 
 export interface RunSyncCommandOptions {
   scope?: ConfigScope;
@@ -167,22 +175,30 @@ export async function runSyncPhase({
 
   const collision = isManaged ? config.distribution.project.collision : undefined;
   const rulesPlacement = isManaged ? config.distribution.project.rules.placement : undefined;
-  const nativePluginPreflight = validateClaudeNativePlugins({
-    scope,
-    activeAppIds,
-    assumeInstalled: assumeInstalledSet,
-    genericPluginRefs: displayPluginRefs,
-    projectMode,
-  });
-  if (nativePluginPreflight.results.some((result) => result.status === 'error')) {
+  const nativePluginPreflightResults: NativePluginDistributionResult[] = [
+    ...validateClaudeNativePlugins({
+      scope,
+      activeAppIds,
+      assumeInstalled: assumeInstalledSet,
+      genericPluginRefs: displayPluginRefs,
+      projectMode,
+    }).results,
+    ...validateCodexNativePlugins({
+      scope,
+      activeAppIds,
+      assumeInstalled: assumeInstalledSet,
+      genericPluginRefs: displayPluginRefs,
+      projectMode,
+    }).results,
+  ];
+  if (nativePluginPreflightResults.some((result) => result.status === 'error')) {
     printCompactDistributions([
       {
         label: 'native plugins',
-        results: nativePluginPreflight.results,
+        results: nativePluginPreflightResults,
         emptyMessage: 'none',
-        getTargetLabel: (result) =>
-          (result as (typeof nativePluginPreflight.results)[number]).platform,
-        getPath: (result) => (result as (typeof nativePluginPreflight.results)[number]).filePath,
+        getTargetLabel: (result) => (result as NativePluginDistributionResult).platform,
+        getPath: (result) => (result as NativePluginDistributionResult).filePath,
       },
     ]);
     return { hasErrors: true, hasChanges: false };
@@ -194,7 +210,7 @@ export async function runSyncPhase({
   let agentDistribution: ReturnType<typeof distributeSubagents>;
   let skillDistribution: ReturnType<typeof distributeSkills>;
   let hookDistribution: ReturnType<typeof distributeHooks>;
-  let nativePluginDistribution: ReturnType<typeof distributeClaudeNativePlugins>;
+  let nativePluginDistribution: { results: NativePluginDistributionResult[] };
 
   try {
     mcpDistribution = await distributeMcp(scope, undefined, {
@@ -240,14 +256,26 @@ export async function runSyncPhase({
       projectMode,
       dryRun,
     });
-    nativePluginDistribution = distributeClaudeNativePlugins({
-      scope,
-      activeAppIds,
-      assumeInstalled: assumeInstalledSet,
-      dryRun,
-      genericPluginRefs: displayPluginRefs,
-      projectMode,
-    });
+    nativePluginDistribution = {
+      results: [
+        ...distributeClaudeNativePlugins({
+          scope,
+          activeAppIds,
+          assumeInstalled: assumeInstalledSet,
+          dryRun,
+          genericPluginRefs: displayPluginRefs,
+          projectMode,
+        }).results,
+        ...distributeCodexNativePlugins({
+          scope,
+          activeAppIds,
+          assumeInstalled: assumeInstalledSet,
+          dryRun,
+          genericPluginRefs: displayPluginRefs,
+          projectMode,
+        }).results,
+      ],
+    };
   } finally {
     // Save manifest even if distribution throws, to preserve partial progress
     if (!dryRun && isManaged && manifest) {
@@ -319,9 +347,8 @@ export async function runSyncPhase({
       label: 'native plugins',
       results: nativePluginDistribution.results,
       emptyMessage: 'none',
-      getTargetLabel: (result) =>
-        (result as (typeof nativePluginDistribution.results)[number]).platform,
-      getPath: (result) => (result as (typeof nativePluginDistribution.results)[number]).filePath,
+      getTargetLabel: (result) => (result as NativePluginDistributionResult).platform,
+      getPath: (result) => (result as NativePluginDistributionResult).filePath,
     });
   }
 
@@ -502,16 +529,24 @@ function displayInventory(opts: {
       );
     }
 
-    const nativePlugins = resolveScopedNativePluginConfig('claude-code', scope);
-    if (nativePlugins.enabled.length > 0) {
-      const names = nativePlugins.enabled
-        .map((pluginId) => {
-          const plugin = pluginIndex.get(pluginId);
-          return plugin ? pluginId : chalk.strikethrough(pluginId);
-        })
+    const nativeConfigs = (['claude-code', 'codex'] as const)
+      .map((appId) => ({ appId, config: resolveScopedNativePluginConfig(appId, scope) }))
+      .filter(({ config }) => config.enabled.length > 0);
+    const nativeCount = nativeConfigs.reduce((sum, entry) => sum + entry.config.enabled.length, 0);
+    if (nativeCount > 0) {
+      const names = nativeConfigs
+        .flatMap(({ appId, config }) =>
+          config.enabled.map((pluginId) => {
+            const plugin = pluginIndex.getNative(pluginId, appId);
+            return plugin ? pluginId : chalk.strikethrough(pluginId);
+          })
+        )
         .join(', ');
+      const appCounts = nativeConfigs
+        .map(({ appId, config }) => `${appId}:${config.enabled.length}`)
+        .join('  ');
       console.log(
-        `  ${chalk.magenta('native plugins')} ${chalk.gray(`(${nativePlugins.enabled.length})`)}  claude-code:${nativePlugins.enabled.length} ${chalk.gray(`scope:${nativePlugins.scope}`)}`
+        `  ${chalk.magenta('native plugins')} ${chalk.gray(`(${nativeCount})`)}  ${appCounts} ${chalk.gray(`scope:${nativeConfigs[0]?.config.scope ?? 'user'}`)}`
       );
       console.log(`                     ${chalk.gray('→')} ${names}`);
     }
