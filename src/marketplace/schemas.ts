@@ -25,6 +25,7 @@ export const pluginEntrySchema = z
     strict: z.boolean().default(true),
     commands: z.union([z.string(), z.array(z.string())]).optional(),
     agents: z.union([z.string(), z.array(z.string())]).optional(),
+    skills: z.unknown().optional(),
     hooks: z.unknown().optional(),
     mcpServers: z.record(z.unknown()).optional(),
     lspServers: z.record(z.unknown()).optional(),
@@ -62,6 +63,7 @@ export const pluginManifestSchema = z
     version: z.string().optional(),
     commands: z.union([z.string(), z.array(z.string())]).optional(),
     agents: z.union([z.string(), z.array(z.string())]).optional(),
+    skills: z.unknown().optional(),
     hooks: z.unknown().optional(),
     mcpServers: z.unknown().optional(),
   })

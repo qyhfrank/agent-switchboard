@@ -76,7 +76,7 @@ function toId(fileName: string): string {
  * The namespace defaults to the plugin name, producing IDs like "plugin-name:component-id".
  *
  * When `customPaths` is present on the plugin (from strict mode resolution),
- * commands/agents are loaded from those specific files instead of scanning directories.
+ * entries are loaded from those paths instead of the default component directories.
  */
 export function loadPluginComponents(
   plugin: ResolvedPlugin,
@@ -114,7 +114,9 @@ export function loadPluginComponents(
     );
   }
 
-  result.skills = loadSkillEntries(plugin.localPath, namespace);
+  result.skills = plugin.customPaths?.skills
+    ? loadSkillEntriesFromCustomPaths(plugin.localPath, plugin.customPaths.skills, namespace)
+    : loadSkillEntries(plugin.localPath, namespace);
   result.hooks = loadPluginHookEntries(plugin.localPath, namespace);
 
   return result;
@@ -216,9 +218,46 @@ function loadMarkdownEntries<T extends CommandEntry | SubagentEntry>(
  * Each subdirectory containing SKILL.md is a skill bundle.
  */
 function loadSkillEntries(pluginDir: string, namespace: string): SkillEntryFromPlugin[] {
-  const skillsDir = path.join(pluginDir, 'skills');
+  return loadSkillEntriesFromDirectory(path.join(pluginDir, 'skills'), namespace, false);
+}
+
+function loadSkillEntriesFromCustomPaths(
+  pluginRoot: string,
+  customPaths: string[],
+  namespace: string
+): SkillEntryFromPlugin[] {
+  const result: SkillEntryFromPlugin[] = [];
+
+  for (const customPath of customPaths) {
+    const absolutePath = path.resolve(pluginRoot, customPath);
+    if (
+      fs.existsSync(absolutePath) &&
+      fs.statSync(absolutePath).isFile() &&
+      path.basename(absolutePath) === SKILL_FILE
+    ) {
+      const skillDir = path.dirname(absolutePath);
+      result.push(parseSkillEntry(skillDir, skillDir, namespace));
+      continue;
+    }
+
+    result.push(...loadSkillEntriesFromDirectory(absolutePath, namespace, true));
+  }
+
+  return result;
+}
+
+function loadSkillEntriesFromDirectory(
+  skillsDir: string,
+  namespace: string,
+  allowDirectSkill: boolean
+): SkillEntryFromPlugin[] {
   if (!fs.existsSync(skillsDir) || !fs.statSync(skillsDir).isDirectory()) {
     return [];
+  }
+
+  const directSkillPath = path.join(skillsDir, SKILL_FILE);
+  if (allowDirectSkill && fs.existsSync(directSkillPath)) {
+    return [parseSkillEntry(skillsDir, skillsDir, namespace)];
   }
 
   const result: SkillEntryFromPlugin[] = [];
@@ -231,29 +270,39 @@ function loadSkillEntries(pluginDir: string, namespace: string): SkillEntryFromP
     const skillPath = path.join(skillDir, SKILL_FILE);
     if (!fs.existsSync(skillPath)) continue;
 
-    try {
-      const rawContent = fs.readFileSync(skillPath, 'utf-8');
-      const parsed = parseSkillMarkdown(rawContent);
-      const bareId = entry.name;
-      const id = `${namespace}:${bareId}`;
-
-      result.push({
-        id,
-        bareId,
-        namespace,
-        source: skillsDir,
-        dirPath: skillDir,
-        skillPath,
-        metadata: parsed.metadata,
-        content: parsed.content,
-      });
-    } catch (error) {
-      const msg = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to parse plugin skill "${entry.name}": ${msg}`);
-    }
+    result.push(parseSkillEntry(skillDir, skillsDir, namespace));
   }
 
   return result;
+}
+
+function parseSkillEntry(
+  skillDir: string,
+  skillsDir: string,
+  namespace: string
+): SkillEntryFromPlugin {
+  const skillPath = path.join(skillDir, SKILL_FILE);
+  const bareId = path.basename(skillDir);
+
+  try {
+    const rawContent = fs.readFileSync(skillPath, 'utf-8');
+    const parsed = parseSkillMarkdown(rawContent);
+    const id = `${namespace}:${bareId}`;
+
+    return {
+      id,
+      bareId,
+      namespace,
+      source: skillsDir,
+      dirPath: skillDir,
+      skillPath,
+      metadata: parsed.metadata,
+      content: parsed.content,
+    };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to parse plugin skill "${bareId}": ${msg}`);
+  }
 }
 
 /**

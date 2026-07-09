@@ -45,6 +45,7 @@ export interface ResolvedPlugin {
   customPaths?: {
     commands?: string[];
     agents?: string[];
+    skills?: string[];
   };
   /** MCP servers declared in the marketplace entry or plugin.json */
   mcpServers?: Record<string, unknown>;
@@ -192,6 +193,8 @@ function applyStrictMode(
     normalizeStringArray(primary.commands) ?? normalizeStringArray(fallback.commands);
   const customAgents =
     normalizeStringArray(primary.agents) ?? normalizeStringArray(fallback.agents);
+  const customSkills =
+    normalizeStringArray(primary.skills) ?? normalizeStringArray(fallback.skills);
   const mcpServers =
     (primary.mcpServers as Record<string, unknown> | undefined) ??
     (fallback.mcpServers as Record<string, unknown> | undefined);
@@ -205,10 +208,11 @@ function applyStrictMode(
     strict: isStrict,
   };
 
-  if (customCommands || customAgents) {
+  if (customCommands || customAgents || customSkills) {
     plugin.customPaths = {};
     if (customCommands) plugin.customPaths.commands = customCommands;
     if (customAgents) plugin.customPaths.agents = customAgents;
+    if (customSkills) plugin.customPaths.skills = customSkills;
   }
 
   if (mcpServers && Object.keys(mcpServers).length > 0) {
@@ -220,7 +224,9 @@ function applyStrictMode(
 
 function normalizeStringArray(value: unknown): string[] | undefined {
   if (typeof value === 'string') return [value];
-  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === 'string');
+  if (Array.isArray(value) && value.every((v): v is string => typeof v === 'string')) {
+    return value;
+  }
   return undefined;
 }
 

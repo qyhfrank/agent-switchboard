@@ -12,6 +12,7 @@ import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { loadRuleLibrary } from '../src/rules/library.js';
+import { loadSkillLibrary } from '../src/skills/library.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
 // ── Fixture helpers ────────────────────────────────────────────────
@@ -629,6 +630,129 @@ test('non-strict mode: plugin.json values used as fallback', () => {
     const plugin = index.get('my-plugin');
     assert.ok(plugin);
     assert.deepEqual(plugin.components.commands, ['my-plugin@nonstrict-test:alt']);
+  });
+});
+
+test('marketplace plugin honors plugin.json custom skills root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'ppt-official');
+    const pluginDir = path.join(mktDir, 'skills');
+    const skillDir = path.join(pluginDir, 'ppt-master');
+    fs.mkdirSync(path.join(mktDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(skillDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(mktDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'ppt-official',
+        owner: { name: 'test' },
+        plugins: [{ name: 'ppt-master', source: './skills', strict: false }],
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'ppt-master', skills: './' })
+    );
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: ppt-master\ndescription: Build PPTX decks\n---\nSkill body'
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\nppt-official = "${mktDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('ppt-master@ppt-official');
+    assert.ok(plugin);
+    assert.deepEqual(plugin.components.skills, ['ppt-master@ppt-official:ppt-master']);
+    assert.ok(
+      loadSkillLibrary().some((skill) => skill.id === 'ppt-master@ppt-official:ppt-master')
+    );
+  });
+});
+
+test('strict marketplace entry supports direct SKILL.md custom path', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'strict-skills');
+    const pluginDir = path.join(mktDir, 'my-plugin');
+    const customSkillDir = path.join(pluginDir, 'custom-skills', 'special');
+    const defaultSkillDir = path.join(pluginDir, 'skills', 'default');
+    fs.mkdirSync(path.join(mktDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(customSkillDir, { recursive: true });
+    fs.mkdirSync(defaultSkillDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(mktDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'strict-skills',
+        owner: { name: 'test' },
+        plugins: [
+          {
+            name: 'my-plugin',
+            source: './my-plugin',
+            skills: 'custom-skills/special/SKILL.md',
+          },
+        ],
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'my-plugin' })
+    );
+    fs.writeFileSync(
+      path.join(customSkillDir, 'SKILL.md'),
+      '---\nname: special\ndescription: Special skill\n---\nSpecial body'
+    );
+    fs.writeFileSync(
+      path.join(defaultSkillDir, 'SKILL.md'),
+      '---\nname: default\ndescription: Default skill\n---\nDefault body'
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\nstrict-skills = "${mktDir}"\n`);
+
+    const plugin = buildPluginIndex().get('my-plugin');
+    assert.ok(plugin);
+    assert.deepEqual(plugin.components.skills, ['my-plugin@strict-skills:special']);
+  });
+});
+
+test('marketplace default skills scan ignores non-path native skills metadata', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'native-skills-metadata');
+    const pluginDir = path.join(mktDir, 'my-plugin');
+    const skillRoot = path.join(pluginDir, 'skills');
+    const childSkillDir = path.join(skillRoot, 'child');
+    fs.mkdirSync(path.join(mktDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(childSkillDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(mktDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'native-skills-metadata',
+        owner: { name: 'test' },
+        plugins: [{ name: 'my-plugin', source: './my-plugin', skills: [{ name: 'native' }] }],
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'my-plugin' })
+    );
+    fs.writeFileSync(
+      path.join(skillRoot, 'SKILL.md'),
+      '---\nname: root\ndescription: Root metadata\n---\nRoot body'
+    );
+    fs.writeFileSync(
+      path.join(childSkillDir, 'SKILL.md'),
+      '---\nname: child\ndescription: Child skill\n---\nChild body'
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\nnative-skills-metadata = "${mktDir}"\n`);
+
+    const plugin = buildPluginIndex().get('my-plugin');
+    assert.ok(plugin);
+    assert.deepEqual(plugin.components.skills, ['my-plugin@native-skills-metadata:child']);
   });
 });
 
