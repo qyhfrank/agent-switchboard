@@ -13,6 +13,7 @@ import path from 'node:path';
 import { getHooksDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import type { BundleFile } from '../library/distribute-bundle.js';
+import { loadPluginHookEntries } from '../marketplace/plugin-loader.js';
 import { loadEntriesFromSources } from '../marketplace/source-loader.js';
 import type { HookFile } from './schema.js';
 import { hookFileSchema } from './schema.js';
@@ -179,8 +180,7 @@ export function loadHookLibrary(scope?: ConfigScope): HookEntry[] {
   const { pluginSources, marketplaceEntries } = loadEntriesFromSources(scope);
 
   for (const { namespace, basePath } of pluginSources) {
-    const hooksDir = path.join(basePath, 'hooks');
-    result.push(...loadHooksFromDirectory(hooksDir, namespace));
+    result.push(...loadPluginHookEntries(basePath, namespace));
   }
 
   result.push(...marketplaceEntries.hooks);
