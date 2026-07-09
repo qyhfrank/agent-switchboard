@@ -144,6 +144,51 @@ test('distributeHooks: rewrites plugin hook CLAUDE_PLUGIN_ROOT references to dis
   });
 });
 
+test('distributeHooks: skips malformed standalone plugin hook files', () => {
+  withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const pluginDir = path.join(asbHome, 'external', 'standalone-hook-plugin');
+    const hooksDir = path.join(pluginDir, 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hooksDir, 'copilot-hooks.json'),
+      JSON.stringify({
+        version: 1,
+        hooks: {
+          sessionStart: [
+            {
+              type: 'command',
+              bash: 'node "hooks/start.js"',
+              powershell: 'node "hooks\\start.js"',
+              timeoutSec: 5,
+            },
+          ],
+        },
+      })
+    );
+    fs.writeFileSync(
+      path.join(hooksDir, 'hooks.json'),
+      JSON.stringify({
+        hooks: {
+          SessionStart: [{ matcher: 'startup', hooks: [{ type: 'command', command: 'echo ok' }] }],
+        },
+      })
+    );
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\nstandalone = "${pluginDir}"\n`
+    );
+    updateLibraryStateSection('hooks', () => ({ enabled: ['standalone:hooks'], agentSync: {} }));
+
+    const outcome = distributeHooks(undefined, ['claude-code'], new Set(['claude-code']), {
+      dryRun: true,
+    });
+
+    assert.ok(outcome.results.length > 0, 'should continue distribution');
+    assert.ok(outcome.results.every((r) => r.status !== 'error'));
+  });
+});
+
 test('distributeHooks: executable mode drift is repaired for claude-code bundles', () => {
   withTempHomes(({ asbHome }) => {
     simulateAppsInstalled('claude-code');
