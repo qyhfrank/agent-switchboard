@@ -33,30 +33,8 @@ export interface PluginComponents {
   hooks: HookEntry[];
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isLikelyForeignHookConfig(parsed: unknown): boolean {
-  if (!isPlainObject(parsed)) return false;
-  const hooks = parsed.hooks;
-  if (!isPlainObject(hooks)) return false;
-
-  const entries = Object.entries(hooks);
-  if (entries.length === 0) return false;
-
-  const allEventsLowercase = entries.every(([event]) => /^[a-z]/.test(event));
-  const allHandlersFlat = entries.every(([, groups]) => {
-    if (!Array.isArray(groups) || groups.length === 0) return false;
-    return groups.every(
-      (group) => isPlainObject(group) && !Array.isArray(group.hooks) && 'command' in group
-    );
-  });
-
-  return allEventsLowercase && allHandlersFlat;
-}
-
 const SKILL_FILE = 'SKILL.md';
+const warnedSkippedHookFiles = new Set<string>();
 
 function isMarkdownFile(name: string): boolean {
   const ext = path.extname(name).toLowerCase();
@@ -322,10 +300,10 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
   for (const entry of entries) {
     if (entry.isFile() && path.extname(entry.name).toLowerCase() === '.json') {
       const absolutePath = path.join(hooksDir, entry.name);
-      const rawContent = fs.readFileSync(absolutePath, 'utf-8');
-      const parsedJson = JSON.parse(rawContent);
 
       try {
+        const rawContent = fs.readFileSync(absolutePath, 'utf-8');
+        const parsedJson = JSON.parse(rawContent);
         const parsed = hookFileSchema.parse(parsedJson);
         const bareId = path.basename(entry.name, '.json');
         const id = `${namespace}:${bareId}`;
@@ -346,11 +324,12 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
           dirPath: hasScripts ? hooksDir : undefined,
         });
       } catch (error) {
-        if (isLikelyForeignHookConfig(parsedJson)) {
-          continue;
-        }
         const msg = error instanceof Error ? error.message : String(error);
-        throw new Error(`Failed to parse plugin hook "${entry.name}": ${msg}`);
+        const warningKey = `${namespace}:${absolutePath}`;
+        if (!warnedSkippedHookFiles.has(warningKey)) {
+          warnedSkippedHookFiles.add(warningKey);
+          console.warn(`[plugins] Skipping plugin hook "${namespace}:${entry.name}": ${msg}`);
+        }
       }
     } else if (entry.isDirectory()) {
       const hookJsonPath = path.join(hooksDir, entry.name, 'hook.json');

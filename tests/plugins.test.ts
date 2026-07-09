@@ -377,10 +377,10 @@ test('plugin MCP servers are merged into config', () => {
   });
 });
 
-test('buildPluginIndex ignores plugin hook files that are not in ASB hook format', () => {
+test('buildPluginIndex warns and skips plugin hook files that are not in ASB hook format', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
-    const pluginDir = path.join(asbHome, 'external', 'cursor-hook-plugin');
+    const pluginDir = path.join(asbHome, 'external', 'copilot-hook-plugin');
     fs.mkdirSync(path.join(pluginDir, 'commands'), { recursive: true });
     fs.mkdirSync(path.join(pluginDir, 'hooks'), { recursive: true });
     fs.writeFileSync(
@@ -388,31 +388,51 @@ test('buildPluginIndex ignores plugin hook files that are not in ASB hook format
       '---\ndescription: Do thing\n---\nBody'
     );
     fs.writeFileSync(
-      path.join(pluginDir, 'hooks', 'hooks-cursor.json'),
+      path.join(pluginDir, 'hooks', 'copilot-hooks.json'),
       JSON.stringify({
         version: 1,
         hooks: {
-          sessionStart: [{ command: './hooks/session-start' }],
+          sessionStart: [
+            {
+              type: 'command',
+              bash: 'node "hooks/start.js"',
+              powershell: 'node "hooks\\start.js"',
+              timeoutSec: 5,
+            },
+          ],
         },
       })
     );
 
-    writeConfigToml(asbHome, `[plugins.sources]\ncursor-hook-plugin = "${pluginDir}"\n`);
+    writeConfigToml(asbHome, `[plugins.sources]\ncopilot-hook-plugin = "${pluginDir}"\n`);
 
-    const index = buildPluginIndex();
-    const plugin = index.get('cursor-hook-plugin');
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      const index = buildPluginIndex();
+      const plugin = index.get('copilot-hook-plugin');
 
-    assert.ok(plugin);
-    assert.deepEqual(plugin.components.commands, ['cursor-hook-plugin:do-thing']);
-    assert.deepEqual(plugin.components.hooks, []);
+      assert.ok(plugin);
+      assert.deepEqual(plugin.components.commands, ['copilot-hook-plugin:do-thing']);
+      assert.deepEqual(plugin.components.hooks, []);
+      assert.ok(warnings.some((w) => w.includes('copilot-hooks.json')));
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });
 
-test('buildPluginIndex fails on malformed ASB-style plugin hooks', () => {
+test('buildPluginIndex warns and skips malformed single-file plugin hooks', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const pluginDir = path.join(asbHome, 'external', 'broken-hook-plugin');
+    fs.mkdirSync(path.join(pluginDir, 'commands'), { recursive: true });
     fs.mkdirSync(path.join(pluginDir, 'hooks'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginDir, 'commands', 'do-thing.md'),
+      '---\ndescription: Do thing\n---\nBody'
+    );
     fs.writeFileSync(
       path.join(pluginDir, 'hooks', 'hooks.json'),
       JSON.stringify({
@@ -424,9 +444,23 @@ test('buildPluginIndex fails on malformed ASB-style plugin hooks', () => {
 
     writeConfigToml(asbHome, `[plugins.sources]\nbroken-hook-plugin = "${pluginDir}"\n`);
 
-    assert.throws(() => buildPluginIndex(), /Failed to parse plugin hook "hooks\.json"/);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+    try {
+      const index = buildPluginIndex();
+      const plugin = index.get('broken-hook-plugin');
+
+      assert.ok(plugin);
+      assert.deepEqual(plugin.components.commands, ['broken-hook-plugin:do-thing']);
+      assert.deepEqual(plugin.components.hooks, []);
+      assert.ok(warnings.some((w) => w.includes('hooks.json')));
+    } finally {
+      console.warn = originalWarn;
+    }
   });
 });
+
 test('plugin MCP servers are available even when selected directly without enabling the parent plugin', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
