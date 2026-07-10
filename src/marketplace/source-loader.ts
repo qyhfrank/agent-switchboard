@@ -53,7 +53,7 @@ export function loadEntriesFromSources(scope?: ConfigScope): {
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
-      const result = readMarketplace(basePath);
+      const result = readMarketplace(basePath, namespace);
       for (const plugin of result.plugins) {
         const pluginId = buildPluginId(plugin.name, namespace, 'marketplace');
         const resolved = isResolvedPlugin(plugin)

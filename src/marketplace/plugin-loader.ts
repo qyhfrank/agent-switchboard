@@ -156,6 +156,30 @@ function toId(fileName: string): string {
   return path.basename(fileName, path.extname(fileName));
 }
 
+function resolvePluginComponentPath(pluginRoot: string, componentPath: string): string {
+  if (componentPath.includes('\0') || path.isAbsolute(componentPath)) {
+    throw new Error(`Plugin component path must be relative: ${componentPath}`);
+  }
+
+  const root = path.resolve(pluginRoot);
+  const resolved = path.resolve(root, componentPath);
+  const relative = path.relative(root, resolved);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Plugin component path escapes the plugin root: ${componentPath}`);
+  }
+
+  if (fs.existsSync(resolved)) {
+    const rootReal = fs.realpathSync.native(root);
+    const resolvedReal = fs.realpathSync.native(resolved);
+    const realRelative = path.relative(rootReal, resolvedReal);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+      throw new Error(`Plugin component path escapes the plugin root: ${componentPath}`);
+    }
+  }
+
+  return resolved;
+}
+
 /**
  * Load all components (commands, agents, skills) from a single plugin directory.
  * The namespace defaults to the plugin name, producing IDs like "plugin-name:component-id".
@@ -178,7 +202,7 @@ export function loadPluginComponents(
     );
   } else {
     result.commands = loadMarkdownEntries<CommandEntry>(
-      path.join(plugin.localPath, 'commands'),
+      resolvePluginComponentPath(plugin.localPath, 'commands'),
       namespace,
       'command'
     );
@@ -193,7 +217,7 @@ export function loadPluginComponents(
     );
   } else {
     result.agents = loadMarkdownEntries<SubagentEntry>(
-      path.join(plugin.localPath, 'agents'),
+      resolvePluginComponentPath(plugin.localPath, 'agents'),
       namespace,
       'agent'
     );
@@ -220,7 +244,7 @@ function loadFromCustomPaths<T extends CommandEntry | SubagentEntry>(
   const result: T[] = [];
 
   for (const customPath of customPaths) {
-    const absolutePath = path.resolve(pluginRoot, customPath);
+    const absolutePath = resolvePluginComponentPath(pluginRoot, customPath);
 
     if (fs.existsSync(absolutePath) && fs.statSync(absolutePath).isDirectory()) {
       result.push(...loadMarkdownEntries<T>(absolutePath, namespace, kind));
@@ -303,7 +327,11 @@ function loadMarkdownEntries<T extends CommandEntry | SubagentEntry>(
  * Each subdirectory containing SKILL.md is a skill bundle.
  */
 function loadSkillEntries(pluginDir: string, namespace: string): SkillEntryFromPlugin[] {
-  return loadSkillEntriesFromDirectory(path.join(pluginDir, 'skills'), namespace, false);
+  return loadSkillEntriesFromDirectory(
+    resolvePluginComponentPath(pluginDir, 'skills'),
+    namespace,
+    false
+  );
 }
 
 function loadSkillEntriesFromCustomPaths(
@@ -314,7 +342,7 @@ function loadSkillEntriesFromCustomPaths(
   const result: SkillEntryFromPlugin[] = [];
 
   for (const customPath of customPaths) {
-    const absolutePath = path.resolve(pluginRoot, customPath);
+    const absolutePath = resolvePluginComponentPath(pluginRoot, customPath);
     if (
       fs.existsSync(absolutePath) &&
       fs.statSync(absolutePath).isFile() &&
@@ -396,7 +424,7 @@ function parseSkillEntry(
  * Claude Code plugins typically have hooks/hooks.json + script files at the same level.
  */
 export function loadPluginHookEntries(pluginDir: string, namespace: string): HookEntry[] {
-  const hooksDir = path.join(pluginDir, 'hooks');
+  const hooksDir = resolvePluginComponentPath(pluginDir, 'hooks');
   if (!fs.existsSync(hooksDir) || !fs.statSync(hooksDir).isDirectory()) {
     return [];
   }

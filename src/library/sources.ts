@@ -12,7 +12,12 @@ import { expandHome, getConfigDir, getPluginsDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
-import { getMarketplaceManifestInfo, getPluginManifestInfo } from '../marketplace/reader.js';
+import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
+import {
+  getMarketplaceManifestInfo,
+  getPluginManifestInfo,
+  refreshMarketplacePluginCache,
+} from '../marketplace/reader.js';
 
 export interface Source {
   namespace: string;
@@ -25,6 +30,16 @@ export interface SourceUpdateResult {
   url: string;
   status: 'updated' | 'error';
   error?: string;
+}
+
+let sourceRevision = 0;
+
+export function getSourceRevision(): number {
+  return sourceRevision;
+}
+
+function markSourcesChanged(): void {
+  sourceRevision++;
 }
 
 // ── Git utilities ──────────────────────────────────────────────────
@@ -218,7 +233,7 @@ function validateNamespace(namespace: string): void {
 }
 
 function ensureNamespaceAvailable(namespace: string): void {
-  if (namespace in getRawSources()) {
+  if (namespace in getRawSources() || fs.existsSync(path.join(getPluginsDir(), namespace))) {
     throw new Error(
       `Source "${namespace}" already exists. Use a different name or remove it first.`
     );
@@ -329,6 +344,7 @@ export function addLocalSource(namespace: string, libraryPath: string): void {
       },
     },
   }));
+  markSourcesChanged();
 }
 
 /**
@@ -375,6 +391,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
         },
       },
     }));
+    markSourcesChanged();
   } catch (configErr) {
     // Rollback: restore repo to pre-subtree-add state
     if (remote.type === 'subtree' && headBefore) {
@@ -403,6 +420,7 @@ export function removeSource(namespace: string): void {
   }
 
   const value = raw[namespace];
+  const effectivePath = resolveEffectivePath(namespace, value);
 
   // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
@@ -453,6 +471,8 @@ export function removeSource(namespace: string): void {
     }
     throw configErr;
   }
+  markSourcesChanged();
+  removeMarketplaceEntryCache(namespace, effectivePath);
 }
 
 /**
@@ -498,14 +518,20 @@ export function validateSourcePath(libraryPath: string): {
  * Pull latest changes for all remote sources.
  * Re-clones if the cache directory is missing or corrupted.
  */
-export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
+export function updateRemoteSources(
+  scope?: ConfigScope,
+  onlyNamespace?: string
+): SourceUpdateResult[] {
   const raw = getRawSources(scope);
   const results: SourceUpdateResult[] = [];
   let gitChecked = false;
+  let attemptedUpdate = false;
 
   for (const [namespace, value] of Object.entries(raw)) {
+    if (onlyNamespace && namespace !== onlyNamespace) continue;
     if (typeof value === 'string') continue;
     if (!isCloneableSource(expandHome(value.url))) continue;
+    attemptedUpdate = true;
 
     try {
       if (!gitChecked) {
@@ -557,6 +583,12 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
           gitPull(cloneDir);
         }
       }
+      const effectivePath = resolveEffectivePath(namespace, value);
+      if (getMarketplaceManifestInfo(effectivePath)) {
+        refreshMarketplacePluginCache(effectivePath, namespace);
+      } else {
+        removeMarketplaceEntryCache(namespace, effectivePath);
+      }
       results.push({ namespace, url: value.url, status: 'updated' });
     } catch (err) {
       results.push({
@@ -567,6 +599,8 @@ export function updateRemoteSources(scope?: ConfigScope): SourceUpdateResult[] {
       });
     }
   }
+
+  if (attemptedUpdate) markSourcesChanged();
 
   return results;
 }
