@@ -274,6 +274,12 @@ test('external marketplace components materialize only when selected', () => {
     const { marketplaceDir, pluginId, skillId } = createRemoteSkillMarketplace(asbHome);
     writeConfigToml(asbHome, `[plugins.sources]\nremote-catalog = "${marketplaceDir}"\n`);
 
+    const listed = JSON.parse(runCli(['plugin', 'list', '--json']).stdout) as Array<{
+      id: string;
+      componentsResolved: boolean;
+    }>;
+    assert.equal(listed.find((entry) => entry.id === pluginId)?.componentsResolved, false);
+
     const index = buildPluginIndex();
     const plugin = index.get(pluginId);
 
@@ -709,12 +715,16 @@ test('plugin list JSON emits one canonical ref and recognizes bare enabled alias
       id: string;
       ref: string;
       enabled: boolean;
+      materialized?: boolean;
+      componentsResolved: boolean;
     }>;
 
     assert.equal(plugins.length, 1);
     assert.equal(plugins[0].id, 'plugin-a@catalog');
     assert.equal(plugins[0].ref, plugins[0].id);
     assert.equal(plugins[0].enabled, true);
+    assert.equal('materialized' in plugins[0], false);
+    assert.equal(plugins[0].componentsResolved, true);
   });
 });
 
