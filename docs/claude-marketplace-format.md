@@ -322,18 +322,30 @@ ASB reads and adapts the Claude Code plugin format for cross-agent distribution.
 | Aspect | Claude Code Native | ASB |
 |--------|-------------------|-----|
 | Source registration | `/plugin marketplace add` | `[plugins.sources]` in TOML config |
-| Source kinds | marketplace or plugin | Same two-kind detection (`isMarketplace()`) |
-| Plugin ID | `plugin-name@marketplace-name` | `pluginRef`: `plugin` or `plugin@source` |
-| Component ID | `plugin:component` | Same: `namespace:bareId` |
-| `.mcp.json` format | `{ "mcpServers": { ... } }` | Flat: `{ "server-name": { ... } }` (no wrapper) |
-| MCP lifecycle | Claude Code plugin enable/disable | `[plugins] enabled = [...]` array |
+| Source kinds | Claude marketplace or plugin | Claude or Codex marketplace, or standalone plugin |
+| Plugin ID | `plugin-name@marketplace-name` | Standalone source: `source`; marketplace entry: `plugin@source` |
+| Component ID | `plugin:component` | `source:component` or `plugin@source:component` |
+| `.mcp.json` format | `{ "mcpServers": { ... } }` | Wrapped or flat server map |
+| Portable lifecycle | Claude Code plugin enable or disable | Global `[plugins]` plus per-application plugin selection |
+| Native lifecycle | Claude Code plugin manager | Target `native_plugins` selection for Claude Code or Codex |
 | Distribution targets | Claude Code only | All active applications (Cursor, Codex, Gemini, etc.) |
 | Name sanitization | N/A | `sanitizeServerKeys()` replaces `[^a-zA-Z0-9_-]` with `-` for Cursor/Codex |
 | Hook runtime | Full Claude Code hook schema | Claude Code receives full hook config; Codex receives the command-only subset and requires `/hooks` review |
+| `strict` authority | `plugin.json` when `true`; marketplace when `false` | Marketplace entry when `true`; `plugin.json` when `false`, with field-level fallback |
 
 Hook bundle scripts are copied to each target's ASB-owned hook directory: `~/.claude/hooks/asb/<id>/` for Claude Code and `~/.codex/hooks/asb/<id>/` or `<project>/.codex/hooks/asb/<id>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
 
-### ASB `.mcp.json` Format Difference
+### ASB Source and Materialization Lifecycle
+
+Each immediate non-dotfile directory under `~/.asb/plugins/` is a first-class ASB source. A source can be a standalone plugin or a marketplace. `[plugins.sources]` registers sources elsewhere on disk or lets ASB manage a remote checkout at `~/.asb/plugins/<source>/`.
+
+Marketplace discovery reads identities and source metadata without fetching external entries. Relative entries resolve within the marketplace checkout. A Git entry that names the same repository and a compatible ref or full SHA reuses that checkout, including its requested subdirectory. Files for another selected Git entry materialize under `ASB_HOME/state/marketplace-plugins/`; this derived state is outside `ASB_HOME/plugins/` and cannot participate in source discovery.
+
+Portable plugin selection and direct component selection are materialization boundaries. Metadata-only inventory and native metadata lookup do not materialize external entries. ASB supports portable materialization for relative entries, GitHub sources, Git URL forms (`url`, `git`, or `github`), and `git-subdir`. Other declared source kinds remain visible as catalog or native metadata but fail with a materialization error if portable expansion requires files ASB cannot acquire.
+
+The derived entry identity includes the configured source, canonical marketplace root, plugin name, Git URL, ref, full 40- or 64-character SHA, and subdirectory. Subdirectory entries use sparse checkout. A refresh writes and verifies a replacement before switching generations; a failed refresh preserves the prior verified entry. Exact SHA entries are immutable and reused. Updating a remote source refreshes only entries already materialized for that source, while source removal cleans only that source's derived entries. `asb sync --dry-run` uses temporary materialization and does not mutate the durable cache or update source checkouts.
+
+### ASB `.mcp.json` Compatibility
 
 Claude Code's official `.mcp.json` wraps servers under `"mcpServers"`:
 
@@ -341,10 +353,10 @@ Claude Code's official `.mcp.json` wraps servers under `"mcpServers"`:
 { "mcpServers": { "my-server": { "command": "npx", "args": [...] } } }
 ```
 
-ASB reads `.mcp.json` as a flat object (no `"mcpServers"` wrapper):
+ASB accepts that wrapped form and a flat server map:
 
 ```json
 { "my-server": { "command": "npx", "args": [...] } }
 ```
 
-This is because ASB's plugin loader (`loadMcpFromPluginDir`) treats the parsed JSON root directly as the server map. Plugins distributed via ASB should use the flat format.
+The wrapped form is portable between Claude Code and ASB. The flat form remains accepted for existing ASB plugins.
