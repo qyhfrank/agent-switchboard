@@ -1645,11 +1645,13 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       return;
     }
     const index = buildPluginIndex(scope);
-    if (!index.get(id)) {
+    const plugin = index.get(id);
+    if (!plugin) {
       console.error(chalk.red(`✗ Plugin "${id}" not found.`));
       console.log(chalk.dim('  Run `asb plugin list` to see available plugins.'));
       process.exit(1);
     }
+    index.materialize([plugin.id]);
     updateConfigLayer(
       (l) => ({
         ...l,

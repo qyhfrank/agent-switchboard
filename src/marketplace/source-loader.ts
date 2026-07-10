@@ -49,6 +49,7 @@ export function loadEntriesFromSources(scope?: ConfigScope): {
     hooks: [],
   };
   const pluginIndex = buildPluginIndex(scope);
+  pluginIndex.materializeConfigured();
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
