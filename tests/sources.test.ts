@@ -9,6 +9,7 @@ import {
   getPluginSourceLocksDir,
   getPluginSourceStateDir,
   getPluginsDir,
+  getProfileConfigPath,
 } from '../src/config/paths.js';
 import {
   addLocalSource,
@@ -411,6 +412,43 @@ test('addLocalSource rejects invalid namespace characters', () => {
 test('addLocalSource rejects non-existent path', () => {
   withTempAsbHome(() => {
     assert.throws(() => addLocalSource('test', '/nonexistent/path'), /does not exist/);
+  });
+});
+
+test('user local source does not retire a profile-owned managed checkout', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'layered-owner';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'layered-owner-remote'));
+    const profile = { profile: 'team' };
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }, profile);
+    const checkout = path.join(getPluginsDir(), namespace);
+    const local = path.join(asbHome, 'local-owner');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+
+    addLocalSource(namespace, local);
+
+    assert.equal(getSourcesRecord()[namespace], local);
+    assert.equal(getSourcesRecord(profile)[namespace], checkout);
+    assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
+  });
+});
+
+test('profile local override keeps the user managed owner independently usable', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'layered-view';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'layered-view-remote'));
+    const profile = { profile: 'team' };
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    const local = path.join(asbHome, 'profile-local');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+
+    addLocalSource(namespace, local, profile);
+
+    assert.equal(getSourcesRecord()[namespace], checkout);
+    assert.equal(getSourcesRecord(profile)[namespace], local);
+    assert.deepEqual(updateRemoteSources(profile, namespace), []);
+    assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
   });
 });
 
@@ -851,6 +889,51 @@ test('managed clone lifecycle adopts a verified checkout created before provenan
   });
 });
 
+test('managed clone adoption refuses a symlinked Git exclude file', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'exclude-link';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'exclude-link-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.rmSync(getPluginSourceStateDir(), { recursive: true, force: true });
+    fs.rmSync(path.join(checkout, '.asb-source-owner'));
+    const external = path.join(asbHome, 'external-exclude');
+    fs.writeFileSync(external, 'keep\n');
+    const exclude = path.join(checkout, '.git', 'info', 'exclude');
+    fs.rmSync(exclude);
+    fs.symlinkSync(external, exclude);
+
+    const result = updateRemoteSources(undefined, namespace);
+
+    assert.equal(result[0]?.status, 'error');
+    assert.match(result[0]?.error ?? '', /exclude path is invalid/i);
+    assert.equal(fs.readFileSync(external, 'utf-8'), 'keep\n');
+  });
+});
+
+test('removeSource quarantines an owned checkout that is no longer clean', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'preserve-dirty';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'preserve-dirty-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.writeFileSync(path.join(checkout, 'foreign.txt'), 'preserve');
+
+    removeSource(namespace);
+
+    assert.equal(fs.existsSync(checkout), false);
+    const preserved = fs
+      .readdirSync(getPluginsDir())
+      .find((name) => name.startsWith(`.preserved-${namespace}-`));
+    assert.ok(preserved);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), preserved, 'foreign.txt'), 'utf-8'),
+      'preserve'
+    );
+    assert.equal(namespace in getSourcesRecord(), false);
+  });
+});
+
 test('updateRemoteSources publishes a missing checkout from a verified hidden stage', (t) => {
   withTempAsbHome((asbHome) => {
     const bareRepo = path.join(asbHome, 'bare-repo.git');
@@ -947,6 +1030,194 @@ test('missing checkout update recovers an interrupted owned clone stage', async 
     const result = updateRemoteSources(undefined, namespace);
     assert.equal(result[0]?.status, 'updated', result[0]?.error);
     assert.equal(fs.existsSync(path.join(checkoutPath, 'rules', 'v1.md')), true);
+  } finally {
+    child?.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('clone recovery rolls back a populated stage that was not validated', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-validation-recovery-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const namespace = 'unvalidated-update';
+    const { bareRepo } = createBareRemote(path.join(root, 'remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.rmSync(checkout, { recursive: true, force: true });
+    const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+    const childSource =
+      'import fs from "node:fs";' +
+      `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};` +
+      'const originalRename = fs.renameSync.bind(fs);' +
+      'let stopped = false;' +
+      'fs.renameSync = (from, to) => {' +
+      'const result = originalRename(from, to);' +
+      'if (!stopped && String(to).endsWith(".json")) {' +
+      'const state = JSON.parse(fs.readFileSync(String(to), "utf-8"));' +
+      'if (state.addition?.kind === "clone" && state.addition.checkoutIdentity && state.addition.phase === "constructing") {' +
+      'stopped = true;process.stdout.write("CHECKPOINT\\n");' +
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
+      '}' +
+      '}' +
+      'return result;' +
+      '};' +
+      `updateRemoteSources(undefined, ${JSON.stringify(namespace)});`;
+    child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    let output = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 10_000;
+      const poll = () => {
+        if (output.includes('CHECKPOINT\n')) resolve();
+        else if (child?.exitCode !== null) reject(new Error(stderr || 'update exited early'));
+        else if (Date.now() >= deadline)
+          reject(new Error(stderr || 'validation checkpoint timed out'));
+        else setTimeout(poll, 10);
+      };
+      poll();
+    });
+    const closed = new Promise<void>((resolve) => child?.once('close', () => resolve()));
+    child.kill('SIGKILL');
+    await closed;
+    child = undefined;
+
+    getSourcesRecord();
+
+    assert.equal(fs.existsSync(checkout), false);
+    assert.deepEqual(
+      fs.readdirSync(getPluginsDir()).filter((name) => name.startsWith('.updating-')),
+      []
+    );
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(
+      states.some((state) => state.addition),
+      false
+    );
+  } finally {
+    child?.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('clone recovery refuses publication after a higher-layer effective override', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-effective-recovery-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const namespace = 'effective-recovery';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(root, 'remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.rmSync(checkout, { recursive: true, force: true });
+    const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+    const childSource =
+      'import fs from "node:fs";' +
+      `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};` +
+      'const originalRename = fs.renameSync.bind(fs);' +
+      `const checkout = ${JSON.stringify(checkout)};` +
+      'fs.renameSync = (from, to) => {' +
+      'if (String(to) === checkout) {' +
+      'process.stdout.write("CHECKPOINT\\n");' +
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
+      '}' +
+      'return originalRename(from, to);' +
+      '};' +
+      `updateRemoteSources({ profile: "team" }, ${JSON.stringify(namespace)});`;
+    child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    let output = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 10_000;
+      const poll = () => {
+        if (output.includes('CHECKPOINT\n')) resolve();
+        else if (child?.exitCode !== null) reject(new Error(stderr || 'update exited early'));
+        else if (Date.now() >= deadline)
+          reject(new Error(stderr || 'publication checkpoint timed out'));
+        else setTimeout(poll, 10);
+      };
+      poll();
+    });
+    const closed = new Promise<void>((resolve) => child?.once('close', () => resolve()));
+    child.kill('SIGKILL');
+    await closed;
+    child = undefined;
+    const local = path.join(asbHome, 'profile-local');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = ${JSON.stringify(local)}\n`
+    );
+
+    assert.equal(getSourcesRecord(profile)[namespace], local);
+    assert.equal(fs.existsSync(checkout), false);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(
+      states.some((state) => state.addition),
+      false
+    );
   } finally {
     child?.kill('SIGKILL');
     if (previousAsbHome === undefined) delete process.env.ASB_HOME;
@@ -2848,7 +3119,11 @@ test('subtree removal requires durable ASB provenance', () => {
       cwd: asbHome,
       stdio: 'pipe',
     });
-    execFileSync('git', ['commit', '-m', 'manual subtree'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['commit', '-m', 'manual subtree', '-m', 'git-subtree-dir: plugins/manual-subtree'],
+      { cwd: asbHome, stdio: 'pipe' }
+    );
 
     assert.throws(() => removeSource('manual-subtree'), /subtree provenance is missing/i);
     assert.equal(fs.readFileSync(path.join(prefix, 'rules', 'manual.md'), 'utf-8'), '# Manual');
@@ -2870,6 +3145,41 @@ test('subtree removal rejects ignored residue beneath its prefix', () => {
     assert.throws(() => removeSource('subtree-residue'), /untracked, or ignored content/i);
     assert.equal(fs.readFileSync(residue, 'utf-8'), 'preserve');
     assert.equal(hasSource('subtree-residue'), true);
+  });
+});
+
+test('subtree removal retains recovery state when residue appears during config publication', (t) => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'late-subtree-residue';
+    const { bareRepo } = createBareRemote(path.join(path.dirname(asbHome), 'late-residue-remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const configPath = fs.realpathSync.native(path.join(asbHome, 'config.toml'));
+    const residue = path.join(getPluginsDir(), namespace, 'foreign.txt');
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      const result = originalRename(from, to);
+      if (path.resolve(String(to)) === configPath) {
+        fs.mkdirSync(path.dirname(residue), { recursive: true });
+        fs.writeFileSync(residue, 'preserve');
+      }
+      return result;
+    });
+
+    assert.throws(() => removeSource(namespace), /remaining subtree content/i);
+
+    assert.equal(fs.readFileSync(residue, 'utf-8'), 'preserve');
+    assert.doesNotMatch(fs.readFileSync(configPath, 'utf-8'), new RegExp(namespace));
+    assert.throws(() => getSourcesRecord(), /remaining subtree content/i);
+    assert.equal(
+      fs.readdirSync(getPluginSourceStateDir()).some((name) => name.endsWith('.json')),
+      true
+    );
   });
 });
 
@@ -2948,6 +3258,219 @@ test('subtree addition recovers a crash before config publication', async () => 
         ? fs.readdirSync(getPluginSourceStateDir()).filter((name) => name.endsWith('.json'))
         : [],
       []
+    );
+  } finally {
+    child?.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('subtree recovery refuses a third tracked prefix state after publication', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subtree-third-state-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const namespace = 'third-state';
+    const { bareRepo, workDir } = createBareRemote(path.join(root, 'remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+    const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+    const childSource =
+      'import fs from "node:fs";' +
+      `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};` +
+      'const originalRemove = fs.rmSync.bind(fs);' +
+      'let stopped = false;' +
+      'fs.rmSync = (target, options) => {' +
+      'if (!stopped && String(target).includes("/.subtree-")) {' +
+      'stopped = true;process.stdout.write("CHECKPOINT\\n");' +
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
+      '}' +
+      'return originalRemove(target, options);' +
+      '};' +
+      `updateRemoteSources(undefined, ${JSON.stringify(namespace)});`;
+    child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    let output = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 10_000;
+      const poll = () => {
+        if (output.includes('CHECKPOINT\n')) resolve();
+        else if (child?.exitCode !== null)
+          reject(new Error(stderr || 'subtree update exited early'));
+        else if (Date.now() >= deadline)
+          reject(new Error(stderr || 'subtree checkpoint timed out'));
+        else setTimeout(poll, 10);
+      };
+      poll();
+    });
+    const closed = new Promise<void>((resolve) => child?.once('close', () => resolve()));
+    child.kill('SIGKILL');
+    await closed;
+    child = undefined;
+    const tracked = path.join(getPluginsDir(), namespace, 'rules', 'v1.md');
+    fs.writeFileSync(tracked, '# Foreign');
+
+    assert.throws(() => getSourcesRecord(), /foreign changes beneath its prefix/i);
+    assert.equal(fs.readFileSync(tracked, 'utf-8'), '# Foreign');
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(
+      states.some((state) => state.addition),
+      true
+    );
+  } finally {
+    child?.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('subtree recovery rolls back a populated stage that was not validated', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subtree-validation-recovery-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const namespace = 'unvalidated-subtree';
+    const { bareRepo, workDir } = createBareRemote(path.join(root, 'remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const headBefore = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: asbHome,
+      encoding: 'utf-8',
+    }).trim();
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+    const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+    const childSource =
+      'import fs from "node:fs";' +
+      `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};` +
+      'const originalRename = fs.renameSync.bind(fs);' +
+      'let stopped = false;' +
+      'fs.renameSync = (from, to) => {' +
+      'const result = originalRename(from, to);' +
+      'if (!stopped && String(to).endsWith(".json")) {' +
+      'const state = JSON.parse(fs.readFileSync(String(to), "utf-8"));' +
+      'if (state.addition?.kind === "subtree" && state.addition.headAfter && state.addition.phase === "constructing") {' +
+      'stopped = true;process.stdout.write("CHECKPOINT\\n");' +
+      'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
+      '}' +
+      '}' +
+      'return result;' +
+      '};' +
+      `updateRemoteSources(undefined, ${JSON.stringify(namespace)});`;
+    child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    let output = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 10_000;
+      const poll = () => {
+        if (output.includes('CHECKPOINT\n')) resolve();
+        else if (child?.exitCode !== null)
+          reject(new Error(stderr || 'subtree update exited early'));
+        else if (Date.now() >= deadline)
+          reject(new Error(stderr || 'validation checkpoint timed out'));
+        else setTimeout(poll, 10);
+      };
+      poll();
+    });
+    const closed = new Promise<void>((resolve) => child?.once('close', () => resolve()));
+    child.kill('SIGKILL');
+    await closed;
+    child = undefined;
+
+    getSourcesRecord();
+
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: asbHome, encoding: 'utf-8' }).trim(),
+      headBefore
+    );
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace, 'rules', 'v2.md')), false);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(
+      states.some((state) => state.addition),
+      false
     );
   } finally {
     child?.kill('SIGKILL');
@@ -3128,6 +3651,165 @@ test('subtree lifecycle: add → update → remove', () => {
   });
 });
 
+test('subtree update completes when the remote tree is already current', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'subtree-noop';
+    const { bareRepo } = createBareRemote(path.join(path.dirname(asbHome), 'subtree-noop-remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const headBefore = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: asbHome,
+      encoding: 'utf-8',
+    }).trim();
+
+    const result = updateRemoteSources(undefined, namespace);
+
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: asbHome, encoding: 'utf-8' }).trim(),
+      headBefore
+    );
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(
+      states.some((state) => state.addition),
+      false
+    );
+    assert.equal(
+      fs.readdirSync(getPluginSourceStateDir()).some((name) => name.startsWith('.subtree-')),
+      false
+    );
+  });
+});
+
+test('subtree lifecycles for different namespaces share one repository lock', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subtree-repo-lock-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  const children: Array<ReturnType<typeof spawn>> = [];
+  try {
+    initAsbAsGitRepo(asbHome);
+    const first = createBareRemote(path.join(root, 'first-remote'));
+    const second = createBareRemote(path.join(root, 'second-remote'));
+    addRemoteSource('repo-lock-first', { url: first.bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure first subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    addRemoteSource('repo-lock-second', { url: second.bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure second subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+    const release = path.join(root, 'release');
+    const holderSource =
+      'import fs from "node:fs";' +
+      `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};` +
+      `const release = ${JSON.stringify(release)};` +
+      'const originalWrite = fs.writeFileSync.bind(fs);' +
+      'let stopped = false;' +
+      'fs.writeFileSync = (target, data, options) => {' +
+      'if (!stopped && String(data).includes("\\"addition\\"") && String(data).includes("repo-lock-first")) {' +
+      'stopped = true;process.stdout.write("CHECKPOINT\\n");' +
+      'while (!fs.existsSync(release)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);' +
+      '}' +
+      'return originalWrite(target, data, options);' +
+      '};' +
+      'updateRemoteSources(undefined, "repo-lock-first");';
+    const holder = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', holderSource],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    children.push(holder);
+    holder.stdout.setEncoding('utf-8');
+    holder.stderr.setEncoding('utf-8');
+    let holderOutput = '';
+    let holderError = '';
+    holder.stdout.on('data', (chunk) => {
+      holderOutput += chunk;
+    });
+    holder.stderr.on('data', (chunk) => {
+      holderError += chunk;
+    });
+    await new Promise<void>((resolve, reject) => {
+      const deadline = Date.now() + 10_000;
+      const poll = () => {
+        if (holderOutput.includes('CHECKPOINT\n')) resolve();
+        else if (holder.exitCode !== null) reject(new Error(holderError || 'holder exited early'));
+        else if (Date.now() >= deadline)
+          reject(new Error(holderError || 'holder checkpoint timed out'));
+        else setTimeout(poll, 10);
+      };
+      poll();
+    });
+    const contender = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};const result=updateRemoteSources(undefined,"repo-lock-second");if(result[0]?.status!=="updated")throw new Error(result[0]?.error);`,
+      ],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    children.push(contender);
+    let contenderError = '';
+    contender.stderr.setEncoding('utf-8');
+    contender.stderr.on('data', (chunk) => {
+      contenderError += chunk;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(contender.exitCode, null, contenderError);
+    assert.equal(
+      fs
+        .readdirSync(getPluginSourceStateDir())
+        .some((name) => name.startsWith('.subtree-repo-lock-second-')),
+      false
+    );
+
+    fs.writeFileSync(release, 'release');
+    const [holderCode, contenderCode] = await Promise.all([
+      new Promise<number | null>((resolve) => holder.once('close', resolve)),
+      new Promise<number | null>((resolve) => contender.once('close', resolve)),
+    ]);
+    assert.equal(holderCode, 0, holderError);
+    assert.equal(contenderCode, 0, contenderError);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('subtree update adopts verified pre-provenance history and publishes from a stage', () => {
   withTempAsbHome((asbHome) => {
     const { bareRepo, workDir } = createBareRemote(
@@ -3161,6 +3843,28 @@ test('subtree update adopts verified pre-provenance history and publishes from a
       fs.readdirSync(getPluginSourceStateDir()).some((name) => name.endsWith('.json')),
       true
     );
+  });
+});
+
+test('legacy subtree adoption rejects a trailer-valid commit with the wrong prefix tree', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'forged-subtree-tree';
+    const { bareRepo } = createBareRemote(path.join(path.dirname(asbHome), 'forged-tree-remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    const tracked = path.join(getPluginsDir(), namespace, 'rules', 'v1.md');
+    fs.writeFileSync(tracked, '# Forged');
+    execFileSync('git', ['add', `plugins/${namespace}`], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '--amend', '--no-edit'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure forged subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.rmSync(getPluginSourceStateDir(), { recursive: true, force: true });
+
+    assert.throws(() => removeSource(namespace), /subtree provenance is missing/i);
+    assert.equal(fs.readFileSync(tracked, 'utf-8'), '# Forged');
   });
 });
 
