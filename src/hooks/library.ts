@@ -148,7 +148,8 @@ export function listHookBundleFiles(entry: HookEntry): BundleFile[] {
   if (!entry.isBundle || !entry.dirPath) return [];
 
   const files: BundleFile[] = [];
-  collectFiles(entry.dirPath, entry.dirPath, files);
+  const bundleRoot = fs.realpathSync.native(entry.dirPath);
+  collectFiles(bundleRoot, bundleRoot, files);
   return files;
 }
 
@@ -156,15 +157,21 @@ function collectFiles(baseDir: string, currentDir: string, files: BundleFile[]):
   const entries = fs.readdirSync(currentDir, { withFileTypes: true });
   for (const entry of entries) {
     const fullPath = path.join(currentDir, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`Hook bundle contains a symbolic link: ${fullPath}`);
+    }
     if (entry.isDirectory()) {
       collectFiles(baseDir, fullPath, files);
-    } else {
-      // Include all files (scripts, hook.json, anything else in the bundle)
-      files.push({
-        sourcePath: fullPath,
-        relativePath: path.relative(baseDir, fullPath),
-      });
+      continue;
     }
+    if (!entry.isFile()) continue;
+
+    const fileReal = fs.realpathSync.native(fullPath);
+    const relative = path.relative(baseDir, fileReal);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+      throw new Error(`Hook bundle file escapes its root: ${fullPath}`);
+    }
+    files.push({ sourcePath: fileReal, relativePath: relative });
   }
 }
 

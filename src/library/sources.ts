@@ -421,6 +421,10 @@ export function removeSource(namespace: string): void {
 
   const value = raw[namespace];
   const effectivePath = resolveEffectivePath(namespace, value);
+  const cacheOwnerPath = fs.existsSync(effectivePath)
+    ? fs.realpathSync.native(effectivePath)
+    : effectivePath;
+  removeMarketplaceEntryCache(namespace, cacheOwnerPath);
 
   // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
@@ -472,7 +476,6 @@ export function removeSource(namespace: string): void {
     throw configErr;
   }
   markSourcesChanged();
-  removeMarketplaceEntryCache(namespace, effectivePath);
 }
 
 /**

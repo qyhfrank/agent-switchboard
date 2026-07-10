@@ -354,7 +354,7 @@ function resolvePluginDir(
         const reused = gitSource.subdir
           ? resolveInside(checkoutRoot, gitSource.subdir)
           : checkoutRoot;
-        if (reused) return reused;
+        if (reused && reusablePathsAreClean(resolution, checkoutRoot, reused)) return reused;
       }
     }
     if (!materializeRemote) return undefined;
@@ -461,6 +461,25 @@ function canReuseMarketplaceCheckout(
     tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot) ??
     tryRunGit(['rev-parse', `origin/${resolution.ref}^{commit}`], resolution.marketplaceRoot);
   return refCommit === head;
+}
+
+function reusablePathsAreClean(
+  resolution: MarketplacePluginResolution,
+  checkoutRoot: string,
+  pluginPath: string
+): boolean {
+  if (!resolution.ref && !resolution.sha) return true;
+  const pathspecs = new Set<string>();
+  for (const candidate of [resolution.marketplaceRoot, pluginPath]) {
+    const relative = path.relative(checkoutRoot, normalizeLocalGitPath(candidate));
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return false;
+    pathspecs.add(relative || '.');
+  }
+  const status = tryRunGit(
+    ['status', '--porcelain=v1', '--untracked-files=all', '--ignored', '--', ...pathspecs],
+    checkoutRoot
+  );
+  return status === '';
 }
 
 function isValidGitRef(ref: string): boolean {

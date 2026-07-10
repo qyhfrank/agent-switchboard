@@ -317,8 +317,21 @@ export function distributeBundle<TEntry, Platform extends string>(
 
     for (const entry of platformSelected) {
       const targetDir = opts.resolveTargetDir(platform, entry);
-      const files = opts.listFiles(entry);
       const entryId = opts.getId(entry);
+      let files: BundleFile[];
+      try {
+        files = opts.listFiles(entry);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        results.push({
+          platform,
+          targetDir,
+          status: 'error',
+          error: `Failed to read ${entryId}: ${msg}`,
+          entryId,
+        });
+        continue;
+      }
       if (managedProjectRoot) {
         try {
           assertNoSymlinkAncestor(managedProjectRoot, targetDir, { allowFinalSymlink: true });

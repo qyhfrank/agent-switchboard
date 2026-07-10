@@ -502,6 +502,56 @@ test('same-origin git-subdir reuse resolves from a nested marketplace checkout r
   });
 });
 
+test('pinned same-origin entries do not reuse a dirty plugin worktree', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const checkoutRoot = path.join(asbHome, 'source-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'committed.md'), '# Committed');
+    fs.writeFileSync(
+      path.join(checkoutRoot, '.gitignore'),
+      'packages/plugin/commands/ignored.md\n'
+    );
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'dirty-catalog',
+        plugins: [
+          {
+            name: 'pinned-plugin',
+            source: {
+              source: 'git-subdir',
+              url: checkoutRoot,
+              path: 'packages/plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    initGitRepo(checkoutRoot);
+    execFileSync('git', ['remote', 'add', 'origin', checkoutRoot], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    commitAll(checkoutRoot);
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'dirty.md'), '# Dirty');
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'ignored.md'), '# Ignored');
+    writeConfigToml(asbHome, `[plugins.sources]\ndirty = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('pinned-plugin@dirty');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+
+    assert.deepEqual(plugin.components.commands, ['pinned-plugin@dirty:committed']);
+    assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+  });
+});
+
 test('same-origin entries with incompatible pins materialize the requested commit', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();

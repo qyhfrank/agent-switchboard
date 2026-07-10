@@ -878,6 +878,30 @@ function createBundleHook(id: string, event = 'UserPromptSubmit'): void {
   fs.writeFileSync(path.join(bundleDir, 'run.sh'), '#!/bin/sh\necho test\n');
 }
 
+test('distributeHooks: hook bundles reject file symlinks outside the bundle', () => {
+  withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    createBundleHook('contained-bundle');
+    const bundleDir = path.join(ensureHooksDirectory(), 'contained-bundle');
+    const outside = path.join(asbHome, 'outside-secret.txt');
+    fs.writeFileSync(outside, 'must not copy');
+    fs.symlinkSync(outside, path.join(bundleDir, 'leak.txt'));
+    updateLibraryStateSection('hooks', () => ({
+      enabled: ['contained-bundle'],
+      agentSync: { codex: { enabled: ['contained-bundle'] } },
+    }));
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+
+    assert.ok(
+      outcome.results.some(
+        (result) => result.status === 'error' && result.error?.includes('symbolic link')
+      )
+    );
+    assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
+  });
+});
+
 function createMixedHook(id: string): void {
   const hooksDir = ensureHooksDirectory();
   fs.writeFileSync(

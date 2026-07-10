@@ -13,7 +13,10 @@ import { distributeHooks } from '../hooks/distribution.js';
 import { updateRemoteSources } from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
-import { withTemporaryMarketplaceEntryCache } from '../marketplace/cache.js';
+import {
+  releaseMarketplaceCacheLeases,
+  withTemporaryMarketplaceEntryCache,
+} from '../marketplace/cache.js';
 import { distributeMcp } from '../mcp/distribution.js';
 import {
   distributeClaudeNativePlugins,
@@ -62,6 +65,14 @@ export interface RunSyncCommandOptions {
 }
 
 export async function runSyncCommand(options: RunSyncCommandOptions): Promise<boolean> {
+  try {
+    return await runSyncCommandWithCacheLeases(options);
+  } finally {
+    releaseMarketplaceCacheLeases();
+  }
+}
+
+async function runSyncCommandWithCacheLeases(options: RunSyncCommandOptions): Promise<boolean> {
   const { scope, updateSources, dryRun = false } = options;
 
   const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
@@ -99,10 +110,14 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
 
   if (dryRun) {
     clearPluginIndexCache();
-    const result = await withTemporaryMarketplaceEntryCache(() =>
-      runSyncPhase({ scope, config, layers, dryRun: true })
-    );
-    clearPluginIndexCache();
+    let result: SyncPhaseResult;
+    try {
+      result = await withTemporaryMarketplaceEntryCache(() =>
+        runSyncPhase({ scope, config, layers, dryRun: true })
+      );
+    } finally {
+      clearPluginIndexCache();
+    }
     console.log();
     console.log(chalk.yellow('[dry-run] No files were modified.'));
     return result.hasErrors || sourceUpdateFailed;

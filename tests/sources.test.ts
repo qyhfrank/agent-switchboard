@@ -787,6 +787,64 @@ test('removeSource cleans only its marketplace entry cache', () => {
   });
 });
 
+test('removeSource retains the canonical cache owner after deleting a remote checkout', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'entry-remote');
+    const catalogParent = path.join(asbHome, 'catalog-remote');
+    fs.mkdirSync(entryParent, { recursive: true });
+    fs.mkdirSync(catalogParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const catalogRemote = createBareRemote(catalogParent);
+    const skillDir = path.join(entryRemote.workDir, 'plugin', 'skills', 'remote-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: remote-skill\ndescription: remote\n---\nBody'
+    );
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin'],
+      { cwd: entryRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    fs.mkdirSync(path.join(catalogRemote.workDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(catalogRemote.workDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'remote-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo, path: 'plugin' },
+          },
+        ],
+      })
+    );
+    execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'catalog'],
+      { cwd: catalogRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+
+    addRemoteSource('catalog-source', { url: catalogRemote.bareRepo, type: 'clone' });
+    const plugin = buildPluginIndex().get('remote-plugin@catalog-source');
+    assert.ok(plugin);
+    buildPluginIndex().expand([plugin.id]);
+    const materializedPath = plugin.meta.sourcePath;
+    assert.equal(fs.existsSync(materializedPath), true);
+
+    removeSource('catalog-source');
+
+    assert.equal(fs.existsSync(materializedPath), false);
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'catalog-source')), false);
+  });
+});
+
 test('addRemoteSource with subdir resolves effective path correctly', () => {
   withTempAsbHome((asbHome) => {
     const bareRepo = path.join(asbHome, 'bare-repo.git');

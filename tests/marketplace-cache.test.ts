@@ -7,8 +7,10 @@ import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import {
   type MarketplaceEntryCacheRequest,
+  type MarketplaceEntryMaterialization,
   materializeMarketplaceEntry,
   refreshMarketplaceEntryCache,
+  releaseMarketplaceCacheLeases,
   removeMarketplaceEntryCache,
 } from '../src/marketplace/cache.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
@@ -107,16 +109,25 @@ function findGitRoot(start: string): string {
 
 function materializeInChild(
   asbHome: string,
-  request: MarketplaceEntryCacheRequest
+  request: MarketplaceEntryCacheRequest,
+  refresh = false
 ): Promise<{ code: number | null; stderr: string }> {
   const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
   const source =
     `import { materializeMarketplaceEntry } from ${JSON.stringify(cacheModule)};` +
-    'materializeMarketplaceEntry(JSON.parse(process.argv[1]));';
+    'materializeMarketplaceEntry(JSON.parse(process.argv[1]), { refresh: process.argv[2] === "refresh" });';
   return new Promise((resolve, reject) => {
     const child = spawn(
       process.execPath,
-      ['--import', 'tsx', '--input-type=module', '--eval', source, JSON.stringify(request)],
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        source,
+        JSON.stringify(request),
+        refresh ? 'refresh' : 'reuse',
+      ],
       {
         cwd: process.cwd(),
         env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
@@ -299,6 +310,39 @@ test('post-switch verification failure restores the prior generation', (t) => {
   });
 });
 
+test('backup cleanup failure keeps the verified replacement authoritative', (t) => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const materialized = materializeMarketplaceEntry(request);
+    writePluginVersion(remote, 'v2');
+
+    const originalRemove = fs.rmSync.bind(fs);
+    let injected = false;
+    t.mock.method(fs, 'rmSync', (target, options) => {
+      if (!injected && path.basename(String(target)).startsWith('.backup-')) {
+        injected = true;
+        originalRemove(path.join(String(target), 'entry.json'), { force: true });
+        throw new Error('injected backup cleanup failure');
+      }
+      return originalRemove(target, options);
+    });
+
+    const refreshed = materializeMarketplaceEntry(request, { refresh: true });
+
+    assert.equal(fs.readFileSync(path.join(refreshed.pluginPath, 'VERSION'), 'utf-8').trim(), 'v2');
+    assert.equal(refreshed.entryPath, materialized.entryPath);
+  });
+});
+
 test('materialization recovers an interrupted backup before fetching', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
@@ -320,6 +364,29 @@ test('materialization recovers an interrupted backup before fetching', () => {
 
     assert.equal(recovered.entryPath, materialized.entryPath);
     assert.equal(fs.readFileSync(path.join(recovered.pluginPath, 'VERSION'), 'utf-8').trim(), 'v1');
+    assert.equal(fs.existsSync(backupPath), false);
+  });
+});
+
+test('materialization cleans an interrupted backup after request identity changes', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const materialized = materializeMarketplaceEntry(request);
+    const backupPath = path.join(path.dirname(materialized.entryPath), '.backup-interrupted');
+    fs.renameSync(materialized.entryPath, backupPath);
+
+    const changed = materializeMarketplaceEntry({ ...request, ref: 'HEAD' });
+
+    assert.equal(fs.existsSync(changed.entryPath), true);
     assert.equal(fs.existsSync(backupPath), false);
   });
 });
@@ -357,6 +424,169 @@ test('concurrent materialization publishes one verified generation', async () =>
   }
 });
 
+test('stale lock recovery rejects a reused PID with a different process identity', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const first = materializeMarketplaceEntry(request);
+    const sourcePath = path.dirname(first.entryPath);
+    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    releaseMarketplaceCacheLeases();
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(
+      path.join(lockPath, 'owner.json'),
+      `${JSON.stringify({
+        token: 'stale-owner',
+        pid: process.pid,
+        startedAt: Date.now() - 300_000,
+        processIdentity: 'different process birth',
+      })}\n`
+    );
+
+    const recovered = materializeMarketplaceEntry(request);
+
+    assert.equal(recovered.entryPath, first.entryPath);
+    assert.notEqual(
+      JSON.parse(fs.readFileSync(path.join(lockPath, 'owner.json'), 'utf-8')).token,
+      'stale-owner'
+    );
+  });
+});
+
+test('concurrent stale lock recovery admits one cache publisher', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-cache-stale-lock-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  try {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const first = materializeMarketplaceEntry(request);
+    const sourcePath = path.dirname(first.entryPath);
+    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    releaseMarketplaceCacheLeases();
+    fs.rmSync(sourcePath, { recursive: true, force: true });
+    const deadOwner = spawn(process.execPath, ['--eval', '']);
+    const deadPid = deadOwner.pid;
+    await new Promise<void>((resolve, reject) => {
+      deadOwner.on('error', reject);
+      deadOwner.on('close', () => resolve());
+    });
+    assert.ok(deadPid);
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(
+      path.join(lockPath, 'owner.json'),
+      `${JSON.stringify({
+        token: 'dead-owner',
+        pid: deadPid,
+        startedAt: Date.now() - 300_000,
+      })}\n`
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => materializeInChild(asbHome, request))
+    );
+
+    assert.deepEqual(
+      results.filter((result) => result.code !== 0),
+      []
+    );
+    assert.equal(
+      fs
+        .readdirSync(path.join(asbHome, 'state', 'marketplace-plugins'), { recursive: true })
+        .filter((entry) => String(entry).endsWith('entry.json')).length,
+      1
+    );
+  } finally {
+    releaseMarketplaceCacheLeases();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a reader lease blocks refresh until the consuming process exits', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-cache-reader-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const children: Array<ReturnType<typeof spawn>> = [];
+  try {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
+    const readerSource =
+      `import { materializeMarketplaceEntry } from ${JSON.stringify(cacheModule)};` +
+      'const result = materializeMarketplaceEntry(JSON.parse(process.argv[1]));' +
+      'process.stdout.write(JSON.stringify(result) + "\\n");' +
+      'process.stdin.resume();';
+    const reader = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', readerSource, JSON.stringify(request)],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }
+    );
+    children.push(reader);
+    reader.stdout.setEncoding('utf-8');
+    const materialized = await new Promise<MarketplaceEntryMaterialization>((resolve, reject) => {
+      let output = '';
+      reader.stdout.on('data', (chunk) => {
+        output += chunk;
+        const newline = output.indexOf('\n');
+        if (newline !== -1) resolve(JSON.parse(output.slice(0, newline)));
+      });
+      reader.on('error', reject);
+      reader.on('close', (code) => {
+        if (!output.includes('\n')) reject(new Error(`reader exited before ready: ${code}`));
+      });
+    });
+    writePluginVersion(remote, 'v2');
+
+    let refreshFinished = false;
+    const refresh = materializeInChild(asbHome, request, true).then((result) => {
+      refreshFinished = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+
+    assert.equal(refreshFinished, false);
+    assert.equal(
+      fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8').trim(),
+      'v1'
+    );
+
+    reader.stdin.end();
+    const result = await refresh;
+    assert.equal(result.code, 0, result.stderr);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('git fetch errors redact credential-bearing query parameters', () => {
   withTempAsbHome((asbHome) => {
     const secret = 'audit-secret-token';
@@ -371,6 +601,34 @@ test('git fetch errors redact credential-bearing query parameters', () => {
         }),
       (error: unknown) => error instanceof Error && !error.message.includes(secret)
     );
+  });
+});
+
+test('successful sparse fetch does not persist URL credentials', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const secret = 'audit-secret-password';
+    const materialized = materializeMarketplaceEntry({
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: `file://audit-user:${secret}@localhost${remote.bareRepo}`,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    });
+
+    const gitDir = path.join(materialized.repoPath, '.git');
+    const gitConfig = fs.readFileSync(path.join(gitDir, 'config'), 'utf-8');
+    assert.doesNotMatch(gitConfig, /audit-user/);
+    assert.doesNotMatch(gitConfig, new RegExp(secret));
+    for (const relative of fs.readdirSync(gitDir, { recursive: true })) {
+      const candidate = path.join(gitDir, String(relative));
+      if (!fs.lstatSync(candidate).isFile()) continue;
+      const content = fs.readFileSync(candidate);
+      assert.equal(content.includes(secret), false, `secret persisted in ${relative}`);
+    }
+    assert.equal(fs.existsSync(path.join(gitDir, 'FETCH_HEAD')), false);
   });
 });
 
