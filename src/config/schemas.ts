@@ -290,7 +290,10 @@ function migratePluginsSection(input: unknown): unknown {
   // Old legacy format: has sources sub-object but no enabled
   const s = obj.sources;
   if (s !== undefined && typeof s === 'object' && s !== null && !Array.isArray(s)) {
-    return { ...obj, enabled: [] };
+    const sourceMap = s as Record<string, unknown>;
+    const legacyPluginNamedSources =
+      'source' in sourceMap && typeof sourceMap.enabled === 'boolean';
+    if (!legacyPluginNamedSources) return { ...obj, enabled: [] };
   }
 
   // Flat boolean-map format: boolean values + [plugins.<name>] source tables

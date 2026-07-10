@@ -120,6 +120,16 @@ export function getMarketplacePluginCacheDir(): string {
   return path.join(getConfigDir(), 'state', 'marketplace-plugins');
 }
 
+/** Returns the stable cross-process lock root for plugin source lifecycles. */
+export function getPluginSourceLocksDir(): string {
+  return path.join(getConfigDir(), 'state', 'plugin-source-locks');
+}
+
+/** Returns persisted plugin source incarnation and recovery records. */
+export function getPluginSourceStateDir(): string {
+  return path.join(getConfigDir(), 'state', 'plugin-sources');
+}
+
 /**
  * Returns the home directory for installed agent apps (Claude Code, OpenCode, etc.)
  * Can be overridden via `ASB_AGENTS_HOME`; falls back to the OS user home.

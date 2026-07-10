@@ -20,13 +20,15 @@ export function normalizeMarketplaceGitRef(value: string | undefined): string | 
   return ref;
 }
 
-export function localCheckoutRefForMarketplaceRef(ref: string): string {
-  if (ref === 'HEAD') return 'refs/remotes/origin/HEAD';
+export function localCheckoutRefsForMarketplaceRef(ref: string): string[] {
+  if (ref === 'HEAD') return ['refs/remotes/origin/HEAD'];
   if (ref.startsWith('refs/heads/')) {
-    return `refs/remotes/origin/${ref.slice('refs/heads/'.length)}`;
+    return [`refs/remotes/origin/${ref.slice('refs/heads/'.length)}`];
   }
-  if (!ref.startsWith('refs/')) return `refs/remotes/origin/${ref}`;
-  return ref;
+  if (!ref.startsWith('refs/')) {
+    return [`refs/remotes/origin/${ref}`, `refs/tags/${ref}`];
+  }
+  return [ref];
 }
 
 export function marketplaceGitFetchTargets(ref: string): string[] {

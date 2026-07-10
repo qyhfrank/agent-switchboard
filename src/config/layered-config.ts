@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse, stringify } from '@iarna/toml';
@@ -209,7 +210,14 @@ function writeLayerFile(filePath: string, config: SwitchboardConfigLayer): void 
   const portable = JSON.parse(JSON.stringify(config));
   // biome-ignore lint/suspicious/noExplicitAny: TOML stringify requires JsonMap typing
   const content = stringify(portable as any);
-  fs.writeFileSync(filePath, content, 'utf-8');
+  const tempPath = path.join(dir, `.${path.basename(filePath)}.${randomUUID()}.tmp`);
+  const mode = fs.existsSync(filePath) ? fs.statSync(filePath).mode & 0o777 : undefined;
+  try {
+    fs.writeFileSync(tempPath, content, { encoding: 'utf-8', mode, flag: 'wx' });
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
 }
 
 export interface UpdateConfigLayerOptions extends LoadConfigLayersOptions {

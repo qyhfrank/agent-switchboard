@@ -9,6 +9,7 @@ import {
   resolveEffectiveSectionConfig,
 } from '../src/config/application-config.js';
 import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
+import { loadSwitchboardConfig } from '../src/config/switchboard-config.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
 import { refreshMarketplacePluginCache } from '../src/marketplace/reader.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
@@ -328,6 +329,21 @@ test('plugin source namespace may be named source', () => {
 
     assert.ok(index.get('demo@source'));
     assert.equal(index.get('demo@sources'), undefined);
+  });
+});
+
+test('legacy plugin namespace sources still migrates from the flat format', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const pluginDir = path.join(asbHome, 'legacy-sources-plugin');
+    fs.mkdirSync(path.join(pluginDir, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginDir, 'commands', 'legacy.md'), '# Legacy');
+    writeConfigToml(asbHome, `[plugins.sources]\nsource = "${pluginDir}"\nenabled = true\n`);
+
+    const config = loadSwitchboardConfig();
+    assert.equal(config.plugins.sources.sources, pluginDir);
+    assert.deepEqual(config.plugins.enabled, ['sources']);
+    assert.ok(buildPluginIndex().get('sources'));
   });
 });
 
@@ -777,6 +793,65 @@ test('short refs resolve the same branch for reuse and materialization', () => {
   });
 });
 
+test('short tag-only refs reuse a compatible same-origin checkout', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const bareRepo = path.join(asbHome, 'tag-only.git');
+    const checkoutRoot = path.join(asbHome, 'tag-only-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], {
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['clone', bareRepo, checkoutRoot], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'tagged.md'), '# Tagged');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'tag-only-catalog',
+        plugins: [
+          {
+            name: 'tag-only-plugin',
+            source: {
+              source: 'git-subdir',
+              url: bareRepo,
+              path: 'packages/plugin',
+              ref: 'release-only',
+            },
+          },
+        ],
+      })
+    );
+    commitAll(checkoutRoot);
+    execFileSync('git', ['tag', 'release-only'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'main', 'refs/tags/release-only'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    writeConfigToml(asbHome, `[plugins.sources]\ntag-only = "${marketplaceDir}"\n`);
+    fs.renameSync(bareRepo, `${bareRepo}.offline`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('tag-only-plugin@tag-only');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+
+    assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
+    assert.deepEqual(plugin.components.commands, ['tag-only-plugin@tag-only:tagged']);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+  });
+});
+
 test('pinned same-origin reuse rejects hidden index deviations', () => {
   for (const mode of ['skip-worktree', 'assume-unchanged'] as const) {
     withTempAsbHome((asbHome) => {
@@ -927,6 +1002,106 @@ test('same-origin detection distinguishes repositories on different ports', () =
     assert.ok(plugin);
     assert.equal(plugin.meta.materialized, false);
     assert.deepEqual(plugin.components.commands, []);
+  });
+});
+
+test('same-origin detection distinguishes SSH principals', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = path.join(asbHome, 'ssh-principal-catalog');
+    const pluginRoot = path.join(marketplaceDir, 'packages', 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'wrong-principal.md'), '# Wrong');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'ssh-principal-catalog',
+        plugins: [
+          {
+            name: 'external-plugin',
+            source: {
+              source: 'git-subdir',
+              url: 'ssh://bob@example.test/org/repo.git',
+              path: 'packages/plugin',
+            },
+          },
+        ],
+      })
+    );
+    initGitRepo(marketplaceDir);
+    execFileSync('git', ['remote', 'add', 'origin', 'ssh://alice@example.test/org/repo.git'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    commitAll(marketplaceDir);
+    writeConfigToml(asbHome, `[plugins.sources]\nssh-principal = "${marketplaceDir}"\n`);
+
+    const plugin = buildPluginIndex().get('external-plugin@ssh-principal');
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.materialized, false);
+    assert.deepEqual(plugin.components.commands, []);
+  });
+});
+
+test('relative Git origins resolve from the checkout root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const bareRepo = path.join(asbHome, 'relative-origin.git');
+    const checkoutRoot = path.join(asbHome, 'relative-origin-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], {
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['clone', bareRepo, checkoutRoot], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'relative.md'), '# Relative');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'relative-origin-catalog',
+        plugins: [
+          {
+            name: 'relative-origin-plugin',
+            source: {
+              source: 'git-subdir',
+              url: bareRepo,
+              path: 'packages/plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    commitAll(checkoutRoot);
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync('git', ['remote', 'set-url', 'origin', '../relative-origin.git'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    writeConfigToml(asbHome, `[plugins.sources]\nrelative-origin = "${marketplaceDir}"\n`);
+    fs.renameSync(bareRepo, `${bareRepo}.offline`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('relative-origin-plugin@relative-origin');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+
+    assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
+    assert.deepEqual(plugin.components.commands, [
+      'relative-origin-plugin@relative-origin:relative',
+    ]);
   });
 });
 

@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { getPluginsDir } from '../src/config/paths.js';
+import { getPluginSourceLocksDir, getPluginsDir } from '../src/config/paths.js';
 import {
   addLocalSource,
   addRemoteSource,
@@ -789,6 +789,199 @@ test('removeSource cleans only its marketplace entry cache', () => {
   });
 });
 
+test('removeSource cleans the canonical cache owner after a source symlink disappears', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'symlink-entry-remote');
+    fs.mkdirSync(entryParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const marketplaceDir = path.join(asbHome, 'symlink-catalog-target');
+    const marketplaceLink = path.join(asbHome, 'symlink-catalog');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'symlink-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo },
+          },
+        ],
+      })
+    );
+    fs.symlinkSync(marketplaceDir, marketplaceLink);
+    addLocalSource('symlink-catalog', marketplaceLink);
+    const index = buildPluginIndex();
+    const plugin = index.get('remote-plugin@symlink-catalog');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    const materializedPath = plugin.meta.sourcePath;
+    assert.equal(fs.existsSync(materializedPath), true);
+    clearPluginIndexCache();
+    fs.rmSync(marketplaceLink);
+
+    removeSource('symlink-catalog');
+
+    assert.equal(hasSource('symlink-catalog'), false);
+    assert.equal(fs.existsSync(materializedPath), false);
+    assert.equal(fs.existsSync(marketplaceDir), true);
+  });
+});
+
+function createManagedMarketplaceSource(
+  asbHome: string,
+  namespace: string
+): { checkoutPath: string; materializedPath: string } {
+  const entryParent = path.join(asbHome, `${namespace}-entry`);
+  const catalogParent = path.join(asbHome, `${namespace}-catalog`);
+  fs.mkdirSync(entryParent, { recursive: true });
+  fs.mkdirSync(catalogParent, { recursive: true });
+  const entryRemote = createBareRemote(entryParent);
+  const catalogRemote = createBareRemote(catalogParent);
+  fs.mkdirSync(path.join(catalogRemote.workDir, '.claude-plugin'), { recursive: true });
+  fs.writeFileSync(
+    path.join(catalogRemote.workDir, '.claude-plugin', 'marketplace.json'),
+    JSON.stringify({
+      name: namespace,
+      plugins: [
+        {
+          name: 'remote-plugin',
+          source: { source: 'url', url: entryRemote.bareRepo },
+        },
+      ],
+    })
+  );
+  execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+  execFileSync(
+    'git',
+    ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'catalog'],
+    { cwd: catalogRemote.workDir, stdio: 'pipe' }
+  );
+  execFileSync('git', ['push', 'origin', 'main'], {
+    cwd: catalogRemote.workDir,
+    stdio: 'pipe',
+  });
+  addRemoteSource(namespace, { url: catalogRemote.bareRepo, type: 'clone' });
+  const index = buildPluginIndex();
+  const plugin = index.get(`remote-plugin@${namespace}`);
+  assert.ok(plugin);
+  index.expand([plugin.id]);
+  const materializedPath = plugin.meta.sourcePath;
+  clearPluginIndexCache();
+  return {
+    checkoutPath: path.join(getPluginsDir(), namespace),
+    materializedPath,
+  };
+}
+
+async function stopRemovalAtCrashPoint(
+  asbHome: string,
+  namespace: string,
+  crashPoint: 'before-config' | 'after-config'
+): Promise<void> {
+  const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+  const configPath = path.join(asbHome, 'config.toml');
+  const childSource =
+    'import fs from "node:fs";' +
+    `import { removeSource } from ${JSON.stringify(sourcesModule)};` +
+    'const originalRename = fs.renameSync.bind(fs);' +
+    'const originalRemove = fs.rmSync.bind(fs);' +
+    `const configPath = ${JSON.stringify(configPath)};` +
+    `const crashPoint = ${JSON.stringify(crashPoint)};` +
+    'const wait = () => {' +
+    'process.stdout.write("CHECKPOINT\\n");' +
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
+    '};' +
+    'fs.renameSync = (from, to) => {' +
+    'if (crashPoint === "before-config" && String(to) === configPath) wait();' +
+    'return originalRename(from, to);' +
+    '};' +
+    'fs.rmSync = (target, options) => {' +
+    'if (crashPoint === "after-config" && String(target).includes(".removing-")) wait();' +
+    'return originalRemove(target, options);' +
+    '};' +
+    `removeSource(${JSON.stringify(namespace)});`;
+  const child = spawn(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+  child.stdout.setEncoding('utf-8');
+  child.stderr.setEncoding('utf-8');
+  let output = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    output += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  await new Promise<void>((resolve, reject) => {
+    const deadline = Date.now() + 10_000;
+    const poll = () => {
+      if (output.includes('CHECKPOINT\n')) resolve();
+      else if (child.exitCode !== null) reject(new Error(stderr || 'removal exited early'));
+      else if (Date.now() >= deadline) reject(new Error(stderr || 'removal checkpoint timed out'));
+      else setTimeout(poll, 10);
+    };
+    poll();
+  });
+  const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  child.kill('SIGKILL');
+  await closed;
+}
+
+test('source removal recovers crashes around the config commit', async () => {
+  for (const crashPoint of ['before-config', 'after-config'] as const) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `asb-source-${crashPoint}-`));
+    const asbHome = path.join(root, 'asb-home');
+    fs.mkdirSync(asbHome, { recursive: true });
+    const previousAsbHome = process.env.ASB_HOME;
+    const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+    process.env.ASB_HOME = asbHome;
+    process.env.ASB_AGENTS_HOME = asbHome;
+    try {
+      clearPluginIndexCache();
+      const namespace = `crash-${crashPoint}`;
+      const { checkoutPath, materializedPath } = createManagedMarketplaceSource(asbHome, namespace);
+      await stopRemovalAtCrashPoint(asbHome, namespace, crashPoint);
+
+      const sources = getSourcesRecord();
+      const removingCheckouts = fs
+        .readdirSync(getPluginsDir())
+        .filter((name) => name.startsWith('.removing-'));
+      const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+      const removingCaches = fs.existsSync(cacheRoot)
+        ? fs.readdirSync(cacheRoot).filter((name) => name.startsWith('.removing-'))
+        : [];
+
+      if (crashPoint === 'before-config') {
+        assert.ok(namespace in sources);
+        assert.equal(fs.existsSync(checkoutPath), true);
+        assert.equal(fs.existsSync(materializedPath), true);
+      } else {
+        assert.equal(namespace in sources, false);
+        assert.equal(fs.existsSync(checkoutPath), false);
+        assert.equal(fs.existsSync(materializedPath), false);
+      }
+      assert.deepEqual(removingCheckouts, []);
+      assert.deepEqual(removingCaches, []);
+    } finally {
+      clearPluginIndexCache();
+      if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+      else process.env.ASB_HOME = previousAsbHome;
+      if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+      else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test('removeSource restores verified cache when config removal fails', (t) => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -816,12 +1009,12 @@ test('removeSource restores verified cache when config removal fails', (t) => {
     index.expand([plugin.id]);
     const materializedPath = plugin.meta.sourcePath;
     const configPath = path.join(asbHome, 'config.toml');
-    const originalWrite = fs.writeFileSync.bind(fs);
-    t.mock.method(fs, 'writeFileSync', (target, data, options) => {
-      if (path.resolve(String(target)) === configPath) {
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (path.resolve(String(to)) === configPath) {
         throw new Error('injected config write failure');
       }
-      return originalWrite(target, data, options);
+      return originalRename(from, to);
     });
 
     assert.throws(() => removeSource('rollback-local-catalog'), /injected config write failure/);
@@ -870,12 +1063,12 @@ test('removeSource restores a managed checkout when config removal fails', (t) =
     const materializedPath = plugin.meta.sourcePath;
     const checkoutPath = path.join(getPluginsDir(), 'rollback-managed');
     const configPath = path.join(asbHome, 'config.toml');
-    const originalWrite = fs.writeFileSync.bind(fs);
-    t.mock.method(fs, 'writeFileSync', (target, data, options) => {
-      if (path.resolve(String(target)) === configPath) {
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (path.resolve(String(to)) === configPath) {
         throw new Error('injected config write failure');
       }
-      return originalWrite(target, data, options);
+      return originalRename(from, to);
     });
 
     assert.throws(() => removeSource('rollback-managed'), /injected config write failure/);
@@ -964,6 +1157,101 @@ test('a descriptor captured before source replacement cannot publish cache after
   });
 });
 
+test('source incarnation invalidates deferred descriptors across processes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-incarnation-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'aba-entry-remote');
+    fs.mkdirSync(entryParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const marketplaceDir = path.join(asbHome, 'aba-local-catalog');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'aba-local-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo },
+          },
+        ],
+      })
+    );
+    addLocalSource('aba-local-catalog', marketplaceDir);
+
+    const indexModule = pathToFileURL(path.resolve('src/plugins/index.ts')).href;
+    const childSource =
+      `import { buildPluginIndex } from ${JSON.stringify(indexModule)};` +
+      'const index = buildPluginIndex();' +
+      'const plugin = index.get("remote-plugin@aba-local-catalog");' +
+      'if (!plugin) throw new Error("plugin missing");' +
+      'process.stdout.write("READY\\n");' +
+      'await new Promise((resolve) => process.stdin.once("data", resolve));' +
+      'try { index.expand([plugin.id]); process.stdout.write("EXPANDED\\n"); }' +
+      'catch (error) { process.stdout.write("ERROR:" + error.message + "\\n"); }';
+    child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['pipe', 'pipe', 'pipe'],
+      }
+    );
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    let output = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    await new Promise<void>((resolve, reject) => {
+      const poll = () => {
+        if (output.includes('READY\n')) resolve();
+        else if (child?.exitCode !== null) reject(new Error(stderr || 'child exited before ready'));
+        else setTimeout(poll, 10);
+      };
+      poll();
+    });
+
+    removeSource('aba-local-catalog');
+    addLocalSource('aba-local-catalog', marketplaceDir);
+    child.stdin.end('expand\n');
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child?.on('error', reject);
+      child?.on('close', resolve);
+    });
+
+    assert.equal(code, 0, stderr);
+    assert.match(output, /ERROR:.*Marketplace source .* no longer active/i);
+    const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+    const entries = fs.existsSync(cacheRoot)
+      ? fs
+          .readdirSync(cacheRoot, { recursive: true })
+          .filter((entry) => String(entry).endsWith('entry.json'))
+      : [];
+    assert.deepEqual(entries, []);
+  } finally {
+    child?.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('removeSource retains the canonical cache owner after deleting a remote checkout', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -1022,7 +1310,7 @@ test('removeSource retains the canonical cache owner after deleting a remote che
   });
 });
 
-test('same-origin source readers block checkout removal until consumption ends', async () => {
+test('dry-run relative source readers block checkout removal until consumption ends', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-reader-'));
   const asbHome = path.join(root, 'asb-home');
   fs.mkdirSync(asbHome, { recursive: true });
@@ -1048,12 +1336,7 @@ test('same-origin source readers block checkout removal until consumption ends',
         plugins: [
           {
             name: 'leased-plugin',
-            source: {
-              source: 'git-subdir',
-              url: bareRepo,
-              path: 'packages/plugin',
-              ref: 'main',
-            },
+            source: './packages/plugin',
           },
         ],
       })
@@ -1068,14 +1351,19 @@ test('same-origin source readers block checkout removal until consumption ends',
     addRemoteSource('leased', { url: bareRepo, type: 'clone' });
 
     const indexModule = pathToFileURL(path.resolve('src/plugins/index.ts')).href;
+    const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
     const readerSource =
       `import { buildPluginIndex } from ${JSON.stringify(indexModule)};` +
+      `import { withTemporaryMarketplaceEntryCache } from ${JSON.stringify(cacheModule)};` +
+      'await withTemporaryMarketplaceEntryCache(async () => {' +
       'const index = buildPluginIndex();' +
       'const plugin = index.get("leased-plugin@leased");' +
       'if (!plugin) throw new Error("plugin missing");' +
       'index.expand([plugin.id]);' +
       'process.stdout.write(JSON.stringify({ sourcePath: plugin.meta.sourcePath }) + "\\n");' +
-      'process.stdin.resume();';
+      'process.stdin.resume();' +
+      'await new Promise((resolve) => process.stdin.on("end", resolve));' +
+      '});';
     const reader = spawn(
       process.execPath,
       ['--import', 'tsx', '--input-type=module', '--eval', readerSource],
@@ -1099,6 +1387,7 @@ test('same-origin source readers block checkout removal until consumption ends',
         if (!output.includes('\n')) reject(new Error(`reader exited before ready: ${code}`));
       });
     });
+    assert.equal(fs.readdirSync(getPluginSourceLocksDir()).length, 1);
 
     const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
     const removerSource = `import { removeSource } from ${JSON.stringify(sourcesModule)};removeSource("leased");`;
@@ -1113,6 +1402,7 @@ test('same-origin source readers block checkout removal until consumption ends',
     );
     children.push(remover);
     let removalFinished = false;
+    let removalResult: { code: number | null; stderr: string } | undefined;
     const removal = new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
       let stderr = '';
       remover.stderr.setEncoding('utf-8');
@@ -1122,12 +1412,17 @@ test('same-origin source readers block checkout removal until consumption ends',
       remover.on('error', reject);
       remover.on('close', (code) => {
         removalFinished = true;
-        resolve({ code, stderr });
+        removalResult = { code, stderr };
+        resolve(removalResult);
       });
     });
     await new Promise((resolve) => setTimeout(resolve, 1_000));
 
-    assert.equal(removalFinished, false);
+    assert.equal(
+      removalFinished,
+      false,
+      removalResult?.stderr || JSON.stringify(fs.readdirSync(getPluginSourceLocksDir()))
+    );
     assert.equal(fs.existsSync(sourcePath), true);
 
     reader.stdin.end();
@@ -1253,7 +1548,7 @@ test('subtree lifecycle: add → update → remove', () => {
     // Update (subtree pull)
     const results = updateRemoteSources();
     assert.equal(results.length, 1);
-    assert.equal(results[0].status, 'updated');
+    if (results[0].status === 'error') assert.fail(results[0].error);
     assert.ok(fs.existsSync(path.join(pluginDir, 'rules', 'v2.md')));
 
     // Remove

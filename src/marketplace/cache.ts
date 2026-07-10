@@ -4,7 +4,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getConfigDir, getMarketplacePluginCacheDir } from '../config/paths.js';
+import {
+  getConfigDir,
+  getMarketplacePluginCacheDir,
+  getPluginSourceLocksDir,
+} from '../config/paths.js';
 import { marketplaceGitFetchTargets, normalizeMarketplaceGitRef } from './git-ref.js';
 
 export interface MarketplaceEntryCacheRequest {
@@ -34,6 +38,11 @@ export interface MarketplaceEntryCacheRefreshResult {
 export interface MarketplaceCacheRemovalStage {
   commit: () => void;
   rollback: () => void;
+}
+
+export interface MarketplaceCacheRemovalPaths {
+  activePath: string;
+  stagedPath: string;
 }
 
 interface MarketplaceEntryCacheMetadata {
@@ -89,7 +98,8 @@ function runGit(args: string[], cwd?: string, env?: NodeJS.ProcessEnv): string {
 function redactGitCredentials(value: string): string {
   return value
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1<redacted>@')
-    .replace(/([?&][^=\s&]+)=([^&\s'"]+)/g, '$1=<redacted>');
+    .replace(/([?&][^=\s&]+)=([^&\s'"]+)/g, '$1=<redacted>')
+    .replace(/#[^\s'"]+/g, '#<redacted>');
 }
 
 function digest(value: string): string {
@@ -230,6 +240,25 @@ function safeCacheRoot(create: boolean): string {
   return cacheRoot;
 }
 
+function safeSourceLockRoot(create: boolean): string {
+  const trustedRoot = path.resolve(getConfigDir());
+  const lockRoot = path.resolve(getPluginSourceLocksDir());
+  assertInside(trustedRoot, lockRoot);
+  let current = trustedRoot;
+  for (const segment of path.relative(trustedRoot, lockRoot).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Plugin source lock root contains a symbolic link: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  if (create) fs.mkdirSync(lockRoot, { recursive: true });
+  return lockRoot;
+}
+
 interface CacheLockMetadata {
   token: string;
   pid: number;
@@ -247,7 +276,7 @@ interface CacheLockObservation {
 
 function sourceLockPath(sourceName: string, marketplacePath: string): string {
   const sourcePath = sourceCachePath(sourceName, marketplacePath);
-  return path.join(configuredCacheRoot(), `.${path.basename(sourcePath)}.lock`);
+  return path.join(getPluginSourceLocksDir(), `.${path.basename(sourcePath)}.lock`);
 }
 
 function readLockMetadata(lockPath: string): CacheLockMetadata | null {
@@ -403,9 +432,10 @@ function tryRecoverStaleLock(
   observed: CacheLockObservation
 ): boolean {
   const observedLockToken = observed.owner?.token;
-  const claimDir = path.join(lockPath, LOCK_RECOVERY_DIR);
+  const claimDir = `${lockPath}.${LOCK_RECOVERY_DIR}`;
   const token = randomUUID();
-  const tempOwnerPath = path.join(lockPath, `.recovering-${token}.tmp`);
+  const preparedClaimDir = `${claimDir}.${token}.tmp`;
+  const preparedOwnerPath = path.join(preparedClaimDir, `${token}.json`);
   const ownerPath = path.join(claimDir, `${token}.json`);
   const owner: CacheLockMetadata = {
     token,
@@ -415,31 +445,20 @@ function tryRecoverStaleLock(
     lockToken: observedLockToken,
   };
   assertNoCacheSymlinks(cacheRoot, claimDir);
+  assertNoCacheSymlinks(cacheRoot, preparedClaimDir);
   try {
-    fs.mkdirSync(claimDir);
+    fs.mkdirSync(preparedClaimDir);
+    fs.writeFileSync(preparedOwnerPath, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
+    fs.renameSync(preparedClaimDir, claimDir);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
+    fs.rmSync(preparedClaimDir, { recursive: true, force: true });
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
     assertNoCacheSymlinks(cacheRoot, claimDir);
     removeStaleRecoveryClaim(cacheRoot, claimDir);
     return false;
   }
 
-  try {
-    assertNoCacheSymlinks(cacheRoot, tempOwnerPath);
-    assertNoCacheSymlinks(cacheRoot, ownerPath);
-    fs.writeFileSync(tempOwnerPath, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
-    fs.renameSync(tempOwnerPath, ownerPath);
-  } catch {
-    fs.rmSync(tempOwnerPath, { force: true });
-    try {
-      fs.rmdirSync(claimDir);
-    } catch {
-      // A competing recovery cleanup may already own this transition.
-    }
-    return false;
-  }
-
-  let moved = false;
   try {
     assertNoCacheSymlinks(cacheRoot, ownerPath);
     const current = observeLock(cacheRoot, lockPath);
@@ -453,18 +472,17 @@ function tryRecoverStaleLock(
     }
     const stalePath = `${lockPath}.stale-${randomUUID()}`;
     fs.renameSync(lockPath, stalePath);
-    moved = true;
     fs.rmSync(stalePath, { recursive: true, force: true });
     return true;
   } catch {
     return false;
   } finally {
-    if (!moved) releaseRecoveryClaim(cacheRoot, claimDir, ownerPath, token);
+    releaseRecoveryClaim(cacheRoot, claimDir, ownerPath, token);
   }
 }
 
 function acquireSourceLock(sourceName: string, marketplacePath: string): () => void {
-  const cacheRoot = safeCacheRoot(true);
+  const cacheRoot = safeSourceLockRoot(true);
   const lockPath = sourceLockPath(sourceName, marketplacePath);
   assertNoCacheSymlinks(cacheRoot, lockPath);
   const token = randomUUID();
@@ -611,26 +629,25 @@ export function withMarketplaceSourceReadLease<T>(
 
 export function stageMarketplaceEntryCacheRemoval(
   sourceName: string,
-  marketplacePath: string
+  marketplacePath: string,
+  preparedPaths?: MarketplaceCacheRemovalPaths
 ): MarketplaceCacheRemovalStage {
   const cacheRoot = safeCacheRoot(false);
-  const sourcePath = sourceCachePath(sourceName, marketplacePath);
+  const sourcePath = preparedPaths?.activePath ?? sourceCachePath(sourceName, marketplacePath);
   if (!fs.existsSync(sourcePath)) {
     return { commit: () => {}, rollback: () => {} };
   }
   assertNoCacheSymlinks(cacheRoot, sourcePath);
-  const stagedPath = path.join(cacheRoot, `.removing-${path.basename(sourcePath)}-${randomUUID()}`);
+  const stagedPath =
+    preparedPaths?.stagedPath ??
+    path.join(cacheRoot, `.removing-${path.basename(sourcePath)}-${randomUUID()}`);
   assertNoCacheSymlinks(cacheRoot, stagedPath);
   fs.renameSync(sourcePath, stagedPath);
   let staged = true;
   return {
     commit: () => {
       if (!staged) return;
-      try {
-        fs.rmSync(stagedPath, { recursive: true, force: true });
-      } catch {
-        // The source is gone and the dot-prefixed staging path is not reusable cache state.
-      }
+      fs.rmSync(stagedPath, { recursive: true, force: true });
       staged = false;
     },
     rollback: () => {
@@ -642,6 +659,22 @@ export function stageMarketplaceEntryCacheRemoval(
       staged = false;
     },
   };
+}
+
+export function marketplaceEntryCacheRemovalPaths(
+  sourceName: string,
+  marketplacePath: string,
+  transactionId: string
+): MarketplaceCacheRemovalPaths {
+  const cacheRoot = safeCacheRoot(false);
+  const activePath = sourceCachePath(sourceName, marketplacePath);
+  const stagedPath = path.join(
+    cacheRoot,
+    `.removing-${path.basename(activePath)}-${safeSegment(transactionId)}`
+  );
+  assertNoCacheSymlinks(cacheRoot, activePath);
+  assertNoCacheSymlinks(cacheRoot, stagedPath);
+  return { activePath, stagedPath };
 }
 
 function resolveInside(root: string, subdir: string | undefined): string {
@@ -666,7 +699,7 @@ function credentialFreeUrl(value: string): string {
     url.hash = '';
     return url.toString();
   } catch {
-    return value.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/i, '$1');
+    return value.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/i, '$1').replace(/[?#].*$/, '');
   }
 }
 

@@ -22,6 +22,7 @@ import {
   getSourceRevision,
   getSourcesRecord,
 } from '../library/sources.js';
+import { releaseMarketplaceCacheLeases } from '../marketplace/cache.js';
 import {
   loadPluginComponents,
   loadPluginHookEntries,
@@ -457,6 +458,7 @@ function getScopeCacheKey(scope?: ConfigScope): string {
 
 export function clearPluginIndexCache(): void {
   cachedIndices.clear();
+  releaseMarketplaceCacheLeases();
 }
 
 export function buildPluginIndex(scope?: ConfigScope): PluginIndex {

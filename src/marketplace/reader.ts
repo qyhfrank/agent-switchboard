@@ -25,7 +25,7 @@ import {
   refreshMarketplaceEntryCache,
   withMarketplaceSourceReadLease,
 } from './cache.js';
-import { localCheckoutRefForMarketplaceRef, normalizeMarketplaceGitRef } from './git-ref.js';
+import { localCheckoutRefsForMarketplaceRef, normalizeMarketplaceGitRef } from './git-ref.js';
 import {
   type MarketplaceManifest,
   marketplaceManifestSchema,
@@ -391,7 +391,7 @@ function resolvePluginDir(
   const { marketplaceRoot, pluginRoot, source } = resolution;
   if (typeof source === 'string') {
     if (source.startsWith('./') || source.startsWith('../') || !source.includes(':')) {
-      return resolveInside(marketplaceRoot, path.join(pluginRoot, source));
+      return resolveSourceCheckoutPath(resolution, path.join(pluginRoot, source));
     }
     return null;
   }
@@ -403,7 +403,7 @@ function resolvePluginDir(
     (source.source === 'local' ||
       (!source.source && !source.url && !source.git && !source.github && !source.repo))
   ) {
-    return resolveInside(marketplaceRoot, path.join(pluginRoot, source.path));
+    return resolveSourceCheckoutPath(resolution, path.join(pluginRoot, source.path));
   }
 
   const gitSource = getGitSource(resolution);
@@ -436,6 +436,18 @@ function resolvePluginDir(
   // Keep native-only and currently unsupported source kinds in the catalog.
   // ASB reports a materialization failure only if portable expansion selects one.
   return materializeRemote ? null : undefined;
+}
+
+function resolveSourceCheckoutPath(
+  resolution: MarketplacePluginResolution,
+  subpath: string
+): string | null | undefined {
+  return withMarketplaceSourceReadLease(
+    resolution.sourceName,
+    resolution.marketplaceRoot,
+    resolution.ownerIsCurrent,
+    () => resolveInside(resolution.marketplaceRoot, subpath)
+  );
 }
 
 function toCacheRequest(
@@ -509,10 +521,12 @@ function canReuseMarketplaceCheckout(
   resolution: MarketplacePluginResolution,
   sourceUrl: string
 ): boolean {
+  const checkoutRoot = getGitCheckoutRoot(resolution.marketplaceRoot);
+  if (!checkoutRoot) return false;
   const origin = getGitOrigin(resolution.marketplaceRoot);
   if (!origin) return false;
   if (
-    normalizeGitIdentity(origin, resolution.marketplaceRoot) !==
+    normalizeGitIdentity(origin, checkoutRoot) !==
     normalizeGitIdentity(sourceUrl, resolution.marketplaceRoot)
   ) {
     return false;
@@ -534,9 +548,14 @@ function canReuseMarketplaceCheckout(
   } catch {
     return false;
   }
-  const checkoutRef = localCheckoutRefForMarketplaceRef(normalizedRef);
-  const refCommit = tryRunGit(['rev-parse', `${checkoutRef}^{commit}`], resolution.marketplaceRoot);
-  return refCommit === head;
+  for (const checkoutRef of localCheckoutRefsForMarketplaceRef(normalizedRef)) {
+    const refCommit = tryRunGit(
+      ['rev-parse', `${checkoutRef}^{commit}`],
+      resolution.marketplaceRoot
+    );
+    if (refCommit !== null) return refCommit === head;
+  }
+  return false;
 }
 
 function reusablePathsAreClean(
@@ -589,23 +608,34 @@ function normalizeGitIdentity(value: string, cwd: string): string {
     return normalizeLocalGitPath(path.resolve(cwd, trimmed));
   }
 
-  const scp = trimmed.match(/^git@([^:]+):(.+)$/);
-  if (scp) return `${scp[1].toLowerCase()}/${stripGitSuffix(scp[2])}`;
+  const scp = trimmed.match(/^([^@/:]+)@([^:]+):(.+)$/);
+  if (scp) {
+    return `ssh-scp://${scp[1]}@${scp[2].toLowerCase()}/${stripGitSuffix(scp[3])}`;
+  }
 
   try {
     const url = new URL(trimmed);
+    const principal = url.username ? `${url.username}@` : '';
     const authority = url.port
       ? `${url.hostname.toLowerCase()}:${url.port}`
       : url.hostname.toLowerCase();
-    return `${authority}/${stripGitSuffix(url.pathname)}`;
+    return `${url.protocol.toLowerCase()}//${principal}${authority}/${stripGitSuffix(url.pathname)}`;
   } catch {
     return stripGitSuffix(trimmed);
   }
 }
 
 function normalizeLocalGitPath(value: string): string {
+  let current = path.resolve(value);
+  const missingSegments: string[] = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(value);
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
   try {
-    return fs.realpathSync.native(value);
+    return path.join(fs.realpathSync.native(current), ...missingSegments);
   } catch {
     return path.resolve(value);
   }

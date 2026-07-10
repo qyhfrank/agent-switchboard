@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
+import { getPluginSourceLocksDir } from '../src/config/paths.js';
 import {
   type MarketplaceEntryCacheRequest,
   type MarketplaceEntryMaterialization,
@@ -19,6 +20,11 @@ import { withTempAsbHome } from './helpers/tmp.js';
 interface GitFixture {
   bareRepo: string;
   workDir: string;
+}
+
+function sourceLockPathForEntry(entryPath: string): string {
+  const sourcePath = path.dirname(entryPath);
+  return path.join(getPluginSourceLocksDir(), `.${path.basename(sourcePath)}.lock`);
 }
 
 function createGitFixture(asbHome: string, name: string): GitFixture {
@@ -578,8 +584,7 @@ test('stale lock recovery rejects a reused PID with a different process identity
       subdir: 'packages/plugin',
     };
     const first = materializeMarketplaceEntry(request);
-    const sourcePath = path.dirname(first.entryPath);
-    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
     fs.mkdirSync(lockPath);
     fs.writeFileSync(
@@ -616,7 +621,7 @@ test('stale ownerless lock directories recover without resetting their age', () 
     };
     const first = materializeMarketplaceEntry(request);
     const sourcePath = path.dirname(first.entryPath);
-    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
     fs.mkdirSync(lockPath);
@@ -624,6 +629,43 @@ test('stale ownerless lock directories recover without resetting their age', () 
     fs.utimesSync(lockPath, staleTime, staleTime);
 
     assert.doesNotThrow(() => materializeInChildSync(asbHome, request));
+  });
+});
+
+test('ownerless stale locks recover after a recovery claimant crashes', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const first = materializeMarketplaceEntry(request);
+    const sourcePath = path.dirname(first.entryPath);
+    const lockPath = sourceLockPathForEntry(first.entryPath);
+    const claimPath = `${lockPath}.recovering`;
+    releaseMarketplaceCacheLeases();
+    fs.rmSync(sourcePath, { recursive: true, force: true });
+    fs.mkdirSync(lockPath);
+    const staleTime = new Date(Date.now() - 300_000);
+    fs.utimesSync(lockPath, staleTime, staleTime);
+    fs.mkdirSync(claimPath);
+    fs.writeFileSync(
+      path.join(claimPath, 'dead-claim.json'),
+      `${JSON.stringify({
+        token: 'dead-claim',
+        pid: 99_999_999,
+        startedAt: Date.now() - 300_000,
+        processIdentity: 'ps-lstart-utc-v1:dead process',
+      })}\n`
+    );
+
+    assert.doesNotThrow(() => materializeInChildSync(asbHome, request));
+    assert.equal(fs.existsSync(claimPath), false);
   });
 });
 
@@ -641,7 +683,7 @@ test('stale recovery rejects a symlinked claim directory without touching its ta
     };
     const first = materializeMarketplaceEntry(request);
     const sourcePath = path.dirname(first.entryPath);
-    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
     fs.mkdirSync(lockPath);
@@ -666,7 +708,7 @@ test('stale recovery rejects a symlinked claim directory without touching its ta
         processIdentity: 'ps-lstart-utc-v1:dead process',
       })}\n`
     );
-    fs.symlinkSync(outside, path.join(lockPath, 'recovering'));
+    fs.symlinkSync(outside, `${lockPath}.recovering`);
 
     assert.throws(() => materializeInChildSync(asbHome, request), /symbolic link/);
     assert.equal(fs.existsSync(victim), true);
@@ -694,7 +736,7 @@ test('concurrent stale lock recovery admits one cache publisher', async () => {
     };
     const first = materializeMarketplaceEntry(request);
     const sourcePath = path.dirname(first.entryPath);
-    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
     const deadOwner = spawn(process.execPath, ['--eval', '']);
@@ -760,8 +802,8 @@ test('concurrent stale recovery-claim takeover preserves one publisher', async (
     };
     const first = materializeMarketplaceEntry(request);
     const sourcePath = path.dirname(first.entryPath);
-    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
-    const claimPath = path.join(lockPath, 'recovering');
+    const lockPath = sourceLockPathForEntry(first.entryPath);
+    const claimPath = `${lockPath}.recovering`;
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
     const deadOwner = spawn(process.execPath, ['--eval', '']);
@@ -894,6 +936,23 @@ test('git fetch errors redact credential-bearing query parameters', () => {
           marketplacePath: path.join(asbHome, 'catalog'),
           pluginName: 'remote-plugin',
           url: `http://127.0.0.1:1/repo.git?access_token=${secret}`,
+          ref: 'main',
+        }),
+      (error: unknown) => error instanceof Error && !error.message.includes(secret)
+    );
+  });
+});
+
+test('git fetch errors redact credential-bearing URL fragments', () => {
+  withTempAsbHome((asbHome) => {
+    const secret = 'audit-secret-fragment';
+    assert.throws(
+      () =>
+        materializeMarketplaceEntry({
+          sourceName: 'catalog',
+          marketplacePath: path.join(asbHome, 'catalog'),
+          pluginName: 'remote-plugin',
+          url: `http://127.0.0.1:1/repo.git#access_token=${secret}`,
           ref: 'main',
         }),
       (error: unknown) => error instanceof Error && !error.message.includes(secret)
