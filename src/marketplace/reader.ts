@@ -15,6 +15,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { getPluginsDir } from '../config/paths.js';
 import {
@@ -27,12 +28,10 @@ import {
 
 export type NativePluginTarget = 'claude-code' | 'codex';
 
-export interface ResolvedPlugin {
+interface MarketplacePluginBase {
   name: string;
   description?: string;
   version?: string;
-  /** Absolute path to the plugin root directory */
-  localPath: string;
   /** Plugin manifest if a supported native plugin manifest exists */
   manifest?: PluginManifest;
   /** Whether plugin is in strict mode */
@@ -49,13 +48,36 @@ export interface ResolvedPlugin {
   };
   /** MCP servers declared in the marketplace entry or plugin.json */
   mcpServers?: Record<string, unknown>;
+  resolution: MarketplacePluginResolution;
+}
+
+export interface ResolvedPlugin extends MarketplacePluginBase {
+  /** Absolute path to the plugin root directory */
+  localPath: string;
+}
+
+export interface DeferredPlugin extends MarketplacePluginBase {
+  localPath?: undefined;
+}
+
+export type MarketplacePlugin = ResolvedPlugin | DeferredPlugin;
+
+export interface MarketplacePluginResolution {
+  entry: PluginEntry;
+  marketplaceRoot: string;
+  pluginRoot: string;
+  pluginName: string;
+  source: string | Record<string, unknown>;
+  marketplaceNamespace: string;
+  ref?: string;
+  sha?: string;
 }
 
 export interface MarketplaceReadResult {
   name: string;
   owner: { name: string; email?: string };
   nativeTarget: NativePluginTarget;
-  plugins: ResolvedPlugin[];
+  plugins: MarketplacePlugin[];
   warnings: string[];
 }
 
@@ -129,30 +151,33 @@ export function readMarketplace(localPath: string): MarketplaceReadResult {
   const manifest: MarketplaceManifest = marketplaceManifestSchema.parse(raw);
 
   const pluginRoot = manifest.metadata?.pluginRoot ?? '';
-  const plugins: ResolvedPlugin[] = [];
+  const plugins: MarketplacePlugin[] = [];
   const marketplaceNamespace = manifest.name.replace(/[^a-zA-Z0-9_-]/g, '-');
 
   for (const entry of manifest.plugins) {
-    const resolved = resolvePluginDir(
-      localPath,
+    const resolution: MarketplacePluginResolution = {
+      entry,
+      marketplaceRoot: localPath,
       pluginRoot,
-      entry.name,
-      entry.source,
+      pluginName: entry.name,
+      source: entry.source,
       marketplaceNamespace,
-      entry.ref
-    );
-    if (!resolved) {
+      ref: entry.ref ?? sourceString(entry.source, 'ref'),
+      sha: entry.sha ?? sourceString(entry.source, 'sha'),
+    };
+    const resolved = resolvePluginDir(resolution, false);
+    if (resolved === null) {
       warnings.push(`Plugin "${entry.name}": unsupported source type, skipped`);
       continue;
     }
 
-    if (!fs.existsSync(resolved)) {
+    if (resolved !== undefined && !fs.existsSync(resolved)) {
       warnings.push(`Plugin "${entry.name}": directory not found at ${resolved}`);
       continue;
     }
 
-    const pluginManifest = readPluginManifest(resolved);
-    const plugin = applyStrictMode(entry, pluginManifest, resolved);
+    const pluginManifest = resolved ? readPluginManifest(resolved) : null;
+    const plugin = applyStrictMode(entry, pluginManifest, resolved, resolution);
 
     plugins.push(plugin);
   }
@@ -164,6 +189,25 @@ export function readMarketplace(localPath: string): MarketplaceReadResult {
     plugins,
     warnings,
   };
+}
+
+export function isResolvedPlugin(plugin: MarketplacePlugin): plugin is ResolvedPlugin {
+  return plugin.localPath !== undefined;
+}
+
+export function resolveMarketplacePlugin(plugin: MarketplacePlugin): ResolvedPlugin | null {
+  if (isResolvedPlugin(plugin)) return plugin;
+
+  const resolved = resolvePluginDir(plugin.resolution, true);
+  if (!resolved || !fs.existsSync(resolved)) return null;
+
+  const pluginManifest = readPluginManifest(resolved);
+  return applyStrictMode(
+    plugin.resolution.entry,
+    pluginManifest,
+    resolved,
+    plugin.resolution
+  ) as ResolvedPlugin;
 }
 
 // ── Strict mode ────────────────────────────────────────────────────
@@ -182,8 +226,9 @@ export function readMarketplace(localPath: string): MarketplaceReadResult {
 function applyStrictMode(
   entry: PluginEntry,
   pluginManifest: PluginManifest | null,
-  localPath: string
-): ResolvedPlugin {
+  localPath: string | undefined,
+  resolution: MarketplacePluginResolution
+): MarketplacePlugin {
   const isStrict = entry.strict;
 
   const primary = isStrict ? entry : (pluginManifest ?? entry);
@@ -199,13 +244,13 @@ function applyStrictMode(
     (primary.mcpServers as Record<string, unknown> | undefined) ??
     (fallback.mcpServers as Record<string, unknown> | undefined);
 
-  const plugin: ResolvedPlugin = {
+  const plugin: MarketplacePluginBase = {
     name: entry.name,
     description: entry.description ?? pluginManifest?.description,
     version: entry.version ?? pluginManifest?.version,
-    localPath,
     manifest: pluginManifest ?? undefined,
     strict: isStrict,
+    resolution: { ...resolution, entry },
   };
 
   if (customCommands || customAgents || customSkills) {
@@ -219,7 +264,7 @@ function applyStrictMode(
     plugin.mcpServers = mcpServers;
   }
 
-  return plugin;
+  return localPath ? { ...plugin, localPath } : plugin;
 }
 
 function normalizeStringArray(value: unknown): string[] | undefined {
@@ -233,13 +278,10 @@ function normalizeStringArray(value: unknown): string[] | undefined {
 // ── Source resolution ──────────────────────────────────────────────
 
 function resolvePluginDir(
-  marketplaceRoot: string,
-  pluginRoot: string,
-  pluginName: string,
-  source: string | Record<string, unknown>,
-  marketplaceNamespace: string,
-  pinRef?: string
-): string | null {
+  resolution: MarketplacePluginResolution,
+  materializeRemote: boolean
+): string | null | undefined {
+  const { marketplaceRoot, pluginRoot, pluginName, source, marketplaceNamespace, ref } = resolution;
   if (typeof source === 'string') {
     if (source.startsWith('./') || source.startsWith('../') || !source.includes(':')) {
       return path.resolve(marketplaceRoot, pluginRoot, source);
@@ -248,8 +290,11 @@ function resolvePluginDir(
   }
 
   if (source.url && typeof source.url === 'string') {
-    const ref = pinRef ?? (source.ref as string | undefined);
     const subdir = typeof source.path === 'string' ? source.path : undefined;
+    if (canReuseMarketplaceCheckout(resolution, source.url)) {
+      return subdir ? resolveInside(marketplaceRoot, subdir) : marketplaceRoot;
+    }
+    if (!materializeRemote) return undefined;
     const cloned = cloneToCacheDir(marketplaceNamespace, pluginName, source.url, ref);
     return cloned && subdir ? resolveInside(cloned, subdir) : cloned;
   }
@@ -269,25 +314,92 @@ function resolvePluginDir(
     if (!ghUrl) return null;
 
     const cloneUrl = ghUrl.endsWith('.git') ? ghUrl : `${ghUrl}.git`;
-    const ref = pinRef ?? (source.ref as string | undefined);
+    if (!materializeRemote) return undefined;
     return cloneToCacheDir(marketplaceNamespace, pluginName, cloneUrl, ref);
   }
 
   // Git URL
   if (source.git && typeof source.git === 'string') {
-    const ref = pinRef ?? (source.ref as string | undefined);
+    if (!materializeRemote) return undefined;
     return cloneToCacheDir(marketplaceNamespace, pluginName, source.git, ref);
   }
 
-  // npm / pip: not yet implemented
-  if (source.npm && typeof source.npm === 'string') {
-    return null;
-  }
-  if (source.pip && typeof source.pip === 'string') {
-    return null;
+  // Keep native-only and currently unsupported source kinds in the catalog.
+  // ASB reports a materialization failure only if portable expansion selects one.
+  return materializeRemote ? null : undefined;
+}
+
+function sourceString(source: string | Record<string, unknown>, key: string): string | undefined {
+  if (typeof source === 'string') return undefined;
+  return typeof source[key] === 'string' ? source[key] : undefined;
+}
+
+function canReuseMarketplaceCheckout(
+  resolution: MarketplacePluginResolution,
+  sourceUrl: string
+): boolean {
+  const origin = getGitOrigin(resolution.marketplaceRoot);
+  if (!origin) return false;
+  if (
+    normalizeGitIdentity(origin, resolution.marketplaceRoot) !==
+    normalizeGitIdentity(sourceUrl, resolution.marketplaceRoot)
+  ) {
+    return false;
   }
 
-  return null;
+  const head = tryRunGit(['rev-parse', 'HEAD'], resolution.marketplaceRoot);
+  if (!head) return false;
+  if (resolution.sha && !head.startsWith(resolution.sha)) return false;
+  if (!resolution.ref) return true;
+
+  const refCommit =
+    tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot) ??
+    tryRunGit(['rev-parse', `origin/${resolution.ref}^{commit}`], resolution.marketplaceRoot);
+  return refCommit === head;
+}
+
+function getGitOrigin(repoDir: string): string | null {
+  return tryRunGit(['config', '--get', 'remote.origin.url'], repoDir);
+}
+
+function tryRunGit(args: string[], cwd: string): string | null {
+  try {
+    return runGit(args, { cwd });
+  } catch {
+    return null;
+  }
+}
+
+function normalizeGitIdentity(value: string, cwd: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith('file://')) {
+    return normalizeLocalGitPath(fileURLToPath(trimmed));
+  }
+  if (path.isAbsolute(trimmed) || trimmed.startsWith('./') || trimmed.startsWith('../')) {
+    return normalizeLocalGitPath(path.resolve(cwd, trimmed));
+  }
+
+  const scp = trimmed.match(/^git@([^:]+):(.+)$/);
+  if (scp) return `${scp[1].toLowerCase()}/${stripGitSuffix(scp[2])}`;
+
+  try {
+    const url = new URL(trimmed);
+    return `${url.hostname.toLowerCase()}/${stripGitSuffix(url.pathname)}`;
+  } catch {
+    return stripGitSuffix(trimmed);
+  }
+}
+
+function normalizeLocalGitPath(value: string): string {
+  try {
+    return fs.realpathSync.native(value);
+  } catch {
+    return path.resolve(value);
+  }
+}
+
+function stripGitSuffix(value: string): string {
+  return value.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '');
 }
 
 // ── Git caching ────────────────────────────────────────────────────

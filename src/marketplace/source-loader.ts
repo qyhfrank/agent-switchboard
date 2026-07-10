@@ -9,9 +9,15 @@ import type { ConfigScope } from '../config/scope.js';
 import type { HookEntry } from '../hooks/library.js';
 import { getSourcesRecord } from '../library/sources.js';
 import { buildPluginId } from '../plugins/identity.js';
+import { buildPluginIndex } from '../plugins/index.js';
 import type { SubagentEntry } from '../subagents/library.js';
 import { loadPluginComponents, type SkillEntryFromPlugin } from './plugin-loader.js';
-import { isMarketplace, readMarketplace } from './reader.js';
+import {
+  isMarketplace,
+  isResolvedPlugin,
+  readMarketplace,
+  resolveMarketplacePlugin,
+} from './reader.js';
 
 export interface MarketplaceSourceEntries {
   commands: CommandEntry[];
@@ -42,13 +48,21 @@ export function loadEntriesFromSources(scope?: ConfigScope): {
     skills: [],
     hooks: [],
   };
+  const pluginIndex = buildPluginIndex(scope);
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
       const result = readMarketplace(basePath);
       for (const plugin of result.plugins) {
         const pluginId = buildPluginId(plugin.name, namespace, 'marketplace');
-        const components = loadPluginComponents(plugin, pluginId);
+        const resolved = isResolvedPlugin(plugin)
+          ? plugin
+          : pluginIndex.get(pluginId)?.meta.materialized
+            ? resolveMarketplacePlugin(plugin)
+            : null;
+        if (!resolved) continue;
+
+        const components = loadPluginComponents(resolved, pluginId);
         marketplaceEntries.commands.push(...components.commands);
         marketplaceEntries.agents.push(...components.agents);
         marketplaceEntries.skills.push(...components.skills);
