@@ -17,7 +17,7 @@ import { getConfigDir } from '../config/paths.js';
 import { loadConfiguredPortableSelections } from '../config/plugin-selection.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
-import { getSourcesRecord } from '../library/sources.js';
+import { getSourceRevision, getSourcesRecord } from '../library/sources.js';
 import { loadPluginComponents, loadPluginHookEntries } from '../marketplace/plugin-loader.js';
 import {
   isMarketplace,
@@ -302,7 +302,7 @@ function buildFromMarketplace(
   allRuleSnippets: PluginRuleSnippet[],
   deferredLoaders: Map<string, () => void>
 ): void {
-  const result = readMarketplace(basePath);
+  const result = readMarketplace(basePath, sourceName);
 
   for (const plugin of result.plugins) {
     const pluginId = buildPluginId(plugin.name, sourceName, 'marketplace');
@@ -336,7 +336,13 @@ function buildFromMarketplace(
 
     if (!isResolvedPlugin(plugin)) {
       deferredLoaders.set(pluginId, () => {
-        const resolved = resolveMarketplacePlugin(plugin as MarketplacePlugin);
+        let resolved: ResolvedPlugin | null;
+        try {
+          resolved = resolveMarketplacePlugin(plugin as MarketplacePlugin);
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to materialize marketplace plugin "${pluginId}": ${detail}`);
+        }
         if (!resolved) {
           throw new Error(`Failed to materialize marketplace plugin "${pluginId}".`);
         }
@@ -430,7 +436,8 @@ function getScopeCacheKey(scope?: ConfigScope): string {
   const project = scope?.project?.trim() ?? '';
   const asbHome = process.env.ASB_HOME ?? '';
   const agentsHome = process.env.ASB_AGENTS_HOME ?? '';
-  return JSON.stringify({ asbHome, agentsHome, profile, project });
+  const sourceRevision = getSourceRevision();
+  return JSON.stringify({ asbHome, agentsHome, profile, project, sourceRevision });
 }
 
 export function clearPluginIndexCache(): void {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -396,6 +397,88 @@ test('runSyncCommand dry-run previews changes without writing outputs', async ()
     assert.match(output, /Distribution:/);
     assert.match(output, /\[dry-run\] No files were modified\./);
     assert.equal(fs.existsSync(getClaudeJsonPath()), false);
+  });
+});
+
+test('runSyncCommand dry-run keeps source checkouts and marketplace cache unchanged', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+
+    const pluginRepo = path.join(asbHome, 'external-plugin.git');
+    const skillDir = path.join(pluginRepo, 'skills', 'remote-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: remote-skill\ndescription: Remote\n---\nBody'
+    );
+    execFileSync('git', ['init', '--initial-branch=main'], {
+      cwd: pluginRepo,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['add', '.'], { cwd: pluginRepo, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin'],
+      { cwd: pluginRepo, stdio: 'pipe' }
+    );
+
+    const catalogBare = path.join(asbHome, 'catalog.git');
+    const catalogWork = path.join(asbHome, 'catalog-work');
+    const catalogCheckout = path.join(asbHome, 'plugins', 'catalog');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', catalogBare], {
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['clone', catalogBare, catalogWork], { stdio: 'pipe' });
+    fs.mkdirSync(path.join(catalogWork, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(catalogWork, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: pluginRepo },
+          },
+        ],
+      })
+    );
+    execFileSync('git', ['add', '.'], { cwd: catalogWork, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'catalog'],
+      { cwd: catalogWork, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: catalogWork, stdio: 'pipe' });
+    fs.mkdirSync(path.dirname(catalogCheckout), { recursive: true });
+    execFileSync('git', ['clone', catalogBare, catalogCheckout], { stdio: 'pipe' });
+
+    fs.writeFileSync(path.join(catalogWork, 'REMOTE-CHANGE'), 'change');
+    execFileSync('git', ['add', '.'], { cwd: catalogWork, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'change'],
+      { cwd: catalogWork, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: catalogWork, stdio: 'pipe' });
+
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins]',
+      'enabled = ["remote-plugin@catalog"]',
+      '',
+      '[plugins.sources]',
+      `catalog = { url = "${catalogBare}", type = "clone" }`,
+    ]);
+
+    const { result } = await captureConsoleOutput(() =>
+      runSyncCommand({ dryRun: true, updateSources: true })
+    );
+
+    assert.equal(result, false);
+    assert.equal(fs.existsSync(path.join(catalogCheckout, 'REMOTE-CHANGE')), false);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
   });
 });
 

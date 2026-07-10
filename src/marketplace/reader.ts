@@ -17,7 +17,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { getPluginsDir } from '../config/paths.js';
+import { expandHome } from '../config/paths.js';
+import {
+  type MarketplaceEntryCacheRefreshResult,
+  type MarketplaceEntryCacheRequest,
+  materializeMarketplaceEntry,
+  refreshMarketplaceEntryCache,
+} from './cache.js';
 import {
   type MarketplaceManifest,
   marketplaceManifestSchema,
@@ -69,6 +75,7 @@ export interface MarketplacePluginResolution {
   pluginName: string;
   source: string | Record<string, unknown>;
   marketplaceNamespace: string;
+  sourceName: string;
   ref?: string;
   sha?: string;
 }
@@ -139,7 +146,7 @@ export function isFormalPlugin(localPath: string): boolean {
 /**
  * Read and resolve a marketplace, returning all resolvable plugins with metadata.
  */
-export function readMarketplace(localPath: string): MarketplaceReadResult {
+export function readMarketplace(localPath: string, sourceName?: string): MarketplaceReadResult {
   const manifestInfo = getMarketplaceManifestInfo(localPath);
   if (!manifestInfo) {
     throw new Error(`No supported marketplace manifest found in ${localPath}`);
@@ -162,6 +169,7 @@ export function readMarketplace(localPath: string): MarketplaceReadResult {
       pluginName: entry.name,
       source: entry.source,
       marketplaceNamespace,
+      sourceName: sourceName ?? marketplaceNamespace,
       ref: entry.ref ?? sourceString(entry.source, 'ref'),
       sha: entry.sha ?? sourceString(entry.source, 'sha'),
     };
@@ -208,6 +216,20 @@ export function resolveMarketplacePlugin(plugin: MarketplacePlugin): ResolvedPlu
     resolved,
     plugin.resolution
   ) as ResolvedPlugin;
+}
+
+export function refreshMarketplacePluginCache(
+  localPath: string,
+  sourceName: string
+): MarketplaceEntryCacheRefreshResult {
+  const marketplace = readMarketplace(localPath, sourceName);
+  const requests: MarketplaceEntryCacheRequest[] = [];
+  for (const plugin of marketplace.plugins) {
+    const gitSource = getGitSource(plugin.resolution);
+    if (!gitSource || canReuseMarketplaceCheckout(plugin.resolution, gitSource.url)) continue;
+    requests.push(toCacheRequest(plugin.resolution, gitSource));
+  }
+  return refreshMarketplaceEntryCache(sourceName, localPath, requests);
 }
 
 // ── Strict mode ────────────────────────────────────────────────────
@@ -281,52 +303,97 @@ function resolvePluginDir(
   resolution: MarketplacePluginResolution,
   materializeRemote: boolean
 ): string | null | undefined {
-  const { marketplaceRoot, pluginRoot, pluginName, source, marketplaceNamespace, ref } = resolution;
+  const { marketplaceRoot, pluginRoot, source } = resolution;
   if (typeof source === 'string') {
     if (source.startsWith('./') || source.startsWith('../') || !source.includes(':')) {
-      return path.resolve(marketplaceRoot, pluginRoot, source);
+      return resolveInside(marketplaceRoot, path.join(pluginRoot, source));
     }
     return null;
   }
 
-  if (source.url && typeof source.url === 'string') {
-    const subdir = typeof source.path === 'string' ? source.path : undefined;
-    if (canReuseMarketplaceCheckout(resolution, source.url)) {
-      return subdir ? resolveInside(marketplaceRoot, subdir) : marketplaceRoot;
+  // Local path source
+  if (
+    source.path &&
+    typeof source.path === 'string' &&
+    (source.source === 'local' ||
+      (!source.source && !source.url && !source.git && !source.github && !source.repo))
+  ) {
+    return resolveInside(marketplaceRoot, path.join(pluginRoot, source.path));
+  }
+
+  const gitSource = getGitSource(resolution);
+  if (gitSource) {
+    if (canReuseMarketplaceCheckout(resolution, gitSource.url)) {
+      return gitSource.subdir ? resolveInside(marketplaceRoot, gitSource.subdir) : marketplaceRoot;
     }
     if (!materializeRemote) return undefined;
-    const cloned = cloneToCacheDir(marketplaceNamespace, pluginName, source.url, ref);
-    return cloned && subdir ? resolveInside(cloned, subdir) : cloned;
-  }
-
-  // Local path source
-  if (source.path && typeof source.path === 'string') {
-    return path.resolve(marketplaceRoot, pluginRoot, source.path);
-  }
-
-  // GitHub shorthand: "org/repo" or full URL
-  if (source.github && typeof source.github === 'string') {
-    const ghUrl = source.github.includes('/')
-      ? source.github.startsWith('http')
-        ? source.github
-        : `https://github.com/${source.github}`
-      : null;
-    if (!ghUrl) return null;
-
-    const cloneUrl = ghUrl.endsWith('.git') ? ghUrl : `${ghUrl}.git`;
-    if (!materializeRemote) return undefined;
-    return cloneToCacheDir(marketplaceNamespace, pluginName, cloneUrl, ref);
-  }
-
-  // Git URL
-  if (source.git && typeof source.git === 'string') {
-    if (!materializeRemote) return undefined;
-    return cloneToCacheDir(marketplaceNamespace, pluginName, source.git, ref);
+    return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource)).pluginPath;
   }
 
   // Keep native-only and currently unsupported source kinds in the catalog.
   // ASB reports a materialization failure only if portable expansion selects one.
   return materializeRemote ? null : undefined;
+}
+
+function toCacheRequest(
+  resolution: MarketplacePluginResolution,
+  gitSource: { url: string; subdir?: string }
+): MarketplaceEntryCacheRequest {
+  return {
+    sourceName: resolution.sourceName,
+    marketplacePath: resolution.marketplaceRoot,
+    pluginName: resolution.pluginName,
+    url: gitSource.url,
+    ref: resolution.ref,
+    sha: resolution.sha,
+    subdir: gitSource.subdir,
+  };
+}
+
+function getGitSource(
+  resolution: MarketplacePluginResolution
+): { url: string; subdir?: string } | null {
+  const source = resolution.source;
+  if (typeof source === 'string') return null;
+
+  let url: string | undefined;
+  if (typeof source.url === 'string') {
+    url = source.url;
+  } else if (typeof source.git === 'string') {
+    url = source.git;
+  } else if (typeof source.github === 'string') {
+    url = githubCloneUrl(source.github);
+  } else if (source.source === 'github' && typeof source.repo === 'string') {
+    url = githubCloneUrl(source.repo);
+  }
+  if (!url) return null;
+
+  return {
+    url: normalizeCloneUrl(url, resolution.marketplaceRoot),
+    subdir: typeof source.path === 'string' ? source.path : undefined,
+  };
+}
+
+function githubCloneUrl(value: string): string | undefined {
+  if (!value.includes('/')) return undefined;
+  const url =
+    /^(https?|ssh|git):\/\//.test(value) || /^[^@/\s]+@[^:\s]+:.+/.test(value)
+      ? value
+      : `https://github.com/${value}`;
+  return url.endsWith('.git') ? url : `${url}.git`;
+}
+
+function normalizeCloneUrl(value: string, marketplaceRoot: string): string {
+  const expanded = expandHome(value.trim());
+  if (/^(https?|ssh|git):\/\//.test(expanded) || /^[^@/\s]+@[^:\s]+:.+/.test(expanded)) {
+    return expanded;
+  }
+  if (expanded.startsWith('file://')) return fileURLToPath(expanded);
+  if (path.isAbsolute(expanded)) return expanded;
+  if (expanded.startsWith('./') || expanded.startsWith('../') || expanded.endsWith('.git')) {
+    return path.resolve(marketplaceRoot, expanded);
+  }
+  return expanded;
 }
 
 function sourceString(source: string | Record<string, unknown>, key: string): string | undefined {
@@ -349,13 +416,30 @@ function canReuseMarketplaceCheckout(
 
   const head = tryRunGit(['rev-parse', 'HEAD'], resolution.marketplaceRoot);
   if (!head) return false;
-  if (resolution.sha && !head.startsWith(resolution.sha)) return false;
+  if (
+    resolution.sha &&
+    (!/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(resolution.sha) ||
+      head.toLowerCase() !== resolution.sha.toLowerCase())
+  ) {
+    return false;
+  }
   if (!resolution.ref) return true;
+  if (!isValidGitRef(resolution.ref)) return false;
 
   const refCommit =
     tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot) ??
     tryRunGit(['rev-parse', `origin/${resolution.ref}^{commit}`], resolution.marketplaceRoot);
   return refCommit === head;
+}
+
+function isValidGitRef(ref: string): boolean {
+  if (ref.startsWith('-')) return false;
+  try {
+    runGit(['check-ref-format', '--allow-onelevel', ref]);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getGitOrigin(repoDir: string): string | null {
@@ -400,47 +484,6 @@ function normalizeLocalGitPath(value: string): string {
 
 function stripGitSuffix(value: string): string {
   return value.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '');
-}
-
-// ── Git caching ────────────────────────────────────────────────────
-
-function cloneToCacheDir(
-  marketplaceNamespace: string,
-  pluginName: string,
-  cloneUrl: string,
-  ref?: string
-): string | null {
-  const cacheRoot = path.resolve(getPluginsDir(), '.plugin-cache');
-  const cacheBase = path.resolve(
-    cacheRoot,
-    safeCacheSegment(marketplaceNamespace),
-    safeCacheSegment(pluginName)
-  );
-
-  try {
-    assertInsideCache(cacheRoot, cacheBase);
-    if (!fs.existsSync(path.join(cacheBase, '.git'))) {
-      fs.mkdirSync(path.dirname(cacheBase), { recursive: true });
-      const args = ['clone', '--depth', '1'];
-      if (ref) args.push('--branch', ref);
-      args.push(cloneUrl, cacheBase);
-      runGit(args);
-    }
-    return cacheBase;
-  } catch {
-    return null;
-  }
-}
-
-function safeCacheSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9_-]/g, '-') || 'entry';
-}
-
-function assertInsideCache(cacheRoot: string, cacheBase: string): void {
-  const relative = path.relative(cacheRoot, cacheBase);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new Error(`Plugin cache path escapes cache root: ${cacheBase}`);
-  }
 }
 
 function resolveInside(root: string, subpath: string): string | null {

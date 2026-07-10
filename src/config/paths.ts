@@ -115,6 +115,11 @@ export function getPluginsDir(): string {
   return path.join(getConfigDir(), 'plugins');
 }
 
+/** Returns the ASB-owned cache for selected external marketplace entries. */
+export function getMarketplacePluginCacheDir(): string {
+  return path.join(getConfigDir(), 'state', 'marketplace-plugins');
+}
+
 /**
  * Returns the home directory for installed agent apps (Claude Code, OpenCode, etc.)
  * Can be overridden via `ASB_AGENTS_HOME`; falls back to the OS user home.
