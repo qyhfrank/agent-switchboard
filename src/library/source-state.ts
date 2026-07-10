@@ -9,9 +9,10 @@ export interface SourceRemovalPathState {
 }
 
 export interface SourceRemovalState {
+  configPath: string;
   cache?: SourceRemovalPathState;
   checkout?: SourceRemovalPathState;
-  subtree?: { repoRoot: string; relativePath: string };
+  subtree?: { repoRoot: string; relativePath: string; head: string };
 }
 
 export interface PluginSourceState {
@@ -72,7 +73,7 @@ function statePath(namespace: string, descriptorKey: string): string {
   const identity = createHash('sha256')
     .update(JSON.stringify([namespace, descriptorKey]))
     .digest('hex');
-  return path.join(
+  return path.resolve(
     getPluginSourceStateDir(),
     `${safeSegment(namespace)}-${identity.slice(0, 20)}.json`
   );
@@ -114,13 +115,16 @@ function validRemovalPathState(value: unknown): value is SourceRemovalPathState 
 function validRemovalState(value: unknown): value is SourceRemovalState {
   if (!value || typeof value !== 'object') return false;
   const removal = value as SourceRemovalState;
+  if (typeof removal.configPath !== 'string' || !path.isAbsolute(removal.configPath)) return false;
   if (removal.cache !== undefined && !validRemovalPathState(removal.cache)) return false;
   if (removal.checkout !== undefined && !validRemovalPathState(removal.checkout)) return false;
   if (removal.subtree !== undefined) {
     if (
       typeof removal.subtree.repoRoot !== 'string' ||
       !path.isAbsolute(removal.subtree.repoRoot) ||
-      typeof removal.subtree.relativePath !== 'string'
+      typeof removal.subtree.relativePath !== 'string' ||
+      typeof removal.subtree.head !== 'string' ||
+      !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(removal.subtree.head)
     ) {
       return false;
     }
@@ -174,7 +178,7 @@ export function ensurePluginSourceState(
   const filePath = statePath(namespace, descriptorKey);
   const expectedPath = path.resolve(marketplacePath);
   const existing = readStateFile(filePath);
-  if (existing?.marketplacePath === expectedPath) return existing;
+  if (existing) return existing;
 
   const state = newState(namespace, descriptorKey, expectedPath);
   if (existing) {
@@ -191,9 +195,7 @@ export function ensurePluginSourceState(
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     const winner = readStateFile(filePath);
     if (!winner) throw new Error(`Plugin source state is unreadable: ${filePath}`);
-    return winner.marketplacePath === expectedPath
-      ? winner
-      : rotatePluginSourceState(namespace, descriptorKey, expectedPath);
+    return winner;
   }
 }
 

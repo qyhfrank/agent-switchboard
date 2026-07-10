@@ -8,7 +8,14 @@ import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { updateConfigLayer } from '../config/layered-config.js';
+import {
+  getConfigLayerLockPath,
+  getWritableConfigLayerPath,
+  loadConfigLayerFile,
+  updateConfigLayer,
+  withConfigFileTransaction,
+  withConfigLayerTransaction,
+} from '../config/layered-config.js';
 import {
   expandHome,
   getConfigDir,
@@ -21,7 +28,11 @@ import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import {
+  assertMarketplaceEntryCacheRemovalPaths,
+  isTemporaryMarketplaceEntryCache,
+  marketplaceEntryCacheExists,
   marketplaceEntryCacheRemovalPaths,
+  redactGitCredentials,
   removeMarketplaceEntryCache,
   stageMarketplaceEntryCacheRemoval,
   withMarketplaceSourceLock,
@@ -83,9 +94,8 @@ function runGit(args: string[], options?: { cwd?: string }): string {
       typeof execError.stderr === 'string'
         ? execError.stderr.trim()
         : (execError.stderr?.toString().trim() ?? '');
-    throw new Error(
-      `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
-    );
+    const detail = stderr || (error instanceof Error ? error.message : String(error));
+    throw new Error(`git ${args[0]} failed: ${redactGitCredentials(detail)}`);
   }
 }
 
@@ -132,12 +142,14 @@ function isGitRepo(dir: string): boolean {
 
 function ensureCleanTree(dir: string): void {
   const args = ['status', '--porcelain'];
+  const canonicalDir = fs.realpathSync.native(dir);
   const excludedPaths = [
     getMarketplacePluginCacheDir(),
     getPluginSourceLocksDir(),
     getPluginSourceStateDir(),
+    getConfigLayerLockPath(getWritableConfigLayerPath()),
   ]
-    .map((excluded) => path.relative(dir, excluded))
+    .map((excluded) => path.relative(canonicalDir, canonicalSourcePath(excluded)))
     .filter((relative) => !relative.startsWith('..') && !path.isAbsolute(relative));
   if (excludedPaths.length > 0) {
     args.push(
@@ -160,11 +172,12 @@ interface StagedPathRemoval {
 }
 
 function ownedPathRemovalPaths(target: string, transactionId: string): SourceRemovalPathState {
+  const activePath = path.resolve(target);
   return {
-    activePath: target,
+    activePath,
     stagedPath: path.join(
-      path.dirname(target),
-      `.removing-${path.basename(target)}-${transactionId}`
+      path.dirname(activePath),
+      `.removing-${path.basename(activePath)}-${transactionId}`
     ),
   };
 }
@@ -193,7 +206,12 @@ function stageOwnedPathRemoval(paths: SourceRemovalPathState): StagedPathRemoval
 // ── URL detection and parsing ──────────────────────────────────────
 
 export function isGitUrl(source: string): boolean {
-  return /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(source);
+  return /^(https?:\/\/|ssh:\/\/|git:\/\/)/.test(source) || isScpGitUrl(source);
+}
+
+function isScpGitUrl(source: string): boolean {
+  if (/^[a-zA-Z]:[\\/]/.test(source)) return false;
+  return /^(?:[^@/:\\\s]+@)?[^@/:\\\s]+:.+$/.test(source);
 }
 
 /**
@@ -309,8 +327,9 @@ function validateNamespace(namespace: string): void {
   }
 }
 
-function ensureNamespaceAvailable(namespace: string): void {
-  if (namespace in getRawSources() || fs.existsSync(path.join(getPluginsDir(), namespace))) {
+function ensureNamespaceAvailableCurrent(namespace: string): void {
+  const configured = loadSwitchboardConfig().plugins.sources;
+  if (namespace in configured || fs.existsSync(path.join(getPluginsDir(), namespace))) {
     throw new Error(
       `Source "${namespace}" already exists. Use a different name or remove it first.`
     );
@@ -401,16 +420,51 @@ export function captureSourceOwnerValidator(
 ): () => boolean {
   const value = getRawSources(scope)[namespace];
   const descriptorKey = sourceDescriptorKey(namespace, value, expectedPath);
-  const state = ensurePluginSourceState(
-    namespace,
-    descriptorKey,
-    canonicalSourcePath(expectedPath)
-  );
+  const expectedCanonicalPath = canonicalSourcePath(expectedPath);
+  if (isTemporaryMarketplaceEntryCache()) {
+    return () =>
+      sourceDescriptorKey(namespace, getRawSources(scope)[namespace], expectedPath) ===
+        descriptorKey && sourceOwnerIsCurrent(namespace, expectedCanonicalPath, scope);
+  }
+  const state = reconcilePluginSourceState(namespace, descriptorKey, expectedCanonicalPath, scope);
   return () =>
     sourceDescriptorKey(namespace, getRawSources(scope)[namespace], expectedPath) ===
       descriptorKey &&
     sourceOwnerIsCurrent(namespace, state.marketplacePath, scope) &&
     pluginSourceStateIsCurrent(state);
+}
+
+function reconcilePluginSourceState(
+  namespace: string,
+  descriptorKey: string,
+  expectedPath: string,
+  scope?: ConfigScope
+): PluginSourceState {
+  let state = ensurePluginSourceState(namespace, descriptorKey, expectedPath);
+  while (state.marketplacePath !== expectedPath) {
+    const observed = state;
+    withMarketplaceSourceLock(namespace, observed.marketplacePath, () => {
+      const currentState = readPluginSourceState(namespace, descriptorKey);
+      if (!currentState) {
+        state = ensurePluginSourceState(namespace, descriptorKey, expectedPath);
+        return;
+      }
+      if (currentState.marketplacePath === expectedPath) {
+        state = currentState;
+        return;
+      }
+      if (
+        sourceDescriptorKey(namespace, getRawSources(scope)[namespace], expectedPath) !==
+          descriptorKey ||
+        !sourceOwnerIsCurrent(namespace, expectedPath, scope)
+      ) {
+        throw new Error(`Marketplace source "${namespace}" is no longer active.`);
+      }
+      removeMarketplaceEntryCache(namespace, currentState.marketplacePath);
+      state = rotatePluginSourceState(namespace, descriptorKey, expectedPath);
+    });
+  }
+  return state;
 }
 
 function canonicalSourcePath(value: string): string {
@@ -449,17 +503,49 @@ function recoverPendingSourceRemovals(): void {
     for (const state of listPendingPluginSourceRemovals()) {
       withMarketplaceSourceLock(state.namespace, state.marketplacePath, () => {
         if (!pluginSourceStateIsCurrent(state) || !state.removal) return;
-        const current = loadSwitchboardConfig().plugins.sources[state.namespace];
-        const sourceIsActive =
-          current !== undefined &&
-          sourceDescriptorKey(state.namespace, current, state.marketplacePath) ===
-            state.descriptorKey;
-        if (sourceIsActive) rollbackInterruptedSourceRemoval(state);
-        else commitInterruptedSourceRemoval(state);
+        const removal = state.removal;
+        withConfigFileTransaction(removal.configPath, () => {
+          const current = loadConfigLayerFile(removal.configPath).config.plugins?.sources?.[
+            state.namespace
+          ];
+          const sourceIsActive =
+            current !== undefined &&
+            sourceDescriptorKey(state.namespace, current, state.marketplacePath) ===
+              state.descriptorKey;
+          if (sourceIsActive) rollbackInterruptedSourceRemoval(state);
+          else commitInterruptedSourceRemoval(state);
+        });
       });
     }
   } finally {
     recoveringSourceRemovals = false;
+  }
+}
+
+function assertInside(root: string, target: string): void {
+  const relative = path.relative(path.resolve(root), path.resolve(target));
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Plugin source recovery path escapes its root: ${target}`);
+  }
+}
+
+function assertNoOwnedPathSymlinks(root: string, target: string): void {
+  const trustedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(target);
+  assertInside(trustedRoot, resolvedTarget);
+  let current = trustedRoot;
+  for (const segment of path
+    .relative(trustedRoot, resolvedTarget)
+    .split(path.sep)
+    .filter(Boolean)) {
+    current = path.join(current, segment);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Plugin source recovery path contains a symbolic link: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
   }
 }
 
@@ -469,25 +555,22 @@ function assertRemovalPathState(
   paths: SourceRemovalPathState
 ): void {
   if (kind === 'checkout') {
-    const activePath = path.join(getPluginsDir(), state.namespace);
+    const pluginsRoot = path.resolve(getPluginsDir());
+    const activePath = path.join(pluginsRoot, state.namespace);
     if (
       path.resolve(paths.activePath) !== path.resolve(activePath) ||
-      path.dirname(paths.stagedPath) !== path.dirname(activePath) ||
+      path.dirname(path.resolve(paths.stagedPath)) !== path.dirname(activePath) ||
       !path.basename(paths.stagedPath).startsWith(`.removing-${state.namespace}-`)
     ) {
       throw new Error(`Invalid plugin source checkout recovery paths for "${state.namespace}".`);
     }
+    assertNoOwnedPathSymlinks(path.resolve(getConfigDir()), pluginsRoot);
+    assertNoOwnedPathSymlinks(pluginsRoot, paths.activePath);
+    assertNoOwnedPathSymlinks(pluginsRoot, paths.stagedPath);
     return;
   }
 
-  const cacheRoot = path.resolve(getMarketplacePluginCacheDir());
-  if (
-    path.dirname(paths.activePath) !== cacheRoot ||
-    path.dirname(paths.stagedPath) !== cacheRoot ||
-    !path.basename(paths.stagedPath).startsWith(`.removing-${path.basename(paths.activePath)}-`)
-  ) {
-    throw new Error(`Invalid plugin source cache recovery paths for "${state.namespace}".`);
-  }
+  assertMarketplaceEntryCacheRemovalPaths(state.namespace, state.marketplacePath, paths);
 }
 
 function rollbackRemovalPath(paths: SourceRemovalPathState): void {
@@ -507,22 +590,41 @@ function commitRemovalPath(paths: SourceRemovalPathState): void {
   fs.rmSync(paths.stagedPath, { recursive: true, force: true });
 }
 
+function rollbackSubtreeRemoval(state: PluginSourceState): void {
+  const subtree = state.removal?.subtree;
+  if (!subtree) return;
+  const expected = `plugins/${state.namespace}`;
+  if (
+    path.resolve(subtree.repoRoot) !== path.resolve(getConfigDir()) ||
+    subtree.relativePath !== expected
+  ) {
+    throw new Error(`Invalid subtree recovery state for "${state.namespace}".`);
+  }
+  const currentHead = runGit(['rev-parse', 'HEAD'], { cwd: subtree.repoRoot });
+  if (currentHead !== subtree.head) {
+    throw new Error(`Subtree recovery HEAD changed for "${state.namespace}".`);
+  }
+  const status = runGit(
+    ['status', '--porcelain=v1', '--untracked-files=all', '--', subtree.relativePath],
+    { cwd: subtree.repoRoot }
+  );
+  if (!status) {
+    if (fs.existsSync(path.join(subtree.repoRoot, subtree.relativePath))) return;
+    throw new Error(`Subtree recovery path is missing for "${state.namespace}".`);
+  }
+  if (status.split('\n').some((line) => !line.startsWith('D  '))) {
+    throw new Error(`Subtree recovery found foreign changes for "${state.namespace}".`);
+  }
+  runGit(
+    ['restore', '--source', subtree.head, '--staged', '--worktree', '--', subtree.relativePath],
+    { cwd: subtree.repoRoot }
+  );
+}
+
 function rollbackInterruptedSourceRemoval(state: PluginSourceState): void {
   const removal = state.removal;
   if (!removal) return;
-  if (removal.subtree) {
-    const expected = `plugins/${state.namespace}`;
-    if (
-      path.resolve(removal.subtree.repoRoot) !== path.resolve(getConfigDir()) ||
-      removal.subtree.relativePath !== expected
-    ) {
-      throw new Error(`Invalid subtree recovery state for "${state.namespace}".`);
-    }
-    runGit(
-      ['restore', '--source=HEAD', '--staged', '--worktree', '--', removal.subtree.relativePath],
-      { cwd: removal.subtree.repoRoot }
-    );
-  }
+  rollbackSubtreeRemoval(state);
   if (removal.checkout) {
     assertRemovalPathState(state, 'checkout', removal.checkout);
     rollbackRemovalPath(removal.checkout);
@@ -570,33 +672,35 @@ export function addLocalSource(namespace: string, libraryPath: string): void {
   }
 
   validateNamespace(namespace);
-  ensureNamespaceAvailable(namespace);
+  getRawSources();
 
   const pluginsChild = path.join(getPluginsDir(), namespace);
   const configValue = resolvedPath === pluginsChild ? namespace : resolvedPath;
-  let state: PluginSourceState | undefined;
-
-  try {
-    state = rotatePluginSourceState(
-      namespace,
-      sourceDescriptorKey(namespace, configValue, resolvedPath),
-      canonicalSourcePath(resolvedPath)
-    );
-    updateConfigLayer((layer) => ({
-      ...layer,
-      plugins: {
-        ...layer.plugins,
-        sources: {
-          ...(layer.plugins?.sources ?? {}),
-          [namespace]: configValue,
+  withConfigLayerTransaction(() => {
+    ensureNamespaceAvailableCurrent(namespace);
+    let state: PluginSourceState | undefined;
+    try {
+      state = rotatePluginSourceState(
+        namespace,
+        sourceDescriptorKey(namespace, configValue, resolvedPath),
+        canonicalSourcePath(resolvedPath)
+      );
+      updateConfigLayer((layer) => ({
+        ...layer,
+        plugins: {
+          ...layer.plugins,
+          sources: {
+            ...(layer.plugins?.sources ?? {}),
+            [namespace]: configValue,
+          },
         },
-      },
-    }));
-    markSourcesChanged();
-  } catch (error) {
-    if (state) deletePluginSourceState(state);
-    throw error;
-  }
+      }));
+      markSourcesChanged();
+    } catch (error) {
+      if (state) deletePluginSourceState(state);
+      throw error;
+    }
+  });
 }
 
 /**
@@ -604,70 +708,71 @@ export function addLocalSource(namespace: string, libraryPath: string): void {
  */
 export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   validateNamespace(namespace);
-  ensureNamespaceAvailable(namespace);
+  getRawSources();
   ensureGitAvailable();
+  withConfigLayerTransaction(() => {
+    ensureNamespaceAvailableCurrent(namespace);
+    let headBefore: string | undefined;
 
-  let headBefore: string | undefined;
-
-  if (remote.type === 'subtree') {
-    if (!isGitRepo(getConfigDir())) {
-      throw new Error(
-        `Subtree mode requires ASB_HOME to be a git repo root. Current ASB_HOME is not a git repo or is a subdirectory of one.`
-      );
-    }
-    if (!remote.ref) {
-      throw new Error(`Subtree sources require an explicit "ref" (e.g. ref = "main").`);
-    }
-    const repoRoot = getConfigDir();
-    ensureCleanTree(repoRoot);
-    const prefix = `plugins/${namespace}`;
-    headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
-    gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
-  } else {
-    const cloneDir = path.join(getPluginsDir(), namespace);
-    gitClone(expandHome(remote.url), cloneDir, remote.ref);
-  }
-
-  const configValue: RemoteSource = { url: remote.url, type: remote.type };
-  if (remote.ref) configValue.ref = remote.ref;
-  if (remote.subdir) configValue.subdir = remote.subdir;
-  const effectivePath = resolveEffectivePath(namespace, configValue);
-  let state: PluginSourceState | undefined;
-
-  try {
-    state = rotatePluginSourceState(
-      namespace,
-      sourceDescriptorKey(namespace, configValue, effectivePath),
-      canonicalSourcePath(effectivePath)
-    );
-    updateConfigLayer((layer) => ({
-      ...layer,
-      plugins: {
-        ...layer.plugins,
-        sources: {
-          ...(layer.plugins?.sources ?? {}),
-          [namespace]: configValue,
-        },
-      },
-    }));
-    markSourcesChanged();
-  } catch (configErr) {
-    if (state) deletePluginSourceState(state);
-    // Rollback: restore repo to pre-subtree-add state
-    if (remote.type === 'subtree' && headBefore) {
-      try {
-        runGit(['reset', '--hard', headBefore], { cwd: getConfigDir() });
-      } catch {
-        /* best-effort rollback */
+    if (remote.type === 'subtree') {
+      if (!isGitRepo(getConfigDir())) {
+        throw new Error(
+          `Subtree mode requires ASB_HOME to be a git repo root. Current ASB_HOME is not a git repo or is a subdirectory of one.`
+        );
       }
+      if (!remote.ref) {
+        throw new Error(`Subtree sources require an explicit "ref" (e.g. ref = "main").`);
+      }
+      const repoRoot = getConfigDir();
+      ensureCleanTree(repoRoot);
+      const prefix = `plugins/${namespace}`;
+      headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
+      gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
     } else {
       const cloneDir = path.join(getPluginsDir(), namespace);
-      if (fs.existsSync(cloneDir)) {
-        fs.rmSync(cloneDir, { recursive: true, force: true });
-      }
+      gitClone(expandHome(remote.url), cloneDir, remote.ref);
     }
-    throw configErr;
-  }
+
+    const configValue: RemoteSource = { url: remote.url, type: remote.type };
+    if (remote.ref) configValue.ref = remote.ref;
+    if (remote.subdir) configValue.subdir = remote.subdir;
+    const effectivePath = resolveEffectivePath(namespace, configValue);
+    let state: PluginSourceState | undefined;
+
+    try {
+      state = rotatePluginSourceState(
+        namespace,
+        sourceDescriptorKey(namespace, configValue, effectivePath),
+        canonicalSourcePath(effectivePath)
+      );
+      updateConfigLayer((layer) => ({
+        ...layer,
+        plugins: {
+          ...layer.plugins,
+          sources: {
+            ...(layer.plugins?.sources ?? {}),
+            [namespace]: configValue,
+          },
+        },
+      }));
+      markSourcesChanged();
+    } catch (configErr) {
+      if (state) deletePluginSourceState(state);
+      if (remote.type === 'subtree' && headBefore) {
+        try {
+          runGit(['reset', '--hard', headBefore], { cwd: getConfigDir() });
+        } catch {
+          /* best-effort rollback */
+        }
+      } else {
+        const cloneDir = path.join(getPluginsDir(), namespace);
+        if (fs.existsSync(cloneDir)) {
+          fs.rmSync(cloneDir, { recursive: true, force: true });
+        }
+      }
+      throw configErr;
+    }
+  });
 }
 
 /**
@@ -687,117 +792,122 @@ export function removeSource(namespace: string): void {
     ensurePluginSourceState(namespace, descriptorKey, canonicalSourcePath(effectivePath));
   const cacheOwnerPath = sourceState.marketplacePath;
   withMarketplaceSourceLock(namespace, cacheOwnerPath, () => {
-    const current = getRawSources()[namespace];
-    if (
-      sourceDescriptorIdentity(current) !== sourceDescriptorIdentity(value) ||
-      !pluginSourceStateIsCurrent(sourceState)
-    ) {
-      throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
-    }
-    const remote = typeof value !== 'string' && isCloneableSource(expandHome(value.url));
-    const pluginDir = path.join(getPluginsDir(), namespace);
-    if (remote && value.type === 'subtree') {
-      if (!isGitRepo(getConfigDir())) {
-        throw new Error(
-          `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
-        );
+    withConfigLayerTransaction((configPath) => {
+      const current = loadSwitchboardConfig().plugins.sources[namespace];
+      if (
+        sourceDescriptorIdentity(current) !== sourceDescriptorIdentity(value) ||
+        !pluginSourceStateIsCurrent(sourceState)
+      ) {
+        throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
       }
-      if (fs.existsSync(pluginDir)) ensureCleanTree(getConfigDir());
-    }
+      const remote = typeof value !== 'string' && isCloneableSource(expandHome(value.url));
+      const pluginDir = path.join(getPluginsDir(), namespace);
+      if (remote && value.type === 'subtree') {
+        if (!isGitRepo(getConfigDir())) {
+          throw new Error(
+            `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
+          );
+        }
+        if (fs.existsSync(pluginDir)) ensureCleanTree(getConfigDir());
+      }
 
-    const transactionId = randomUUID();
-    const cachePaths = marketplaceEntryCacheRemovalPaths(namespace, cacheOwnerPath, transactionId);
-    const checkoutPaths = ownedPathRemovalPaths(pluginDir, transactionId);
-    const removal = {
-      ...(fs.existsSync(cachePaths.activePath) ? { cache: cachePaths } : {}),
-      ...(remote && value.type !== 'subtree' && fs.existsSync(checkoutPaths.activePath)
-        ? { checkout: checkoutPaths }
-        : {}),
-      ...(remote && value.type === 'subtree' && fs.existsSync(pluginDir)
-        ? {
-            subtree: {
-              repoRoot: getConfigDir(),
-              relativePath: `plugins/${namespace}`,
+      const transactionId = randomUUID();
+      const cachePaths = marketplaceEntryCacheRemovalPaths(
+        namespace,
+        cacheOwnerPath,
+        transactionId
+      );
+      const checkoutPaths = ownedPathRemovalPaths(pluginDir, transactionId);
+      const removal = {
+        configPath,
+        ...(fs.existsSync(cachePaths.activePath) ? { cache: cachePaths } : {}),
+        ...(remote && value.type !== 'subtree' && fs.existsSync(checkoutPaths.activePath)
+          ? { checkout: checkoutPaths }
+          : {}),
+        ...(remote && value.type === 'subtree' && fs.existsSync(pluginDir)
+          ? {
+              subtree: {
+                repoRoot: path.resolve(getConfigDir()),
+                relativePath: `plugins/${namespace}`,
+                head: runGit(['rev-parse', 'HEAD'], { cwd: getConfigDir() }),
+              },
+            }
+          : {}),
+      };
+      const removalState = beginPluginSourceRemoval(sourceState, removal);
+      let cacheStage = { commit: () => {}, rollback: () => {} };
+      let checkoutStage: StagedPathRemoval = { commit: () => {}, rollback: () => {} };
+      let subtreeTouched = false;
+      let configCommitted = false;
+      try {
+        cacheStage = stageMarketplaceEntryCacheRemoval(namespace, cacheOwnerPath, cachePaths);
+        if (remote && value.type === 'subtree' && fs.existsSync(pluginDir)) {
+          subtreeTouched = true;
+          runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
+        } else if (remote) {
+          checkoutStage = stageOwnedPathRemoval(checkoutPaths);
+        }
+
+        updateConfigLayer((layer) => {
+          const newSources = { ...(layer.plugins?.sources ?? {}) };
+          delete newSources[namespace];
+          return {
+            ...layer,
+            plugins: {
+              ...layer.plugins,
+              sources: newSources,
             },
-          }
-        : {}),
-    };
-    const removalState = beginPluginSourceRemoval(sourceState, removal);
-    let cacheStage = { commit: () => {}, rollback: () => {} };
-    let checkoutStage: StagedPathRemoval = { commit: () => {}, rollback: () => {} };
-    let subtreeTouched = false;
-    let configCommitted = false;
-    try {
-      cacheStage = stageMarketplaceEntryCacheRemoval(namespace, cacheOwnerPath, cachePaths);
-      if (remote && value.type === 'subtree' && fs.existsSync(pluginDir)) {
-        subtreeTouched = true;
-        runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
-      } else if (remote) {
-        checkoutStage = stageOwnedPathRemoval(checkoutPaths);
-      }
-
-      updateConfigLayer((layer) => {
-        const newSources = { ...(layer.plugins?.sources ?? {}) };
-        delete newSources[namespace];
-        return {
-          ...layer,
-          plugins: {
-            ...layer.plugins,
-            sources: newSources,
-          },
-        };
-      });
-      configCommitted = true;
-      markSourcesChanged();
-      checkoutStage.commit();
-      cacheStage.commit();
-      deletePluginSourceState(removalState);
-    } catch (error) {
-      if (configCommitted) throw error;
-      const rollbackErrors: string[] = [];
-      if (subtreeTouched && isGitRepo(getConfigDir())) {
-        try {
-          runGit(
-            ['restore', '--source=HEAD', '--staged', '--worktree', '--', `plugins/${namespace}`],
-            { cwd: getConfigDir() }
-          );
-        } catch (rollbackError) {
-          rollbackErrors.push(
-            `restore subtree: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-          );
-        }
-      }
-      try {
-        checkoutStage.rollback();
-      } catch (rollbackError) {
-        rollbackErrors.push(
-          `restore checkout: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-        );
-      }
-      try {
-        cacheStage.rollback();
-      } catch (rollbackError) {
-        rollbackErrors.push(
-          `restore cache: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-        );
-      }
-      if (rollbackErrors.length === 0) {
-        try {
-          clearPluginSourceRemoval(removalState);
-        } catch (rollbackError) {
-          rollbackErrors.push(
-            `clear recovery record: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-          );
-        }
-      }
-      if (rollbackErrors.length > 0) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`${message}\nRollback failed: ${rollbackErrors.join('; ')}`, {
-          cause: error,
+          };
         });
+        configCommitted = true;
+        markSourcesChanged();
+        checkoutStage.commit();
+        cacheStage.commit();
+        deletePluginSourceState(removalState);
+      } catch (error) {
+        if (configCommitted) throw error;
+        const rollbackErrors: string[] = [];
+        if (subtreeTouched && isGitRepo(getConfigDir())) {
+          try {
+            rollbackSubtreeRemoval(removalState);
+          } catch (rollbackError) {
+            rollbackErrors.push(
+              `restore subtree: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+            );
+          }
+        }
+        try {
+          checkoutStage.rollback();
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `restore checkout: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
+        }
+        try {
+          cacheStage.rollback();
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `restore cache: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
+        }
+        if (rollbackErrors.length === 0) {
+          try {
+            clearPluginSourceRemoval(removalState);
+          } catch (rollbackError) {
+            rollbackErrors.push(
+              `clear recovery record: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+            );
+          }
+        }
+        if (rollbackErrors.length > 0) {
+          const message = error instanceof Error ? error.message : String(error);
+          throw new Error(`${message}\nRollback failed: ${rollbackErrors.join('; ')}`, {
+            cause: error,
+          });
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   });
 }
 
@@ -863,6 +973,7 @@ export function updateRemoteSources(
     const effectivePath = resolveEffectivePath(namespace, value);
 
     try {
+      const ownerValidator = captureSourceOwnerValidator(namespace, effectivePath, scope);
       withMarketplaceSourceLock(namespace, effectivePath, () => {
         if (
           sourceDescriptorIdentity(getRawSources(scope)[namespace]) !==
@@ -920,11 +1031,7 @@ export function updateRemoteSources(
           }
         }
         if (getMarketplaceManifestInfo(effectivePath)) {
-          refreshMarketplacePluginCache(
-            effectivePath,
-            namespace,
-            captureSourceOwnerValidator(namespace, effectivePath, scope)
-          );
+          refreshMarketplacePluginCache(effectivePath, namespace, ownerValidator);
         } else {
           removeMarketplaceEntryCache(namespace, effectivePath);
         }
@@ -943,21 +1050,29 @@ export function updateRemoteSources(
   for (const source of getSources(scope)) {
     if (onlyNamespace && source.namespace !== onlyNamespace) continue;
     if (handledNamespaces.has(source.namespace)) continue;
-    if (!getMarketplaceManifestInfo(source.path)) continue;
-    attemptedUpdate = true;
+    const value = raw[source.namespace];
+    const descriptorKey = sourceDescriptorKey(source.namespace, value, source.path);
+    const state = readPluginSourceState(source.namespace, descriptorKey);
+    const ownerPath = state?.marketplacePath ?? canonicalSourcePath(source.path);
+    const isMarketplace = Boolean(getMarketplaceManifestInfo(source.path));
+    if (!isMarketplace && !marketplaceEntryCacheExists(source.namespace, ownerPath)) continue;
     try {
-      withMarketplaceSourceLock(source.namespace, source.path, () => {
+      const ownerValidator = isMarketplace
+        ? captureSourceOwnerValidator(source.namespace, source.path, scope)
+        : undefined;
+      withMarketplaceSourceLock(source.namespace, ownerPath, () => {
         if (!sourceOwnerIsCurrent(source.namespace, source.path, scope)) {
           throw new Error(
             `Source "${source.namespace}" changed while waiting for its lifecycle lock.`
           );
         }
-        refreshMarketplacePluginCache(
-          source.path,
-          source.namespace,
-          captureSourceOwnerValidator(source.namespace, source.path, scope)
-        );
+        if (isMarketplace) {
+          refreshMarketplacePluginCache(source.path, source.namespace, ownerValidator);
+        } else {
+          removeMarketplaceEntryCache(source.namespace, ownerPath);
+        }
       });
+      attemptedUpdate = true;
       results.push({ namespace: source.namespace, url: source.path, status: 'updated' });
     } catch (err) {
       results.push({

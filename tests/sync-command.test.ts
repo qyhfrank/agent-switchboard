@@ -556,6 +556,8 @@ test('runSyncCommand dry-run previews external plugins without persistent writes
     assert.match(output, /remote-skill/);
     assert.equal(fs.existsSync(path.join(catalogCheckout, 'REMOTE-CHANGE')), false);
     assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'plugin-sources')), false);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'plugin-source-locks')), false);
     assert.equal(fs.existsSync(path.join(agentsHome, '.claude', 'skills')), false);
   });
 });

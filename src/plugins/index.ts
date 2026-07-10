@@ -493,6 +493,12 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   const byName = new Map<string, PluginDescriptor[]>();
   const nativeRefAliases = new Map<string, PluginDescriptor[]>();
   for (const p of plugins) {
+    const existingId = byId.get(p.id);
+    if (existingId) {
+      throw new Error(
+        `Duplicate canonical plugin ID "${p.id}" from ${existingId.meta.sourcePath} and ${p.meta.sourcePath}. Rename one source to keep plugin identities distinct.`
+      );
+    }
     byId.set(p.id, p);
     if (p.meta.native) {
       const key = `${p.meta.native.target}\0${p.meta.native.installRef}`;

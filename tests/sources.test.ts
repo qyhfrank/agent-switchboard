@@ -22,6 +22,18 @@ import {
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
+async function waitForReadyFiles(
+  paths: string[],
+  minimum: number,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (paths.filter((filePath) => fs.existsSync(filePath)).length < minimum) {
+    if (Date.now() >= deadline) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 // ── URL detection ──────────────────────────────────────────────────
 
 test('isGitUrl detects HTTPS URLs', () => {
@@ -120,6 +132,179 @@ test('addLocalSource creates local source and getSourcesRecord returns it', () =
     assert.equal(src.path, libDir);
     assert.equal(src.remote, undefined);
   });
+});
+
+test('source config updates preserve a symlinked config carrier', () => {
+  withTempAsbHome((asbHome) => {
+    const configPath = path.join(asbHome, 'config.toml');
+    const targetPath = path.join(asbHome, 'shared', 'config.toml');
+    const libDir = path.join(asbHome, 'symlinked-config-lib');
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.mkdirSync(path.join(libDir, 'rules'), { recursive: true });
+    fs.writeFileSync(targetPath, '[plugins]\nenabled = []\n');
+    fs.rmSync(configPath, { force: true });
+    fs.symlinkSync(targetPath, configPath);
+
+    addLocalSource('symlinked-config', libDir);
+
+    assert.equal(fs.lstatSync(configPath).isSymbolicLink(), true);
+    assert.match(fs.readFileSync(targetPath, 'utf-8'), /symlinked-config/);
+  });
+});
+
+test('config transactions preserve concurrent updates from different processes', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-config-concurrency-'));
+  const asbHome = path.join(root, 'asb-home');
+  const goPath = path.join(root, 'go');
+  fs.mkdirSync(asbHome, { recursive: true });
+  fs.writeFileSync(path.join(asbHome, 'config.toml'), '[plugins]\nenabled = []\n');
+  const configModule = pathToFileURL(path.resolve('src/config/layered-config.ts')).href;
+  const children = ['alpha', 'beta'].map((key) => {
+    const readyPath = path.join(root, `${key}.ready`);
+    const source =
+      'import fs from "node:fs";' +
+      `import { updateConfigLayer } from ${JSON.stringify(configModule)};` +
+      `const ready = ${JSON.stringify(readyPath)};` +
+      `const go = ${JSON.stringify(goPath)};` +
+      `const key = ${JSON.stringify(key)};` +
+      'updateConfigLayer((layer) => {' +
+      'fs.writeFileSync(ready, "ready");' +
+      'while (!fs.existsSync(go)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);' +
+      'return { ...layer, plugins: { ...layer.plugins, sources: { ...(layer.plugins?.sources ?? {}), [key]: "/tmp/" + key } } };' +
+      '});';
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', source],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    let stderr = '';
+    child.stderr.setEncoding('utf-8');
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const result = new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (code) => resolve({ code, stderr }));
+    });
+    return {
+      readyPath,
+      child,
+      result,
+    };
+  });
+  try {
+    await waitForReadyFiles(
+      children.map(({ readyPath }) => readyPath),
+      1,
+      10_000
+    );
+    await waitForReadyFiles(
+      children.map(({ readyPath }) => readyPath),
+      2,
+      500
+    );
+    fs.writeFileSync(goPath, 'go');
+    const results = await Promise.all(children.map(({ result }) => result));
+    assert.deepEqual(
+      results.filter(({ code }) => code !== 0),
+      []
+    );
+    const config = fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8');
+    assert.match(config, /alpha/);
+    assert.match(config, /beta/);
+  } finally {
+    for (const { child } of children) child.kill('SIGKILL');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('concurrent source adds admit one namespace owner', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-add-concurrency-'));
+  const asbHome = path.join(root, 'asb-home');
+  const goPath = path.join(root, 'go');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+  const children = ['alpha', 'beta'].map((key) => {
+    const libraryPath = path.join(root, key);
+    const readyPath = path.join(root, `${key}.ready`);
+    fs.mkdirSync(path.join(libraryPath, 'rules'), { recursive: true });
+    const source =
+      'import fs from "node:fs";' +
+      `import { addLocalSource } from ${JSON.stringify(sourcesModule)};` +
+      `const configPath = ${JSON.stringify(path.join(fs.realpathSync.native(asbHome), 'config.toml'))};` +
+      `const ready = ${JSON.stringify(readyPath)};` +
+      `const go = ${JSON.stringify(goPath)};` +
+      'const originalRename = fs.renameSync.bind(fs);' +
+      'fs.renameSync = (from, to) => {' +
+      'if (String(to) === configPath) {' +
+      'fs.writeFileSync(ready, "ready");' +
+      'while (!fs.existsSync(go)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);' +
+      '}' +
+      'return originalRename(from, to);' +
+      '};' +
+      `try { addLocalSource("shared", ${JSON.stringify(libraryPath)}); process.stdout.write("OK"); }` +
+      'catch (error) { process.stdout.write("ERROR:" + error.message); }';
+    const child = spawn(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', source],
+      {
+        cwd: process.cwd(),
+        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    let output = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk) => {
+      output += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    const result = new Promise<string>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', (code) =>
+        code === 0 ? resolve(output) : reject(new Error(stderr || output))
+      );
+    });
+    return {
+      key,
+      libraryPath,
+      readyPath,
+      child,
+      result,
+    };
+  });
+  try {
+    await waitForReadyFiles(
+      children.map(({ readyPath }) => readyPath),
+      1,
+      10_000
+    );
+    await waitForReadyFiles(
+      children.map(({ readyPath }) => readyPath),
+      2,
+      500
+    );
+    fs.writeFileSync(goPath, 'go');
+    const outputs = await Promise.all(children.map(({ result }) => result));
+    assert.equal(outputs.filter((output) => output === 'OK').length, 1);
+    assert.equal(outputs.filter((output) => output.startsWith('ERROR:')).length, 1);
+    const winner = children[outputs.indexOf('OK')];
+    assert.match(
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'),
+      new RegExp(winner.key)
+    );
+  } finally {
+    for (const { child } of children) child.kill('SIGKILL');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('addLocalSource rejects duplicate namespace', () => {
@@ -342,6 +527,23 @@ test('addRemoteSource clones a local git repo and saves config', () => {
     const src = sources.find((s) => s.namespace === 'test-remote');
     assert.ok(src?.remote);
     assert.equal(src.remote.url, bareRepo);
+  });
+});
+
+test('source Git errors redact URL query and fragment credentials', () => {
+  withTempAsbHome(() => {
+    assert.throws(
+      () =>
+        addRemoteSource('secret-source', {
+          url: 'http://127.0.0.1:1/repo.git?access_token=query-secret#fragment-secret',
+          type: 'clone',
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.doesNotMatch(error.message, /query-secret|fragment-secret/);
+        return true;
+      }
+    );
   });
 });
 
@@ -732,6 +934,49 @@ test('updateRemoteSources removes derived cache when a source stops being a mark
   });
 });
 
+test('updateRemoteSources removes derived cache when a local marketplace becomes a plugin', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'local-transition-entry');
+    fs.mkdirSync(entryParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const marketplaceDir = path.join(asbHome, 'local-transition-catalog');
+    const manifestDir = path.join(marketplaceDir, '.claude-plugin');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'marketplace.json'),
+      JSON.stringify({
+        name: 'local-transition',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo },
+          },
+        ],
+      })
+    );
+    addLocalSource('local-transition', marketplaceDir);
+    const firstIndex = buildPluginIndex();
+    const plugin = firstIndex.get('remote-plugin@local-transition');
+    assert.ok(plugin);
+    firstIndex.expand([plugin.id]);
+    const materializedPath = plugin.meta.sourcePath;
+
+    clearPluginIndexCache();
+    fs.rmSync(manifestDir, { recursive: true, force: true });
+    fs.mkdirSync(path.join(marketplaceDir, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(marketplaceDir, 'rules', 'ordinary.md'), '# Ordinary');
+
+    const results = updateRemoteSources(undefined, 'local-transition');
+    const nextIndex = buildPluginIndex();
+
+    assert.equal(results[0]?.status, 'updated');
+    assert.equal(fs.existsSync(materializedPath), false);
+    assert.ok(nextIndex.get('local-transition'));
+    assert.equal(nextIndex.get('remote-plugin@local-transition'), undefined);
+  });
+});
+
 test('removeSource cleans only its marketplace entry cache', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -829,6 +1074,56 @@ test('removeSource cleans the canonical cache owner after a source symlink disap
   });
 });
 
+test('source path rotation retires cache owned by the previous canonical path', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'rotating-entry-remote');
+    fs.mkdirSync(entryParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const firstCatalog = path.join(asbHome, 'rotating-catalog-one');
+    const secondCatalog = path.join(asbHome, 'rotating-catalog-two');
+    const catalogLink = path.join(asbHome, 'rotating-catalog');
+    for (const catalogPath of [firstCatalog, secondCatalog]) {
+      fs.mkdirSync(path.join(catalogPath, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(catalogPath, '.claude-plugin', 'marketplace.json'),
+        JSON.stringify({
+          name: 'rotating-catalog',
+          plugins: [
+            {
+              name: 'remote-plugin',
+              source: { source: 'url', url: entryRemote.bareRepo },
+            },
+          ],
+        })
+      );
+    }
+    fs.symlinkSync(firstCatalog, catalogLink);
+    addLocalSource('rotating-catalog', catalogLink);
+    const firstIndex = buildPluginIndex();
+    const firstPlugin = firstIndex.get('remote-plugin@rotating-catalog');
+    assert.ok(firstPlugin);
+    firstIndex.expand([firstPlugin.id]);
+    const firstMaterializedPath = firstPlugin.meta.sourcePath;
+
+    clearPluginIndexCache();
+    fs.rmSync(catalogLink);
+    fs.symlinkSync(secondCatalog, catalogLink);
+    const secondIndex = buildPluginIndex();
+    const secondPlugin = secondIndex.get('remote-plugin@rotating-catalog');
+    assert.ok(secondPlugin);
+    secondIndex.expand([secondPlugin.id]);
+    const secondMaterializedPath = secondPlugin.meta.sourcePath;
+    assert.notEqual(firstMaterializedPath, secondMaterializedPath);
+
+    clearPluginIndexCache();
+    removeSource('rotating-catalog');
+
+    assert.equal(fs.existsSync(firstMaterializedPath), false);
+    assert.equal(fs.existsSync(secondMaterializedPath), false);
+  });
+});
+
 function createManagedMarketplaceSource(
   asbHome: string,
   namespace: string
@@ -881,7 +1176,13 @@ async function stopRemovalAtCrashPoint(
   crashPoint: 'before-config' | 'after-config'
 ): Promise<void> {
   const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
-  const configPath = path.join(asbHome, 'config.toml');
+  const configuredPath = process.env.ASB_CONFIG?.trim() || path.join(asbHome, 'config.toml');
+  const configPath = fs.existsSync(configuredPath)
+    ? fs.realpathSync.native(configuredPath)
+    : path.join(
+        fs.realpathSync.native(path.dirname(configuredPath)),
+        path.basename(configuredPath)
+      );
   const childSource =
     'import fs from "node:fs";' +
     `import { removeSource } from ${JSON.stringify(sourcesModule)};` +
@@ -959,6 +1260,9 @@ test('source removal recovers crashes around the config commit', async () => {
       const removingCaches = fs.existsSync(cacheRoot)
         ? fs.readdirSync(cacheRoot).filter((name) => name.startsWith('.removing-'))
         : [];
+      const configTransactionArtifacts = fs
+        .readdirSync(asbHome)
+        .filter((name) => name.includes('.asb-write.') || name.includes('.asb-lock'));
 
       if (crashPoint === 'before-config') {
         assert.ok(namespace in sources);
@@ -971,6 +1275,7 @@ test('source removal recovers crashes around the config commit', async () => {
       }
       assert.deepEqual(removingCheckouts, []);
       assert.deepEqual(removingCaches, []);
+      assert.deepEqual(configTransactionArtifacts, []);
     } finally {
       clearPluginIndexCache();
       if (previousAsbHome === undefined) delete process.env.ASB_HOME;
@@ -979,6 +1284,128 @@ test('source removal recovers crashes around the config commit', async () => {
       else process.env.ASB_AGENTS_HOME = previousAgentsHome;
       fs.rmSync(root, { recursive: true, force: true });
     }
+  }
+});
+
+test('source removal recovery stays bound to its original ASB_CONFIG carrier', async () => {
+  for (const crashPoint of ['before-config', 'after-config'] as const) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `asb-source-carrier-${crashPoint}-`));
+    const asbHome = path.join(root, 'asb-home');
+    const originalConfig = path.join(root, 'original.toml');
+    const ambientConfig = path.join(root, 'ambient.toml');
+    fs.mkdirSync(asbHome, { recursive: true });
+    fs.writeFileSync(ambientConfig, '[plugins]\nenabled = []\n');
+    const previousAsbHome = process.env.ASB_HOME;
+    const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+    const previousAsbConfig = process.env.ASB_CONFIG;
+    process.env.ASB_HOME = asbHome;
+    process.env.ASB_AGENTS_HOME = asbHome;
+    process.env.ASB_CONFIG = originalConfig;
+    try {
+      clearPluginIndexCache();
+      const namespace = `carrier-${crashPoint}`;
+      const { checkoutPath, materializedPath } = createManagedMarketplaceSource(asbHome, namespace);
+      await stopRemovalAtCrashPoint(asbHome, namespace, crashPoint);
+      process.env.ASB_CONFIG = ambientConfig;
+
+      getSourcesRecord();
+
+      const original = fs.readFileSync(originalConfig, 'utf-8');
+      if (crashPoint === 'before-config') {
+        assert.match(original, new RegExp(namespace));
+        assert.equal(fs.existsSync(checkoutPath), true);
+        assert.equal(fs.existsSync(materializedPath), true);
+      } else {
+        assert.doesNotMatch(original, new RegExp(namespace));
+        assert.equal(fs.existsSync(checkoutPath), false);
+        assert.equal(fs.existsSync(materializedPath), false);
+      }
+    } finally {
+      clearPluginIndexCache();
+      if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+      else process.env.ASB_HOME = previousAsbHome;
+      if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+      else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+      if (previousAsbConfig === undefined) delete process.env.ASB_CONFIG;
+      else process.env.ASB_CONFIG = previousAsbConfig;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('subtree removal recovery preserves foreign content after a crash', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subtree-recovery-'));
+  const canonicalRoot = fs.realpathSync.native(root);
+  const asbHome = path.join(canonicalRoot, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'subtree-foreign-recovery';
+    const { bareRepo } = createBareRemote(canonicalRoot);
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'add source'],
+      { cwd: asbHome, stdio: 'pipe' }
+    );
+
+    await stopRemovalAtCrashPoint(asbHome, namespace, 'before-config');
+    const recoveredFile = path.join(getPluginsDir(), namespace, 'rules', 'v1.md');
+    fs.mkdirSync(path.dirname(recoveredFile), { recursive: true });
+    fs.writeFileSync(recoveredFile, '# Foreign');
+
+    assert.throws(() => getSourcesRecord(), /foreign changes/);
+    assert.equal(fs.readFileSync(recoveredFile, 'utf-8'), '# Foreign');
+  } finally {
+    clearPluginIndexCache();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('source removal recovery rejects a symlinked checkout root', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-checkout-recovery-'));
+  const canonicalRoot = fs.realpathSync.native(root);
+  const asbHome = path.join(canonicalRoot, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    clearPluginIndexCache();
+    const namespace = 'symlinked-checkout-recovery';
+    createManagedMarketplaceSource(asbHome, namespace);
+    await stopRemovalAtCrashPoint(asbHome, namespace, 'after-config');
+
+    const pluginsRoot = getPluginsDir();
+    const outsidePlugins = path.join(canonicalRoot, 'outside-plugins');
+    fs.renameSync(pluginsRoot, outsidePlugins);
+    fs.symlinkSync(outsidePlugins, pluginsRoot);
+    const stagedName = fs
+      .readdirSync(outsidePlugins)
+      .find((name) => name.startsWith(`.removing-${namespace}-`));
+    assert.ok(stagedName);
+    const sentinel = path.join(outsidePlugins, stagedName, 'sentinel.txt');
+    fs.writeFileSync(sentinel, 'preserve');
+
+    assert.throws(() => getSourcesRecord(), /symbolic link/);
+    assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'preserve');
+  } finally {
+    clearPluginIndexCache();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -1008,7 +1435,7 @@ test('removeSource restores verified cache when config removal fails', (t) => {
     assert.ok(plugin);
     index.expand([plugin.id]);
     const materializedPath = plugin.meta.sourcePath;
-    const configPath = path.join(asbHome, 'config.toml');
+    const configPath = path.join(fs.realpathSync.native(asbHome), 'config.toml');
     const originalRename = fs.renameSync.bind(fs);
     t.mock.method(fs, 'renameSync', (from, to) => {
       if (path.resolve(String(to)) === configPath) {
@@ -1062,7 +1489,7 @@ test('removeSource restores a managed checkout when config removal fails', (t) =
     buildPluginIndex().expand([plugin.id]);
     const materializedPath = plugin.meta.sourcePath;
     const checkoutPath = path.join(getPluginsDir(), 'rollback-managed');
-    const configPath = path.join(asbHome, 'config.toml');
+    const configPath = path.join(fs.realpathSync.native(asbHome), 'config.toml');
     const originalRename = fs.renameSync.bind(fs);
     t.mock.method(fs, 'renameSync', (from, to) => {
       if (path.resolve(String(to)) === configPath) {

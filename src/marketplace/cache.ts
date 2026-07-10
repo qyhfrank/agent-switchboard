@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { acquireFileLock } from '../config/file-lock.js';
 import {
   getConfigDir,
   getMarketplacePluginCacheDir,
@@ -59,13 +60,6 @@ interface MarketplaceEntryCacheMetadata {
 }
 
 const METADATA_FILE = 'entry.json';
-const LOCK_METADATA_FILE = 'owner.json';
-const LOCK_RECOVERY_DIR = 'recovering';
-const PROCESS_IDENTITY_PREFIX = 'ps-lstart-utc-v1:';
-const LOCK_TIMEOUT_MS = 120_000;
-const LOCK_STALE_MS = 120_000;
-const LOCK_WAIT_MS = 25;
-const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 const temporaryCacheRoot = new AsyncLocalStorage<string>();
 const heldSourceLocks = new Map<string, () => void>();
 const activeSourceLocks = new Set<string>();
@@ -95,7 +89,7 @@ function runGit(args: string[], cwd?: string, env?: NodeJS.ProcessEnv): string {
   }
 }
 
-function redactGitCredentials(value: string): string {
+export function redactGitCredentials(value: string): string {
   return value
     .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1<redacted>@')
     .replace(/([?&][^=\s&]+)=([^&\s'"]+)/g, '$1=<redacted>')
@@ -188,7 +182,7 @@ function sourceCachePath(sourceName: string, marketplacePath: string): string {
   const ownerIdentity = digest(
     JSON.stringify({ sourceName: normalized, marketplacePath: canonicalPath(marketplacePath) })
   );
-  return path.join(
+  return path.resolve(
     configuredCacheRoot(),
     `${safeSegment(normalized)}-${ownerIdentity.slice(0, 10)}`
   );
@@ -259,277 +253,20 @@ function safeSourceLockRoot(create: boolean): string {
   return lockRoot;
 }
 
-interface CacheLockMetadata {
-  token: string;
-  pid: number;
-  startedAt: number;
-  processIdentity?: string;
-  lockToken?: string;
-}
-
-interface CacheLockObservation {
-  owner: CacheLockMetadata | null;
-  dev: bigint;
-  ino: bigint;
-  mtimeNs: bigint;
-}
-
 function sourceLockPath(sourceName: string, marketplacePath: string): string {
   const sourcePath = sourceCachePath(sourceName, marketplacePath);
-  return path.join(getPluginSourceLocksDir(), `.${path.basename(sourcePath)}.lock`);
-}
-
-function readLockMetadata(lockPath: string): CacheLockMetadata | null {
-  return readLockOwner(path.join(lockPath, LOCK_METADATA_FILE));
-}
-
-function readLockOwner(ownerPath: string): CacheLockMetadata | null {
-  try {
-    const value = JSON.parse(fs.readFileSync(ownerPath, 'utf-8'));
-    if (
-      typeof value?.token !== 'string' ||
-      typeof value.pid !== 'number' ||
-      typeof value.startedAt !== 'number' ||
-      (value.processIdentity !== undefined && typeof value.processIdentity !== 'string') ||
-      (value.lockToken !== undefined && typeof value.lockToken !== 'string')
-    ) {
-      return null;
-    }
-    return value as CacheLockMetadata;
-  } catch {
-    return null;
-  }
-}
-
-function processIdentity(pid: number): string | null {
-  try {
-    const identity = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
-      env: { ...process.env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC0' },
-      stdio: 'pipe',
-      encoding: 'utf-8',
-      timeout: 5_000,
-    }).trim();
-    return identity ? `${PROCESS_IDENTITY_PREFIX}${identity}` : null;
-  } catch {
-    return null;
-  }
-}
-
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
-  }
-}
-
-function observeLock(cacheRoot: string, lockPath: string): CacheLockObservation | null {
-  assertNoCacheSymlinks(cacheRoot, lockPath);
-  try {
-    const stat = fs.lstatSync(lockPath, { bigint: true });
-    const ownerPath = path.join(lockPath, LOCK_METADATA_FILE);
-    assertNoCacheSymlinks(cacheRoot, ownerPath);
-    return {
-      owner: readLockOwner(ownerPath),
-      dev: stat.dev,
-      ino: stat.ino,
-      mtimeNs: stat.mtimeNs,
-    };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
-function lockObservationIsStale(observation: CacheLockObservation): boolean {
-  if (observation.owner) return lockOwnerIsStale(observation.owner);
-  return Date.now() - Number(observation.mtimeNs / 1_000_000n) > LOCK_STALE_MS;
-}
-
-function sameObservedLock(
-  before: CacheLockObservation,
-  after: CacheLockObservation | null
-): boolean {
-  return (
-    after !== null &&
-    before.dev === after.dev &&
-    before.ino === after.ino &&
-    before.owner?.token === after.owner?.token
-  );
-}
-
-function lockOwnerIsStale(metadata: CacheLockMetadata): boolean {
-  if (!processIsAlive(metadata.pid)) return true;
-  if (!metadata.processIdentity?.startsWith(PROCESS_IDENTITY_PREFIX)) return false;
-  const identity = processIdentity(metadata.pid);
-  return identity !== null && identity !== metadata.processIdentity;
-}
-
-function pathIsOld(target: string): boolean {
-  try {
-    return Date.now() - fs.statSync(target).mtimeMs > LOCK_STALE_MS;
-  } catch {
-    return false;
-  }
-}
-
-function removeStaleRecoveryClaim(cacheRoot: string, claimDir: string): void {
-  assertNoCacheSymlinks(cacheRoot, claimDir);
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(claimDir, { withFileTypes: true });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw error;
-  }
-  if (entries.length === 0) {
-    if (pathIsOld(claimDir)) {
-      try {
-        fs.rmdirSync(claimDir);
-      } catch {
-        // Another claimant may have published its owner record.
-      }
-    }
-    return;
-  }
-  for (const entry of entries) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const ownerPath = path.join(claimDir, entry.name);
-    assertNoCacheSymlinks(cacheRoot, ownerPath);
-    const metadata = readLockOwner(ownerPath);
-    if (metadata ? !lockOwnerIsStale(metadata) : !pathIsOld(ownerPath)) continue;
-    try {
-      fs.rmSync(ownerPath, { force: true });
-    } catch {}
-  }
-  try {
-    fs.rmdirSync(claimDir);
-  } catch {
-    // A successor claim keeps the non-empty directory authoritative.
-  }
-}
-
-function releaseRecoveryClaim(
-  cacheRoot: string,
-  claimDir: string,
-  ownerPath: string,
-  token: string
-): void {
-  assertNoCacheSymlinks(cacheRoot, claimDir);
-  assertNoCacheSymlinks(cacheRoot, ownerPath);
-  if (readLockOwner(ownerPath)?.token === token) fs.rmSync(ownerPath, { force: true });
-  try {
-    fs.rmdirSync(claimDir);
-  } catch {
-    // Another claimant or recovery cleanup owns the directory now.
-  }
-}
-
-function tryRecoverStaleLock(
-  cacheRoot: string,
-  lockPath: string,
-  observed: CacheLockObservation
-): boolean {
-  const observedLockToken = observed.owner?.token;
-  const claimDir = `${lockPath}.${LOCK_RECOVERY_DIR}`;
-  const token = randomUUID();
-  const preparedClaimDir = `${claimDir}.${token}.tmp`;
-  const preparedOwnerPath = path.join(preparedClaimDir, `${token}.json`);
-  const ownerPath = path.join(claimDir, `${token}.json`);
-  const owner: CacheLockMetadata = {
-    token,
-    pid: process.pid,
-    startedAt: Date.now(),
-    processIdentity: processIdentity(process.pid) ?? undefined,
-    lockToken: observedLockToken,
-  };
-  assertNoCacheSymlinks(cacheRoot, claimDir);
-  assertNoCacheSymlinks(cacheRoot, preparedClaimDir);
-  try {
-    fs.mkdirSync(preparedClaimDir);
-    fs.writeFileSync(preparedOwnerPath, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
-    fs.renameSync(preparedClaimDir, claimDir);
-  } catch (error) {
-    fs.rmSync(preparedClaimDir, { recursive: true, force: true });
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code !== 'EEXIST' && code !== 'ENOTEMPTY') throw error;
-    assertNoCacheSymlinks(cacheRoot, claimDir);
-    removeStaleRecoveryClaim(cacheRoot, claimDir);
-    return false;
-  }
-
-  try {
-    assertNoCacheSymlinks(cacheRoot, ownerPath);
-    const current = observeLock(cacheRoot, lockPath);
-    if (
-      readLockOwner(ownerPath)?.token !== token ||
-      current?.owner?.token !== observedLockToken ||
-      !sameObservedLock(observed, current) ||
-      !lockObservationIsStale(observed)
-    ) {
-      return false;
-    }
-    const stalePath = `${lockPath}.stale-${randomUUID()}`;
-    fs.renameSync(lockPath, stalePath);
-    fs.rmSync(stalePath, { recursive: true, force: true });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    releaseRecoveryClaim(cacheRoot, claimDir, ownerPath, token);
-  }
+  return path.resolve(getPluginSourceLocksDir(), `.${path.basename(sourcePath)}.lock`);
 }
 
 function acquireSourceLock(sourceName: string, marketplacePath: string): () => void {
   const cacheRoot = safeSourceLockRoot(true);
   const lockPath = sourceLockPath(sourceName, marketplacePath);
   assertNoCacheSymlinks(cacheRoot, lockPath);
-  const token = randomUUID();
-  const deadline = Date.now() + LOCK_TIMEOUT_MS;
-  let nextRecoveryCheck = 0;
-  const owner: CacheLockMetadata = {
-    token,
-    pid: process.pid,
-    startedAt: Date.now(),
-    processIdentity: processIdentity(process.pid) ?? undefined,
-  };
+  return acquireFileLock(lockPath);
+}
 
-  while (true) {
-    try {
-      fs.mkdirSync(lockPath);
-      try {
-        fs.writeFileSync(path.join(lockPath, LOCK_METADATA_FILE), `${JSON.stringify(owner)}\n`);
-      } catch (error) {
-        fs.rmSync(lockPath, { recursive: true, force: true });
-        throw error;
-      }
-      return () => {
-        assertNoCacheSymlinks(cacheRoot, lockPath);
-        assertNoCacheSymlinks(cacheRoot, path.join(lockPath, LOCK_METADATA_FILE));
-        if (readLockMetadata(lockPath)?.token === token) {
-          fs.rmSync(lockPath, { recursive: true, force: true });
-        }
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-      if (Date.now() >= nextRecoveryCheck) {
-        nextRecoveryCheck = Date.now() + 1_000;
-        const observed = observeLock(cacheRoot, lockPath);
-        if (
-          observed &&
-          lockObservationIsStale(observed) &&
-          tryRecoverStaleLock(cacheRoot, lockPath, observed)
-        ) {
-          continue;
-        }
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for marketplace cache lock: ${sourceName}`);
-      }
-      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
-    }
-  }
+export function isTemporaryMarketplaceEntryCache(): boolean {
+  return temporaryCacheRoot.getStore() !== undefined;
 }
 
 export function releaseMarketplaceCacheLeases(): void {
@@ -637,7 +374,11 @@ export function stageMarketplaceEntryCacheRemoval(
   if (!fs.existsSync(sourcePath)) {
     return { commit: () => {}, rollback: () => {} };
   }
-  assertNoCacheSymlinks(cacheRoot, sourcePath);
+  if (preparedPaths) {
+    assertMarketplaceEntryCacheRemovalPaths(sourceName, marketplacePath, preparedPaths);
+  } else {
+    assertNoCacheSymlinks(cacheRoot, sourcePath);
+  }
   const stagedPath =
     preparedPaths?.stagedPath ??
     path.join(cacheRoot, `.removing-${path.basename(sourcePath)}-${randomUUID()}`);
@@ -675,6 +416,32 @@ export function marketplaceEntryCacheRemovalPaths(
   assertNoCacheSymlinks(cacheRoot, activePath);
   assertNoCacheSymlinks(cacheRoot, stagedPath);
   return { activePath, stagedPath };
+}
+
+export function assertMarketplaceEntryCacheRemovalPaths(
+  sourceName: string,
+  marketplacePath: string,
+  paths: MarketplaceCacheRemovalPaths
+): void {
+  const cacheRoot = safeCacheRoot(false);
+  const expectedActive = sourceCachePath(sourceName, marketplacePath);
+  if (
+    path.resolve(paths.activePath) !== path.resolve(expectedActive) ||
+    path.dirname(path.resolve(paths.stagedPath)) !== cacheRoot ||
+    !path.basename(paths.stagedPath).startsWith(`.removing-${path.basename(expectedActive)}-`)
+  ) {
+    throw new Error(`Invalid marketplace cache recovery paths for source "${sourceName}".`);
+  }
+  assertNoCacheSymlinks(cacheRoot, paths.activePath);
+  assertNoCacheSymlinks(cacheRoot, paths.stagedPath);
+}
+
+export function marketplaceEntryCacheExists(sourceName: string, marketplacePath: string): boolean {
+  const cacheRoot = safeCacheRoot(false);
+  const sourcePath = sourceCachePath(sourceName, marketplacePath);
+  if (!fs.existsSync(sourcePath)) return false;
+  assertNoCacheSymlinks(cacheRoot, sourcePath);
+  return true;
 }
 
 function resolveInside(root: string, subdir: string | undefined): string {
@@ -1086,10 +853,24 @@ export function refreshMarketplaceEntryCache(
 
 export async function withTemporaryMarketplaceEntryCache<T>(action: () => Promise<T>): Promise<T> {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-marketplace-cache-'));
+  const sourceLockRoot = getPluginSourceLocksDir();
+  const stateRoot = path.dirname(sourceLockRoot);
+  const sourceLockRootExisted = fs.existsSync(sourceLockRoot);
+  const stateRootExisted = fs.existsSync(stateRoot);
   try {
     return await temporaryCacheRoot.run(path.join(tempRoot, 'marketplace-plugins'), action);
   } finally {
     releaseMarketplaceCacheLeases();
     fs.rmSync(tempRoot, { recursive: true, force: true });
+    if (!sourceLockRootExisted) {
+      try {
+        fs.rmdirSync(sourceLockRoot);
+      } catch {}
+    }
+    if (!stateRootExisted) {
+      try {
+        fs.rmdirSync(stateRoot);
+      } catch {}
+    }
   }
 }

@@ -1,8 +1,7 @@
-import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse, stringify } from '@iarna/toml';
-
+import { withFileLock } from './file-lock.js';
 import { getProfileConfigPath, getProjectConfigPath, getSwitchboardConfigPath } from './paths.js';
 import {
   type SwitchboardConfig,
@@ -201,8 +200,62 @@ function resolveLayerPath(kind: ConfigLayerKind, options?: LoadConfigLayersOptio
   }
 }
 
+function canonicalizeMissingPath(value: string): string {
+  let current = path.resolve(value);
+  const missing: string[] = [];
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return path.resolve(value);
+    missing.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(fs.realpathSync.native(current), ...missing);
+}
+
+export function resolveConfigWritePath(filePath: string): string {
+  let current = path.resolve(filePath);
+  const visited = new Set<string>();
+  while (true) {
+    if (visited.has(current))
+      throw new Error(`Config path contains a symbolic-link cycle: ${filePath}`);
+    visited.add(current);
+    try {
+      const stat = fs.lstatSync(current);
+      if (!stat.isSymbolicLink()) return fs.realpathSync.native(current);
+      const target = fs.readlinkSync(current);
+      current = path.resolve(path.dirname(current), target);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      return canonicalizeMissingPath(current);
+    }
+  }
+}
+
+function configTempPath(filePath: string): string {
+  const targetPath = resolveConfigWritePath(filePath);
+  return path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.asb-write.tmp`);
+}
+
+export function getConfigLayerLockPath(filePath: string): string {
+  const targetPath = resolveConfigWritePath(filePath);
+  return path.join(path.dirname(targetPath), `.${path.basename(targetPath)}.asb-lock`);
+}
+
+export function cleanupConfigLayerTemp(filePath: string): void {
+  fs.rmSync(configTempPath(filePath), { force: true });
+}
+
+export function withConfigFileTransaction<T>(filePath: string, action: () => T): T {
+  const normalized = path.resolve(filePath);
+  return withFileLock(getConfigLayerLockPath(normalized), () => {
+    cleanupConfigLayerTemp(normalized);
+    return action();
+  });
+}
+
 function writeLayerFile(filePath: string, config: SwitchboardConfigLayer): void {
-  const dir = path.dirname(filePath);
+  const targetPath = resolveConfigWritePath(filePath);
+  const dir = path.dirname(targetPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -210,11 +263,11 @@ function writeLayerFile(filePath: string, config: SwitchboardConfigLayer): void 
   const portable = JSON.parse(JSON.stringify(config));
   // biome-ignore lint/suspicious/noExplicitAny: TOML stringify requires JsonMap typing
   const content = stringify(portable as any);
-  const tempPath = path.join(dir, `.${path.basename(filePath)}.${randomUUID()}.tmp`);
-  const mode = fs.existsSync(filePath) ? fs.statSync(filePath).mode & 0o777 : undefined;
+  const tempPath = configTempPath(filePath);
+  const mode = fs.existsSync(targetPath) ? fs.statSync(targetPath).mode & 0o777 : undefined;
   try {
     fs.writeFileSync(tempPath, content, { encoding: 'utf-8', mode, flag: 'wx' });
-    fs.renameSync(tempPath, filePath);
+    fs.renameSync(tempPath, targetPath);
   } finally {
     fs.rmSync(tempPath, { force: true });
   }
@@ -230,15 +283,32 @@ export function loadWritableConfigLayer(options?: UpdateConfigLayerOptions): Con
   return readLayerFile(filePath);
 }
 
+export function getWritableConfigLayerPath(options?: UpdateConfigLayerOptions): string {
+  const targetKind = options?.target ?? defaultWritableLayer(options);
+  return path.resolve(resolveLayerPath(targetKind, options));
+}
+
+export function loadConfigLayerFile(filePath: string): ConfigLayerLoadResult {
+  return readLayerFile(path.resolve(filePath));
+}
+
+export function withConfigLayerTransaction<T>(
+  action: (filePath: string) => T,
+  options?: UpdateConfigLayerOptions
+): T {
+  const filePath = getWritableConfigLayerPath(options);
+  return withConfigFileTransaction(filePath, () => action(filePath));
+}
+
 export function updateConfigLayer(
   mutator: (layer: SwitchboardConfigLayer) => SwitchboardConfigLayer,
   options?: UpdateConfigLayerOptions
 ): ConfigLayerLoadResult {
-  const targetKind = options?.target ?? defaultWritableLayer(options);
-  const filePath = resolveLayerPath(targetKind, options);
-  const current = readLayerFile(filePath);
-  const draft = JSON.parse(JSON.stringify(current.config)) as SwitchboardConfigLayer;
-  const next = switchboardConfigLayerSchema.parse(mutator(draft));
-  writeLayerFile(filePath, next);
-  return { path: filePath, exists: true, config: next };
+  return withConfigLayerTransaction((filePath) => {
+    const current = readLayerFile(filePath);
+    const draft = JSON.parse(JSON.stringify(current.config)) as SwitchboardConfigLayer;
+    const next = switchboardConfigLayerSchema.parse(mutator(draft));
+    writeLayerFile(filePath, next);
+    return { path: filePath, exists: true, config: next };
+  }, options);
 }

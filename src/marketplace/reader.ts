@@ -408,25 +408,23 @@ function resolvePluginDir(
 
   const gitSource = getGitSource(resolution);
   if (gitSource) {
-    if (canReuseMarketplaceCheckout(resolution, gitSource.url)) {
-      const reused = withMarketplaceSourceReadLease(
-        resolution.sourceName,
-        resolution.marketplaceRoot,
-        resolution.ownerIsCurrent,
-        () => {
-          if (!canReuseMarketplaceCheckout(resolution, gitSource.url)) return null;
-          const checkoutRoot = getGitCheckoutRoot(marketplaceRoot);
-          if (!checkoutRoot) return null;
-          const pluginPath = gitSource.subdir
-            ? resolveInside(checkoutRoot, gitSource.subdir)
-            : checkoutRoot;
-          return pluginPath && reusablePathsAreClean(resolution, checkoutRoot, pluginPath)
-            ? pluginPath
-            : null;
-        }
-      );
-      if (reused) return reused;
-    }
+    const reused = withMarketplaceSourceReadLease(
+      resolution.sourceName,
+      resolution.marketplaceRoot,
+      resolution.ownerIsCurrent,
+      () => {
+        if (!canReuseMarketplaceCheckout(resolution, gitSource.url, materializeRemote)) return null;
+        const checkoutRoot = getGitCheckoutRoot(marketplaceRoot);
+        if (!checkoutRoot) return null;
+        const pluginPath = gitSource.subdir
+          ? resolveInside(checkoutRoot, gitSource.subdir)
+          : checkoutRoot;
+        return pluginPath && reusablePathsAreClean(resolution, checkoutRoot, pluginPath)
+          ? pluginPath
+          : null;
+      }
+    );
+    if (reused) return reused;
     if (!materializeRemote) return undefined;
     return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource), {
       ownerIsCurrent: resolution.ownerIsCurrent,
@@ -493,7 +491,7 @@ function getGitSource(
 function githubCloneUrl(value: string): string | undefined {
   if (!value.includes('/')) return undefined;
   const url =
-    /^(https?|ssh|git):\/\//.test(value) || /^[^@/\s]+@[^:\s]+:.+/.test(value)
+    /^(https?|ssh|git):\/\//.test(value) || isScpGitUrl(value)
       ? value
       : `https://github.com/${value}`;
   return url.endsWith('.git') ? url : `${url}.git`;
@@ -501,7 +499,7 @@ function githubCloneUrl(value: string): string | undefined {
 
 function normalizeCloneUrl(value: string, marketplaceRoot: string): string {
   const expanded = expandHome(value.trim());
-  if (/^(https?|ssh|git):\/\//.test(expanded) || /^[^@/\s]+@[^:\s]+:.+/.test(expanded)) {
+  if (/^(https?|ssh|git):\/\//.test(expanded) || isScpGitUrl(expanded)) {
     return expanded;
   }
   if (expanded.startsWith('file://')) return fileURLToPath(expanded);
@@ -519,7 +517,8 @@ function sourceString(source: string | Record<string, unknown>, key: string): st
 
 function canReuseMarketplaceCheckout(
   resolution: MarketplacePluginResolution,
-  sourceUrl: string
+  sourceUrl: string,
+  allowRemoteProbe: boolean
 ): boolean {
   const checkoutRoot = getGitCheckoutRoot(resolution.marketplaceRoot);
   if (!checkoutRoot) return false;
@@ -541,21 +540,49 @@ function canReuseMarketplaceCheckout(
   ) {
     return false;
   }
-  if (!resolution.ref) return true;
+  if (!resolution.ref) {
+    if (resolution.sha) return true;
+    const originHead = tryRunGit(
+      ['rev-parse', 'refs/remotes/origin/HEAD^{commit}'],
+      resolution.marketplaceRoot
+    );
+    return originHead === head;
+  }
   let normalizedRef: string;
   try {
     normalizedRef = normalizeMarketplaceGitRef(resolution.ref) as string;
   } catch {
     return false;
   }
+  const shortRef = normalizedRef !== 'HEAD' && !normalizedRef.startsWith('refs/');
   for (const checkoutRef of localCheckoutRefsForMarketplaceRef(normalizedRef)) {
     const refCommit = tryRunGit(
       ['rev-parse', `${checkoutRef}^{commit}`],
       resolution.marketplaceRoot
     );
-    if (refCommit !== null) return refCommit === head;
+    if (refCommit === null) continue;
+    if (
+      shortRef &&
+      checkoutRef.startsWith('refs/tags/') &&
+      (!allowRemoteProbe || remoteBranchExists(resolution.marketplaceRoot, normalizedRef) !== false)
+    ) {
+      return false;
+    }
+    return refCommit === head;
   }
   return false;
+}
+
+function remoteBranchExists(repoDir: string, ref: string): boolean | null {
+  try {
+    return (
+      runGit(['ls-remote', '--heads', 'origin', `refs/heads/${ref}`], {
+        cwd: repoDir,
+      }).length > 0
+    );
+  } catch {
+    return null;
+  }
 }
 
 function reusablePathsAreClean(
@@ -608,9 +635,10 @@ function normalizeGitIdentity(value: string, cwd: string): string {
     return normalizeLocalGitPath(path.resolve(cwd, trimmed));
   }
 
-  const scp = trimmed.match(/^([^@/:]+)@([^:]+):(.+)$/);
+  const scp = isScpGitUrl(trimmed) ? trimmed.match(/^(?:([^@/:\\\s]+)@)?([^:]+):(.+)$/) : null;
   if (scp) {
-    return `ssh-scp://${scp[1]}@${scp[2].toLowerCase()}/${stripGitSuffix(scp[3])}`;
+    const principal = scp[1] ? `${scp[1]}@` : '';
+    return `ssh-scp://${principal}${scp[2].toLowerCase()}:${stripScpGitSuffix(scp[3])}`;
   }
 
   try {
@@ -643,6 +671,15 @@ function normalizeLocalGitPath(value: string): string {
 
 function stripGitSuffix(value: string): string {
   return value.replace(/^\/+|\/+$/g, '').replace(/\.git$/, '');
+}
+
+function stripScpGitSuffix(value: string): string {
+  return value.replace(/\/+$/g, '').replace(/\.git$/, '');
+}
+
+function isScpGitUrl(value: string): boolean {
+  if (/^[a-zA-Z]:[\\/]/.test(value)) return false;
+  return /^(?:[^@/:\\\s]+@)?[^@/:\\\s]+:.+$/.test(value);
 }
 
 function resolveInside(root: string, subpath: string): string | null {

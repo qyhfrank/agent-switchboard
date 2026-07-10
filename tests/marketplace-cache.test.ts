@@ -13,6 +13,7 @@ import {
   refreshMarketplaceEntryCache,
   releaseMarketplaceCacheLeases,
   removeMarketplaceEntryCache,
+  withMarketplaceSourceLock,
 } from '../src/marketplace/cache.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
@@ -571,6 +572,31 @@ test('concurrent materialization publishes one verified generation', async () =>
   }
 });
 
+test('source lock publishes its owner before the live lock path', (t) => {
+  withTempAsbHome((asbHome) => {
+    const lockRoot = getPluginSourceLocksDir();
+    const originalWrite = fs.writeFileSync.bind(fs);
+    let ownerObserved = false;
+    t.mock.method(fs, 'writeFileSync', (target, data, options) => {
+      if (
+        path.dirname(String(target)) === lockRoot &&
+        path.basename(String(target)).endsWith('.tmp')
+      ) {
+        ownerObserved = true;
+        const liveLocks = fs.existsSync(lockRoot)
+          ? fs.readdirSync(lockRoot).filter((entry) => entry.endsWith('.lock'))
+          : [];
+        assert.deepEqual(liveLocks, []);
+      }
+      return originalWrite(target, data, options);
+    });
+
+    withMarketplaceSourceLock('atomic-lock', path.join(asbHome, 'catalog'), () => {});
+
+    assert.equal(ownerObserved, true);
+  });
+});
+
 test('stale lock recovery rejects a reused PID with a different process identity', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
@@ -586,9 +612,8 @@ test('stale lock recovery rejects a reused PID with a different process identity
     const first = materializeMarketplaceEntry(request);
     const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
-    fs.mkdirSync(lockPath);
     fs.writeFileSync(
-      path.join(lockPath, 'owner.json'),
+      lockPath,
       `${JSON.stringify({
         token: 'stale-owner',
         pid: process.pid,
@@ -600,10 +625,7 @@ test('stale lock recovery rejects a reused PID with a different process identity
     const recovered = materializeMarketplaceEntry(request);
 
     assert.equal(recovered.entryPath, first.entryPath);
-    assert.notEqual(
-      JSON.parse(fs.readFileSync(path.join(lockPath, 'owner.json'), 'utf-8')).token,
-      'stale-owner'
-    );
+    assert.notEqual(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).token, 'stale-owner');
   });
 });
 
@@ -624,7 +646,7 @@ test('stale ownerless lock directories recover without resetting their age', () 
     const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
-    fs.mkdirSync(lockPath);
+    fs.writeFileSync(lockPath, '');
     const staleTime = new Date(Date.now() - 300_000);
     fs.utimesSync(lockPath, staleTime, staleTime);
 
@@ -650,12 +672,11 @@ test('ownerless stale locks recover after a recovery claimant crashes', () => {
     const claimPath = `${lockPath}.recovering`;
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
-    fs.mkdirSync(lockPath);
+    fs.writeFileSync(lockPath, '');
     const staleTime = new Date(Date.now() - 300_000);
     fs.utimesSync(lockPath, staleTime, staleTime);
-    fs.mkdirSync(claimPath);
     fs.writeFileSync(
-      path.join(claimPath, 'dead-claim.json'),
+      claimPath,
       `${JSON.stringify({
         token: 'dead-claim',
         pid: 99_999_999,
@@ -686,9 +707,8 @@ test('stale recovery rejects a symlinked claim directory without touching its ta
     const lockPath = sourceLockPathForEntry(first.entryPath);
     releaseMarketplaceCacheLeases();
     fs.rmSync(sourcePath, { recursive: true, force: true });
-    fs.mkdirSync(lockPath);
     fs.writeFileSync(
-      path.join(lockPath, 'owner.json'),
+      lockPath,
       `${JSON.stringify({
         token: 'dead-owner',
         pid: 99_999_999,
@@ -746,9 +766,8 @@ test('concurrent stale lock recovery admits one cache publisher', async () => {
       deadOwner.on('close', () => resolve());
     });
     assert.ok(deadPid);
-    fs.mkdirSync(lockPath);
     fs.writeFileSync(
-      path.join(lockPath, 'owner.json'),
+      lockPath,
       `${JSON.stringify({
         token: 'dead-owner',
         pid: deadPid,
@@ -819,11 +838,9 @@ test('concurrent stale recovery-claim takeover preserves one publisher', async (
       startedAt: Date.now() - 300_000,
       processIdentity: 'ps-lstart-utc-v1:dead process',
     };
-    fs.mkdirSync(lockPath);
-    fs.writeFileSync(path.join(lockPath, 'owner.json'), `${JSON.stringify(staleMetadata)}\n`);
-    fs.mkdirSync(claimPath);
+    fs.writeFileSync(lockPath, `${JSON.stringify(staleMetadata)}\n`);
     fs.writeFileSync(
-      path.join(claimPath, 'dead-claim.json'),
+      claimPath,
       `${JSON.stringify({ ...staleMetadata, token: 'dead-claim', lockToken: 'dead-owner' })}\n`
     );
 

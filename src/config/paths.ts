@@ -22,7 +22,7 @@ const CONFIG_DIR_LEGACY = '.agent-switchboard';
  */
 export function getConfigDir(): string {
   const asbHome = process.env.ASB_HOME?.trim();
-  if (asbHome && asbHome.length > 0) return asbHome;
+  if (asbHome && asbHome.length > 0) return path.resolve(asbHome);
 
   const home = os.homedir();
   const shortDir = path.join(home, CONFIG_DIR_SHORT);
@@ -49,7 +49,7 @@ export function getMcpConfigPath(): string {
  */
 export function getSwitchboardConfigPath(): string {
   const override = process.env.ASB_CONFIG?.trim();
-  if (override && override.length > 0) return override;
+  if (override && override.length > 0) return path.resolve(override);
   return path.join(getConfigDir(), 'config.toml');
 }
 

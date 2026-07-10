@@ -673,6 +673,32 @@ test('pinned same-origin entries do not reuse a dirty plugin worktree', () => {
   });
 });
 
+test('unpinned same-origin entries do not reuse dirty checkout content', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { checkoutRoot, marketplaceDir, pluginRoot } = createPinnedSameOriginMarketplace(
+      asbHome,
+      'unpinned-dirty-catalog'
+    );
+    const manifestPath = path.join(marketplaceDir, '.claude-plugin', 'marketplace.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    delete manifest.plugins[0].source.ref;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+    commitAll(checkoutRoot);
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: checkoutRoot, stdio: 'ignore' });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'dirty.md'), '# Dirty');
+    writeConfigToml(asbHome, `[plugins.sources]\nunpinned = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('pinned-plugin@unpinned');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+
+    assert.deepEqual(plugin.components.commands, ['pinned-plugin@unpinned:committed']);
+    assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+  });
+});
+
 test('same-origin ref validation follows the remote-tracking branch', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -839,7 +865,6 @@ test('short tag-only refs reuse a compatible same-origin checkout', () => {
       stdio: 'ignore',
     });
     writeConfigToml(asbHome, `[plugins.sources]\ntag-only = "${marketplaceDir}"\n`);
-    fs.renameSync(bareRepo, `${bareRepo}.offline`);
 
     const index = buildPluginIndex();
     const plugin = index.get('tag-only-plugin@tag-only');
@@ -849,6 +874,72 @@ test('short tag-only refs reuse a compatible same-origin checkout', () => {
     assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
     assert.deepEqual(plugin.components.commands, ['tag-only-plugin@tag-only:tagged']);
     assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+  });
+});
+
+test('short refs do not reuse a local tag when the remote branch exists', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const bareRepo = path.join(asbHome, 'missing-tracking.git');
+    const checkoutRoot = path.join(asbHome, 'missing-tracking-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], {
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['clone', bareRepo, checkoutRoot], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'branch.md'), '# Branch');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'missing-tracking-catalog',
+        plugins: [
+          {
+            name: 'branch-plugin',
+            source: {
+              source: 'git-subdir',
+              url: bareRepo,
+              path: 'packages/plugin',
+              ref: 'collision',
+            },
+          },
+        ],
+      })
+    );
+    commitAll(checkoutRoot);
+    execFileSync('git', ['branch', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    fs.rmSync(path.join(pluginRoot, 'commands', 'branch.md'));
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'tag.md'), '# Tag');
+    commitAll(checkoutRoot);
+    execFileSync('git', ['tag', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'main', 'refs/tags/collision'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['update-ref', '-d', 'refs/remotes/origin/collision'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    writeConfigToml(asbHome, `[plugins.sources]\nmissing-tracking = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('branch-plugin@missing-tracking');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+
+    assert.deepEqual(plugin.components.commands, ['branch-plugin@missing-tracking:branch']);
+    assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
   });
 });
 
@@ -1045,6 +1136,112 @@ test('same-origin detection distinguishes SSH principals', () => {
   });
 });
 
+test('same-origin detection distinguishes relative and absolute SCP paths', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = path.join(asbHome, 'scp-path-catalog');
+    const pluginRoot = path.join(marketplaceDir, 'packages', 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'wrong-path.md'), '# Wrong');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'scp-path-catalog',
+        plugins: [
+          {
+            name: 'external-plugin',
+            source: {
+              source: 'git-subdir',
+              url: 'git@example.test:/org/repo.git',
+              path: 'packages/plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    initGitRepo(marketplaceDir);
+    execFileSync('git', ['remote', 'add', 'origin', 'git@example.test:org/repo.git'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    commitAll(marketplaceDir);
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    writeConfigToml(asbHome, `[plugins.sources]\nscp-path = "${marketplaceDir}"\n`);
+
+    const plugin = buildPluginIndex().get('external-plugin@scp-path');
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.materialized, false);
+    assert.deepEqual(plugin.components.commands, []);
+  });
+});
+
+test('userless SCP Git sources materialize through SSH transport', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const bareRepo = path.join(asbHome, 'userless-scp.git');
+    const workDir = path.join(asbHome, 'userless-scp-work');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], {
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: workDir,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: workDir, stdio: 'ignore' });
+    fs.mkdirSync(path.join(workDir, 'packages', 'plugin', 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(workDir, 'packages', 'plugin', 'commands', 'remote.md'), '# Remote');
+    commitAll(workDir);
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'ignore' });
+
+    const marketplaceDir = path.join(asbHome, 'userless-scp-catalog');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'userless-scp-catalog',
+        plugins: [
+          {
+            name: 'userless-plugin',
+            source: {
+              source: 'git-subdir',
+              url: `example.test:${bareRepo}`,
+              path: 'packages/plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\nuserless-scp = "${marketplaceDir}"\n`);
+    const sshCommand = path.join(asbHome, 'fake-ssh');
+    fs.writeFileSync(sshCommand, '#!/bin/sh\nexec /bin/sh -c "$2"\n');
+    fs.chmodSync(sshCommand, 0o755);
+    const previousCommand = process.env.GIT_SSH_COMMAND;
+    const previousVariant = process.env.GIT_SSH_VARIANT;
+    process.env.GIT_SSH_COMMAND = sshCommand;
+    process.env.GIT_SSH_VARIANT = 'simple';
+    try {
+      const index = buildPluginIndex();
+      const plugin = index.get('userless-plugin@userless-scp');
+      assert.ok(plugin);
+      index.expand([plugin.id]);
+      assert.deepEqual(plugin.components.commands, ['userless-plugin@userless-scp:remote']);
+    } finally {
+      if (previousCommand === undefined) delete process.env.GIT_SSH_COMMAND;
+      else process.env.GIT_SSH_COMMAND = previousCommand;
+      if (previousVariant === undefined) delete process.env.GIT_SSH_VARIANT;
+      else process.env.GIT_SSH_VARIANT = previousVariant;
+    }
+  });
+});
+
 test('relative Git origins resolve from the checkout root', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -1123,6 +1320,21 @@ test('buildPluginIndex discovers standalone plugin sources', () => {
     assert.deepEqual(vp.components.commands, ['my-lib:do-thing']);
     assert.equal(vp.meta.sourceKind, 'plugin');
     assert.equal(vp.meta.sourceName, 'my-lib');
+  });
+});
+
+test('buildPluginIndex rejects duplicate canonical plugin IDs', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const directDir = path.join(asbHome, 'plugins', 'foo@bar', 'commands');
+    fs.mkdirSync(directDir, { recursive: true });
+    fs.writeFileSync(path.join(directDir, 'direct.md'), '# Direct');
+    const marketplaceDir = createMarketplaceFixture(asbHome, 'collision-marketplace', [
+      { name: 'foo', commands: ['marketplace'] },
+    ]);
+    writeConfigToml(asbHome, `[plugins.sources]\nbar = "${marketplaceDir}"\n`);
+
+    assert.throws(() => buildPluginIndex(), /duplicate canonical plugin id.*foo@bar/i);
   });
 });
 
