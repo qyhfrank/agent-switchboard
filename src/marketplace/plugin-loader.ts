@@ -6,6 +6,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { z } from 'zod';
+
 import type { CommandEntry } from '../commands/library.js';
 import type { HookEntry } from '../hooks/library.js';
 import { hookFileSchema } from '../hooks/schema.js';
@@ -35,6 +37,111 @@ export interface PluginComponents {
 
 const SKILL_FILE = 'SKILL.md';
 const warnedSkippedHookFiles = new Set<string>();
+const copilotV1HookEvents = new Set([
+  'agentStop',
+  'errorOccurred',
+  'notification',
+  'permissionRequest',
+  'postToolUse',
+  'postToolUseFailure',
+  'preCompact',
+  'preToolUse',
+  'sessionEnd',
+  'sessionStart',
+  'subagentStart',
+  'subagentStop',
+  'userPromptSubmitted',
+  'ErrorOccurred',
+  'Notification',
+  'PermissionRequest',
+  'PostToolUse',
+  'PostToolUseFailure',
+  'PreCompact',
+  'PreToolUse',
+  'SessionEnd',
+  'SessionStart',
+  'Stop',
+  'SubagentStart',
+  'SubagentStop',
+  'UserPromptSubmit',
+]);
+const copilotHttpsOnlyHookEvents = new Set([
+  'permissionRequest',
+  'preToolUse',
+  'PermissionRequest',
+  'PreToolUse',
+]);
+
+function isCopilotHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === 'https:' ||
+      (url.protocol === 'http:' &&
+        (url.hostname === 'localhost' ||
+          /^127(?:\.\d{1,3}){3}$/.test(url.hostname) ||
+          url.hostname === '[::1]'))
+    );
+  } catch {
+    return false;
+  }
+}
+
+const copilotCommandHookSchema = z
+  .object({
+    type: z.literal('command').optional(),
+    bash: z.string().optional(),
+    command: z.string().optional(),
+    powershell: z.string().optional(),
+    cwd: z.string().optional(),
+    env: z.record(z.string()).optional(),
+    matcher: z.string().optional(),
+    timeout: z.number().optional(),
+    timeoutSec: z.number().optional(),
+  })
+  .passthrough()
+  .refine((handler) => handler.bash || handler.command || handler.powershell);
+const copilotHookHandlerSchema = z.union([
+  copilotCommandHookSchema,
+  z
+    .object({
+      type: z.literal('http'),
+      url: z.string().refine(isCopilotHttpUrl),
+      headers: z.record(z.string()).optional(),
+      allowedEnvVars: z.array(z.string()).optional(),
+      matcher: z.string().optional(),
+      timeout: z.number().optional(),
+      timeoutSec: z.number().optional(),
+    })
+    .passthrough(),
+  z.object({ type: z.literal('prompt'), prompt: z.string() }).passthrough(),
+]);
+const copilotV1HookFileSchema = z
+  .object({
+    version: z.literal(1),
+    disableAllHooks: z.boolean().optional(),
+    hooks: z.record(z.array(copilotHookHandlerSchema)),
+  })
+  .passthrough()
+  .refine((file) => Object.keys(file.hooks).every((event) => copilotV1HookEvents.has(event)))
+  .refine((file) =>
+    Object.entries(file.hooks).every(
+      ([event, handlers]) =>
+        event === 'sessionStart' ||
+        event === 'SessionStart' ||
+        handlers.every((handler) => handler.type !== 'prompt')
+    )
+  )
+  .refine((file) =>
+    Object.entries(file.hooks).every(([event, handlers]) =>
+      handlers.every(
+        (handler) =>
+          handler.type !== 'http' ||
+          new URL(handler.url).protocol === 'https:' ||
+          (!copilotHttpsOnlyHookEvents.has(event) && handler.allowedEnvVars === undefined)
+      )
+    )
+  );
 
 function isMarkdownFile(name: string): boolean {
   const ext = path.extname(name).toLowerCase();
@@ -304,7 +411,11 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
       try {
         const rawContent = fs.readFileSync(absolutePath, 'utf-8');
         const parsedJson = JSON.parse(rawContent);
-        const parsed = hookFileSchema.parse(parsedJson);
+        if (copilotV1HookFileSchema.safeParse(parsedJson).success) continue;
+        const parsed = hookFileSchema.safeParse(parsedJson);
+        if (!parsed.success) {
+          throw parsed.error;
+        }
         const bareId = path.basename(entry.name, '.json');
         const id = `${namespace}:${bareId}`;
 
@@ -317,9 +428,9 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
           namespace,
           source: hooksDir,
           filePath: absolutePath,
-          name: parsed.name,
-          description: parsed.description,
-          hooks: parsed.hooks,
+          name: parsed.data.name,
+          description: parsed.data.description,
+          hooks: parsed.data.hooks,
           isBundle: hasScripts,
           dirPath: hasScripts ? hooksDir : undefined,
         });
