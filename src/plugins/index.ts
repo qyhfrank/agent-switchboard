@@ -565,7 +565,15 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
 
   let configuredSelectionKey = '';
   const materializeConfigured = (): void => {
-    const configured = loadConfiguredPortableSelections(scope);
+    const configured = loadConfiguredPortableSelections(scope, {
+      pluginRef: (ref) => byId.get(ref)?.id ?? ref,
+      componentRef: (ref) => {
+        const parsed = splitComponentId(ref);
+        if (!parsed) return ref;
+        const plugin = byId.get(parsed.pluginId);
+        return plugin ? buildComponentId(plugin.id, parsed.bareId) : ref;
+      },
+    });
     const selectionKey = JSON.stringify(configured);
     if (selectionKey === configuredSelectionKey) return;
     materialize(configured.pluginRefs);

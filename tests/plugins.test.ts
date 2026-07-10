@@ -584,6 +584,140 @@ test('enabled plugins expand to commands for all active applications', () => {
   });
 });
 
+test('application plugin add and remove normalize bare and source-qualified aliases', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'app-selection', [
+      { name: 'plugin-a', commands: ['a-one'] },
+      { name: 'plugin-b', commands: ['b-one', 'b-two'] },
+    ]);
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications]',
+        'enabled = ["claude-code", "codex"]',
+        '',
+        '[plugins]',
+        'enabled = ["plugin-a"]',
+        '',
+        '[plugins.sources]',
+        `app-selection = "${mktDir}"`,
+        '',
+        '[applications.codex.plugins]',
+        'remove = ["plugin-a@app-selection"]',
+        'add = ["plugin-b"]',
+        '',
+        '[applications.codex.commands]',
+        'remove = ["plugin-b@app-selection:b-one"]',
+        'add = ["manual-command"]',
+      ].join('\n')
+    );
+
+    assert.deepEqual(resolveEffectiveSectionConfig('commands', 'claude-code').enabled, [
+      'plugin-a@app-selection:a-one',
+    ]);
+    assert.deepEqual(resolveEffectiveSectionConfig('commands', 'codex').enabled, [
+      'plugin-b@app-selection:b-two',
+      'manual-command',
+    ]);
+  });
+});
+
+test('application removals do not materialize unselected external plugin aliases', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir } = createRemoteSkillMarketplace(asbHome);
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications]',
+        'enabled = ["codex"]',
+        '',
+        '[plugins]',
+        'enabled = ["remote-plugin"]',
+        '',
+        '[skills]',
+        'enabled = ["remote-plugin:remote-skill"]',
+        '',
+        '[plugins.sources]',
+        `remote-catalog = "${marketplaceDir}"`,
+        '',
+        '[applications.codex.plugins]',
+        'remove = ["remote-plugin@remote-catalog"]',
+        '',
+        '[applications.codex.skills]',
+        'remove = ["remote-plugin@remote-catalog:remote-skill"]',
+      ].join('\n')
+    );
+
+    assert.equal(
+      loadSkillLibrary().some((skill) => skill.id.includes('remote-plugin')),
+      false
+    );
+    assert.deepEqual(resolveEffectiveSectionConfig('skills', 'codex').enabled, []);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+  });
+});
+
+test('plugin excludes do not remove an explicitly enabled component', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'exclude-boundary', [
+      { name: 'plugin-a', commands: ['keep-explicit'] },
+    ]);
+    writeConfigToml(
+      asbHome,
+      [
+        '[commands]',
+        'enabled = ["plugin-a@exclude-boundary:keep-explicit"]',
+        '',
+        '[plugins]',
+        'enabled = ["plugin-a"]',
+        '',
+        '[plugins.sources]',
+        `exclude-boundary = "${mktDir}"`,
+        '',
+        '[plugins.exclude]',
+        'commands = ["plugin-a@exclude-boundary:keep-explicit"]',
+      ].join('\n')
+    );
+
+    assert.deepEqual(resolveEffectiveSectionConfig('commands', 'claude-code').enabled, [
+      'plugin-a@exclude-boundary:keep-explicit',
+    ]);
+  });
+});
+
+test('plugin list JSON emits one canonical ref and recognizes bare enabled aliases', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'json-catalog', [
+      { name: 'plugin-a', commands: ['command-a'] },
+    ]);
+    writeConfigToml(
+      asbHome,
+      [
+        '[plugins]',
+        'enabled = ["plugin-a"]',
+        '',
+        '[plugins.sources]',
+        `catalog = "${mktDir}"`,
+      ].join('\n')
+    );
+
+    const plugins = JSON.parse(runCli(['plugin', 'list', '--json']).stdout) as Array<{
+      id: string;
+      ref: string;
+      enabled: boolean;
+    }>;
+
+    assert.equal(plugins.length, 1);
+    assert.equal(plugins[0].id, 'plugin-a@catalog');
+    assert.equal(plugins[0].ref, plugins[0].id);
+    assert.equal(plugins[0].enabled, true);
+  });
+});
+
 test('plugin rules are loaded into rule library', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
