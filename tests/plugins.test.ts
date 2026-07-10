@@ -1564,6 +1564,44 @@ test('standalone plugin discovery retains its source lifecycle read lease', () =
   });
 });
 
+test('failed multi-source index builds release only leases acquired by that build', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const publishedDir = path.join(asbHome, 'external', 'published');
+    const acquiredDir = path.join(asbHome, 'external', 'acquired');
+    const collisionDir = path.join(asbHome, 'plugins', 'foo@bar');
+    for (const pluginDir of [publishedDir, acquiredDir, collisionDir]) {
+      fs.mkdirSync(path.join(pluginDir, 'commands'), { recursive: true });
+      fs.writeFileSync(path.join(pluginDir, 'commands', 'command.md'), '# Command');
+    }
+    const marketplaceDir = createMarketplaceFixture(asbHome, 'failed-build', [
+      { name: 'foo', commands: ['marketplace'] },
+    ]);
+    writeConfigToml(asbHome, `[plugins.sources]\npublished = "${publishedDir}"\n`);
+
+    try {
+      const publishedIndex = buildPluginIndex();
+      assert.ok(publishedIndex.get('published'));
+      const publishedLeases = fs.readdirSync(getPluginSourceLocksDir()).sort();
+      assert.equal(publishedLeases.length, 2);
+
+      fs.writeFileSync(
+        path.join(asbHome, 'team.toml'),
+        ['[plugins.sources]', `acquired = "${acquiredDir}"`, `bar = "${marketplaceDir}"`].join('\n')
+      );
+
+      assert.throws(
+        () => buildPluginIndex({ profile: 'team' }),
+        /duplicate canonical plugin id.*foo@bar/i
+      );
+      assert.deepEqual(fs.readdirSync(getPluginSourceLocksDir()).sort(), publishedLeases);
+      assert.strictEqual(buildPluginIndex(), publishedIndex);
+    } finally {
+      clearPluginIndexCache();
+    }
+  });
+});
+
 test('buildPluginIndex rejects duplicate canonical plugin IDs', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -2104,6 +2142,81 @@ test('plugin marketplace list shows only configured sources and checkout status'
     assert.doesNotMatch(stdout, /direct-source/);
     assert.match(stdout, /checked out/);
     assert.doesNotMatch(stdout, /\bcached\b/);
+  });
+});
+
+test('plugin marketplace commands honor profile scope inherited from the plugin command', () => {
+  withTempAsbHome((asbHome) => {
+    const userSource = path.join(asbHome, 'external', 'user-source');
+    const profileSource = path.join(asbHome, 'external', 'profile-source');
+    for (const sourceDir of [userSource, profileSource]) {
+      fs.mkdirSync(path.join(sourceDir, 'rules'), { recursive: true });
+      fs.writeFileSync(path.join(sourceDir, 'rules', 'rule.md'), '# Rule');
+    }
+    writeConfigToml(asbHome, `[plugins.sources]\nshared = "${userSource}"\n`);
+    const profilePath = path.join(asbHome, 'team.toml');
+    fs.writeFileSync(profilePath, `[plugins.sources]\nshared = "${profileSource}"\n`);
+
+    const listed = JSON.parse(
+      runCli(['plugin', '--profile', 'team', 'marketplace', 'list', '--json']).stdout
+    ) as Array<{ namespace: string; path: string }>;
+    assert.equal(listed.find((source) => source.namespace === 'shared')?.path, profileSource);
+
+    runCli(['plugin', '--profile', 'team', 'marketplace', 'remove', 'shared']);
+    assert.equal(loadSwitchboardConfig().plugins.sources.shared, userSource);
+    assert.doesNotMatch(fs.readFileSync(profilePath, 'utf-8'), /shared/);
+
+    runCli(['plugin', '--profile', 'team', 'marketplace', 'add', profileSource, 'profile-added']);
+    assert.equal(loadSwitchboardConfig().plugins.sources['profile-added'], undefined);
+    assert.equal(
+      loadSwitchboardConfig({ profile: 'team' }).plugins.sources['profile-added'],
+      profileSource
+    );
+  });
+});
+
+test('plugin marketplace commands honor project scope inherited from the plugin command', () => {
+  withTempAsbHome((asbHome) => {
+    writeConfigToml(asbHome, '');
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    const projectSource = createMarketplaceFixture(asbHome, 'project-source', []);
+
+    runCli([
+      'plugin',
+      '--project',
+      projectRoot,
+      'marketplace',
+      'add',
+      projectSource,
+      'project-added',
+    ]);
+    assert.equal(loadSwitchboardConfig().plugins.sources['project-added'], undefined);
+    assert.equal(
+      loadSwitchboardConfig({ projectPath: projectRoot }).plugins.sources['project-added'],
+      projectSource
+    );
+
+    const listed = JSON.parse(
+      runCli(['plugin', '--project', projectRoot, 'marketplace', 'list', '--json']).stdout
+    ) as Array<{ namespace: string }>;
+    assert.deepEqual(
+      listed.map((source) => source.namespace),
+      ['project-added']
+    );
+
+    const updated = runCli([
+      'plugin',
+      '--project',
+      projectRoot,
+      'marketplace',
+      'update',
+      'project-added',
+    ]);
+    assert.match(updated.stdout, /project-added: updated/);
+
+    runCli(['plugin', '--project', projectRoot, 'marketplace', 'remove', 'project-added']);
+    assert.deepEqual(loadSwitchboardConfig({ projectPath: projectRoot }).plugins.sources, {});
   });
 });
 

@@ -186,6 +186,10 @@ function resolveScope(input?: ScopeOptionInput): ConfigScope | undefined {
   };
 }
 
+function resolveCommandScope(command: Command): ConfigScope | undefined {
+  return resolveScope(command.optsWithGlobals() as ScopeOptionInput);
+}
+
 function getScopedProjectMode(
   scope: ConfigScope | undefined,
   config: { distribution: { project: { mode: 'managed' | 'exclusive' | 'none' } } }
@@ -1777,20 +1781,25 @@ mktRoot
   .description('Add a configured plugin source')
   .argument('<location>', 'Local path or git URL (e.g., https://github.com/org/repo)')
   .argument('[name]', 'Namespace (defaults to repo or directory name)')
-  .action((location: string, nameArg: string | undefined) => {
+  .action((location: string, nameArg: string | undefined, _options: unknown, command: Command) => {
     try {
+      const scope = resolveCommandScope(command);
       const name = nameArg ?? inferSourceName(location);
       if (isGitUrl(location)) {
         const parsed = parseGitUrl(location);
         const displayUrl = redactGitCredentials(parsed.url);
         const spinner = ora(`Cloning ${displayUrl}...`).start();
         try {
-          addRemoteSource(name, {
-            url: parsed.url,
-            ref: parsed.ref,
-            subdir: parsed.subdir,
-            type: 'clone',
-          });
+          addRemoteSource(
+            name,
+            {
+              url: parsed.url,
+              ref: parsed.ref,
+              subdir: parsed.subdir,
+              type: 'clone',
+            },
+            scope
+          );
           spinner.succeed(chalk.green(`✓ Cloned ${displayUrl}`));
         } catch (err) {
           spinner.fail(chalk.red('Failed to clone'));
@@ -1802,7 +1811,7 @@ mktRoot
         const validation = validateSourcePath(effectivePath);
 
         if (!validation.valid) {
-          removeSource(name);
+          removeSource(name, scope);
           console.error(
             chalk.red(
               '\n✗ Cloned repository does not contain any library folders (rules/, commands/, agents/, skills/) or marketplace manifest.'
@@ -1834,7 +1843,7 @@ mktRoot
           process.exit(1);
         }
 
-        addLocalSource(name, location);
+        addLocalSource(name, location, scope);
 
         console.log(chalk.green(`\n✓ Added source "${name}" at ${path.resolve(location)}`));
         if (validation.kind === 'marketplace') {
@@ -1866,9 +1875,10 @@ mktRoot
   .alias('rm')
   .description('Remove a configured plugin source by name')
   .argument('<name>', 'Source namespace to remove')
-  .action((name: string) => {
+  .action((name: string, _options: unknown, command: Command) => {
     try {
-      removeSource(name);
+      const scope = resolveCommandScope(command);
+      removeSource(name, scope);
       clearPluginIndexCache();
       console.log(chalk.green(`\n✓ Removed source "${name}"`));
     } catch (error) {
@@ -1883,9 +1893,10 @@ mktRoot
   .command('update')
   .description('Update source checkouts and materialized entries')
   .argument('[name]', 'Specific source namespace to update')
-  .action((name?: string) => {
+  .action((name: string | undefined, _options: unknown, command: Command) => {
     try {
-      const results = updateRemoteSources(undefined, name);
+      const scope = resolveCommandScope(command);
+      const results = updateRemoteSources(scope, name);
       clearPluginIndexCache();
       if (results.length === 0) {
         if (name) {
@@ -1918,10 +1929,15 @@ mktRoot
   .alias('ls')
   .description('List all configured plugin sources')
   .option('--json', 'Output inventory as JSON')
-  .action((options: { json?: boolean }) => {
+  .action((options: { json?: boolean }, command: Command) => {
     try {
-      const configuredNamespaces = new Set(Object.keys(loadSwitchboardConfig().plugins.sources));
-      const sources = getSources().filter((source) => configuredNamespaces.has(source.namespace));
+      const scope = resolveCommandScope(command);
+      const configuredNamespaces = new Set(
+        Object.keys(loadSwitchboardConfig(scopeToLayerOptions(scope)).plugins.sources)
+      );
+      const sources = getSources(scope).filter((source) =>
+        configuredNamespaces.has(source.namespace)
+      );
 
       if (options.json) {
         console.log(

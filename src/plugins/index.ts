@@ -24,7 +24,9 @@ import {
   recordSourceKind,
 } from '../library/sources.js';
 import {
+  captureMarketplaceCacheLeaseSnapshot,
   releaseMarketplaceCacheLeases,
+  releaseMarketplaceCacheLeasesAfter,
   withMarketplaceSourceReadLease,
 } from '../marketplace/cache.js';
 import {
@@ -477,11 +479,7 @@ export function clearPluginIndexCache(): void {
   releaseMarketplaceCacheLeases();
 }
 
-export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
-  const cacheKey = getScopeCacheKey(scope);
-  const cachedIndex = cachedIndices.get(cacheKey);
-  if (cachedIndex) return cachedIndex;
-
+function buildUncachedPluginIndex(scope?: ConfigScope): PluginIndex {
   const plugins: PluginDescriptor[] = [];
   const mcpServers: PluginMcpServer[] = [];
   const ruleSnippets: PluginRuleSnippet[] = [];
@@ -706,6 +704,21 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     },
   };
 
-  cachedIndices.set(cacheKey, index);
   return index;
+}
+
+export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
+  const cacheKey = getScopeCacheKey(scope);
+  const cachedIndex = cachedIndices.get(cacheKey);
+  if (cachedIndex) return cachedIndex;
+
+  const leaseSnapshot = captureMarketplaceCacheLeaseSnapshot();
+  try {
+    const index = buildUncachedPluginIndex(scope);
+    cachedIndices.set(cacheKey, index);
+    return index;
+  } catch (error) {
+    releaseMarketplaceCacheLeasesAfter(leaseSnapshot);
+    throw error;
+  }
 }
