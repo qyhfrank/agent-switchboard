@@ -794,6 +794,63 @@ test('updateRemoteSources pulls latest changes', () => {
   });
 });
 
+test('managed branch accepts a clean checkout behind its fetched tracking ref', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'tracking-remote'));
+    addRemoteSource('tracking-behind', { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkoutPath = path.join(getPluginsDir(), 'tracking-behind');
+    const oldHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: checkoutPath,
+      encoding: 'utf-8',
+    }).trim();
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['fetch', 'origin', 'main'], { cwd: checkoutPath, stdio: 'pipe' });
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutPath, encoding: 'utf-8' }).trim(),
+      oldHead
+    );
+
+    assert.equal(getSourcesRecord()['tracking-behind'], checkoutPath);
+    const result = updateRemoteSources(undefined, 'tracking-behind');
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutPath, encoding: 'utf-8' }).trim(),
+      execFileSync('git', ['rev-parse', 'refs/remotes/origin/main'], {
+        cwd: checkoutPath,
+        encoding: 'utf-8',
+      }).trim()
+    );
+  });
+});
+
+test('managed clone lifecycle adopts a verified checkout created before provenance state', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'legacy-clone-remote'));
+    addRemoteSource('legacy-clone', { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkoutPath = path.join(getPluginsDir(), 'legacy-clone');
+    fs.rmSync(getPluginSourceStateDir(), { recursive: true, force: true });
+    fs.rmSync(path.join(checkoutPath, '.asb-source-owner'));
+
+    const result = updateRemoteSources(undefined, 'legacy-clone');
+
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.match(
+      fs.readFileSync(path.join(checkoutPath, '.asb-source-owner'), 'utf-8'),
+      /^[0-9a-f-]+\n$/
+    );
+    removeSource('legacy-clone');
+    assert.equal(fs.existsSync(checkoutPath), false);
+  });
+});
+
 test('updateRemoteSources publishes a missing checkout from a verified hidden stage', (t) => {
   withTempAsbHome((asbHome) => {
     const bareRepo = path.join(asbHome, 'bare-repo.git');
@@ -827,7 +884,7 @@ test('updateRemoteSources publishes a missing checkout from a verified hidden st
     t.mock.method(fs, 'renameSync', (from, to) => {
       if (path.resolve(String(to)) === path.resolve(cacheDir)) {
         publishedFromHiddenStage = true;
-        assert.match(path.basename(String(from)), /^\.updating-reclone-test-/);
+        assert.match(path.basename(path.dirname(String(from))), /^\.updating-reclone-test-/);
         assert.equal(fs.existsSync(cacheDir), false);
         assert.equal(
           execFileSync('git', ['config', '--get', 'remote.origin.url'], {
@@ -842,10 +899,62 @@ test('updateRemoteSources publishes a missing checkout from a verified hidden st
 
     const results = updateRemoteSources();
     assert.equal(results.length, 1);
-    assert.equal(results[0].status, 'updated');
+    assert.equal(results[0].status, 'updated', results[0].error);
     assert.equal(publishedFromHiddenStage, true);
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'test.md')));
   });
+});
+
+test('missing checkout update recovers an interrupted owned clone stage', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-update-recovery-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  let child: ReturnType<typeof spawn> | undefined;
+  try {
+    const namespace = 'recoverable-update';
+    const { bareRepo } = createBareRemote(path.join(root, 'remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
+    const checkoutPath = path.join(getPluginsDir(), namespace);
+    fs.rmSync(checkoutPath, { recursive: true, force: true });
+
+    const started = await startRemoteAddBeforeCheckoutOwnership(
+      asbHome,
+      namespace,
+      bareRepo,
+      'update'
+    );
+    child = started.child;
+    const stageName = fs
+      .readdirSync(getPluginsDir())
+      .find((name) => name.startsWith(`.updating-${namespace}-`));
+    assert.ok(stageName, started.stderr());
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), stageName, '.asb-stage-owner')), true);
+    const closed = new Promise<void>((resolve) => child?.once('close', () => resolve()));
+    child.kill('SIGKILL');
+    await closed;
+    child = undefined;
+
+    getSourcesRecord();
+    assert.deepEqual(
+      fs.readdirSync(getPluginsDir()).filter((name) => name.startsWith('.updating-')),
+      []
+    );
+    assert.equal(fs.existsSync(checkoutPath), false);
+    const result = updateRemoteSources(undefined, namespace);
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.equal(fs.existsSync(path.join(checkoutPath, 'rules', 'v1.md')), true);
+  } finally {
+    child?.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('managed checkout reads fail closed on configured origin and ref replacement', () => {
@@ -885,6 +994,54 @@ test('managed checkout reads fail closed on configured origin and ref replacemen
     const corruptResult = updateRemoteSources();
     assert.equal(corruptResult[0]?.status, 'error');
     assert.equal(fs.existsSync(path.join(checkoutPath, 'rules', 'v1.md')), true);
+  });
+});
+
+test('removeSource refuses a dangling replacement for an owned checkout', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'dangling-remote'));
+    addRemoteSource('dangling-checkout', { url: bareRepo, type: 'clone' });
+    const checkoutPath = path.join(getPluginsDir(), 'dangling-checkout');
+    fs.rmSync(checkoutPath, { recursive: true, force: true });
+    fs.symlinkSync(path.join(asbHome, 'missing-checkout'), checkoutPath);
+
+    assert.throws(() => removeSource('dangling-checkout'), /symbolic link|ownership changed/i);
+    assert.equal(fs.lstatSync(checkoutPath).isSymbolicLink(), true);
+    assert.match(fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'), /dangling-checkout/);
+  });
+});
+
+test('re-adding a directly deleted namespace retires its prior owned checkout', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'readd-remote'));
+    addRemoteSource('readded', { url: bareRepo, type: 'clone' });
+    const oldCheckout = path.join(getPluginsDir(), 'readded');
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), '');
+    const localSource = path.join(asbHome, 'replacement');
+    fs.mkdirSync(path.join(localSource, 'rules'), { recursive: true });
+
+    addLocalSource('readded', localSource);
+
+    assert.equal(getSourcesRecord().readded, localSource);
+    assert.equal(fs.existsSync(oldCheckout), false);
+  });
+});
+
+test('direct descriptor replacement cannot discard an owned checkout incarnation', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'rebind-remote'));
+    addRemoteSource('rebound', { url: bareRepo, type: 'clone' });
+    const oldCheckout = path.join(getPluginsDir(), 'rebound');
+    const replacement = path.join(asbHome, 'replacement-source');
+    fs.mkdirSync(path.join(replacement, 'rules'), { recursive: true });
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\nrebound = ${JSON.stringify(replacement)}\n`
+    );
+
+    assert.throws(() => removeSource('rebound'), /cannot replace its managed checkout/i);
+    assert.equal(fs.existsSync(oldCheckout), true);
+    assert.match(fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'), /rebound/);
   });
 });
 
@@ -1593,27 +1750,21 @@ async function stopRemovalAtCrashPoint(
   await closed;
 }
 
-async function startRemoteAddAtPublication(
+async function startRemoteAddBeforeCheckoutOwnership(
   asbHome: string,
   namespace: string,
-  bareRepo: string
+  bareRepo: string,
+  operation: 'add' | 'update' = 'add'
 ): Promise<{ child: ReturnType<typeof spawn>; stderr: () => string }> {
   const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
-  const configuredPath = process.env.ASB_CONFIG?.trim() || path.join(asbHome, 'config.toml');
-  const configPath = fs.existsSync(configuredPath)
-    ? fs.realpathSync.native(configuredPath)
-    : path.join(
-        fs.realpathSync.native(path.dirname(configuredPath)),
-        path.basename(configuredPath)
-      );
-  const checkoutPath = path.join(asbHome, 'plugins', namespace);
+  const action =
+    operation === 'add'
+      ? `addRemoteSource(${JSON.stringify(namespace)}, { url: ${JSON.stringify(bareRepo)}, type: "clone" });`
+      : `updateRemoteSources(undefined, ${JSON.stringify(namespace)});`;
   const childSource =
     'import fs from "node:fs";' +
-    `import { addRemoteSource } from ${JSON.stringify(sourcesModule)};` +
-    'const originalRename = fs.renameSync.bind(fs);' +
-    `const configPath = ${JSON.stringify(configPath)};` +
-    `const checkoutPath = ${JSON.stringify(checkoutPath)};` +
-    `const namespace = ${JSON.stringify(namespace)};` +
+    `import { addRemoteSource, updateRemoteSources } from ${JSON.stringify(sourcesModule)};` +
+    'const originalWrite = fs.writeFileSync.bind(fs);' +
     'let stopped = false;' +
     'const wait = () => {' +
     'if (stopped) return;' +
@@ -1621,12 +1772,11 @@ async function startRemoteAddAtPublication(
     'process.stdout.write("CHECKPOINT\\n");' +
     'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
     '};' +
-    'fs.renameSync = (from, to) => {' +
-    'const fromName = String(from).split(/[\\\\/]/).pop();' +
-    'if ((fromName?.startsWith(".adding-" + namespace + "-") && String(to) === checkoutPath) || String(to) === configPath) wait();' +
-    'return originalRename(from, to);' +
+    'fs.writeFileSync = (target, data, options) => {' +
+    'if (String(target).endsWith("/.asb-source-owner")) wait();' +
+    'return originalWrite(target, data, options);' +
     '};' +
-    `addRemoteSource(namespace, { url: ${JSON.stringify(bareRepo)}, type: "clone" });`;
+    action;
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '--eval', childSource],
@@ -1822,7 +1972,7 @@ test('remote clone addition stays hidden until publication and recovers for retr
   try {
     const namespace = 'recoverable-add';
     const { bareRepo } = createBareRemote(path.join(root, 'remote'));
-    const started = await startRemoteAddAtPublication(asbHome, namespace, bareRepo);
+    const started = await startRemoteAddBeforeCheckoutOwnership(asbHome, namespace, bareRepo);
     child = started.child;
 
     const visibleSources = fs.existsSync(getPluginsDir())
@@ -1865,7 +2015,7 @@ test('source addition recovery preserves a replacement at its staged pathname', 
   try {
     const namespace = 'owned-add-stage';
     const { bareRepo } = createBareRemote(path.join(root, 'remote'));
-    const started = await startRemoteAddAtPublication(asbHome, namespace, bareRepo);
+    const started = await startRemoteAddBeforeCheckoutOwnership(asbHome, namespace, bareRepo);
     child = started.child;
     const closed = new Promise<void>((resolve) => child?.once('close', () => resolve()));
     child.kill('SIGKILL');
@@ -1882,7 +2032,7 @@ test('source addition recovery preserves a replacement at its staged pathname', 
     const sentinel = path.join(stagedPath, 'sentinel.txt');
     fs.writeFileSync(sentinel, 'preserve');
 
-    assert.throws(() => getSourcesRecord(), /addition ownership/i);
+    assert.throws(() => getSourcesRecord(), /staging ownership|recovery ownership/i);
     assert.equal(fs.readFileSync(sentinel, 'utf-8'), 'preserve');
   } finally {
     child?.kill('SIGKILL');
@@ -2583,7 +2733,7 @@ test('addRemoteSource with subdir resolves effective path correctly', () => {
   });
 });
 
-test('addRemoteSource rejects a checkout subdirectory symlink that escapes its source', () => {
+test('addRemoteSource rejects a missing subdirectory beneath an escaping symlink', () => {
   withTempAsbHome((asbHome) => {
     const remoteParent = path.join(asbHome, 'escaping-subdir-remote');
     fs.mkdirSync(remoteParent, { recursive: true });
@@ -2605,7 +2755,7 @@ test('addRemoteSource rejects a checkout subdirectory symlink that escapes its s
         addRemoteSource('escaping-subdir', {
           url: bareRepo,
           type: 'clone',
-          subdir: 'escape',
+          subdir: 'escape/missing',
         }),
       (error: unknown) => {
         assert.ok(error instanceof Error);
@@ -2661,6 +2811,67 @@ function initAsbAsGitRepo(asbHome: string): void {
     { cwd: asbHome, stdio: 'pipe' }
   );
 }
+
+test('configured subtree rejects symlinked managed roots and namespace prefixes', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(asbHome, 'outside-subtree');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      '[plugins.sources]\nlinked = { url = "https://example.com/repo.git", type = "subtree", ref = "main" }\n'
+    );
+
+    fs.symlinkSync(outside, getPluginsDir());
+    assert.throws(() => getSourcesRecord(), /symbolic link/i);
+    fs.rmSync(getPluginsDir(), { force: true });
+
+    fs.mkdirSync(getPluginsDir(), { recursive: true });
+    fs.symlinkSync(outside, path.join(getPluginsDir(), 'linked'));
+    assert.throws(() => getSourcesRecord(), /symbolic link/i);
+  });
+});
+
+test('subtree removal requires durable ASB provenance', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(
+      path.join(path.dirname(asbHome), 'manual-subtree-remote')
+    );
+    initAsbAsGitRepo(asbHome);
+    const prefix = path.join(getPluginsDir(), 'manual-subtree');
+    fs.mkdirSync(path.join(prefix, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(prefix, 'rules', 'manual.md'), '# Manual');
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\nmanual-subtree = { url = ${JSON.stringify(bareRepo)}, type = "subtree", ref = "main" }\n`
+    );
+    execFileSync('git', ['add', 'config.toml', 'plugins/manual-subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['commit', '-m', 'manual subtree'], { cwd: asbHome, stdio: 'pipe' });
+
+    assert.throws(() => removeSource('manual-subtree'), /subtree provenance is missing/i);
+    assert.equal(fs.readFileSync(path.join(prefix, 'rules', 'manual.md'), 'utf-8'), '# Manual');
+    assert.equal(hasSource('manual-subtree'), true);
+  });
+});
+
+test('subtree removal rejects ignored residue beneath its prefix', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(path.dirname(asbHome), 'residue-remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource('subtree-residue', { url: bareRepo, type: 'subtree', ref: 'main' });
+    fs.writeFileSync(path.join(asbHome, '.gitignore'), '/plugins/subtree-residue/private.txt\n');
+    execFileSync('git', ['add', 'config.toml', '.gitignore'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure subtree'], { cwd: asbHome, stdio: 'pipe' });
+    const residue = path.join(getPluginsDir(), 'subtree-residue', 'private.txt');
+    fs.writeFileSync(residue, 'preserve');
+
+    assert.throws(() => removeSource('subtree-residue'), /untracked, or ignored content/i);
+    assert.equal(fs.readFileSync(residue, 'utf-8'), 'preserve');
+    assert.equal(hasSource('subtree-residue'), true);
+  });
+});
 
 test('subtree addition recovers a crash before config publication', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subtree-add-recovery-'));
@@ -2914,6 +3125,42 @@ test('subtree lifecycle: add → update → remove', () => {
     removeSource('st');
     assert.equal(hasSource('st'), false);
     assert.equal(fs.existsSync(pluginDir), false);
+  });
+});
+
+test('subtree update adopts verified pre-provenance history and publishes from a stage', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(
+      path.join(path.dirname(asbHome), 'legacy-subtree-remote')
+    );
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource('legacy-subtree', { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure legacy subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.rmSync(getPluginSourceStateDir(), { recursive: true, force: true });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+
+    const result = updateRemoteSources(undefined, 'legacy-subtree');
+
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), 'legacy-subtree', 'rules', 'v2.md'), 'utf-8'),
+      '# V2'
+    );
+    assert.equal(
+      fs.readdirSync(getPluginSourceStateDir()).some((name) => name.endsWith('.json')),
+      true
+    );
   });
 });
 

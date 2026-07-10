@@ -16,19 +16,27 @@ export interface SourcePathIdentity {
 
 export interface SourceCloneAdditionState {
   kind: 'clone';
+  purpose: 'add' | 'update';
   configPath: string;
   checkout: SourceRemovalPathState;
+  ready: boolean;
+  checkoutIdentity?: SourcePathIdentity;
   transactionId: string;
 }
 
 export interface SourceSubtreeAdditionState {
   kind: 'subtree';
+  purpose: 'add' | 'update';
   configPath: string;
   repoRoot: string;
   prefix: string;
+  hadPrefix: boolean;
+  stagePath: string;
+  stageIdentity: SourcePathIdentity;
   headBefore: string;
   headRef: string | null;
   headAfter?: string;
+  treeAfter?: string;
   transactionId: string;
 }
 
@@ -41,6 +49,18 @@ export interface SourceRemovalState {
   subtree?: { repoRoot: string; relativePath: string; head: string };
 }
 
+export interface SourceCheckoutState {
+  path: string;
+  owner: string;
+  identity: SourcePathIdentity;
+}
+
+export interface SourceSubtreeState {
+  repoRoot: string;
+  relativePath: string;
+  tree: string;
+}
+
 export interface PluginSourceState {
   version: 1;
   namespace: string;
@@ -48,6 +68,8 @@ export interface PluginSourceState {
   marketplacePath: string;
   incarnation: string;
   sourceKind?: 'marketplace' | 'plugin';
+  checkout?: SourceCheckoutState;
+  subtree?: SourceSubtreeState;
   addition?: SourceAdditionState;
   removal?: SourceRemovalState;
 }
@@ -129,6 +151,9 @@ function parseState(value: unknown): PluginSourceState | null {
   if (state.addition !== undefined && !validAdditionState(state.addition)) return null;
   if (state.removal !== undefined && !validRemovalState(state.removal)) return null;
   if (state.addition !== undefined && state.removal !== undefined) return null;
+  if (state.checkout !== undefined && !validCheckoutState(state.checkout)) return null;
+  if (state.subtree !== undefined && !validSubtreeState(state.subtree)) return null;
+  if (state.checkout !== undefined && state.subtree !== undefined) return null;
   return state as PluginSourceState;
 }
 
@@ -175,12 +200,39 @@ function validRemovalState(value: unknown): value is SourceRemovalState {
   return true;
 }
 
+function validCheckoutState(value: unknown): value is SourceCheckoutState {
+  if (!value || typeof value !== 'object') return false;
+  const checkout = value as Partial<SourceCheckoutState>;
+  return (
+    typeof checkout.path === 'string' &&
+    path.isAbsolute(checkout.path) &&
+    typeof checkout.owner === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      checkout.owner
+    ) &&
+    validPathIdentity(checkout.identity)
+  );
+}
+
+function validSubtreeState(value: unknown): value is SourceSubtreeState {
+  if (!value || typeof value !== 'object') return false;
+  const subtree = value as Partial<SourceSubtreeState>;
+  return (
+    typeof subtree.repoRoot === 'string' &&
+    path.isAbsolute(subtree.repoRoot) &&
+    typeof subtree.relativePath === 'string' &&
+    typeof subtree.tree === 'string' &&
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.tree)
+  );
+}
+
 function validAdditionState(value: unknown): value is SourceAdditionState {
   if (!value || typeof value !== 'object') return false;
   const addition = value as Partial<SourceAdditionState>;
   if (
     typeof addition.configPath !== 'string' ||
     !path.isAbsolute(addition.configPath) ||
+    (addition.purpose !== 'add' && addition.purpose !== 'update') ||
     typeof addition.transactionId !== 'string' ||
     !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       addition.transactionId
@@ -189,7 +241,13 @@ function validAdditionState(value: unknown): value is SourceAdditionState {
     return false;
   }
   if (addition.kind === 'clone') {
-    return validRemovalPathState((addition as Partial<SourceCloneAdditionState>).checkout);
+    const clone = addition as Partial<SourceCloneAdditionState>;
+    return (
+      validRemovalPathState(clone.checkout) &&
+      typeof clone.ready === 'boolean' &&
+      (clone.checkoutIdentity === undefined || validPathIdentity(clone.checkoutIdentity)) &&
+      (!clone.ready || clone.checkoutIdentity !== undefined)
+    );
   }
   if (addition.kind !== 'subtree') return false;
   const subtree = addition as Partial<SourceSubtreeAdditionState>;
@@ -197,10 +255,18 @@ function validAdditionState(value: unknown): value is SourceAdditionState {
     typeof subtree.repoRoot === 'string' &&
     path.isAbsolute(subtree.repoRoot) &&
     typeof subtree.prefix === 'string' &&
+    typeof subtree.hadPrefix === 'boolean' &&
+    typeof subtree.stagePath === 'string' &&
+    path.isAbsolute(subtree.stagePath) &&
+    validPathIdentity(subtree.stageIdentity) &&
     typeof subtree.headBefore === 'string' &&
     /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.headBefore) &&
     (subtree.headRef === null || typeof subtree.headRef === 'string') &&
-    (subtree.headAfter === undefined || /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.headAfter))
+    (subtree.headAfter === undefined ||
+      /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.headAfter)) &&
+    (subtree.treeAfter === undefined ||
+      /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.treeAfter)) &&
+    (subtree.headAfter === undefined) === (subtree.treeAfter === undefined)
   );
 }
 
@@ -275,6 +341,13 @@ export function rotatePluginSourceState(
   descriptorKey: string,
   marketplacePath: string
 ): PluginSourceState {
+  const existing = readStateFile(statePath(namespace));
+  if (existing?.addition || existing?.removal) {
+    throw new Error(`Plugin source "${namespace}" has a pending lifecycle transaction.`);
+  }
+  if (existing) {
+    throw new Error(`Plugin source "${namespace}" must retire its current owner before rotation.`);
+  }
   const state = newState(namespace, descriptorKey, marketplacePath);
   writeStateFile(statePath(namespace), state);
   return state;
@@ -320,6 +393,55 @@ export function clearPluginSourceAddition(state: PluginSourceState): PluginSourc
   if (current?.incarnation !== state.incarnation) return state;
   const next = { ...current };
   delete next.addition;
+  writeStateFile(statePath(state.namespace), next);
+  return next;
+}
+
+export function completePluginSourceAddition(
+  state: PluginSourceState,
+  ownership: { checkout: SourceCheckoutState } | { subtree: SourceSubtreeState }
+): PluginSourceState {
+  const current = readStateFile(statePath(state.namespace));
+  if (current?.incarnation !== state.incarnation || !current.addition) {
+    throw new Error(`Plugin source "${state.namespace}" changed during addition completion.`);
+  }
+  const next = { ...current };
+  delete next.addition;
+  if ('checkout' in ownership) {
+    next.checkout = ownership.checkout;
+    delete next.subtree;
+  } else {
+    next.subtree = ownership.subtree;
+    delete next.checkout;
+  }
+  writeStateFile(statePath(state.namespace), next);
+  return next;
+}
+
+export function setPluginSourceSubtree(
+  state: PluginSourceState,
+  subtree: SourceSubtreeState
+): PluginSourceState {
+  const current = readStateFile(statePath(state.namespace));
+  if (current?.incarnation !== state.incarnation) {
+    throw new Error(`Plugin source "${state.namespace}" changed during subtree update.`);
+  }
+  const next = { ...current, subtree };
+  delete next.checkout;
+  writeStateFile(statePath(state.namespace), next);
+  return next;
+}
+
+export function setPluginSourceCheckout(
+  state: PluginSourceState,
+  checkout: SourceCheckoutState
+): PluginSourceState {
+  const current = readStateFile(statePath(state.namespace));
+  if (current?.incarnation !== state.incarnation) {
+    throw new Error(`Plugin source "${state.namespace}" changed during checkout adoption.`);
+  }
+  const next = { ...current, checkout };
+  delete next.subtree;
   writeStateFile(statePath(state.namespace), next);
   return next;
 }
