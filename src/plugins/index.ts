@@ -21,8 +21,12 @@ import {
   captureSourceOwnerValidator,
   getSourceRevision,
   getSourcesRecord,
+  recordSourceKind,
 } from '../library/sources.js';
-import { releaseMarketplaceCacheLeases } from '../marketplace/cache.js';
+import {
+  releaseMarketplaceCacheLeases,
+  withMarketplaceSourceReadLease,
+} from '../marketplace/cache.js';
 import {
   loadPluginComponents,
   loadPluginHookEntries,
@@ -473,19 +477,25 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   const sources = getSourcesRecord(scope);
 
   for (const [namespace, basePath] of Object.entries(sources)) {
-    if (isMarketplace(basePath)) {
-      buildFromMarketplace(
-        namespace,
-        basePath,
-        plugins,
-        mcpServers,
-        ruleSnippets,
-        deferredLoaders,
-        scope
-      );
-    } else {
-      buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets);
-    }
+    const ownerIsCurrent = captureSourceOwnerValidator(namespace, basePath, scope);
+    withMarketplaceSourceReadLease(namespace, basePath, ownerIsCurrent, () => {
+      if (isMarketplace(basePath)) {
+        recordSourceKind(namespace, basePath, 'marketplace', scope);
+        buildFromMarketplace(
+          namespace,
+          basePath,
+          plugins,
+          mcpServers,
+          ruleSnippets,
+          deferredLoaders,
+          scope
+        );
+      } else {
+        recordSourceKind(namespace, basePath, 'plugin', scope);
+        buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets);
+      }
+      return true;
+    });
   }
 
   // Build lookup maps: canonical IDs always work; bare names work only when unambiguous.
@@ -520,6 +530,15 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   for (const [name, descriptors] of byName) {
     if (descriptors.length === 1) {
       const descriptor = descriptors[0];
+      const canonicalOwner = byId.get(name);
+      if (canonicalOwner && canonicalOwner !== descriptor) {
+        console.warn(
+          `[plugins] Ambiguous plugin ref "${name}" is the canonical ID from source ` +
+            `"${canonicalOwner.meta.sourceName}" and a bare name from source ` +
+            `"${descriptor.meta.sourceName}". Use "${descriptor.id}" for the latter plugin.`
+        );
+        continue;
+      }
       byId.set(name, descriptor);
       if (!descriptor.refs.includes(name)) {
         descriptor.refs.push(name);

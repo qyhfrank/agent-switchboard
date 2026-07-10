@@ -25,7 +25,7 @@ import {
   refreshMarketplaceEntryCache,
   withMarketplaceSourceReadLease,
 } from './cache.js';
-import { localCheckoutRefsForMarketplaceRef, normalizeMarketplaceGitRef } from './git-ref.js';
+import { normalizeMarketplaceGitRef } from './git-ref.js';
 import {
   type MarketplaceManifest,
   marketplaceManifestSchema,
@@ -518,7 +518,7 @@ function sourceString(source: string | Record<string, unknown>, key: string): st
 function canReuseMarketplaceCheckout(
   resolution: MarketplacePluginResolution,
   sourceUrl: string,
-  allowRemoteProbe: boolean
+  materializeRemote: boolean
 ): boolean {
   const checkoutRoot = getGitCheckoutRoot(resolution.marketplaceRoot);
   if (!checkoutRoot) return false;
@@ -542,11 +542,8 @@ function canReuseMarketplaceCheckout(
   }
   if (!resolution.ref) {
     if (resolution.sha) return true;
-    const originHead = tryRunGit(
-      ['rev-parse', 'refs/remotes/origin/HEAD^{commit}'],
-      resolution.marketplaceRoot
-    );
-    return originHead === head;
+    const remoteHead = liveRemoteCheckoutRef(resolution.marketplaceRoot, 'HEAD');
+    return checkoutMatchesLiveRemote(checkoutRoot, head, remoteHead);
   }
   let normalizedRef: string;
   try {
@@ -554,35 +551,84 @@ function canReuseMarketplaceCheckout(
   } catch {
     return false;
   }
-  const shortRef = normalizedRef !== 'HEAD' && !normalizedRef.startsWith('refs/');
-  for (const checkoutRef of localCheckoutRefsForMarketplaceRef(normalizedRef)) {
-    const refCommit = tryRunGit(
-      ['rev-parse', `${checkoutRef}^{commit}`],
-      resolution.marketplaceRoot
-    );
-    if (refCommit === null) continue;
-    if (
-      shortRef &&
-      checkoutRef.startsWith('refs/tags/') &&
-      (!allowRemoteProbe || remoteBranchExists(resolution.marketplaceRoot, normalizedRef) !== false)
-    ) {
-      return false;
-    }
-    return refCommit === head;
-  }
-  return false;
+  const remoteRef = liveRemoteCheckoutRef(resolution.marketplaceRoot, normalizedRef);
+  if (checkoutMatchesLiveRemote(checkoutRoot, head, remoteRef)) return true;
+  return (
+    remoteRef === null &&
+    !materializeRemote &&
+    localGitSourceIsUnavailable(sourceUrl, resolution.marketplaceRoot) &&
+    checkoutMatchesOfflineBranch(checkoutRoot, head, normalizedRef)
+  );
 }
 
-function remoteBranchExists(repoDir: string, ref: string): boolean | null {
-  try {
-    return (
-      runGit(['ls-remote', '--heads', 'origin', `refs/heads/${ref}`], {
-        cwd: repoDir,
-      }).length > 0
-    );
-  } catch {
-    return null;
+interface LiveRemoteCheckoutRef {
+  commit: string;
+  branch?: string;
+}
+
+function liveRemoteCheckoutRef(repoDir: string, ref: string): LiveRemoteCheckoutRef | null {
+  if (ref === 'HEAD') {
+    const output = tryRunGit(['ls-remote', '--symref', 'origin', 'HEAD'], repoDir);
+    if (output === null) return null;
+    const branch = output
+      .split('\n')
+      .map((line) => /^ref:\s+(\S+)\s+HEAD$/.exec(line)?.[1])
+      .find((value): value is string => value !== undefined);
+    const commit = listedRemoteCommit(output, 'HEAD');
+    return branch && commit ? { branch, commit } : null;
   }
+
+  if (!ref.startsWith('refs/')) {
+    const branch = `refs/heads/${ref}`;
+    const tag = `refs/tags/${ref}`;
+    const output = tryRunGit(['ls-remote', 'origin', branch, tag, `${tag}^{}`], repoDir);
+    if (output === null) return null;
+    const branchCommit = listedRemoteCommit(output, branch);
+    if (branchCommit) return { branch, commit: branchCommit };
+    const tagCommit = listedRemoteCommit(output, `${tag}^{}`) ?? listedRemoteCommit(output, tag);
+    return tagCommit ? { commit: tagCommit } : null;
+  }
+
+  const targets = ref.startsWith('refs/tags/') ? [ref, `${ref}^{}`] : [ref];
+  const output = tryRunGit(['ls-remote', 'origin', ...targets], repoDir);
+  if (output === null) return null;
+  const commit = listedRemoteCommit(output, `${ref}^{}`) ?? listedRemoteCommit(output, ref);
+  if (!commit) return null;
+  return ref.startsWith('refs/heads/') ? { branch: ref, commit } : { commit };
+}
+
+function listedRemoteCommit(output: string, ref: string): string | undefined {
+  for (const line of output.split('\n')) {
+    const [commit, listedRef] = line.trim().split(/\s+/, 2);
+    if (listedRef === ref && /^[0-9a-fA-F]{40,64}$/.test(commit)) return commit.toLowerCase();
+  }
+  return undefined;
+}
+
+function checkoutMatchesLiveRemote(
+  checkoutRoot: string,
+  head: string,
+  remoteRef: LiveRemoteCheckoutRef | null
+): boolean {
+  if (!remoteRef || head.toLowerCase() !== remoteRef.commit) return false;
+  if (!remoteRef.branch) return true;
+  return tryRunGit(['symbolic-ref', '-q', 'HEAD'], checkoutRoot) === remoteRef.branch;
+}
+
+function localGitSourceIsUnavailable(sourceUrl: string, cwd: string): boolean {
+  const identity = normalizeGitIdentity(sourceUrl, cwd);
+  return path.isAbsolute(identity) && !fs.existsSync(identity);
+}
+
+function checkoutMatchesOfflineBranch(checkoutRoot: string, head: string, ref: string): boolean {
+  const branch = ref.startsWith('refs/heads/')
+    ? ref
+    : !ref.startsWith('refs/') && ref !== 'HEAD'
+      ? `refs/heads/${ref}`
+      : undefined;
+  if (!branch || tryRunGit(['symbolic-ref', '-q', 'HEAD'], checkoutRoot) !== branch) return false;
+  const trackingRef = `refs/remotes/origin/${branch.slice('refs/heads/'.length)}`;
+  return tryRunGit(['rev-parse', `${trackingRef}^{commit}`], checkoutRoot) === head;
 }
 
 function reusablePathsAreClean(
@@ -590,7 +636,6 @@ function reusablePathsAreClean(
   checkoutRoot: string,
   pluginPath: string
 ): boolean {
-  if (!resolution.ref && !resolution.sha) return true;
   const pathspecs = new Set<string>();
   for (const candidate of [resolution.marketplaceRoot, pluginPath]) {
     const relative = path.relative(checkoutRoot, normalizeLocalGitPath(candidate));

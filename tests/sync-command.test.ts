@@ -1166,6 +1166,110 @@ test('distributeCodexNativePlugins rejects same-name marketplace from another ro
   });
 });
 
+test('distributeClaudeNativePlugins rejects same-name marketplace from another path', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mktDir = createClaudeMarketplaceFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins.sources]',
+      `openai-codex = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    const calls: string[][] = [];
+    const runner: ClaudePluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return {
+          status: 0,
+          stdout: JSON.stringify([
+            {
+              name: 'openai-codex',
+              source: 'directory',
+              path: path.join(asbHome, 'other-openai-codex'),
+            },
+          ]),
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'plugin list --json') {
+        return {
+          status: 0,
+          stdout: '[{"pluginId":"codex@openai-codex","enabled":true}]',
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'error');
+    assert.match(outcome.results[0]?.error ?? '', /different source/);
+    assert.deepEqual(calls, [
+      ['plugin', 'validate', mktDir],
+      ['plugin', 'marketplace', 'list', '--json'],
+    ]);
+  });
+});
+
+test('distributeClaudeNativePlugins rejects marketplace without path evidence', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mktDir = createClaudeMarketplaceFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins.sources]',
+      `openai-codex = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["codex@openai-codex"]',
+    ]);
+
+    const calls: string[][] = [];
+    const runner: ClaudePluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return {
+          status: 0,
+          stdout: '[{"name":"openai-codex","source":"directory"}]',
+          stderr: '',
+        };
+      }
+      if (args.join(' ') === 'plugin list --json') {
+        return {
+          status: 0,
+          stdout: '[{"pluginId":"codex@openai-codex","enabled":true}]',
+          stderr: '',
+        };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'error');
+    assert.match(outcome.results[0]?.error ?? '', /path could not be verified/);
+    assert.deepEqual(calls, [
+      ['plugin', 'validate', mktDir],
+      ['plugin', 'marketplace', 'list', '--json'],
+    ]);
+  });
+});
+
 test('distributeClaudeNativePlugins skips installed enabled plugins as up-to-date', async () => {
   await withTempHomesAsync(async ({ asbHome }) => {
     simulateAppsInstalled('claude-code');
@@ -1185,7 +1289,11 @@ test('distributeClaudeNativePlugins skips installed enabled plugins as up-to-dat
     const runner: ClaudePluginCommandRunner = (args) => {
       calls.push(args);
       if (args.join(' ') === 'plugin marketplace list --json') {
-        return { status: 0, stdout: '[{"name":"openai-codex"}]', stderr: '' };
+        return {
+          status: 0,
+          stdout: JSON.stringify([{ name: 'openai-codex', path: mktDir }]),
+          stderr: '',
+        };
       }
       if (args.join(' ') === 'plugin list --json') {
         return {
@@ -1231,7 +1339,11 @@ test('distributeClaudeNativePlugins enables disabled installed plugins', async (
     const runner: ClaudePluginCommandRunner = (args) => {
       calls.push(args);
       if (args.join(' ') === 'plugin marketplace list --json') {
-        return { status: 0, stdout: '[{"name":"openai-codex"}]', stderr: '' };
+        return {
+          status: 0,
+          stdout: JSON.stringify([{ name: 'openai-codex', path: mktDir }]),
+          stderr: '',
+        };
       }
       if (args.join(' ') === 'plugin list --json') {
         return {

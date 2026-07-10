@@ -12,7 +12,8 @@ import {
   getConfigLayerLockPath,
   getWritableConfigLayerPath,
   loadConfigLayerFile,
-  updateConfigLayer,
+  resolveConfigWritePath,
+  updateConfigLayerFile,
   withConfigFileTransaction,
   withConfigLayerTransaction,
 } from '../config/layered-config.js';
@@ -43,16 +44,19 @@ import {
   refreshMarketplacePluginCache,
 } from '../marketplace/reader.js';
 import {
+  beginPluginSourceAddition,
   beginPluginSourceRemoval,
+  clearPluginSourceAddition,
   clearPluginSourceRemoval,
   deletePluginSourceState,
   ensurePluginSourceState,
-  listPendingPluginSourceRemovals,
+  listPendingPluginSourceTransactions,
   type PluginSourceState,
   pluginSourceStateIsCurrent,
   readPluginSourceState,
   rotatePluginSourceState,
   type SourceRemovalPathState,
+  setPluginSourceKind,
 } from './source-state.js';
 
 export interface Source {
@@ -166,6 +170,15 @@ function ensureCleanTree(dir: string): void {
   }
 }
 
+function rollbackSubtreeAddition(repoRoot: string, headBefore: string, headAfter: string): void {
+  const currentHead = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
+  if (currentHead !== headAfter) {
+    throw new Error('Subtree addition rollback refused because repository HEAD changed.');
+  }
+  ensureCleanTree(repoRoot);
+  runGit(['reset', '--hard', headBefore], { cwd: repoRoot });
+}
+
 interface StagedPathRemoval {
   commit: () => void;
   rollback: () => void;
@@ -178,6 +191,17 @@ function ownedPathRemovalPaths(target: string, transactionId: string): SourceRem
     stagedPath: path.join(
       path.dirname(activePath),
       `.removing-${path.basename(activePath)}-${transactionId}`
+    ),
+  };
+}
+
+function ownedPathAdditionPaths(namespace: string, transactionId: string): SourceRemovalPathState {
+  const activePath = managedCheckoutPath(namespace);
+  return {
+    activePath,
+    stagedPath: path.join(
+      path.dirname(activePath),
+      `.adding-${path.basename(activePath)}-${transactionId}`
     ),
   };
 }
@@ -278,7 +302,8 @@ export function inferSourceName(location: string): string {
 
 function getRawSources(scope?: ConfigScope): Record<string, SourceValue> {
   const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-  recoverPendingSourceRemovals();
+  for (const namespace of Object.keys(config.plugins.sources)) validateNamespace(namespace);
+  recoverPendingSourceTransactions();
   return config.plugins.sources;
 }
 
@@ -310,7 +335,7 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
       if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
       return effectivePath;
     }
-    let effectivePath = path.join(getPluginsDir(), namespace);
+    let effectivePath = managedCheckoutPath(namespace);
     if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
     return effectivePath;
   }
@@ -327,9 +352,20 @@ function validateNamespace(namespace: string): void {
   }
 }
 
+function managedCheckoutPath(namespace: string): string {
+  validateNamespace(namespace);
+  const pluginsRoot = path.resolve(getPluginsDir());
+  const checkoutPath = path.resolve(pluginsRoot, namespace);
+  if (path.dirname(checkoutPath) !== pluginsRoot) {
+    throw new Error(`Managed source checkout must be an immediate child of ${pluginsRoot}.`);
+  }
+  return checkoutPath;
+}
+
 function ensureNamespaceAvailableCurrent(namespace: string): void {
   const configured = loadSwitchboardConfig().plugins.sources;
-  if (namespace in configured || fs.existsSync(path.join(getPluginsDir(), namespace))) {
+  for (const configuredNamespace of Object.keys(configured)) validateNamespace(configuredNamespace);
+  if (namespace in configured || fs.existsSync(managedCheckoutPath(namespace))) {
     throw new Error(
       `Source "${namespace}" already exists. Use a different name or remove it first.`
     );
@@ -419,19 +455,36 @@ export function captureSourceOwnerValidator(
   scope?: ConfigScope
 ): () => boolean {
   const value = getRawSources(scope)[namespace];
-  const descriptorKey = sourceDescriptorKey(namespace, value, expectedPath);
+  const descriptorKey = sourceDescriptorKey(namespace, value);
   const expectedCanonicalPath = canonicalSourcePath(expectedPath);
   if (isTemporaryMarketplaceEntryCache()) {
     return () =>
-      sourceDescriptorKey(namespace, getRawSources(scope)[namespace], expectedPath) ===
-        descriptorKey && sourceOwnerIsCurrent(namespace, expectedCanonicalPath, scope);
+      sourceDescriptorKey(namespace, getRawSources(scope)[namespace]) === descriptorKey &&
+      sourceOwnerIsCurrent(namespace, expectedCanonicalPath, scope);
   }
   const state = reconcilePluginSourceState(namespace, descriptorKey, expectedCanonicalPath, scope);
   return () =>
-    sourceDescriptorKey(namespace, getRawSources(scope)[namespace], expectedPath) ===
-      descriptorKey &&
+    sourceDescriptorKey(namespace, getRawSources(scope)[namespace]) === descriptorKey &&
     sourceOwnerIsCurrent(namespace, state.marketplacePath, scope) &&
     pluginSourceStateIsCurrent(state);
+}
+
+export function recordSourceKind(
+  namespace: string,
+  expectedPath: string,
+  sourceKind: SourceKind,
+  scope?: ConfigScope
+): void {
+  if (isTemporaryMarketplaceEntryCache()) return;
+  const value = getRawSources(scope)[namespace];
+  const descriptorKey = sourceDescriptorKey(namespace, value);
+  const state = reconcilePluginSourceState(
+    namespace,
+    descriptorKey,
+    canonicalSourcePath(expectedPath),
+    scope
+  );
+  setPluginSourceKind(state, sourceKind);
 }
 
 function reconcilePluginSourceState(
@@ -454,8 +507,7 @@ function reconcilePluginSourceState(
         return;
       }
       if (
-        sourceDescriptorKey(namespace, getRawSources(scope)[namespace], expectedPath) !==
-          descriptorKey ||
+        sourceDescriptorKey(namespace, getRawSources(scope)[namespace]) !== descriptorKey ||
         !sourceOwnerIsCurrent(namespace, expectedPath, scope)
       ) {
         throw new Error(`Marketplace source "${namespace}" is no longer active.`);
@@ -482,43 +534,51 @@ function sourceDescriptorIdentity(value: SourceValue | undefined): string {
   return JSON.stringify(['remote', value.url, value.type, value.ref ?? null, value.subdir ?? null]);
 }
 
-function sourceDescriptorKey(
-  namespace: string,
-  value: SourceValue | undefined,
-  expectedPath: string
-): string {
+function sourceDescriptorKey(namespace: string, value: SourceValue | undefined): string {
   const identity =
     value === undefined
-      ? JSON.stringify(['discovered', namespace, canonicalSourcePath(expectedPath)])
+      ? JSON.stringify(['discovered', namespace])
       : sourceDescriptorIdentity(value);
   return createHash('sha256').update(identity).digest('hex');
 }
 
-let recoveringSourceRemovals = false;
+let recoveringSourceTransactions = false;
 
-function recoverPendingSourceRemovals(): void {
-  if (recoveringSourceRemovals) return;
-  recoveringSourceRemovals = true;
+function recoverPendingSourceTransactions(): void {
+  if (recoveringSourceTransactions) return;
+  const pending = listPendingPluginSourceTransactions();
+  if (isTemporaryMarketplaceEntryCache()) {
+    if (pending.length > 0) {
+      throw new Error(
+        'A pending source transaction requires durable recovery. Run ASB without --dry-run before retrying the preview.'
+      );
+    }
+    return;
+  }
+  recoveringSourceTransactions = true;
   try {
-    for (const state of listPendingPluginSourceRemovals()) {
+    for (const state of pending) {
       withMarketplaceSourceLock(state.namespace, state.marketplacePath, () => {
-        if (!pluginSourceStateIsCurrent(state) || !state.removal) return;
-        const removal = state.removal;
-        withConfigFileTransaction(removal.configPath, () => {
-          const current = loadConfigLayerFile(removal.configPath).config.plugins?.sources?.[
+        if (!pluginSourceStateIsCurrent(state)) return;
+        const transaction = state.addition ?? state.removal;
+        if (!transaction) return;
+        withConfigFileTransaction(transaction.configPath, () => {
+          const current = loadConfigLayerFile(transaction.configPath).config.plugins?.sources?.[
             state.namespace
           ];
           const sourceIsActive =
             current !== undefined &&
-            sourceDescriptorKey(state.namespace, current, state.marketplacePath) ===
-              state.descriptorKey;
-          if (sourceIsActive) rollbackInterruptedSourceRemoval(state);
+            sourceDescriptorKey(state.namespace, current) === state.descriptorKey;
+          if (state.addition) {
+            if (sourceIsActive) commitInterruptedSourceAddition(state);
+            else rollbackInterruptedSourceAddition(state);
+          } else if (sourceIsActive) rollbackInterruptedSourceRemoval(state);
           else commitInterruptedSourceRemoval(state);
         });
       });
     }
   } finally {
-    recoveringSourceRemovals = false;
+    recoveringSourceTransactions = false;
   }
 }
 
@@ -556,7 +616,7 @@ function assertRemovalPathState(
 ): void {
   if (kind === 'checkout') {
     const pluginsRoot = path.resolve(getPluginsDir());
-    const activePath = path.join(pluginsRoot, state.namespace);
+    const activePath = managedCheckoutPath(state.namespace);
     if (
       path.resolve(paths.activePath) !== path.resolve(activePath) ||
       path.dirname(path.resolve(paths.stagedPath)) !== path.dirname(activePath) ||
@@ -571,6 +631,67 @@ function assertRemovalPathState(
   }
 
   assertMarketplaceEntryCacheRemovalPaths(state.namespace, state.marketplacePath, paths);
+}
+
+function assertAdditionPathState(state: PluginSourceState): SourceRemovalPathState {
+  const addition = state.addition;
+  if (!addition) throw new Error(`Source addition state is missing for "${state.namespace}".`);
+  const pluginsRoot = path.resolve(getPluginsDir());
+  const activePath = managedCheckoutPath(state.namespace);
+  if (
+    path.resolve(addition.checkout.activePath) !== activePath ||
+    path.dirname(path.resolve(addition.checkout.stagedPath)) !== pluginsRoot ||
+    !path
+      .basename(addition.checkout.stagedPath)
+      .startsWith(`.adding-${state.namespace}-${addition.transactionId}`)
+  ) {
+    throw new Error(`Invalid plugin source addition paths for "${state.namespace}".`);
+  }
+  assertNoOwnedPathSymlinks(path.resolve(getConfigDir()), pluginsRoot);
+  assertNoOwnedPathSymlinks(pluginsRoot, addition.checkout.activePath);
+  assertNoOwnedPathSymlinks(pluginsRoot, addition.checkout.stagedPath);
+  return addition.checkout;
+}
+
+function sourceAdditionMarker(checkoutPath: string): string {
+  return path.join(checkoutPath, '.git', 'asb-source-owner');
+}
+
+function assertSourceAdditionMarker(state: PluginSourceState, checkoutPath: string): string {
+  const markerPath = sourceAdditionMarker(checkoutPath);
+  if (!fs.existsSync(markerPath)) {
+    throw new Error(`Plugin source addition ownership is missing for "${state.namespace}".`);
+  }
+  if (fs.readFileSync(markerPath, 'utf-8') !== `${state.incarnation}\n`) {
+    throw new Error(`Plugin source addition ownership changed for "${state.namespace}".`);
+  }
+  return markerPath;
+}
+
+function commitInterruptedSourceAddition(state: PluginSourceState): void {
+  const paths = assertAdditionPathState(state);
+  if (fs.existsSync(paths.activePath) && fs.existsSync(paths.stagedPath)) {
+    throw new Error(`Source addition found both staged and active checkouts: ${state.namespace}`);
+  }
+  if (!fs.existsSync(paths.activePath)) {
+    if (!fs.existsSync(paths.stagedPath)) {
+      throw new Error(`Source addition checkout is missing for "${state.namespace}".`);
+    }
+    assertSourceAdditionMarker(state, paths.stagedPath);
+    fs.renameSync(paths.stagedPath, paths.activePath);
+  }
+  assertSourceAdditionMarker(state, paths.activePath);
+  clearPluginSourceAddition(state);
+}
+
+function rollbackInterruptedSourceAddition(state: PluginSourceState): void {
+  const paths = assertAdditionPathState(state);
+  if (fs.existsSync(paths.activePath)) {
+    assertSourceAdditionMarker(state, paths.activePath);
+    fs.rmSync(paths.activePath, { recursive: true, force: true });
+  }
+  fs.rmSync(paths.stagedPath, { recursive: true, force: true });
+  deletePluginSourceState(state);
 }
 
 function rollbackRemovalPath(paths: SourceRemovalPathState): void {
@@ -674,18 +795,19 @@ export function addLocalSource(namespace: string, libraryPath: string): void {
   validateNamespace(namespace);
   getRawSources();
 
-  const pluginsChild = path.join(getPluginsDir(), namespace);
+  const pluginsChild = managedCheckoutPath(namespace);
   const configValue = resolvedPath === pluginsChild ? namespace : resolvedPath;
-  withConfigLayerTransaction(() => {
+  withConfigLayerTransaction((configCarrier) => {
+    const configPath = resolveConfigWritePath(configCarrier);
     ensureNamespaceAvailableCurrent(namespace);
     let state: PluginSourceState | undefined;
     try {
       state = rotatePluginSourceState(
         namespace,
-        sourceDescriptorKey(namespace, configValue, resolvedPath),
+        sourceDescriptorKey(namespace, configValue),
         canonicalSourcePath(resolvedPath)
       );
-      updateConfigLayer((layer) => ({
+      updateConfigLayerFile(configPath, (layer) => ({
         ...layer,
         plugins: {
           ...layer.plugins,
@@ -710,68 +832,122 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   validateNamespace(namespace);
   getRawSources();
   ensureGitAvailable();
-  withConfigLayerTransaction(() => {
-    ensureNamespaceAvailableCurrent(namespace);
-    let headBefore: string | undefined;
+  const configValue: RemoteSource = { url: remote.url, type: remote.type };
+  if (remote.ref) configValue.ref = remote.ref;
+  if (remote.subdir) configValue.subdir = remote.subdir;
+  const effectivePath = resolveEffectivePath(namespace, configValue);
 
-    if (remote.type === 'subtree') {
-      if (!isGitRepo(getConfigDir())) {
-        throw new Error(
-          `Subtree mode requires ASB_HOME to be a git repo root. Current ASB_HOME is not a git repo or is a subdirectory of one.`
-        );
-      }
-      if (!remote.ref) {
-        throw new Error(`Subtree sources require an explicit "ref" (e.g. ref = "main").`);
-      }
-      const repoRoot = getConfigDir();
-      ensureCleanTree(repoRoot);
-      const prefix = `plugins/${namespace}`;
-      headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
-      gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
-    } else {
-      const cloneDir = path.join(getPluginsDir(), namespace);
-      gitClone(expandHome(remote.url), cloneDir, remote.ref);
-    }
+  withMarketplaceSourceLock(namespace, effectivePath, () => {
+    withConfigLayerTransaction((configCarrier) => {
+      ensureNamespaceAvailableCurrent(namespace);
+      const configPath = resolveConfigWritePath(configCarrier);
 
-    const configValue: RemoteSource = { url: remote.url, type: remote.type };
-    if (remote.ref) configValue.ref = remote.ref;
-    if (remote.subdir) configValue.subdir = remote.subdir;
-    const effectivePath = resolveEffectivePath(namespace, configValue);
-    let state: PluginSourceState | undefined;
-
-    try {
-      state = rotatePluginSourceState(
-        namespace,
-        sourceDescriptorKey(namespace, configValue, effectivePath),
-        canonicalSourcePath(effectivePath)
-      );
-      updateConfigLayer((layer) => ({
-        ...layer,
-        plugins: {
-          ...layer.plugins,
-          sources: {
-            ...(layer.plugins?.sources ?? {}),
-            [namespace]: configValue,
-          },
-        },
-      }));
-      markSourcesChanged();
-    } catch (configErr) {
-      if (state) deletePluginSourceState(state);
-      if (remote.type === 'subtree' && headBefore) {
+      if (remote.type === 'subtree') {
+        if (!isGitRepo(getConfigDir())) {
+          throw new Error(
+            `Subtree mode requires ASB_HOME to be a git repo root. Current ASB_HOME is not a git repo or is a subdirectory of one.`
+          );
+        }
+        if (!remote.ref) {
+          throw new Error(`Subtree sources require an explicit "ref" (e.g. ref = "main").`);
+        }
+        const repoRoot = getConfigDir();
+        ensureCleanTree(repoRoot);
+        const prefix = `plugins/${namespace}`;
+        const headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
+        gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
+        const headAfter = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
+        let state: PluginSourceState | undefined;
         try {
-          runGit(['reset', '--hard', headBefore], { cwd: getConfigDir() });
-        } catch {
-          /* best-effort rollback */
+          state = rotatePluginSourceState(
+            namespace,
+            sourceDescriptorKey(namespace, configValue),
+            canonicalSourcePath(effectivePath)
+          );
+          updateConfigLayerFile(configPath, (layer) => ({
+            ...layer,
+            plugins: {
+              ...layer.plugins,
+              sources: {
+                ...(layer.plugins?.sources ?? {}),
+                [namespace]: configValue,
+              },
+            },
+          }));
+          markSourcesChanged();
+        } catch (configError) {
+          try {
+            rollbackSubtreeAddition(repoRoot, headBefore, headAfter);
+            if (state) deletePluginSourceState(state);
+          } catch (rollbackError) {
+            const message =
+              configError instanceof Error ? configError.message : String(configError);
+            const rollbackMessage =
+              rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+            throw new Error(`${message}\nRollback refused: ${rollbackMessage}`, {
+              cause: configError,
+            });
+          }
+          throw configError;
         }
-      } else {
-        const cloneDir = path.join(getPluginsDir(), namespace);
-        if (fs.existsSync(cloneDir)) {
-          fs.rmSync(cloneDir, { recursive: true, force: true });
-        }
+        return;
       }
-      throw configErr;
-    }
+
+      const transactionId = randomUUID();
+      const checkout = ownedPathAdditionPaths(namespace, transactionId);
+      let state: PluginSourceState | undefined;
+      let additionState: PluginSourceState | undefined;
+      let configCommitted = false;
+      try {
+        state = rotatePluginSourceState(
+          namespace,
+          sourceDescriptorKey(namespace, configValue),
+          canonicalSourcePath(effectivePath)
+        );
+        additionState = beginPluginSourceAddition(state, {
+          configPath,
+          checkout,
+          transactionId,
+        });
+        gitClone(expandHome(remote.url), checkout.stagedPath, remote.ref);
+        const gitDir = path.join(checkout.stagedPath, '.git');
+        if (!fs.existsSync(gitDir) || !fs.lstatSync(gitDir).isDirectory()) {
+          throw new Error(`Cloned source is missing its Git metadata: ${checkout.stagedPath}`);
+        }
+        fs.writeFileSync(sourceAdditionMarker(checkout.stagedPath), `${state.incarnation}\n`, {
+          flag: 'wx',
+        });
+        if (fs.existsSync(checkout.activePath)) {
+          throw new Error(`Source checkout appeared during publication: ${checkout.activePath}`);
+        }
+        fs.renameSync(checkout.stagedPath, checkout.activePath);
+        updateConfigLayerFile(configPath, (layer) => ({
+          ...layer,
+          plugins: {
+            ...layer.plugins,
+            sources: {
+              ...(layer.plugins?.sources ?? {}),
+              [namespace]: configValue,
+            },
+          },
+        }));
+        configCommitted = true;
+        markSourcesChanged();
+        commitInterruptedSourceAddition(additionState);
+      } catch (error) {
+        if (configCommitted) throw error;
+        try {
+          if (additionState) rollbackInterruptedSourceAddition(additionState);
+          else if (state) deletePluginSourceState(state);
+        } catch (rollbackError) {
+          const message = error instanceof Error ? error.message : String(error);
+          const rollbackMessage =
+            rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          throw new Error(`${message}\nRollback failed: ${rollbackMessage}`, { cause: error });
+        }
+        throw error;
+      }
+    });
   });
 }
 
@@ -786,14 +962,15 @@ export function removeSource(namespace: string): void {
 
   const value = raw[namespace];
   const effectivePath = resolveEffectivePath(namespace, value);
-  const descriptorKey = sourceDescriptorKey(namespace, value, effectivePath);
+  const descriptorKey = sourceDescriptorKey(namespace, value);
   const sourceState =
     readPluginSourceState(namespace, descriptorKey) ??
     ensurePluginSourceState(namespace, descriptorKey, canonicalSourcePath(effectivePath));
   const cacheOwnerPath = sourceState.marketplacePath;
   withMarketplaceSourceLock(namespace, cacheOwnerPath, () => {
-    withConfigLayerTransaction((configPath) => {
-      const current = loadSwitchboardConfig().plugins.sources[namespace];
+    withConfigLayerTransaction((configCarrier) => {
+      const configPath = resolveConfigWritePath(configCarrier);
+      const current = loadConfigLayerFile(configPath).config.plugins?.sources?.[namespace];
       if (
         sourceDescriptorIdentity(current) !== sourceDescriptorIdentity(value) ||
         !pluginSourceStateIsCurrent(sourceState)
@@ -801,7 +978,7 @@ export function removeSource(namespace: string): void {
         throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
       }
       const remote = typeof value !== 'string' && isCloneableSource(expandHome(value.url));
-      const pluginDir = path.join(getPluginsDir(), namespace);
+      const pluginDir = managedCheckoutPath(namespace);
       if (remote && value.type === 'subtree') {
         if (!isGitRepo(getConfigDir())) {
           throw new Error(
@@ -848,7 +1025,7 @@ export function removeSource(namespace: string): void {
           checkoutStage = stageOwnedPathRemoval(checkoutPaths);
         }
 
-        updateConfigLayer((layer) => {
+        updateConfigLayerFile(configPath, (layer) => {
           const newSources = { ...(layer.plugins?.sources ?? {}) };
           delete newSources[namespace];
           return {
@@ -973,7 +1150,6 @@ export function updateRemoteSources(
     const effectivePath = resolveEffectivePath(namespace, value);
 
     try {
-      const ownerValidator = captureSourceOwnerValidator(namespace, effectivePath, scope);
       withMarketplaceSourceLock(namespace, effectivePath, () => {
         if (
           sourceDescriptorIdentity(getRawSources(scope)[namespace]) !==
@@ -1022,7 +1198,7 @@ export function updateRemoteSources(
             }
           }
         } else {
-          const cloneDir = path.join(getPluginsDir(), namespace);
+          const cloneDir = managedCheckoutPath(namespace);
           const gitDir = path.join(cloneDir, '.git');
           if (!fs.existsSync(gitDir)) {
             gitClone(expandHome(value.url), cloneDir, value.ref);
@@ -1031,9 +1207,16 @@ export function updateRemoteSources(
           }
         }
         if (getMarketplaceManifestInfo(effectivePath)) {
+          recordSourceKind(namespace, effectivePath, 'marketplace', scope);
+          const ownerValidator = captureSourceOwnerValidator(namespace, effectivePath, scope);
           refreshMarketplacePluginCache(effectivePath, namespace, ownerValidator);
         } else {
           removeMarketplaceEntryCache(namespace, effectivePath);
+          const descriptorKey = sourceDescriptorKey(namespace, value);
+          const state =
+            readPluginSourceState(namespace, descriptorKey) ??
+            ensurePluginSourceState(namespace, descriptorKey, canonicalSourcePath(effectivePath));
+          setPluginSourceKind(state, 'plugin');
         }
       });
       results.push({ namespace, url: value.url, status: 'updated' });
@@ -1051,12 +1234,16 @@ export function updateRemoteSources(
     if (onlyNamespace && source.namespace !== onlyNamespace) continue;
     if (handledNamespaces.has(source.namespace)) continue;
     const value = raw[source.namespace];
-    const descriptorKey = sourceDescriptorKey(source.namespace, value, source.path);
+    const descriptorKey = sourceDescriptorKey(source.namespace, value);
     const state = readPluginSourceState(source.namespace, descriptorKey);
     const ownerPath = state?.marketplacePath ?? canonicalSourcePath(source.path);
     const isMarketplace = Boolean(getMarketplaceManifestInfo(source.path));
-    if (!isMarketplace && !marketplaceEntryCacheExists(source.namespace, ownerPath)) continue;
+    const hasDerivedCache = marketplaceEntryCacheExists(source.namespace, ownerPath);
+    if (!isMarketplace && state?.sourceKind !== 'marketplace' && !hasDerivedCache) continue;
     try {
+      if (isMarketplace) {
+        recordSourceKind(source.namespace, source.path, 'marketplace', scope);
+      }
       const ownerValidator = isMarketplace
         ? captureSourceOwnerValidator(source.namespace, source.path, scope)
         : undefined;
@@ -1070,6 +1257,7 @@ export function updateRemoteSources(
           refreshMarketplacePluginCache(source.path, source.namespace, ownerValidator);
         } else {
           removeMarketplaceEntryCache(source.namespace, ownerPath);
+          if (state) setPluginSourceKind(state, 'plugin');
         }
       });
       attemptedUpdate = true;

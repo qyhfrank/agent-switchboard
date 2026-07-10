@@ -1,4 +1,6 @@
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { resolveScopedNativePluginConfig } from '../config/application-config.js';
 import type { ConfigScope } from '../config/scope.js';
 import { buildPluginIndex, type PluginDescriptor } from '../plugins/index.js';
@@ -126,10 +128,36 @@ function collectObjects(
   return out;
 }
 
-function hasMarketplace(value: unknown, marketplaceName: string): boolean {
-  return collectObjects(value).some((entry) => {
+function findMarketplace(
+  value: unknown,
+  marketplaceName: string
+): Record<string, unknown> | undefined {
+  return collectObjects(value).find((entry) => {
     return entry.name === marketplaceName || entry.marketplaceName === marketplaceName;
   });
+}
+
+function normalizePathForCompare(filePath: string): string {
+  try {
+    return fs.realpathSync.native(filePath);
+  } catch {
+    return path.resolve(filePath);
+  }
+}
+
+function verifyMarketplacePath(
+  entry: Record<string, unknown>,
+  meta: ClaudeNativePluginMeta
+): string | undefined {
+  if (typeof entry.path !== 'string') {
+    return `Claude marketplace "${meta.marketplaceName}" is already registered, but its path could not be verified`;
+  }
+
+  if (normalizePathForCompare(entry.path) === normalizePathForCompare(meta.marketplacePath)) {
+    return undefined;
+  }
+
+  return `Claude marketplace "${meta.marketplaceName}" is already registered from a different source; remove it from Claude Code before syncing ${meta.installRef}`;
 }
 
 function pluginMatches(entry: Record<string, unknown>, meta: ClaudeNativePluginMeta): boolean {
@@ -265,7 +293,8 @@ export function distributeClaudeNativePlugins({
 
       const actions: string[] = [];
       const marketplaces = readJson(runner, ['plugin', 'marketplace', 'list', '--json']);
-      if (!hasMarketplace(marketplaces, nativeMeta.marketplaceName)) {
+      const marketplace = findMarketplace(marketplaces, nativeMeta.marketplaceName);
+      if (!marketplace) {
         runRequired(runner, [
           'plugin',
           'marketplace',
@@ -275,6 +304,9 @@ export function distributeClaudeNativePlugins({
           nativeMeta.marketplacePath,
         ]);
         actions.push('marketplace added');
+      } else {
+        const marketplacePathError = verifyMarketplacePath(marketplace, nativeMeta);
+        if (marketplacePathError) throw new Error(marketplacePathError);
       }
 
       const installed = readJson(runner, ['plugin', 'list', '--json']);

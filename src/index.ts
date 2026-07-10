@@ -67,6 +67,7 @@ import {
 import { loadLibraryStateSection, saveMcpEnabledState } from './library/state.js';
 import { loadManifest, saveManifest } from './manifest/store.js';
 import type { ProjectDistributionManifest } from './manifest/types.js';
+import { redactGitCredentials } from './marketplace/cache.js';
 import { readMarketplace } from './marketplace/reader.js';
 import { distributeMcp } from './mcp/distribution.js';
 import { buildPluginIndex, clearPluginIndexCache } from './plugins/index.js';
@@ -1657,21 +1658,40 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       console.log(chalk.dim('  Run `asb plugin list` to see available plugins.'));
       process.exit(1);
     }
-    if ((layer.config.plugins?.enabled ?? []).some((ref) => selectsPlugin(index, plugin.id, ref))) {
-      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled in this config layer.`));
-      return;
+    const normalizeEnabled = (refs: string[]): string[] => {
+      const result: string[] = [];
+      let inserted = false;
+      for (const ref of refs) {
+        if (!selectsPlugin(index, plugin.id, ref)) {
+          result.push(ref);
+        } else if (!inserted) {
+          result.push(plugin.id);
+          inserted = true;
+        }
+      }
+      if (!inserted) result.push(plugin.id);
+      return result;
+    };
+    const alreadyEnabled = (layer.config.plugins?.enabled ?? []).some((ref) =>
+      selectsPlugin(index, plugin.id, ref)
+    );
+    if (!alreadyEnabled) {
+      index.materialize([plugin.id]);
     }
-    index.materialize([plugin.id]);
     updateConfigLayer(
       (l) => ({
         ...l,
         plugins: {
           ...(l.plugins ?? {}),
-          enabled: [...(l.plugins?.enabled ?? []), id],
+          enabled: normalizeEnabled(l.plugins?.enabled ?? []),
         },
       }),
       layerOpts
     );
+    if (alreadyEnabled) {
+      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled in this config layer.`));
+      return;
+    }
     console.log(chalk.green(`✓ Plugin "${id}" enabled.`));
   } catch (error) {
     if (error instanceof Error) {
@@ -1759,7 +1779,8 @@ mktRoot
       const name = nameArg ?? inferSourceName(location);
       if (isGitUrl(location)) {
         const parsed = parseGitUrl(location);
-        const spinner = ora(`Cloning ${parsed.url}...`).start();
+        const displayUrl = redactGitCredentials(parsed.url);
+        const spinner = ora(`Cloning ${displayUrl}...`).start();
         try {
           addRemoteSource(name, {
             url: parsed.url,
@@ -1767,7 +1788,7 @@ mktRoot
             subdir: parsed.subdir,
             type: 'clone',
           });
-          spinner.succeed(chalk.green(`✓ Cloned ${parsed.url}`));
+          spinner.succeed(chalk.green(`✓ Cloned ${displayUrl}`));
         } catch (err) {
           spinner.fail(chalk.red('Failed to clone'));
           throw err;
@@ -1787,7 +1808,7 @@ mktRoot
           process.exit(1);
         }
 
-        console.log(chalk.green(`\n✓ Added source "${name}" from ${parsed.url}`));
+        console.log(chalk.green(`\n✓ Added source "${name}" from ${displayUrl}`));
         if (parsed.ref) console.log(chalk.dim(`  Ref: ${parsed.ref}`));
         if (parsed.subdir) console.log(chalk.dim(`  Subdir: ${parsed.subdir}`));
         if (validation.kind === 'marketplace') {
@@ -1879,7 +1900,9 @@ mktRoot
       }
       for (const r of results) {
         if (r.status === 'updated') {
-          console.log(chalk.green(`  ✓ ${r.namespace}: updated from ${r.url}`));
+          console.log(
+            chalk.green(`  ✓ ${r.namespace}: updated from ${redactGitCredentials(r.url)}`)
+          );
         } else {
           console.log(chalk.red(`  ✗ ${r.namespace}: ${r.error}`));
         }
@@ -1903,7 +1926,23 @@ mktRoot
       const sources = getSources();
 
       if (options.json) {
-        console.log(JSON.stringify(sources, null, 2));
+        console.log(
+          JSON.stringify(
+            sources.map((source) =>
+              source.remote
+                ? {
+                    ...source,
+                    remote: {
+                      ...source.remote,
+                      url: redactGitCredentials(source.remote.url),
+                    },
+                  }
+                : source
+            ),
+            null,
+            2
+          )
+        );
         return;
       }
 
@@ -1928,7 +1967,7 @@ mktRoot
             : isRemote
               ? 'plugin (remote)'
               : 'plugin';
-        const sourcePlain = isRemote ? (src.remote?.url ?? src.path) : src.path;
+        const sourcePlain = isRemote ? redactGitCredentials(src.remote?.url ?? src.path) : src.path;
 
         let statusPlain: string;
         if (isRemote) {

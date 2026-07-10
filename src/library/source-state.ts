@@ -8,6 +8,12 @@ export interface SourceRemovalPathState {
   stagedPath: string;
 }
 
+export interface SourceAdditionState {
+  configPath: string;
+  checkout: SourceRemovalPathState;
+  transactionId: string;
+}
+
 export interface SourceRemovalState {
   configPath: string;
   cache?: SourceRemovalPathState;
@@ -21,6 +27,8 @@ export interface PluginSourceState {
   descriptorKey: string;
   marketplacePath: string;
   incarnation: string;
+  sourceKind?: 'marketplace' | 'plugin';
+  addition?: SourceAdditionState;
   removal?: SourceRemovalState;
 }
 
@@ -93,11 +101,16 @@ function parseState(value: unknown): PluginSourceState | null {
     !/^[0-9a-f]{64}$/.test(state.descriptorKey) ||
     typeof state.marketplacePath !== 'string' ||
     !path.isAbsolute(state.marketplacePath) ||
-    typeof state.incarnation !== 'string'
+    typeof state.incarnation !== 'string' ||
+    (state.sourceKind !== undefined &&
+      state.sourceKind !== 'marketplace' &&
+      state.sourceKind !== 'plugin')
   ) {
     return null;
   }
+  if (state.addition !== undefined && !validAdditionState(state.addition)) return null;
   if (state.removal !== undefined && !validRemovalState(state.removal)) return null;
+  if (state.addition !== undefined && state.removal !== undefined) return null;
   return state as PluginSourceState;
 }
 
@@ -130,6 +143,20 @@ function validRemovalState(value: unknown): value is SourceRemovalState {
     }
   }
   return true;
+}
+
+function validAdditionState(value: unknown): value is SourceAdditionState {
+  if (!value || typeof value !== 'object') return false;
+  const addition = value as SourceAdditionState;
+  return (
+    typeof addition.configPath === 'string' &&
+    path.isAbsolute(addition.configPath) &&
+    validRemovalPathState(addition.checkout) &&
+    typeof addition.transactionId === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+      addition.transactionId
+    )
+  );
 }
 
 function readStateFile(filePath: string): PluginSourceState | null {
@@ -181,11 +208,6 @@ export function ensurePluginSourceState(
   if (existing) return existing;
 
   const state = newState(namespace, descriptorKey, expectedPath);
-  if (existing) {
-    writeStateFile(filePath, state);
-    return state;
-  }
-
   const stateRoot = safeStateRoot(true);
   assertNoStateSymlinks(stateRoot, filePath);
   try {
@@ -223,12 +245,51 @@ export function pluginSourceStateIsCurrent(state: PluginSourceState): boolean {
   );
 }
 
+export function beginPluginSourceAddition(
+  state: PluginSourceState,
+  addition: SourceAdditionState
+): PluginSourceState {
+  if (!pluginSourceStateIsCurrent(state)) {
+    throw new Error(`Plugin source "${state.namespace}" changed before addition staging.`);
+  }
+  if (state.removal) {
+    throw new Error(`Plugin source "${state.namespace}" has a pending removal.`);
+  }
+  const next = { ...state, addition };
+  writeStateFile(statePath(state.namespace, state.descriptorKey), next);
+  return next;
+}
+
+export function clearPluginSourceAddition(state: PluginSourceState): PluginSourceState {
+  const current = readStateFile(statePath(state.namespace, state.descriptorKey));
+  if (current?.incarnation !== state.incarnation) return state;
+  const next = { ...current };
+  delete next.addition;
+  writeStateFile(statePath(state.namespace, state.descriptorKey), next);
+  return next;
+}
+
+export function setPluginSourceKind(
+  state: PluginSourceState,
+  sourceKind: 'marketplace' | 'plugin'
+): PluginSourceState {
+  const current = readStateFile(statePath(state.namespace, state.descriptorKey));
+  if (current?.incarnation !== state.incarnation) return state;
+  if (current.sourceKind === sourceKind) return current;
+  const next = { ...current, sourceKind };
+  writeStateFile(statePath(state.namespace, state.descriptorKey), next);
+  return next;
+}
+
 export function beginPluginSourceRemoval(
   state: PluginSourceState,
   removal: SourceRemovalState
 ): PluginSourceState {
   if (!pluginSourceStateIsCurrent(state)) {
     throw new Error(`Plugin source "${state.namespace}" changed before removal staging.`);
+  }
+  if (state.addition) {
+    throw new Error(`Plugin source "${state.namespace}" has a pending addition.`);
   }
   const next = { ...state, removal };
   writeStateFile(statePath(state.namespace, state.descriptorKey), next);
@@ -251,14 +312,18 @@ export function deletePluginSourceState(state: PluginSourceState): void {
   fs.rmSync(filePath, { force: true });
 }
 
-export function listPendingPluginSourceRemovals(): PluginSourceState[] {
+function listPluginSourceStates(): PluginSourceState[] {
   const stateRoot = safeStateRoot(false);
   if (!fs.existsSync(stateRoot)) return [];
   const records: PluginSourceState[] = [];
   for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
     const state = readStateFile(path.join(stateRoot, entry.name));
-    if (state?.removal) records.push(state);
+    if (state) records.push(state);
   }
   return records;
+}
+
+export function listPendingPluginSourceTransactions(): PluginSourceState[] {
+  return listPluginSourceStates().filter((state) => state.addition || state.removal);
 }

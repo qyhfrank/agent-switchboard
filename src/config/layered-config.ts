@@ -296,7 +296,7 @@ export function withConfigLayerTransaction<T>(
   action: (filePath: string) => T,
   options?: UpdateConfigLayerOptions
 ): T {
-  const filePath = getWritableConfigLayerPath(options);
+  const filePath = resolveConfigWritePath(getWritableConfigLayerPath(options));
   return withConfigFileTransaction(filePath, () => action(filePath));
 }
 
@@ -304,11 +304,19 @@ export function updateConfigLayer(
   mutator: (layer: SwitchboardConfigLayer) => SwitchboardConfigLayer,
   options?: UpdateConfigLayerOptions
 ): ConfigLayerLoadResult {
-  return withConfigLayerTransaction((filePath) => {
-    const current = readLayerFile(filePath);
+  return updateConfigLayerFile(getWritableConfigLayerPath(options), mutator);
+}
+
+export function updateConfigLayerFile(
+  filePath: string,
+  mutator: (layer: SwitchboardConfigLayer) => SwitchboardConfigLayer
+): ConfigLayerLoadResult {
+  const resolvedPath = resolveConfigWritePath(filePath);
+  return withConfigFileTransaction(resolvedPath, () => {
+    const current = readLayerFile(resolvedPath);
     const draft = JSON.parse(JSON.stringify(current.config)) as SwitchboardConfigLayer;
     const next = switchboardConfigLayerSchema.parse(mutator(draft));
-    writeLayerFile(filePath, next);
-    return { path: filePath, exists: true, config: next };
-  }, options);
+    writeLayerFile(resolvedPath, next);
+    return { path: resolvedPath, exists: true, config: next };
+  });
 }
