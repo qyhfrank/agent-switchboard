@@ -8,11 +8,16 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
-import { expandHome, getConfigDir, getPluginsDir } from '../config/paths.js';
+import {
+  expandHome,
+  getConfigDir,
+  getMarketplacePluginCacheDir,
+  getPluginsDir,
+} from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
-import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
+import { removeMarketplaceEntryCache, withMarketplaceSourceLock } from '../marketplace/cache.js';
 import {
   getMarketplaceManifestInfo,
   getPluginManifestInfo,
@@ -106,7 +111,12 @@ function isGitRepo(dir: string): boolean {
 }
 
 function ensureCleanTree(dir: string): void {
-  const status = runGit(['status', '--porcelain'], { cwd: dir });
+  const cachePath = path.relative(dir, getMarketplacePluginCacheDir());
+  const args = ['status', '--porcelain'];
+  if (!cachePath.startsWith('..') && !path.isAbsolute(cachePath)) {
+    args.push('--', '.', `:(exclude)${cachePath.split(path.sep).join('/')}`);
+  }
+  const status = runGit(args, { cwd: dir });
   if (status.length > 0) {
     throw new Error(
       `ASB_HOME has uncommitted changes. Commit or stash them before subtree operations.`
@@ -307,6 +317,25 @@ export function getSourcesRecord(scope?: ConfigScope): Record<string, string> {
   return result;
 }
 
+export function sourceOwnerIsCurrent(
+  namespace: string,
+  expectedPath: string,
+  scope?: ConfigScope
+): boolean {
+  const currentPath = getSourcesRecord(scope)[namespace];
+  if (!currentPath) return false;
+  return canonicalSourcePath(currentPath) === canonicalSourcePath(expectedPath);
+}
+
+function canonicalSourcePath(value: string): string {
+  const resolved = path.resolve(value);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
 export function hasSource(namespace: string, scope?: ConfigScope): boolean {
   const raw = getRawSources(scope);
   if (namespace in raw) return true;
@@ -424,58 +453,62 @@ export function removeSource(namespace: string): void {
   const cacheOwnerPath = fs.existsSync(effectivePath)
     ? fs.realpathSync.native(effectivePath)
     : effectivePath;
-  removeMarketplaceEntryCache(namespace, cacheOwnerPath);
+  withMarketplaceSourceLock(namespace, cacheOwnerPath, () => {
+    const current = getRawSources()[namespace];
+    if (JSON.stringify(current) !== JSON.stringify(value)) {
+      throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
+    }
+    removeMarketplaceEntryCache(namespace, cacheOwnerPath);
 
-  // For subtree sources, perform git rm first to avoid split-brain on failure
-  if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
-    const pluginDir = path.join(getPluginsDir(), namespace);
-    if (value.type === 'subtree') {
-      if (!isGitRepo(getConfigDir())) {
-        throw new Error(
-          `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
-        );
-      }
-      if (fs.existsSync(pluginDir)) {
-        ensureCleanTree(getConfigDir());
-        try {
-          runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
-        } catch (err) {
+    // For subtree sources, perform git rm first to avoid split-brain on failure
+    if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
+      const pluginDir = path.join(getPluginsDir(), namespace);
+      if (value.type === 'subtree') {
+        if (!isGitRepo(getConfigDir())) {
           throw new Error(
-            `Failed to git rm subtree "plugins/${namespace}": ${err instanceof Error ? err.message : String(err)}`
+            `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
           );
         }
-      }
-    } else {
-      if (fs.existsSync(pluginDir)) {
+        if (fs.existsSync(pluginDir)) {
+          ensureCleanTree(getConfigDir());
+          try {
+            runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
+          } catch (err) {
+            throw new Error(
+              `Failed to git rm subtree "plugins/${namespace}": ${err instanceof Error ? err.message : String(err)}`
+            );
+          }
+        }
+      } else if (fs.existsSync(pluginDir)) {
         fs.rmSync(pluginDir, { recursive: true, force: true });
       }
     }
-  }
 
-  try {
-    updateConfigLayer((layer) => {
-      const newSources = { ...(layer.plugins?.sources ?? {}) };
-      delete newSources[namespace];
-      return {
-        ...layer,
-        plugins: {
-          ...layer.plugins,
-          sources: newSources,
-        },
-      };
-    });
-  } catch (configErr) {
-    // Rollback git rm if config write fails (subtree only)
-    if (typeof value !== 'string' && value.type === 'subtree' && isGitRepo(getConfigDir())) {
-      try {
-        runGit(['checkout', 'HEAD', '--', `plugins/${namespace}`], { cwd: getConfigDir() });
-      } catch {
-        /* best-effort rollback */
+    try {
+      updateConfigLayer((layer) => {
+        const newSources = { ...(layer.plugins?.sources ?? {}) };
+        delete newSources[namespace];
+        return {
+          ...layer,
+          plugins: {
+            ...layer.plugins,
+            sources: newSources,
+          },
+        };
+      });
+    } catch (configErr) {
+      // Rollback git rm if config write fails (subtree only)
+      if (typeof value !== 'string' && value.type === 'subtree' && isGitRepo(getConfigDir())) {
+        try {
+          runGit(['checkout', 'HEAD', '--', `plugins/${namespace}`], { cwd: getConfigDir() });
+        } catch {
+          /* best-effort rollback */
+        }
       }
+      throw configErr;
     }
-    throw configErr;
-  }
-  markSourcesChanged();
+    markSourcesChanged();
+  });
 }
 
 /**
@@ -590,7 +623,9 @@ export function updateRemoteSources(
       }
       const effectivePath = resolveEffectivePath(namespace, value);
       if (getMarketplaceManifestInfo(effectivePath)) {
-        refreshMarketplacePluginCache(effectivePath, namespace);
+        refreshMarketplacePluginCache(effectivePath, namespace, () =>
+          sourceOwnerIsCurrent(namespace, effectivePath, scope)
+        );
       } else {
         removeMarketplaceEntryCache(namespace, effectivePath);
       }
@@ -611,7 +646,9 @@ export function updateRemoteSources(
     if (!getMarketplaceManifestInfo(source.path)) continue;
     attemptedUpdate = true;
     try {
-      refreshMarketplacePluginCache(source.path, source.namespace);
+      refreshMarketplacePluginCache(source.path, source.namespace, () =>
+        sourceOwnerIsCurrent(source.namespace, source.path, scope)
+      );
       results.push({ namespace: source.namespace, url: source.path, status: 'updated' });
     } catch (err) {
       results.push({

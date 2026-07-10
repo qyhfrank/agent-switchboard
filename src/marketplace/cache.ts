@@ -14,6 +14,7 @@ export interface MarketplaceEntryCacheRequest {
   ref?: string;
   sha?: string;
   subdir?: string;
+  ownerIsCurrent?: () => boolean;
 }
 
 export interface MarketplaceEntryMaterialization {
@@ -43,13 +44,15 @@ interface MarketplaceEntryCacheMetadata {
 
 const METADATA_FILE = 'entry.json';
 const LOCK_METADATA_FILE = 'owner.json';
-const LOCK_RECOVERY_FILE = 'recovering.json';
+const LOCK_RECOVERY_DIR = 'recovering';
+const PROCESS_IDENTITY_PREFIX = 'ps-lstart-utc-v1:';
 const LOCK_TIMEOUT_MS = 120_000;
 const LOCK_STALE_MS = 120_000;
 const LOCK_WAIT_MS = 25;
 const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 const temporaryCacheRoot = new AsyncLocalStorage<string>();
 const heldSourceLocks = new Map<string, () => void>();
+const activeSourceLocks = new Set<string>();
 let lockExitHandlerRegistered = false;
 
 function configuredCacheRoot(): string {
@@ -144,6 +147,7 @@ function normalizeRequest(request: MarketplaceEntryCacheRequest): MarketplaceEnt
     ref,
     sha,
     subdir: normalizeSubdir(request.subdir),
+    ownerIsCurrent: request.ownerIsCurrent,
   };
 }
 
@@ -228,6 +232,7 @@ interface CacheLockMetadata {
   pid: number;
   startedAt: number;
   processIdentity?: string;
+  lockToken?: string;
 }
 
 function sourceLockPath(sourceName: string, marketplacePath: string): string {
@@ -246,7 +251,8 @@ function readLockOwner(ownerPath: string): CacheLockMetadata | null {
       typeof value?.token !== 'string' ||
       typeof value.pid !== 'number' ||
       typeof value.startedAt !== 'number' ||
-      (value.processIdentity !== undefined && typeof value.processIdentity !== 'string')
+      (value.processIdentity !== undefined && typeof value.processIdentity !== 'string') ||
+      (value.lockToken !== undefined && typeof value.lockToken !== 'string')
     ) {
       return null;
     }
@@ -259,11 +265,12 @@ function readLockOwner(ownerPath: string): CacheLockMetadata | null {
 function processIdentity(pid: number): string | null {
   try {
     const identity = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C', TZ: 'UTC0' },
       stdio: 'pipe',
       encoding: 'utf-8',
       timeout: 5_000,
     }).trim();
-    return identity || null;
+    return identity ? `${PROCESS_IDENTITY_PREFIX}${identity}` : null;
   } catch {
     return null;
   }
@@ -282,7 +289,8 @@ function lockIsStale(lockPath: string): boolean {
   const metadata = readLockMetadata(lockPath);
   if (metadata) {
     if (!processIsAlive(metadata.pid)) return true;
-    const identity = metadata.processIdentity ? processIdentity(metadata.pid) : null;
+    if (!metadata.processIdentity?.startsWith(PROCESS_IDENTITY_PREFIX)) return false;
+    const identity = processIdentity(metadata.pid);
     return identity !== null && identity !== metadata.processIdentity;
   }
   try {
@@ -292,56 +300,115 @@ function lockIsStale(lockPath: string): boolean {
   }
 }
 
-function recoveryClaimIsStale(claimPath: string): boolean {
-  const metadata = readLockOwner(claimPath);
-  if (metadata) {
-    if (!processIsAlive(metadata.pid)) return true;
-    const identity = metadata.processIdentity ? processIdentity(metadata.pid) : null;
-    return identity !== null && identity !== metadata.processIdentity;
-  }
+function lockOwnerIsStale(metadata: CacheLockMetadata): boolean {
+  if (!processIsAlive(metadata.pid)) return true;
+  if (!metadata.processIdentity?.startsWith(PROCESS_IDENTITY_PREFIX)) return false;
+  const identity = processIdentity(metadata.pid);
+  return identity !== null && identity !== metadata.processIdentity;
+}
+
+function pathIsOld(target: string): boolean {
   try {
-    return Date.now() - fs.statSync(claimPath).mtimeMs > LOCK_STALE_MS;
+    return Date.now() - fs.statSync(target).mtimeMs > LOCK_STALE_MS;
   } catch {
     return false;
   }
 }
 
-function releaseRecoveryClaim(claimPath: string, token: string): void {
-  if (readLockOwner(claimPath)?.token === token) fs.rmSync(claimPath, { force: true });
+function removeStaleRecoveryClaim(claimDir: string): void {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(claimDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  if (entries.length === 0) {
+    if (pathIsOld(claimDir)) {
+      try {
+        fs.rmdirSync(claimDir);
+      } catch {
+        // Another claimant may have published its owner record.
+      }
+    }
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const ownerPath = path.join(claimDir, entry.name);
+    const metadata = readLockOwner(ownerPath);
+    if (metadata ? !lockOwnerIsStale(metadata) : !pathIsOld(ownerPath)) continue;
+    try {
+      fs.rmSync(ownerPath, { force: true });
+    } catch {}
+  }
+  try {
+    fs.rmdirSync(claimDir);
+  } catch {
+    // A successor claim keeps the non-empty directory authoritative.
+  }
+}
+
+function releaseRecoveryClaim(claimDir: string, ownerPath: string, token: string): void {
+  if (readLockOwner(ownerPath)?.token === token) fs.rmSync(ownerPath, { force: true });
+  try {
+    fs.rmdirSync(claimDir);
+  } catch {
+    // Another claimant or recovery cleanup owns the directory now.
+  }
 }
 
 function tryRecoverStaleLock(lockPath: string): boolean {
-  const claimPath = path.join(lockPath, LOCK_RECOVERY_FILE);
+  const observedLockToken = readLockMetadata(lockPath)?.token;
+  const claimDir = path.join(lockPath, LOCK_RECOVERY_DIR);
   const token = randomUUID();
+  const tempOwnerPath = path.join(lockPath, `.recovering-${token}.tmp`);
+  const ownerPath = path.join(claimDir, `${token}.json`);
   const owner: CacheLockMetadata = {
     token,
     pid: process.pid,
     startedAt: Date.now(),
     processIdentity: processIdentity(process.pid) ?? undefined,
+    lockToken: observedLockToken,
   };
   try {
-    fs.writeFileSync(claimPath, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
+    fs.mkdirSync(claimDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
-    if (recoveryClaimIsStale(claimPath)) {
-      const observed = readLockOwner(claimPath)?.token;
-      if (observed && readLockOwner(claimPath)?.token === observed) {
-        fs.rmSync(claimPath, { force: true });
-      }
-    }
+    removeStaleRecoveryClaim(claimDir);
     return false;
   }
 
   try {
-    if (!lockIsStale(lockPath)) return false;
+    fs.writeFileSync(tempOwnerPath, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
+    fs.renameSync(tempOwnerPath, ownerPath);
+  } catch {
+    fs.rmSync(tempOwnerPath, { force: true });
+    try {
+      fs.rmdirSync(claimDir);
+    } catch {
+      // A competing recovery cleanup may already own this transition.
+    }
+    return false;
+  }
+
+  let moved = false;
+  try {
+    if (
+      readLockOwner(ownerPath)?.token !== token ||
+      readLockMetadata(lockPath)?.token !== observedLockToken ||
+      !lockIsStale(lockPath)
+    ) {
+      return false;
+    }
     const stalePath = `${lockPath}.stale-${randomUUID()}`;
     fs.renameSync(lockPath, stalePath);
+    moved = true;
     fs.rmSync(stalePath, { recursive: true, force: true });
     return true;
   } catch {
     return false;
   } finally {
-    releaseRecoveryClaim(claimPath, token);
+    if (!moved) releaseRecoveryClaim(claimDir, ownerPath, token);
   }
 }
 
@@ -408,17 +475,35 @@ function withSourceLock<T>(
   retain = false
 ): T {
   const lockPath = sourceLockPath(sourceName, marketplacePath);
-  if (heldSourceLocks.has(lockPath)) return action();
+  if (heldSourceLocks.has(lockPath) || activeSourceLocks.has(lockPath)) return action();
   const release = acquireSourceLock(sourceName, marketplacePath);
+  activeSourceLocks.add(lockPath);
   try {
     const result = action();
+    activeSourceLocks.delete(lockPath);
     if (retain) retainSourceLock(lockPath, release);
     else release();
     return result;
   } catch (error) {
+    activeSourceLocks.delete(lockPath);
     release();
     throw error;
   }
+}
+
+export function withMarketplaceSourceLock<T>(
+  sourceName: string,
+  marketplacePath: string,
+  action: () => T
+): T {
+  const lockPath = sourceLockPath(sourceName, marketplacePath);
+  const result = withSourceLock(sourceName, marketplacePath, action);
+  const heldRelease = heldSourceLocks.get(lockPath);
+  if (heldRelease) {
+    heldRelease();
+    heldSourceLocks.delete(lockPath);
+  }
+  return result;
 }
 
 function resolveInside(root: string, subdir: string | undefined): string {
@@ -560,7 +645,11 @@ function recoverEntryBackup(
     if (readMetadata(backupPath)?.identity !== identity) continue;
     const backup = cachedMaterialization(request, identity, backupPath);
     if (current || !backup) {
-      fs.rmSync(backupPath, { recursive: true, force: true });
+      try {
+        fs.rmSync(backupPath, { recursive: true, force: true });
+      } catch {
+        // A valid current generation does not depend on redundant backup cleanup.
+      }
       continue;
     }
     if (fs.existsSync(entryPath)) fs.rmSync(entryPath, { recursive: true, force: true });
@@ -622,7 +711,8 @@ function removeSupersededPluginBackups(request: MarketplaceEntryCacheRequest): v
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith('.backup-')) continue;
     const entryPath = path.join(sourcePath, entry.name);
-    if (readMetadata(entryPath)?.pluginName !== request.pluginName) continue;
+    const metadata = readMetadata(entryPath);
+    if (metadata && metadata.pluginName !== request.pluginName) continue;
     try {
       fs.rmSync(entryPath, { recursive: true, force: true });
     } catch {
@@ -633,23 +723,30 @@ function removeSupersededPluginBackups(request: MarketplaceEntryCacheRequest): v
 
 export function materializeMarketplaceEntry(
   input: MarketplaceEntryCacheRequest,
-  options: { refresh?: boolean } = {}
+  options: { refresh?: boolean; ownerIsCurrent?: () => boolean } = {}
 ): MarketplaceEntryMaterialization {
   const request = normalizeRequest(input);
   const identity = requestIdentity(request);
   const cacheRoot = safeCacheRoot(true);
   const sourcePath = sourceCachePath(request.sourceName, request.marketplacePath);
   const entryPath = entryCachePath(request, identity);
-  assertNoCacheSymlinks(cacheRoot, sourcePath);
-  fs.mkdirSync(sourcePath, { recursive: true });
-  assertNoCacheSymlinks(cacheRoot, entryPath);
+  const ownerIsCurrent = options.ownerIsCurrent ?? request.ownerIsCurrent;
 
   return withSourceLock(
     request.sourceName,
     request.marketplacePath,
     () => {
+      if (ownerIsCurrent && !ownerIsCurrent()) {
+        throw new Error(`Marketplace source "${request.sourceName}" is no longer active.`);
+      }
+      assertNoCacheSymlinks(cacheRoot, sourcePath);
+      fs.mkdirSync(sourcePath, { recursive: true });
+      assertNoCacheSymlinks(cacheRoot, entryPath);
       const cached = recoverEntryBackup(request, identity, entryPath);
-      if (cached && (!options.refresh || request.sha)) return cached;
+      if (cached && (!options.refresh || request.sha)) {
+        removeSupersededPluginBackups(request);
+        return cached;
+      }
 
       const tempPath = fs.mkdtempSync(path.join(sourcePath, '.tmp-'));
       try {
@@ -673,6 +770,9 @@ export function materializeMarketplaceEntry(
         if (!cachedMaterialization(request, identity, tempPath)) {
           throw new Error(`Marketplace cache verification failed: ${tempPath}`);
         }
+        if (ownerIsCurrent && !ownerIsCurrent()) {
+          throw new Error(`Marketplace source "${request.sourceName}" is no longer active.`);
+        }
         const materialized = replaceEntry(tempPath, entryPath, () =>
           cachedMaterialization(request, identity, entryPath)
         );
@@ -690,7 +790,6 @@ export function materializeMarketplaceEntry(
 export function removeMarketplaceEntryCache(sourceName: string, marketplacePath: string): void {
   const cacheRoot = safeCacheRoot(false);
   const sourcePath = sourceCachePath(sourceName, marketplacePath);
-  if (!fs.existsSync(sourcePath)) return;
   withSourceLock(sourceName, marketplacePath, () => {
     if (!fs.existsSync(sourcePath)) return;
     assertNoCacheSymlinks(cacheRoot, sourcePath);

@@ -78,6 +78,7 @@ export interface MarketplacePluginResolution {
   sourceName: string;
   ref?: string;
   sha?: string;
+  ownerIsCurrent?: () => boolean;
 }
 
 export interface MarketplaceReadResult {
@@ -171,7 +172,11 @@ export function isFormalPlugin(localPath: string): boolean {
 /**
  * Read and resolve a marketplace, returning all resolvable plugins with metadata.
  */
-export function readMarketplace(localPath: string, sourceName?: string): MarketplaceReadResult {
+export function readMarketplace(
+  localPath: string,
+  sourceName?: string,
+  ownerIsCurrent?: () => boolean
+): MarketplaceReadResult {
   const manifestInfo = getMarketplaceManifestInfo(localPath);
   if (!manifestInfo) {
     throw new Error(`No supported marketplace manifest found in ${localPath}`);
@@ -197,6 +202,7 @@ export function readMarketplace(localPath: string, sourceName?: string): Marketp
       sourceName: sourceName ?? marketplaceNamespace,
       ref: entry.ref ?? sourceString(entry.source, 'ref'),
       sha: entry.sha ?? sourceString(entry.source, 'sha'),
+      ownerIsCurrent,
     };
     const resolved = resolvePluginDir(resolution, false);
     if (resolved === null) {
@@ -245,13 +251,14 @@ export function resolveMarketplacePlugin(plugin: MarketplacePlugin): ResolvedPlu
 
 export function refreshMarketplacePluginCache(
   localPath: string,
-  sourceName: string
+  sourceName: string,
+  ownerIsCurrent?: () => boolean
 ): MarketplaceEntryCacheRefreshResult {
-  const marketplace = readMarketplace(localPath, sourceName);
+  const marketplace = readMarketplace(localPath, sourceName, ownerIsCurrent);
   const requests: MarketplaceEntryCacheRequest[] = [];
   for (const plugin of marketplace.plugins) {
     const gitSource = getGitSource(plugin.resolution);
-    if (!gitSource || canReuseMarketplaceCheckout(plugin.resolution, gitSource.url)) continue;
+    if (!gitSource || isResolvedPlugin(plugin)) continue;
     requests.push(toCacheRequest(plugin.resolution, gitSource));
   }
   return refreshMarketplaceEntryCache(sourceName, localPath, requests);
@@ -358,7 +365,9 @@ function resolvePluginDir(
       }
     }
     if (!materializeRemote) return undefined;
-    return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource)).pluginPath;
+    return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource), {
+      ownerIsCurrent: resolution.ownerIsCurrent,
+    }).pluginPath;
   }
 
   // Keep native-only and currently unsupported source kinds in the catalog.
@@ -378,6 +387,7 @@ function toCacheRequest(
     ref: resolution.ref,
     sha: resolution.sha,
     subdir: gitSource.subdir,
+    ownerIsCurrent: resolution.ownerIsCurrent,
   };
 }
 
@@ -457,10 +467,21 @@ function canReuseMarketplaceCheckout(
   if (!resolution.ref) return true;
   if (!isValidGitRef(resolution.ref)) return false;
 
+  const remoteRef = remoteTrackingRef(resolution.ref);
   const refCommit =
-    tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot) ??
-    tryRunGit(['rev-parse', `origin/${resolution.ref}^{commit}`], resolution.marketplaceRoot);
+    (remoteRef
+      ? tryRunGit(['rev-parse', `${remoteRef}^{commit}`], resolution.marketplaceRoot)
+      : null) ?? tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot);
   return refCommit === head;
+}
+
+function remoteTrackingRef(ref: string): string | null {
+  if (ref.startsWith('refs/remotes/origin/')) return ref;
+  if (ref.startsWith('refs/heads/')) {
+    return `refs/remotes/origin/${ref.slice('refs/heads/'.length)}`;
+  }
+  if (ref.startsWith('refs/')) return null;
+  return `refs/remotes/origin/${ref}`;
 }
 
 function reusablePathsAreClean(
@@ -479,7 +500,12 @@ function reusablePathsAreClean(
     ['status', '--porcelain=v1', '--untracked-files=all', '--ignored', '--', ...pathspecs],
     checkoutRoot
   );
-  return status === '';
+  if (status !== '') return false;
+  const indexState = tryRunGit(['ls-files', '-v', '-z', '--', ...pathspecs], checkoutRoot);
+  return (
+    indexState !== null &&
+    !indexState.split('\0').some((entry) => entry !== '' && /^[a-zS] /.test(entry))
+  );
 }
 
 function isValidGitRef(ref: string): boolean {

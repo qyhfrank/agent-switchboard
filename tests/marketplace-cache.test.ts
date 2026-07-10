@@ -110,7 +110,8 @@ function findGitRoot(start: string): string {
 function materializeInChild(
   asbHome: string,
   request: MarketplaceEntryCacheRequest,
-  refresh = false
+  refresh = false,
+  extraEnv: NodeJS.ProcessEnv = {}
 ): Promise<{ code: number | null; stderr: string }> {
   const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
   const source =
@@ -130,7 +131,12 @@ function materializeInChild(
       ],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        env: {
+          ...process.env,
+          ASB_HOME: asbHome,
+          ASB_AGENTS_HOME: asbHome,
+          ...extraEnv,
+        },
         stdio: ['ignore', 'ignore', 'pipe'],
       }
     );
@@ -310,7 +316,7 @@ test('post-switch verification failure restores the prior generation', (t) => {
   });
 });
 
-test('backup cleanup failure keeps the verified replacement authoritative', (t) => {
+test('persistent backup cleanup failure keeps the verified replacement readable', (t) => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -326,11 +332,8 @@ test('backup cleanup failure keeps the verified replacement authoritative', (t) 
     writePluginVersion(remote, 'v2');
 
     const originalRemove = fs.rmSync.bind(fs);
-    let injected = false;
     t.mock.method(fs, 'rmSync', (target, options) => {
-      if (!injected && path.basename(String(target)).startsWith('.backup-')) {
-        injected = true;
-        originalRemove(path.join(String(target), 'entry.json'), { force: true });
+      if (path.basename(String(target)).startsWith('.backup-')) {
         throw new Error('injected backup cleanup failure');
       }
       return originalRemove(target, options);
@@ -340,6 +343,39 @@ test('backup cleanup failure keeps the verified replacement authoritative', (t) 
 
     assert.equal(fs.readFileSync(path.join(refreshed.pluginPath, 'VERSION'), 'utf-8').trim(), 'v2');
     assert.equal(refreshed.entryPath, materialized.entryPath);
+    fs.renameSync(remote.bareRepo, `${remote.bareRepo}.offline`);
+    const reused = materializeMarketplaceEntry(request);
+    assert.equal(reused.entryPath, materialized.entryPath);
+    assert.equal(
+      fs
+        .readdirSync(path.dirname(materialized.entryPath))
+        .some((name) => name.startsWith('.backup-')),
+      true
+    );
+  });
+});
+
+test('cache hits remove unreadable internal backups', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const materialized = materializeMarketplaceEntry(request);
+    const corruptBackup = path.join(path.dirname(materialized.entryPath), '.backup-corrupt');
+    fs.mkdirSync(corruptBackup);
+    fs.writeFileSync(path.join(corruptBackup, 'partial'), 'derived');
+
+    const reused = materializeMarketplaceEntry(request);
+
+    assert.equal(reused.entryPath, materialized.entryPath);
+    assert.equal(fs.existsSync(corruptBackup), false);
   });
 });
 
@@ -447,7 +483,7 @@ test('stale lock recovery rejects a reused PID with a different process identity
         token: 'stale-owner',
         pid: process.pid,
         startedAt: Date.now() - 300_000,
-        processIdentity: 'different process birth',
+        processIdentity: 'ps-lstart-utc-v1:different process birth',
       })}\n`
     );
 
@@ -465,6 +501,10 @@ test('concurrent stale lock recovery admits one cache publisher', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-cache-stale-lock-'));
   const asbHome = path.join(root, 'asb-home');
   fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
   try {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -495,6 +535,7 @@ test('concurrent stale lock recovery admits one cache publisher', async () => {
         token: 'dead-owner',
         pid: deadPid,
         startedAt: Date.now() - 300_000,
+        processIdentity: 'ps-lstart-utc-v1:dead process',
       })}\n`
     );
 
@@ -514,11 +555,86 @@ test('concurrent stale lock recovery admits one cache publisher', async () => {
     );
   } finally {
     releaseMarketplaceCacheLeases();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
-test('a reader lease blocks refresh until the consuming process exits', async () => {
+test('concurrent stale recovery-claim takeover preserves one publisher', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-cache-stale-claim-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const first = materializeMarketplaceEntry(request);
+    const sourcePath = path.dirname(first.entryPath);
+    const lockPath = path.join(path.dirname(sourcePath), `.${path.basename(sourcePath)}.lock`);
+    const claimPath = path.join(lockPath, 'recovering');
+    releaseMarketplaceCacheLeases();
+    fs.rmSync(sourcePath, { recursive: true, force: true });
+    const deadOwner = spawn(process.execPath, ['--eval', '']);
+    const deadPid = deadOwner.pid;
+    await new Promise<void>((resolve, reject) => {
+      deadOwner.on('error', reject);
+      deadOwner.on('close', () => resolve());
+    });
+    assert.ok(deadPid);
+    const staleMetadata = {
+      token: 'dead-owner',
+      pid: deadPid,
+      startedAt: Date.now() - 300_000,
+      processIdentity: 'ps-lstart-utc-v1:dead process',
+    };
+    fs.mkdirSync(lockPath);
+    fs.writeFileSync(path.join(lockPath, 'owner.json'), `${JSON.stringify(staleMetadata)}\n`);
+    fs.mkdirSync(claimPath);
+    fs.writeFileSync(
+      path.join(claimPath, 'dead-claim.json'),
+      `${JSON.stringify({ ...staleMetadata, token: 'dead-claim', lockToken: 'dead-owner' })}\n`
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => materializeInChild(asbHome, request))
+    );
+
+    assert.deepEqual(
+      results.filter((result) => result.code !== 0),
+      []
+    );
+    assert.equal(fs.existsSync(claimPath), false);
+    assert.equal(
+      fs
+        .readdirSync(path.join(asbHome, 'state', 'marketplace-plugins'), { recursive: true })
+        .filter((entry) => String(entry).endsWith('entry.json')).length,
+      1
+    );
+  } finally {
+    releaseMarketplaceCacheLeases();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a reader lease blocks cross-timezone refresh until the consuming process exits', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-cache-reader-'));
   const asbHome = path.join(root, 'asb-home');
   fs.mkdirSync(asbHome, { recursive: true });
@@ -545,7 +661,12 @@ test('a reader lease blocks refresh until the consuming process exits', async ()
       ['--import', 'tsx', '--input-type=module', '--eval', readerSource, JSON.stringify(request)],
       {
         cwd: process.cwd(),
-        env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+        env: {
+          ...process.env,
+          ASB_HOME: asbHome,
+          ASB_AGENTS_HOME: asbHome,
+          TZ: 'Asia/Hong_Kong',
+        },
         stdio: ['pipe', 'pipe', 'pipe'],
       }
     );
@@ -566,7 +687,7 @@ test('a reader lease blocks refresh until the consuming process exits', async ()
     writePluginVersion(remote, 'v2');
 
     let refreshFinished = false;
-    const refresh = materializeInChild(asbHome, request, true).then((result) => {
+    const refresh = materializeInChild(asbHome, request, true, { TZ: 'UTC' }).then((result) => {
       refreshFinished = true;
       return result;
     });

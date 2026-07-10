@@ -17,7 +17,7 @@ import { getConfigDir } from '../config/paths.js';
 import { loadConfiguredPortableSelections } from '../config/plugin-selection.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
-import { getSourceRevision, getSourcesRecord } from '../library/sources.js';
+import { getSourceRevision, getSourcesRecord, sourceOwnerIsCurrent } from '../library/sources.js';
 import {
   loadPluginComponents,
   loadPluginHookEntries,
@@ -306,9 +306,12 @@ function buildFromMarketplace(
   allPlugins: PluginDescriptor[],
   allMcpServers: PluginMcpServer[],
   allRuleSnippets: PluginRuleSnippet[],
-  deferredLoaders: Map<string, () => void>
+  deferredLoaders: Map<string, () => void>,
+  scope?: ConfigScope
 ): void {
-  const result = readMarketplace(basePath, sourceName);
+  const result = readMarketplace(basePath, sourceName, () =>
+    sourceOwnerIsCurrent(sourceName, basePath, scope)
+  );
 
   for (const plugin of result.plugins) {
     const pluginId = buildPluginId(plugin.name, sourceName, 'marketplace');
@@ -463,7 +466,15 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
-      buildFromMarketplace(namespace, basePath, plugins, mcpServers, ruleSnippets, deferredLoaders);
+      buildFromMarketplace(
+        namespace,
+        basePath,
+        plugins,
+        mcpServers,
+        ruleSnippets,
+        deferredLoaders,
+        scope
+      );
     } else {
       buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets);
     }

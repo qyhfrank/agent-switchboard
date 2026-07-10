@@ -787,6 +787,44 @@ test('removeSource cleans only its marketplace entry cache', () => {
   });
 });
 
+test('a descriptor captured before source removal cannot publish cache afterward', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'stale-entry-remote');
+    fs.mkdirSync(entryParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const marketplaceDir = path.join(asbHome, 'stale-local-catalog');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'stale-local-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo },
+          },
+        ],
+      })
+    );
+    addLocalSource('stale-local-catalog', marketplaceDir);
+    const index = buildPluginIndex();
+    const plugin = index.get('remote-plugin@stale-local-catalog');
+    assert.ok(plugin);
+
+    removeSource('stale-local-catalog');
+
+    assert.throws(() => index.expand([plugin.id]), /source .* no longer active/i);
+    const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+    const entries = fs.existsSync(cacheRoot)
+      ? fs
+          .readdirSync(cacheRoot, { recursive: true })
+          .filter((entry) => String(entry).endsWith('entry.json'))
+      : [];
+    assert.deepEqual(entries, []);
+  });
+});
+
 test('removeSource retains the canonical cache owner after deleting a remote checkout', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();

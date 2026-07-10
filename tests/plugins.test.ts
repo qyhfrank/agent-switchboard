@@ -10,6 +10,7 @@ import {
 } from '../src/config/application-config.js';
 import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
+import { refreshMarketplacePluginCache } from '../src/marketplace/reader.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { loadRuleLibrary } from '../src/rules/library.js';
 import { loadSkillLibrary } from '../src/skills/library.js';
@@ -151,6 +152,53 @@ function initGitRepo(repoDir: string): void {
 function commitAll(repoDir: string): void {
   execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'ignore' });
   execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repoDir, stdio: 'ignore' });
+}
+
+function createPinnedSameOriginMarketplace(
+  asbHome: string,
+  name: string
+): { checkoutRoot: string; marketplaceDir: string; pluginRoot: string } {
+  const bareRepo = path.join(asbHome, `${name}.git`);
+  const checkoutRoot = path.join(asbHome, `${name}-checkout`);
+  const marketplaceDir = path.join(checkoutRoot, 'catalog');
+  const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+  execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], { stdio: 'ignore' });
+  execFileSync('git', ['clone', bareRepo, checkoutRoot], { stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: checkoutRoot,
+    stdio: 'ignore',
+  });
+  execFileSync('git', ['config', 'user.name', 'Test'], {
+    cwd: checkoutRoot,
+    stdio: 'ignore',
+  });
+  fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+  fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+  fs.writeFileSync(path.join(pluginRoot, 'commands', 'committed.md'), '# Committed');
+  fs.writeFileSync(
+    path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+    JSON.stringify({
+      name,
+      plugins: [
+        {
+          name: 'pinned-plugin',
+          source: {
+            source: 'git-subdir',
+            url: bareRepo,
+            path: 'packages/plugin',
+            ref: 'main',
+          },
+        },
+      ],
+    })
+  );
+  commitAll(checkoutRoot);
+  execFileSync('git', ['push', 'origin', 'main'], { cwd: checkoutRoot, stdio: 'ignore' });
+  execFileSync('git', ['fetch', 'origin', '+refs/heads/main:refs/remotes/origin/main'], {
+    cwd: checkoutRoot,
+    stdio: 'ignore',
+  });
+  return { checkoutRoot, marketplaceDir, pluginRoot };
 }
 
 function createRemoteSkillMarketplace(asbHome: string): {
@@ -549,7 +597,91 @@ test('pinned same-origin entries do not reuse a dirty plugin worktree', () => {
 
     assert.deepEqual(plugin.components.commands, ['pinned-plugin@dirty:committed']);
     assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+    assert.deepEqual(refreshMarketplacePluginCache(marketplaceDir, 'dirty'), {
+      refreshed: 1,
+      removed: 0,
+    });
+    assert.equal(fs.existsSync(plugin.meta.sourcePath), true);
   });
+});
+
+test('same-origin ref validation follows the remote-tracking branch', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { checkoutRoot, marketplaceDir, pluginRoot } = createPinnedSameOriginMarketplace(
+      asbHome,
+      'remote-ref-catalog'
+    );
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'local-only.md'), '# Local');
+    commitAll(checkoutRoot);
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'main'], { cwd: checkoutRoot, encoding: 'utf-8' }).trim(),
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf-8' }).trim()
+    );
+    assert.notEqual(
+      execFileSync('git', ['rev-parse', 'origin/main'], {
+        cwd: checkoutRoot,
+        encoding: 'utf-8',
+      }).trim(),
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: checkoutRoot, encoding: 'utf-8' }).trim()
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\nremote-ref = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('pinned-plugin@remote-ref');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+
+    assert.deepEqual(plugin.components.commands, ['pinned-plugin@remote-ref:committed']);
+    assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+  });
+});
+
+test('pinned same-origin reuse rejects hidden index deviations', () => {
+  for (const mode of ['skip-worktree', 'assume-unchanged'] as const) {
+    withTempAsbHome((asbHome) => {
+      clearPluginIndexCache();
+      const { checkoutRoot, marketplaceDir, pluginRoot } = createPinnedSameOriginMarketplace(
+        asbHome,
+        `${mode}-catalog`
+      );
+      const commandPath = path.join(pluginRoot, 'commands', 'committed.md');
+      execFileSync('git', ['update-index', `--${mode}`, 'packages/plugin/commands/committed.md'], {
+        cwd: checkoutRoot,
+        stdio: 'ignore',
+      });
+      if (mode === 'skip-worktree') fs.rmSync(commandPath);
+      else fs.writeFileSync(commandPath, '# Local');
+      const relativeCommand = 'packages/plugin/commands/committed.md';
+      assert.equal(
+        execFileSync('git', ['status', '--porcelain=v1', '--', relativeCommand], {
+          cwd: checkoutRoot,
+          encoding: 'utf-8',
+        }).trim(),
+        ''
+      );
+      assert.equal(
+        execFileSync('git', ['ls-files', '-v', '--', relativeCommand], {
+          cwd: checkoutRoot,
+          encoding: 'utf-8',
+        }).trim()[0],
+        mode === 'skip-worktree' ? 'S' : 'h'
+      );
+      writeConfigToml(asbHome, `[plugins.sources]\nhidden = "${marketplaceDir}"\n`);
+
+      const index = buildPluginIndex();
+      const plugin = index.get('pinned-plugin@hidden');
+      assert.ok(plugin);
+      index.expand([plugin.id]);
+
+      assert.deepEqual(plugin.components.commands, ['pinned-plugin@hidden:committed']);
+      assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+      assert.equal(
+        fs.readFileSync(path.join(plugin.meta.sourcePath, 'commands', 'committed.md'), 'utf-8'),
+        '# Committed'
+      );
+    });
+  }
 });
 
 test('same-origin entries with incompatible pins materialize the requested commit', () => {
