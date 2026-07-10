@@ -138,6 +138,58 @@ function writeConfigToml(asbHome: string, content: string) {
   fs.writeFileSync(path.join(asbHome, 'config.toml'), content);
 }
 
+function initGitRepo(repoDir: string): void {
+  execFileSync('git', ['init', '--initial-branch=main'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+    cwd: repoDir,
+    stdio: 'ignore',
+  });
+  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repoDir, stdio: 'ignore' });
+}
+
+function commitAll(repoDir: string): void {
+  execFileSync('git', ['add', '.'], { cwd: repoDir, stdio: 'ignore' });
+  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: repoDir, stdio: 'ignore' });
+}
+
+function createRemoteSkillMarketplace(asbHome: string): {
+  marketplaceDir: string;
+  pluginId: string;
+  skillId: string;
+} {
+  const remoteRepo = path.join(asbHome, 'remote-plugin.git');
+  const skillDir = path.join(remoteRepo, 'skills', 'remote-skill');
+  fs.mkdirSync(skillDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(skillDir, 'SKILL.md'),
+    '---\nname: remote-skill\ndescription: Remote skill\n---\nBody'
+  );
+  initGitRepo(remoteRepo);
+  commitAll(remoteRepo);
+
+  const marketplaceDir = path.join(asbHome, 'marketplaces', 'remote-catalog');
+  fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+  fs.writeFileSync(
+    path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+    JSON.stringify({
+      name: 'remote-catalog',
+      owner: { name: 'test' },
+      plugins: [
+        {
+          name: 'remote-plugin',
+          description: 'Remote plugin',
+          source: { source: 'url', url: remoteRepo },
+        },
+      ],
+    })
+  );
+  return {
+    marketplaceDir,
+    pluginId: 'remote-plugin@remote-catalog',
+    skillId: 'remote-plugin@remote-catalog:remote-skill',
+  };
+}
+
 // ── Tests ──────────────────────────────────────────────────────────
 
 test('buildPluginIndex discovers marketplace plugins', () => {
@@ -183,6 +235,118 @@ test('buildPluginIndex discovers marketplace plugins', () => {
     assert.ok(b);
     assert.deepEqual(b.components.commands, ['plugin-b@test-marketplace:cmd-three']);
     assert.deepEqual(b.components.agents, []);
+  });
+});
+
+test('external marketplace components materialize only when selected', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir, pluginId, skillId } = createRemoteSkillMarketplace(asbHome);
+    writeConfigToml(asbHome, `[plugins.sources]\nremote-catalog = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get(pluginId);
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.description, 'Remote plugin');
+    assert.deepEqual(plugin.components.skills, []);
+    assert.equal(
+      fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache', 'remote-catalog')),
+      false
+    );
+
+    assert.equal(
+      loadSkillLibrary().some((skill) => skill.id === skillId),
+      false
+    );
+    assert.equal(
+      fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache', 'remote-catalog')),
+      false
+    );
+
+    assert.deepEqual(index.expand([pluginId]).skills, [skillId]);
+    const selectedSkill = loadSkillLibrary().find((skill) => skill.id === skillId);
+    assert.ok(selectedSkill);
+    assert.equal(fs.existsSync(selectedSkill.skillPath), true);
+  });
+});
+
+test('direct external component selection materializes its owning plugin', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir, pluginId, skillId } = createRemoteSkillMarketplace(asbHome);
+    writeConfigToml(
+      asbHome,
+      [
+        '[skills]',
+        `enabled = ["${skillId}"]`,
+        '',
+        '[plugins.sources]',
+        `remote-catalog = "${marketplaceDir}"`,
+      ].join('\n')
+    );
+
+    const index = buildPluginIndex();
+    assert.deepEqual(index.get(pluginId)?.components.skills, []);
+
+    const resolved = resolveApplicationSectionConfig('skills', 'codex');
+
+    assert.deepEqual(resolved.enabled, [skillId]);
+    assert.equal(index.get(pluginId)?.meta.materialized, true);
+    assert.equal(
+      loadSkillLibrary().some((skill) => skill.id === skillId),
+      true
+    );
+  });
+});
+
+test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = path.join(asbHome, 'marketplaces', 'self-catalog');
+    const pluginRoot = path.join(marketplaceDir, 'skills');
+    const skillDir = path.join(pluginRoot, 'ppt-master');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'self-catalog',
+        owner: { name: 'test' },
+        plugins: [
+          {
+            name: 'ppt-master',
+            source: { source: 'git-subdir', url: marketplaceDir, path: 'skills', ref: 'main' },
+          },
+        ],
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginRoot, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'ppt-master', skills: './' })
+    );
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: ppt-master\ndescription: Build slides\n---\nBody'
+    );
+    initGitRepo(marketplaceDir);
+    execFileSync('git', ['remote', 'add', 'origin', marketplaceDir], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    commitAll(marketplaceDir);
+    writeConfigToml(asbHome, `[plugins.sources]\nself-catalog = "${marketplaceDir}"\n`);
+
+    const plugin = buildPluginIndex().get('ppt-master@self-catalog');
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.sourcePath, pluginRoot);
+    assert.deepEqual(plugin.components.skills, ['ppt-master@self-catalog:ppt-master']);
+    assert.equal(
+      fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache', 'self-catalog')),
+      false
+    );
   });
 });
 
@@ -984,6 +1148,48 @@ test('Codex marketplace plugins expose Codex native install metadata', () => {
   });
 });
 
+test('native-only marketplace sources remain discoverable without materialization', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'native-catalog');
+    fs.mkdirSync(path.join(mktDir, '.agents', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(mktDir, '.agents', 'plugins', 'marketplace.json'),
+      JSON.stringify({
+        name: 'native-catalog',
+        plugins: [
+          {
+            name: 'native-package',
+            version: '1.2.3',
+            source: { source: 'npm', package: '@example/native-package' },
+          },
+        ],
+      })
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\nnative-source = "${mktDir}"\n`);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('native-package@native-source');
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.materialized, false);
+    assert.deepEqual(plugin.components, {
+      commands: [],
+      agents: [],
+      skills: [],
+      hooks: [],
+      rules: [],
+      mcp: [],
+    });
+    assert.equal(
+      index.getNative('native-package@native-catalog', 'codex')?.id,
+      'native-package@native-source'
+    );
+    assert.equal(plugin.meta.native?.version, '1.2.3');
+    assert.equal(fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache')), false);
+  });
+});
+
 test('remote marketplace cache paths do not use raw plugin names', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -1005,7 +1211,11 @@ test('remote marketplace cache paths do not use raw plugin names', () => {
     writeConfigToml(asbHome, `[plugins.sources]\nunsafe-cache = "${mktDir}"\n`);
 
     const index = buildPluginIndex();
-    assert.equal(index.plugins.length, 0);
+    assert.equal(index.plugins.length, 1);
+    assert.throws(
+      () => index.expand(['../../escape/plugin@unsafe-cache']),
+      /Failed to materialize marketplace plugin/
+    );
     assert.equal(fs.existsSync(path.join(asbHome, 'plugins', 'escape')), false);
   });
 });
@@ -1065,7 +1275,15 @@ test('remote marketplace source paths stay inside the cloned cache root', () => 
     writeConfigToml(asbHome, `[plugins.sources]\nescape-source = "${mktDir}"\n`);
 
     const index = buildPluginIndex();
-    assert.equal(index.plugins.length, 0);
+    assert.equal(index.plugins.length, 2);
+    assert.throws(
+      () => index.expand(['remote-plugin@escape-source']),
+      /Failed to materialize marketplace plugin/
+    );
+    assert.throws(
+      () => index.expand(['remote-symlink@escape-source']),
+      /Failed to materialize marketplace plugin/
+    );
   });
 });
 

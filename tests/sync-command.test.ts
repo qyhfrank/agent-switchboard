@@ -114,6 +114,33 @@ function createCodexPluginFixture(asbHome: string): string {
   return pluginDir;
 }
 
+function createExternalNativeMarketplaceFixture(
+  asbHome: string,
+  target: 'claude-code' | 'codex'
+): string {
+  const mktDir = path.join(asbHome, 'marketplaces', `${target}-external`);
+  const manifestDir =
+    target === 'claude-code'
+      ? path.join(mktDir, '.claude-plugin')
+      : path.join(mktDir, '.agents', 'plugins');
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(manifestDir, 'marketplace.json'),
+    JSON.stringify({
+      name: `${target}-external`,
+      plugins: [
+        {
+          name: 'remote-native',
+          version: '1.0.0',
+          source: { source: 'url', url: 'file:///not-materialized.git' },
+        },
+      ],
+    }),
+    'utf-8'
+  );
+  return mktDir;
+}
+
 async function captureConsoleOutput<T>(
   fn: () => Promise<T>
 ): Promise<{ result: T; output: string }> {
@@ -533,6 +560,51 @@ test('distributeClaudeNativePlugins installs missing marketplace plugin through 
   });
 });
 
+test('Claude native distribution leaves external marketplace entries unmaterialized', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mktDir = createExternalNativeMarketplaceFixture(asbHome, 'claude-code');
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins.sources]',
+      `external-source = "${mktDir}"`,
+      '',
+      '[applications.claude-code.native_plugins]',
+      'enabled = ["remote-native@claude-code-external"]',
+    ]);
+
+    const calls: string[][] = [];
+    const runner: ClaudePluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return { status: 0, stdout: '[]', stderr: '' };
+      }
+      if (args.join(' ') === 'plugin list --json') {
+        return { status: 0, stdout: '[]', stderr: '' };
+      }
+      return { status: 0, stdout: '', stderr: '' };
+    };
+
+    const outcome = distributeClaudeNativePlugins({
+      activeAppIds: ['claude-code'],
+      runner,
+    });
+
+    assert.equal(outcome.results[0]?.status, 'written');
+    assert.deepEqual(calls, [
+      ['plugin', 'validate', mktDir],
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'marketplace', 'add', '--scope', 'user', mktDir],
+      ['plugin', 'list', '--json'],
+      ['plugin', 'install', '--scope', 'user', 'remote-native@claude-code-external'],
+    ]);
+    assert.equal(fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache')), false);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+  });
+});
+
 test('distributeClaudeNativePlugins dry-run does not invoke Claude CLI runner', async () => {
   await withTempHomesAsync(async ({ asbHome }) => {
     simulateAppsInstalled('claude-code');
@@ -630,6 +702,48 @@ test('distributeCodexNativePlugins installs bare plugin through Codex CLI', asyn
       ['plugin', 'list', '--marketplace', 'cowart', '--json'],
       ['plugin', 'add', 'cowart@cowart', '--json'],
     ]);
+  });
+});
+
+test('Codex native distribution leaves external marketplace entries unmaterialized', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    const mktDir = createExternalNativeMarketplaceFixture(asbHome, 'codex');
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[plugins.sources]',
+      `external-source = "${mktDir}"`,
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["remote-native@codex-external"]',
+    ]);
+
+    const calls: string[][] = [];
+    const runner: CodexPluginCommandRunner = (args) => {
+      calls.push(args);
+      if (args.join(' ') === 'plugin marketplace list --json') {
+        return { status: 0, stdout: '{"marketplaces":[]}', stderr: '' };
+      }
+      if (args.join(' ') === 'plugin list --marketplace codex-external --json') {
+        return { status: 0, stdout: '{"installed":[],"available":[]}', stderr: '' };
+      }
+      return { status: 0, stdout: '{}', stderr: '' };
+    };
+
+    const outcome = distributeCodexNativePlugins({ activeAppIds: ['codex'], runner });
+
+    assert.equal(outcome.results[0]?.status, 'written');
+    assert.deepEqual(calls, [
+      ['plugin', 'marketplace', 'list', '--json'],
+      ['plugin', 'marketplace', 'add', mktDir, '--json'],
+      ['plugin', 'list', '--marketplace', 'codex-external', '--json'],
+      ['plugin', 'add', 'remote-native@codex-external', '--json'],
+    ]);
+    assert.equal(fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache')), false);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'native-plugins')), false);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
   });
 });
 
