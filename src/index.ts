@@ -1583,11 +1583,13 @@ pluginRoot
         console.log(
           JSON.stringify(
             index.plugins.map((p) => {
+              const { materialized: _materialized, ...publicMeta } = p.meta;
               return {
                 id: p.id,
                 ref: p.id,
                 enabled: p.refs.some((candidate) => enabledSet.has(candidate)),
-                ...p.meta,
+                ...publicMeta,
+                componentsResolved: p.meta.materialized !== false,
                 components: Object.fromEntries(
                   Object.entries(p.components).map(([k, v]) => [k, v.length])
                 ),
