@@ -20,9 +20,13 @@ import { getSourcesRecord } from '../library/sources.js';
 import { loadPluginComponents, loadPluginHookEntries } from '../marketplace/plugin-loader.js';
 import {
   isMarketplace,
+  isResolvedPlugin,
+  type MarketplacePlugin,
   type NativePluginTarget,
+  type ResolvedPlugin,
   readMarketplace,
   readPluginManifest,
+  resolveMarketplacePlugin,
 } from '../marketplace/reader.js';
 import type { RuleSnippet } from '../rules/library.js';
 import { parseRuleMarkdown } from '../rules/parser.js';
@@ -47,6 +51,7 @@ export interface PluginMeta {
   sourceKind: 'marketplace' | 'plugin';
   /** Namespace of the source this plugin came from (for @source disambiguation) */
   sourceName: string;
+  materialized?: boolean;
   native?: NativePluginMeta;
 }
 
@@ -89,6 +94,8 @@ export interface PluginIndex {
   getNative(pluginId: string, target?: NativePluginTarget): PluginDescriptor | undefined;
   /** Expand a list of plugin IDs into per-section component IDs */
   expand(pluginIds: string[]): PluginComponents;
+  /** Materialize selected marketplace plugins without expanding their components */
+  materialize(pluginIds: string[]): PluginDescriptor[];
   /** Normalize legacy or aliased component refs to canonical IDs */
   normalizeComponentId(componentId: string): string;
 }
@@ -242,47 +249,64 @@ function loadPluginRuleIds(basePath: string, namespace: string): string[] {
 
 // ── Index builder ──────────────────────────────────────────────────
 
+function emptyPluginComponents(): PluginComponents {
+  return { commands: [], agents: [], skills: [], hooks: [], rules: [], mcp: [] };
+}
+
+function loadMarketplacePluginData(
+  plugin: ResolvedPlugin,
+  pluginId: string,
+  allMcpServers: PluginMcpServer[],
+  allRuleSnippets: PluginRuleSnippet[]
+): PluginComponents {
+  const components = loadPluginComponents(plugin, pluginId);
+  const rulesResult = loadRulesFromPluginDir(plugin.localPath, pluginId);
+  const mcpResult = loadMcpFromPluginDir(plugin.localPath, pluginId);
+
+  if (plugin.mcpServers) {
+    for (const [name, serverDef] of Object.entries(plugin.mcpServers)) {
+      if (typeof serverDef !== 'object' || serverDef === null) continue;
+      const serverId = buildComponentId(pluginId, name);
+      if (!mcpResult.ids.includes(serverId)) {
+        mcpResult.ids.push(serverId);
+        mcpResult.servers.push({
+          pluginId,
+          serverId,
+          server: serverDef as McpServer,
+        });
+      }
+    }
+  }
+
+  allMcpServers.push(...mcpResult.servers);
+  allRuleSnippets.push(...rulesResult.snippets);
+
+  return {
+    commands: components.commands.map((entry) => entry.id),
+    agents: components.agents.map((entry) => entry.id),
+    skills: components.skills.map((entry) => entry.id),
+    hooks: components.hooks.map((entry) => entry.id),
+    rules: rulesResult.ids,
+    mcp: mcpResult.ids,
+  };
+}
+
 function buildFromMarketplace(
   sourceName: string,
   basePath: string,
   allPlugins: PluginDescriptor[],
   allMcpServers: PluginMcpServer[],
-  allRuleSnippets: PluginRuleSnippet[]
+  allRuleSnippets: PluginRuleSnippet[],
+  deferredLoaders: Map<string, () => void>
 ): void {
   const result = readMarketplace(basePath);
 
   for (const plugin of result.plugins) {
     const pluginId = buildPluginId(plugin.name, sourceName, 'marketplace');
-    const components = loadPluginComponents(plugin, pluginId);
-
-    const commandIds = components.commands.map((c) => c.id);
-    const agentIds = components.agents.map((a) => a.id);
-    const skillIds = components.skills.map((s) => s.id);
-    const hookIds = components.hooks.map((h) => h.id);
-
-    const rulesResult = loadRulesFromPluginDir(plugin.localPath, pluginId);
-    const mcpResult = loadMcpFromPluginDir(plugin.localPath, pluginId);
-
-    // Also pick up mcpServers declared in the marketplace entry / plugin.json
-    if (plugin.mcpServers) {
-      for (const [name, serverDef] of Object.entries(plugin.mcpServers)) {
-        if (typeof serverDef !== 'object' || serverDef === null) continue;
-        const serverId = buildComponentId(pluginId, name);
-        if (!mcpResult.ids.includes(serverId)) {
-          mcpResult.ids.push(serverId);
-          mcpResult.servers.push({
-            pluginId,
-            serverId,
-            server: serverDef as McpServer,
-          });
-        }
-      }
-    }
-
-    allMcpServers.push(...mcpResult.servers);
-    allRuleSnippets.push(...rulesResult.snippets);
-
-    allPlugins.push({
+    const initialComponents = isResolvedPlugin(plugin)
+      ? loadMarketplacePluginData(plugin, pluginId, allMcpServers, allRuleSnippets)
+      : emptyPluginComponents();
+    const descriptor: PluginDescriptor = {
       name: plugin.name,
       id: pluginId,
       refs: [pluginId],
@@ -290,9 +314,10 @@ function buildFromMarketplace(
         description: plugin.description,
         version: plugin.version,
         owner: result.owner.name,
-        sourcePath: plugin.localPath,
+        sourcePath: plugin.localPath ?? basePath,
         sourceKind: 'marketplace',
         sourceName,
+        materialized: isResolvedPlugin(plugin),
         native: {
           target: result.nativeTarget,
           marketplaceName: result.name,
@@ -302,15 +327,28 @@ function buildFromMarketplace(
           version: plugin.version,
         },
       },
-      components: {
-        commands: commandIds,
-        agents: agentIds,
-        skills: skillIds,
-        hooks: hookIds,
-        rules: rulesResult.ids,
-        mcp: mcpResult.ids,
-      },
-    });
+      components: initialComponents,
+    };
+    allPlugins.push(descriptor);
+
+    if (!isResolvedPlugin(plugin)) {
+      deferredLoaders.set(pluginId, () => {
+        const resolved = resolveMarketplacePlugin(plugin as MarketplacePlugin);
+        if (!resolved) {
+          throw new Error(`Failed to materialize marketplace plugin "${pluginId}".`);
+        }
+        descriptor.components = loadMarketplacePluginData(
+          resolved,
+          pluginId,
+          allMcpServers,
+          allRuleSnippets
+        );
+        descriptor.meta.description = resolved.description;
+        descriptor.meta.version = resolved.version;
+        descriptor.meta.sourcePath = resolved.localPath;
+        descriptor.meta.materialized = true;
+      });
+    }
   }
 }
 
@@ -404,11 +442,12 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   const plugins: PluginDescriptor[] = [];
   const mcpServers: PluginMcpServer[] = [];
   const ruleSnippets: PluginRuleSnippet[] = [];
+  const deferredLoaders = new Map<string, () => void>();
   const sources = getSourcesRecord(scope);
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
-      buildFromMarketplace(namespace, basePath, plugins, mcpServers, ruleSnippets);
+      buildFromMarketplace(namespace, basePath, plugins, mcpServers, ruleSnippets, deferredLoaders);
     } else {
       buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets);
     }
@@ -469,7 +508,7 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   }
 
   const componentAliases = new Map<string, string>();
-  for (const plugin of plugins) {
+  const registerComponentAliases = (plugin: PluginDescriptor) => {
     for (const section of ['commands', 'agents', 'skills', 'hooks', 'rules', 'mcp'] as const) {
       for (const componentId of plugin.components[section]) {
         componentAliases.set(componentId, componentId);
@@ -482,7 +521,26 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
         }
       }
     }
+  };
+  for (const plugin of plugins) {
+    registerComponentAliases(plugin);
   }
+
+  const materialize = (pluginIds: string[]): PluginDescriptor[] => {
+    const result: PluginDescriptor[] = [];
+    for (const pluginId of pluginIds) {
+      const plugin = byId.get(pluginId);
+      if (!plugin) continue;
+      const loader = deferredLoaders.get(plugin.id);
+      if (loader) {
+        loader();
+        deferredLoaders.delete(plugin.id);
+        registerComponentAliases(plugin);
+      }
+      result.push(plugin);
+    }
+    return result;
+  };
 
   const index: PluginIndex = {
     plugins,
@@ -506,6 +564,8 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
       return byNativeRef.get(`${target}\0${pluginId}`);
     },
 
+    materialize,
+
     expand(pluginIds: string[]): PluginComponents {
       const result: PluginComponents = {
         commands: [],
@@ -516,9 +576,7 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
         mcp: [],
       };
 
-      for (const pid of pluginIds) {
-        const descriptor = this.get(pid);
-        if (!descriptor) continue;
+      for (const descriptor of materialize(pluginIds)) {
         for (const section of ['commands', 'agents', 'skills', 'hooks', 'rules', 'mcp'] as const) {
           result[section].push(...descriptor.components[section]);
         }
@@ -528,6 +586,13 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     },
 
     normalizeComponentId(componentId: string) {
+      const existing = componentAliases.get(componentId);
+      if (existing) return existing;
+
+      const parsed = splitComponentId(componentId);
+      if (parsed && byId.has(parsed.pluginId)) {
+        materialize([parsed.pluginId]);
+      }
       return componentAliases.get(componentId) ?? componentId;
     },
   };
