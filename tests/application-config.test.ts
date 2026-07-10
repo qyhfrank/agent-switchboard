@@ -9,6 +9,7 @@ import {
   resolveApplicationSectionConfig,
 } from '../src/config/application-config.js';
 import { loadMergedSwitchboardConfig } from '../src/config/layered-config.js';
+import { clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
 test('mergeIncrementalSelection returns base when no override', () => {
@@ -146,5 +147,40 @@ test('per-agent override with complete active replacement', () => {
 
     const result = resolveApplicationSectionConfig('skills', 'codex');
     assert.deepEqual(result.enabled, ['skill-x', 'skill-y']);
+  });
+});
+
+test('per-application plugin enabled replaces the global portable plugin selection', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    for (const plugin of ['global-plugin', 'codex-plugin']) {
+      const commandsDir = path.join(asbHome, 'plugins', plugin, 'commands');
+      fs.mkdirSync(commandsDir, { recursive: true });
+      fs.writeFileSync(path.join(commandsDir, `${plugin}.md`), `# ${plugin}`);
+    }
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[applications]',
+        'enabled = ["claude-code", "codex", "gemini"]',
+        '',
+        '[plugins]',
+        'enabled = ["global-plugin"]',
+        '',
+        '[applications.codex.plugins]',
+        'enabled = ["codex-plugin"]',
+        '',
+        '[applications.gemini.plugins]',
+        'enabled = []',
+      ].join('\n')
+    );
+
+    assert.deepEqual(resolveApplicationSectionConfig('commands', 'claude-code').enabled, [
+      'global-plugin:global-plugin',
+    ]);
+    assert.deepEqual(resolveApplicationSectionConfig('commands', 'codex').enabled, [
+      'codex-plugin:codex-plugin',
+    ]);
+    assert.deepEqual(resolveApplicationSectionConfig('commands', 'gemini').enabled, []);
   });
 });

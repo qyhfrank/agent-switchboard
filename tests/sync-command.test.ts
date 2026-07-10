@@ -193,6 +193,82 @@ test('runSyncCommand syncs global config through extracted orchestration', async
   });
 });
 
+test('runSyncCommand distributes profile-scoped application plugins per target', async () => {
+  await withTempHomesAsync(async ({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code', 'codex');
+    for (const [plugin, command] of [
+      ['global-plugin', 'global-command'],
+      ['codex-plugin', 'codex-command'],
+    ] as const) {
+      const commandsDir = path.join(asbHome, 'plugins', plugin, 'commands');
+      fs.mkdirSync(commandsDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(commandsDir, `${command}.md`),
+        `---\ndescription: ${command}\n---\n${command}\n`
+      );
+    }
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code", "codex"]',
+    ]);
+    writeConfig(getProfileConfigPath('team'), [
+      '[plugins]',
+      'enabled = ["global-plugin"]',
+      '',
+      '[applications.codex.plugins]',
+      'enabled = ["codex-plugin"]',
+    ]);
+
+    const { result } = await captureConsoleOutput(() =>
+      runSyncCommand({ scope: { profile: 'team' }, updateSources: false })
+    );
+
+    assert.equal(result, false);
+    assert.equal(
+      fs.existsSync(
+        path.join(agentsHome, '.claude', 'commands', 'global-plugin:global-command.md')
+      ),
+      true
+    );
+    assert.equal(
+      fs.existsSync(path.join(agentsHome, '.claude', 'commands', 'codex-plugin:codex-command.md')),
+      false
+    );
+    assert.equal(
+      fs.existsSync(path.join(agentsHome, '.codex', 'prompts', 'codex-plugin:codex-command.md')),
+      true
+    );
+    assert.equal(
+      fs.existsSync(path.join(agentsHome, '.codex', 'prompts', 'global-plugin:global-command.md')),
+      false
+    );
+  });
+});
+
+test('runSyncCommand keeps application portable and native plugin selections separate', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    simulateAppsInstalled('codex');
+    createCodexPluginFixture(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["codex"]',
+      '',
+      '[applications.codex.plugins]',
+      'enabled = ["cowart"]',
+      '',
+      '[applications.codex.native_plugins]',
+      'enabled = ["cowart"]',
+    ]);
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ updateSources: false, dryRun: true })
+    );
+
+    assert.equal(result, true);
+    assert.match(output, /also enabled through \[plugins\]\.enabled/);
+  });
+});
+
 test('runSyncCommand project scope only syncs project outputs', async () => {
   await withTempHomesAsync(async ({ asbHome }) => {
     simulateAppsInstalled('claude-code');

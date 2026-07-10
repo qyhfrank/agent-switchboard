@@ -2,6 +2,7 @@ import chalk from 'chalk';
 import { distributeCommands } from '../commands/distribution.js';
 import {
   resolveScopedNativePluginConfig,
+  resolveScopedPortablePluginConfig,
   resolveScopedSectionConfig,
 } from '../config/application-config.js';
 import type { ConfigLayers } from '../config/layered-config.js';
@@ -147,6 +148,12 @@ export async function runSyncPhase({
     }
     sectionAppConfigs.set(section, appMap);
   }
+  const portablePluginRefsByApp = new Map(
+    config.applications.enabled.map((appId) => [
+      appId,
+      resolveScopedPortablePluginConfig(appId, scope).enabled,
+    ])
+  );
 
   const assumeInstalledSet = new Set(config.applications.assume_installed);
 
@@ -188,14 +195,14 @@ export async function runSyncPhase({
       scope,
       activeAppIds,
       assumeInstalled: assumeInstalledSet,
-      genericPluginRefs: displayPluginRefs,
+      genericPluginRefs: portablePluginRefsByApp.get('claude-code') ?? [],
       projectMode,
     }).results,
     ...validateCodexNativePlugins({
       scope,
       activeAppIds,
       assumeInstalled: assumeInstalledSet,
-      genericPluginRefs: displayPluginRefs,
+      genericPluginRefs: portablePluginRefsByApp.get('codex') ?? [],
       projectMode,
     }).results,
   ];
@@ -271,7 +278,7 @@ export async function runSyncPhase({
           activeAppIds,
           assumeInstalled: assumeInstalledSet,
           dryRun,
-          genericPluginRefs: displayPluginRefs,
+          genericPluginRefs: portablePluginRefsByApp.get('claude-code') ?? [],
           projectMode,
         }).results,
         ...distributeCodexNativePlugins({
@@ -279,7 +286,7 @@ export async function runSyncPhase({
           activeAppIds,
           assumeInstalled: assumeInstalledSet,
           dryRun,
-          genericPluginRefs: displayPluginRefs,
+          genericPluginRefs: portablePluginRefsByApp.get('codex') ?? [],
           projectMode,
         }).results,
       ],
