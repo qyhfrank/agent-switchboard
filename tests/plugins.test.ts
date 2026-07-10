@@ -13,6 +13,7 @@ import { loadMcpEnabledState } from '../src/library/state.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { loadRuleLibrary } from '../src/rules/library.js';
 import { loadSkillLibrary } from '../src/skills/library.js';
+import { runCli } from './helpers/cli.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
 // ── Fixture helpers ────────────────────────────────────────────────
@@ -159,10 +160,20 @@ function createRemoteSkillMarketplace(asbHome: string): {
 } {
   const remoteRepo = path.join(asbHome, 'remote-plugin.git');
   const skillDir = path.join(remoteRepo, 'skills', 'remote-skill');
+  const ruleDir = path.join(remoteRepo, 'rules');
   fs.mkdirSync(skillDir, { recursive: true });
+  fs.mkdirSync(ruleDir, { recursive: true });
   fs.writeFileSync(
     path.join(skillDir, 'SKILL.md'),
     '---\nname: remote-skill\ndescription: Remote skill\n---\nBody'
+  );
+  fs.writeFileSync(
+    path.join(ruleDir, 'remote-rule.md'),
+    '---\ntitle: Remote Rule\n---\nRemote rule body'
+  );
+  fs.writeFileSync(
+    path.join(remoteRepo, '.mcp.json'),
+    JSON.stringify({ 'remote-api': { type: 'http', url: 'https://example.com/mcp' } })
   );
   initGitRepo(remoteRepo);
   commitAll(remoteRepo);
@@ -188,6 +199,25 @@ function createRemoteSkillMarketplace(asbHome: string): {
     pluginId: 'remote-plugin@remote-catalog',
     skillId: 'remote-plugin@remote-catalog:remote-skill',
   };
+}
+
+function createNativeOnlyMarketplace(asbHome: string): string {
+  const mktDir = path.join(asbHome, 'marketplaces', 'native-catalog');
+  fs.mkdirSync(path.join(mktDir, '.agents', 'plugins'), { recursive: true });
+  fs.writeFileSync(
+    path.join(mktDir, '.agents', 'plugins', 'marketplace.json'),
+    JSON.stringify({
+      name: 'native-catalog',
+      plugins: [
+        {
+          name: 'native-package',
+          version: '1.2.3',
+          source: { source: 'npm', package: '@example/native-package' },
+        },
+      ],
+    })
+  );
+  return mktDir;
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -297,6 +327,72 @@ test('direct external component selection materializes its owning plugin', () =>
       loadSkillLibrary().some((skill) => skill.id === skillId),
       true
     );
+  });
+});
+
+test('configured external plugins materialize before standalone library loading', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir, pluginId, skillId } = createRemoteSkillMarketplace(asbHome);
+    writeConfigToml(
+      asbHome,
+      [
+        '[plugins]',
+        `enabled = ["${pluginId}"]`,
+        '',
+        '[plugins.sources]',
+        `remote-catalog = "${marketplaceDir}"`,
+      ].join('\n')
+    );
+
+    const skill = loadSkillLibrary().find((entry) => entry.id === skillId);
+
+    assert.ok(skill);
+    assert.equal(fs.existsSync(skill.skillPath), true);
+  });
+});
+
+test('configured external plugin MCP servers materialize before MCP loading', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir, pluginId } = createRemoteSkillMarketplace(asbHome);
+    const serverId = `${pluginId}:remote-api`;
+    writeConfigToml(
+      asbHome,
+      [
+        '[mcp]',
+        `enabled = ["${serverId}"]`,
+        '',
+        '[plugins.sources]',
+        `remote-catalog = "${marketplaceDir}"`,
+      ].join('\n')
+    );
+
+    const config = loadMcpConfigWithPlugins();
+
+    assert.equal(config.mcpServers[serverId]?.url, 'https://example.com/mcp');
+  });
+});
+
+test('configured external plugin rules materialize before rule loading', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir, pluginId } = createRemoteSkillMarketplace(asbHome);
+    writeConfigToml(
+      asbHome,
+      [
+        '[plugins]',
+        `enabled = ["${pluginId}"]`,
+        '',
+        '[plugins.sources]',
+        `remote-catalog = "${marketplaceDir}"`,
+      ].join('\n')
+    );
+
+    const rule = loadRuleLibrary().find((entry) => entry.id === `${pluginId}:remote-rule`);
+
+    assert.ok(rule);
+    assert.equal(fs.existsSync(rule.filePath), true);
   });
 });
 
@@ -1151,21 +1247,7 @@ test('Codex marketplace plugins expose Codex native install metadata', () => {
 test('native-only marketplace sources remain discoverable without materialization', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
-    const mktDir = path.join(asbHome, 'marketplaces', 'native-catalog');
-    fs.mkdirSync(path.join(mktDir, '.agents', 'plugins'), { recursive: true });
-    fs.writeFileSync(
-      path.join(mktDir, '.agents', 'plugins', 'marketplace.json'),
-      JSON.stringify({
-        name: 'native-catalog',
-        plugins: [
-          {
-            name: 'native-package',
-            version: '1.2.3',
-            source: { source: 'npm', package: '@example/native-package' },
-          },
-        ],
-      })
-    );
+    const mktDir = createNativeOnlyMarketplace(asbHome);
     writeConfigToml(asbHome, `[plugins.sources]\nnative-source = "${mktDir}"\n`);
 
     const index = buildPluginIndex();
@@ -1187,6 +1269,19 @@ test('native-only marketplace sources remain discoverable without materializatio
     );
     assert.equal(plugin.meta.native?.version, '1.2.3');
     assert.equal(fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache')), false);
+  });
+});
+
+test('plugin enable validates portable materialization before persisting selection', () => {
+  withTempAsbHome((asbHome) => {
+    const mktDir = createNativeOnlyMarketplace(asbHome);
+    writeConfigToml(asbHome, `[plugins.sources]\nnative-source = "${mktDir}"\n`);
+
+    assert.throws(
+      () => runCli(['plugin', 'enable', 'native-package@native-source']),
+      /Command failed/
+    );
+    assert.doesNotMatch(fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'), /enabled/);
   });
 });
 

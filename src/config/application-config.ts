@@ -9,6 +9,7 @@
 import type { NativePluginTarget } from '../marketplace/reader.js';
 import { buildPluginIndex, type PluginComponentSection } from '../plugins/index.js';
 import { loadMergedSwitchboardConfig, loadWritableConfigLayer } from './layered-config.js';
+import { mergeIncrementalSelection } from './plugin-selection.js';
 import type {
   IncrementalSelection,
   NativePluginSelection,
@@ -20,6 +21,8 @@ import type { ConfigScope } from './scope.js';
 import { scopeToLayerOptions } from './scope.js';
 
 export type ConfigSection = 'mcp' | 'commands' | 'agents' | 'skills' | 'hooks' | 'rules';
+
+export { mergeIncrementalSelection } from './plugin-selection.js';
 
 /** Schema-level keys in [applications] that are NOT per-app override objects. */
 const APPLICATION_SCHEMA_KEYS = new Set(['enabled', 'active', 'assume_installed']);
@@ -43,35 +46,6 @@ type ApplicationConfigSource = SwitchboardConfig | SwitchboardConfigLayer;
  * Priority: enabled > add/remove
  * Formula: (base - remove) ∪ add
  */
-export function mergeIncrementalSelection(
-  base: string[],
-  override?: IncrementalSelection
-): string[] {
-  if (!override) return base;
-
-  if (override.enabled) {
-    return override.enabled;
-  }
-
-  let result = [...base];
-
-  if (override.remove && override.remove.length > 0) {
-    const removeSet = new Set(override.remove);
-    result = result.filter((id) => !removeSet.has(id));
-  }
-
-  if (override.add && override.add.length > 0) {
-    const existing = new Set(result);
-    for (const id of override.add) {
-      if (!existing.has(id)) {
-        result.push(id);
-      }
-    }
-  }
-
-  return result;
-}
-
 /**
  * Get per-application override configuration for a specific section
  */
