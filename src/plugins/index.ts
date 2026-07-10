@@ -18,7 +18,11 @@ import { loadConfiguredPortableSelections } from '../config/plugin-selection.js'
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { getSourceRevision, getSourcesRecord } from '../library/sources.js';
-import { loadPluginComponents, loadPluginHookEntries } from '../marketplace/plugin-loader.js';
+import {
+  loadPluginComponents,
+  loadPluginHookEntries,
+  resolvePluginComponentPath,
+} from '../marketplace/plugin-loader.js';
 import {
   isMarketplace,
   isResolvedPlugin,
@@ -130,7 +134,7 @@ function loadRulesFromPluginDir(
   pluginDir: string,
   namespace: string
 ): { ids: string[]; snippets: PluginRuleSnippet[]; pluginId: string } {
-  const rulesDir = path.join(pluginDir, 'rules');
+  const rulesDir = resolvePluginComponentPath(pluginDir, 'rules');
   if (!fs.existsSync(rulesDir) || !fs.statSync(rulesDir).isDirectory()) {
     return { ids: [], snippets: [], pluginId: namespace };
   }
@@ -171,7 +175,7 @@ function loadMcpFromPluginDir(
   pluginDir: string,
   namespace: string
 ): { ids: string[]; servers: PluginMcpServer[] } {
-  const mcpJsonPath = path.join(pluginDir, '.mcp.json');
+  const mcpJsonPath = resolvePluginComponentPath(pluginDir, '.mcp.json');
   const ids: string[] = [];
   const servers: PluginMcpServer[] = [];
 
@@ -208,7 +212,7 @@ function loadPluginComponentIds(
   namespace: string,
   type: 'commands' | 'agents'
 ): string[] {
-  const dir = path.join(basePath, type);
+  const dir = resolvePluginComponentPath(basePath, type);
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];
@@ -221,14 +225,16 @@ function loadPluginComponentIds(
 }
 
 function loadPluginSkillIds(basePath: string, namespace: string): string[] {
-  const dir = path.join(basePath, 'skills');
+  const dir = resolvePluginComponentPath(basePath, 'skills');
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort(byEntryName)) {
-    if (entry.isDirectory() && fs.existsSync(path.join(dir, entry.name, 'SKILL.md'))) {
-      ids.push(buildComponentId(namespace, entry.name));
-    }
+    if (!entry.isDirectory()) continue;
+    const skillPath = path.join(dir, entry.name, 'SKILL.md');
+    if (!fs.existsSync(skillPath)) continue;
+    resolvePluginComponentPath(basePath, path.join('skills', entry.name, 'SKILL.md'));
+    ids.push(buildComponentId(namespace, entry.name));
   }
   return ids;
 }
@@ -238,7 +244,7 @@ function loadPluginHookIds(basePath: string, namespace: string): string[] {
 }
 
 function loadPluginRuleIds(basePath: string, namespace: string): string[] {
-  const dir = path.join(basePath, 'rules');
+  const dir = resolvePluginComponentPath(basePath, 'rules');
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return [];
 
   const ids: string[] = [];

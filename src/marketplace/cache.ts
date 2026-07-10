@@ -42,6 +42,11 @@ interface MarketplaceEntryCacheMetadata {
 }
 
 const METADATA_FILE = 'entry.json';
+const LOCK_METADATA_FILE = 'owner.json';
+const LOCK_TIMEOUT_MS = 120_000;
+const LOCK_STALE_MS = 120_000;
+const LOCK_WAIT_MS = 25;
+const lockWaitBuffer = new Int32Array(new SharedArrayBuffer(4));
 const temporaryCacheRoot = new AsyncLocalStorage<string>();
 
 function configuredCacheRoot(): string {
@@ -62,10 +67,15 @@ function runGit(args: string[], cwd?: string): string {
       typeof execError.stderr === 'string'
         ? execError.stderr.trim()
         : (execError.stderr?.toString().trim() ?? '');
-    throw new Error(
-      `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
-    );
+    const detail = stderr || (error instanceof Error ? error.message : String(error));
+    throw new Error(`git ${args[0]} failed: ${redactGitCredentials(detail)}`);
   }
+}
+
+function redactGitCredentials(value: string): string {
+  return value
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1<redacted>@')
+    .replace(/([?&][^=\s&]+)=([^&\s'"]+)/g, '$1=<redacted>');
 }
 
 function digest(value: string): string {
@@ -209,6 +219,105 @@ function safeCacheRoot(create: boolean): string {
   return cacheRoot;
 }
 
+interface CacheLockMetadata {
+  token: string;
+  pid: number;
+  startedAt: number;
+}
+
+function sourceLockPath(sourceName: string, marketplacePath: string): string {
+  const sourcePath = sourceCachePath(sourceName, marketplacePath);
+  return path.join(configuredCacheRoot(), `.${path.basename(sourcePath)}.lock`);
+}
+
+function readLockMetadata(lockPath: string): CacheLockMetadata | null {
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(lockPath, LOCK_METADATA_FILE), 'utf-8'));
+    if (
+      typeof value?.token !== 'string' ||
+      typeof value.pid !== 'number' ||
+      typeof value.startedAt !== 'number'
+    ) {
+      return null;
+    }
+    return value as CacheLockMetadata;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function lockIsStale(lockPath: string): boolean {
+  const metadata = readLockMetadata(lockPath);
+  if (metadata) return !processIsAlive(metadata.pid);
+  try {
+    return Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS;
+  } catch {
+    return false;
+  }
+}
+
+function acquireSourceLock(sourceName: string, marketplacePath: string): () => void {
+  const cacheRoot = safeCacheRoot(true);
+  const lockPath = sourceLockPath(sourceName, marketplacePath);
+  assertNoCacheSymlinks(cacheRoot, lockPath);
+  const token = randomUUID();
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath);
+      try {
+        fs.writeFileSync(
+          path.join(lockPath, LOCK_METADATA_FILE),
+          `${JSON.stringify({ token, pid: process.pid, startedAt: Date.now() })}\n`
+        );
+      } catch (error) {
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        throw error;
+      }
+      return () => {
+        if (readLockMetadata(lockPath)?.token === token) {
+          fs.rmSync(lockPath, { recursive: true, force: true });
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      if (lockIsStale(lockPath)) {
+        const stalePath = `${lockPath}.stale-${randomUUID()}`;
+        try {
+          fs.renameSync(lockPath, stalePath);
+          fs.rmSync(stalePath, { recursive: true, force: true });
+          continue;
+        } catch {
+          // Another process recovered or replaced the lock first.
+        }
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for marketplace cache lock: ${sourceName}`);
+      }
+      Atomics.wait(lockWaitBuffer, 0, 0, LOCK_WAIT_MS);
+    }
+  }
+}
+
+function withSourceLock<T>(sourceName: string, marketplacePath: string, action: () => T): T {
+  const release = acquireSourceLock(sourceName, marketplacePath);
+  try {
+    return action();
+  } finally {
+    release();
+  }
+}
+
 function resolveInside(root: string, subdir: string | undefined): string {
   if (!subdir) return root;
   const resolved = path.resolve(root, subdir);
@@ -225,9 +334,10 @@ function resolveInside(root: string, subdir: string | undefined): string {
 function credentialFreeUrl(value: string): string {
   try {
     const url = new URL(value);
-    if (!url.username && !url.password) return value;
     url.username = '';
     url.password = '';
+    url.search = '';
+    url.hash = '';
     return url.toString();
   } catch {
     return value;
@@ -240,14 +350,14 @@ function checkoutRequest(
 ): { commit: string; pluginPath: string } {
   fs.mkdirSync(repoPath, { recursive: true });
   runGit(['init'], repoPath);
-  runGit(['remote', 'add', 'origin', request.url], repoPath);
 
   const target = request.ref ?? request.sha ?? 'HEAD';
   const fetchArgs = ['fetch', '--depth', '1'];
   if (request.subdir) fetchArgs.push('--filter=blob:none');
-  fetchArgs.push('origin', target);
+  fetchArgs.push('--', request.url, target);
   runGit(fetchArgs, repoPath);
   const commit = runGit(['rev-parse', 'FETCH_HEAD^{commit}'], repoPath);
+  fs.rmSync(path.join(repoPath, '.git', 'FETCH_HEAD'), { force: true });
   if (request.sha && commit !== request.sha) {
     throw new Error(
       `Marketplace plugin pin mismatch: ${request.ref ?? 'fetched commit'} resolved to ${commit}, expected ${request.sha}.`
@@ -259,7 +369,7 @@ function checkoutRequest(
     runGit(['sparse-checkout', 'set', '--', request.subdir], repoPath);
   }
   runGit(['checkout', '--detach', commit], repoPath);
-  runGit(['remote', 'set-url', 'origin', credentialFreeUrl(request.url)], repoPath);
+  runGit(['remote', 'add', 'origin', credentialFreeUrl(request.url)], repoPath);
 
   return { commit, pluginPath: resolveInside(repoPath, request.subdir) };
 }
@@ -317,13 +427,44 @@ function cachedMaterialization(
   }
 }
 
-function replaceEntry(tempPath: string, entryPath: string): void {
+function recoverEntryBackup(
+  request: MarketplaceEntryCacheRequest,
+  identity: string,
+  entryPath: string
+): MarketplaceEntryMaterialization | null {
+  let current = cachedMaterialization(request, identity, entryPath);
+  const sourcePath = path.dirname(entryPath);
+  for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('.backup-')) continue;
+    const backupPath = path.join(sourcePath, entry.name);
+    if (readMetadata(backupPath)?.identity !== identity) continue;
+    const backup = cachedMaterialization(request, identity, backupPath);
+    if (current || !backup) {
+      fs.rmSync(backupPath, { recursive: true, force: true });
+      continue;
+    }
+    if (fs.existsSync(entryPath)) fs.rmSync(entryPath, { recursive: true, force: true });
+    fs.renameSync(backupPath, entryPath);
+    current = cachedMaterialization(request, identity, entryPath);
+    if (!current) throw new Error(`Marketplace cache recovery failed: ${entryPath}`);
+  }
+  return current;
+}
+
+function replaceEntry(
+  tempPath: string,
+  entryPath: string,
+  verify: () => MarketplaceEntryMaterialization | null
+): MarketplaceEntryMaterialization {
   const backupPath = path.join(path.dirname(entryPath), `.backup-${randomUUID()}`);
   const hadEntry = fs.existsSync(entryPath);
   if (hadEntry) fs.renameSync(entryPath, backupPath);
   try {
     fs.renameSync(tempPath, entryPath);
+    const materialized = verify();
+    if (!materialized) throw new Error(`Marketplace cache verification failed: ${entryPath}`);
     if (hadEntry) fs.rmSync(backupPath, { recursive: true, force: true });
+    return materialized;
   } catch (error) {
     if (fs.existsSync(entryPath)) fs.rmSync(entryPath, { recursive: true, force: true });
     if (hadEntry && fs.existsSync(backupPath)) fs.renameSync(backupPath, entryPath);
@@ -360,42 +501,52 @@ export function materializeMarketplaceEntry(
   fs.mkdirSync(sourcePath, { recursive: true });
   assertNoCacheSymlinks(cacheRoot, entryPath);
 
-  const cached = cachedMaterialization(request, identity, entryPath);
-  if (cached && (!options.refresh || request.sha)) return cached;
+  return withSourceLock(request.sourceName, request.marketplacePath, () => {
+    const cached = recoverEntryBackup(request, identity, entryPath);
+    if (cached && (!options.refresh || request.sha)) return cached;
 
-  const tempPath = fs.mkdtempSync(path.join(sourcePath, '.tmp-'));
-  try {
-    const repoPath = path.join(tempPath, 'repo');
-    const checkout = checkoutRequest(request, repoPath);
-    const metadata: MarketplaceEntryCacheMetadata = {
-      version: 1,
-      identity,
-      sourceName: request.sourceName,
-      marketplacePath: request.marketplacePath,
-      pluginName: request.pluginName,
-      ref: request.ref,
-      sha: request.sha,
-      subdir: request.subdir,
-      commit: checkout.commit,
-    };
-    fs.writeFileSync(path.join(tempPath, METADATA_FILE), `${JSON.stringify(metadata, null, 2)}\n`);
-    replaceEntry(tempPath, entryPath);
-    removeSupersededPluginEntries(request, identity);
-
-    const materialized = cachedMaterialization(request, identity, entryPath);
-    if (!materialized) throw new Error(`Marketplace cache verification failed: ${entryPath}`);
-    return materialized;
-  } finally {
-    if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { recursive: true, force: true });
-  }
+    const tempPath = fs.mkdtempSync(path.join(sourcePath, '.tmp-'));
+    try {
+      const repoPath = path.join(tempPath, 'repo');
+      const checkout = checkoutRequest(request, repoPath);
+      const metadata: MarketplaceEntryCacheMetadata = {
+        version: 1,
+        identity,
+        sourceName: request.sourceName,
+        marketplacePath: request.marketplacePath,
+        pluginName: request.pluginName,
+        ref: request.ref,
+        sha: request.sha,
+        subdir: request.subdir,
+        commit: checkout.commit,
+      };
+      fs.writeFileSync(
+        path.join(tempPath, METADATA_FILE),
+        `${JSON.stringify(metadata, null, 2)}\n`
+      );
+      if (!cachedMaterialization(request, identity, tempPath)) {
+        throw new Error(`Marketplace cache verification failed: ${tempPath}`);
+      }
+      const materialized = replaceEntry(tempPath, entryPath, () =>
+        cachedMaterialization(request, identity, entryPath)
+      );
+      removeSupersededPluginEntries(request, identity);
+      return materialized;
+    } finally {
+      if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { recursive: true, force: true });
+    }
+  });
 }
 
 export function removeMarketplaceEntryCache(sourceName: string, marketplacePath: string): void {
   const cacheRoot = safeCacheRoot(false);
   const sourcePath = sourceCachePath(sourceName, marketplacePath);
   if (!fs.existsSync(sourcePath)) return;
-  assertNoCacheSymlinks(cacheRoot, sourcePath);
-  fs.rmSync(sourcePath, { recursive: true, force: true });
+  withSourceLock(sourceName, marketplacePath, () => {
+    if (!fs.existsSync(sourcePath)) return;
+    assertNoCacheSymlinks(cacheRoot, sourcePath);
+    fs.rmSync(sourcePath, { recursive: true, force: true });
+  });
 }
 
 export function refreshMarketplaceEntryCache(
@@ -411,18 +562,17 @@ export function refreshMarketplaceEntryCache(
 
   const requests = new Map<string, MarketplaceEntryCacheRequest>();
   for (const input of currentRequests) {
-    const request = normalizeRequest(input);
-    if (
-      request.sourceName !== sourceName.trim() ||
-      request.marketplacePath !== canonicalMarketplacePath
-    ) {
+    const source = input.sourceName.trim();
+    const root = canonicalPath(input.marketplacePath);
+    if (source !== sourceName.trim() || root !== canonicalMarketplacePath) {
       throw new Error('Marketplace cache refresh request does not match its source owner.');
     }
-    requests.set(request.pluginName, request);
+    requests.set(input.pluginName.trim(), input);
   }
 
   let refreshed = 0;
   let removed = 0;
+  const staleEntries: string[] = [];
   const refreshedPlugins = new Set<string>();
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
@@ -432,14 +582,26 @@ export function refreshMarketplaceEntryCache(
     const metadata = readMetadata(entryPath);
     const request = metadata ? requests.get(metadata.pluginName) : undefined;
     if (!request) {
-      fs.rmSync(entryPath, { recursive: true, force: true });
-      removed++;
+      staleEntries.push(entryPath);
       continue;
     }
     if (refreshedPlugins.has(request.pluginName)) continue;
     materializeMarketplaceEntry(request, { refresh: true });
     refreshedPlugins.add(request.pluginName);
     refreshed++;
+  }
+
+  if (staleEntries.length > 0) {
+    withSourceLock(sourceName, canonicalMarketplacePath, () => {
+      for (const entryPath of staleEntries) {
+        if (!fs.existsSync(entryPath)) continue;
+        assertNoCacheSymlinks(cacheRoot, entryPath);
+        const metadata = readMetadata(entryPath);
+        if (metadata && requests.has(metadata.pluginName)) continue;
+        fs.rmSync(entryPath, { recursive: true, force: true });
+        removed++;
+      }
+    });
   }
 
   return { refreshed, removed };

@@ -526,12 +526,14 @@ export function updateRemoteSources(
   const results: SourceUpdateResult[] = [];
   let gitChecked = false;
   let attemptedUpdate = false;
+  const handledNamespaces = new Set<string>();
 
   for (const [namespace, value] of Object.entries(raw)) {
     if (onlyNamespace && namespace !== onlyNamespace) continue;
     if (typeof value === 'string') continue;
     if (!isCloneableSource(expandHome(value.url))) continue;
     attemptedUpdate = true;
+    handledNamespaces.add(namespace);
 
     try {
       if (!gitChecked) {
@@ -594,6 +596,24 @@ export function updateRemoteSources(
       results.push({
         namespace,
         url: value.url,
+        status: 'error',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  for (const source of getSources(scope)) {
+    if (onlyNamespace && source.namespace !== onlyNamespace) continue;
+    if (handledNamespaces.has(source.namespace)) continue;
+    if (!getMarketplaceManifestInfo(source.path)) continue;
+    attemptedUpdate = true;
+    try {
+      refreshMarketplacePluginCache(source.path, source.namespace);
+      results.push({ namespace: source.namespace, url: source.path, status: 'updated' });
+    } catch (err) {
+      results.push({
+        namespace: source.namespace,
+        url: source.path,
         status: 'error',
         error: err instanceof Error ? err.message : String(err),
       });

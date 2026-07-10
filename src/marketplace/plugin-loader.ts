@@ -156,7 +156,7 @@ function toId(fileName: string): string {
   return path.basename(fileName, path.extname(fileName));
 }
 
-function resolvePluginComponentPath(pluginRoot: string, componentPath: string): string {
+export function resolvePluginComponentPath(pluginRoot: string, componentPath: string): string {
   if (componentPath.includes('\0') || path.isAbsolute(componentPath)) {
     throw new Error(`Plugin component path must be relative: ${componentPath}`);
   }
@@ -370,6 +370,7 @@ function loadSkillEntriesFromDirectory(
 
   const directSkillPath = path.join(skillsDir, SKILL_FILE);
   if (allowDirectSkill && fs.existsSync(directSkillPath)) {
+    resolvePluginComponentPath(skillsDir, SKILL_FILE);
     return [parseSkillEntry(skillsDir, skillsDir, namespace)];
   }
 
@@ -382,6 +383,8 @@ function loadSkillEntriesFromDirectory(
     const skillDir = path.join(skillsDir, entry.name);
     const skillPath = path.join(skillDir, SKILL_FILE);
     if (!fs.existsSync(skillPath)) continue;
+
+    resolvePluginComponentPath(skillsDir, path.join(entry.name, SKILL_FILE));
 
     result.push(parseSkillEntry(skillDir, skillsDir, namespace));
   }
@@ -471,7 +474,10 @@ export function loadPluginHookEntries(pluginDir: string, namespace: string): Hoo
         }
       }
     } else if (entry.isDirectory()) {
-      const hookJsonPath = path.join(hooksDir, entry.name, 'hook.json');
+      const hookJsonPath = resolvePluginComponentPath(
+        pluginDir,
+        path.join('hooks', entry.name, 'hook.json')
+      );
       if (!fs.existsSync(hookJsonPath)) continue;
 
       try {

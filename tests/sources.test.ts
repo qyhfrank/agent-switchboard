@@ -606,6 +606,67 @@ test('updateRemoteSources refreshes materialized marketplace entries', () => {
   });
 });
 
+test('updateRemoteSources refreshes materialized entries from a local marketplace source', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'local-entry-remote');
+    fs.mkdirSync(entryParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const pluginRoot = path.join(entryRemote.workDir, 'plugin');
+    const skillDir = path.join(pluginRoot, 'skills', 'remote-skill');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      '---\nname: remote-skill\ndescription: remote\n---\nBody'
+    );
+    fs.writeFileSync(path.join(pluginRoot, 'VERSION'), 'v1\n');
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin-v1'],
+      { cwd: entryRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    const marketplaceDir = path.join(asbHome, 'local-catalog');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'local-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo, path: 'plugin' },
+          },
+        ],
+      })
+    );
+    addLocalSource('local-catalog', marketplaceDir);
+
+    const index = buildPluginIndex();
+    const plugin = index.get('remote-plugin@local-catalog');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    const materializedPath = plugin.meta.sourcePath;
+    assert.equal(fs.readFileSync(path.join(materializedPath, 'VERSION'), 'utf-8').trim(), 'v1');
+
+    fs.writeFileSync(path.join(pluginRoot, 'VERSION'), 'v2\n');
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin-v2'],
+      { cwd: entryRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    const results = updateRemoteSources();
+
+    assert.equal(results.find((result) => result.namespace === 'local-catalog')?.status, 'updated');
+    assert.equal(fs.readFileSync(path.join(materializedPath, 'VERSION'), 'utf-8').trim(), 'v2');
+  });
+});
+
 test('updateRemoteSources removes derived cache when a source stops being a marketplace', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();

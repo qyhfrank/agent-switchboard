@@ -104,10 +104,35 @@ export interface NativeManifestInfo {
   nativeTarget: NativePluginTarget;
 }
 
+function resolveContainedManifest(localPath: string, relativePath: string): string | undefined {
+  const root = path.resolve(localPath);
+  const manifestPath = path.resolve(root, relativePath);
+  const relative = path.relative(root, manifestPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(manifestPath)) {
+    return undefined;
+  }
+
+  try {
+    const rootReal = fs.realpathSync.native(root);
+    const manifestReal = fs.realpathSync.native(manifestPath);
+    const realRelative = path.relative(rootReal, manifestReal);
+    if (
+      realRelative.startsWith('..') ||
+      path.isAbsolute(realRelative) ||
+      !fs.statSync(manifestReal).isFile()
+    ) {
+      return undefined;
+    }
+    return manifestPath;
+  } catch {
+    return undefined;
+  }
+}
+
 export function getMarketplaceManifestInfo(localPath: string): NativeManifestInfo | undefined {
   for (const manifest of MARKETPLACE_MANIFESTS) {
-    const manifestPath = path.join(localPath, manifest.relativePath);
-    if (fs.existsSync(manifestPath)) {
+    const manifestPath = resolveContainedManifest(localPath, manifest.relativePath);
+    if (manifestPath) {
       return { manifestPath, nativeTarget: manifest.nativeTarget };
     }
   }
@@ -120,8 +145,8 @@ export function getPluginManifestInfo(
 ): NativeManifestInfo | undefined {
   for (const manifest of PLUGIN_MANIFESTS) {
     if (nativeTarget && manifest.nativeTarget !== nativeTarget) continue;
-    const manifestPath = path.join(localPath, manifest.relativePath);
-    if (fs.existsSync(manifestPath)) {
+    const manifestPath = resolveContainedManifest(localPath, manifest.relativePath);
+    if (manifestPath) {
       return { manifestPath, nativeTarget: manifest.nativeTarget };
     }
   }
@@ -324,7 +349,13 @@ function resolvePluginDir(
   const gitSource = getGitSource(resolution);
   if (gitSource) {
     if (canReuseMarketplaceCheckout(resolution, gitSource.url)) {
-      return gitSource.subdir ? resolveInside(marketplaceRoot, gitSource.subdir) : marketplaceRoot;
+      const checkoutRoot = getGitCheckoutRoot(marketplaceRoot);
+      if (checkoutRoot) {
+        const reused = gitSource.subdir
+          ? resolveInside(checkoutRoot, gitSource.subdir)
+          : checkoutRoot;
+        if (reused) return reused;
+      }
     }
     if (!materializeRemote) return undefined;
     return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource)).pluginPath;
@@ -446,6 +477,11 @@ function getGitOrigin(repoDir: string): string | null {
   return tryRunGit(['config', '--get', 'remote.origin.url'], repoDir);
 }
 
+function getGitCheckoutRoot(repoDir: string): string | null {
+  const root = tryRunGit(['rev-parse', '--show-toplevel'], repoDir);
+  return root ? normalizeLocalGitPath(root) : null;
+}
+
 function tryRunGit(args: string[], cwd: string): string | null {
   try {
     return runGit(args, { cwd });
@@ -468,7 +504,10 @@ function normalizeGitIdentity(value: string, cwd: string): string {
 
   try {
     const url = new URL(trimmed);
-    return `${url.hostname.toLowerCase()}/${stripGitSuffix(url.pathname)}`;
+    const authority = url.port
+      ? `${url.hostname.toLowerCase()}:${url.port}`
+      : url.hostname.toLowerCase();
+    return `${authority}/${stripGitSuffix(url.pathname)}`;
   } catch {
     return stripGitSuffix(trimmed);
   }

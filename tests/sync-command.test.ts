@@ -476,8 +476,8 @@ test('runSyncCommand dry-run previews changes without writing outputs', async ()
   });
 });
 
-test('runSyncCommand dry-run keeps source checkouts and marketplace cache unchanged', async () => {
-  await withTempHomesAsync(async ({ asbHome }) => {
+test('runSyncCommand dry-run previews external plugins without persistent writes', async () => {
+  await withTempHomesAsync(async ({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');
 
     const pluginRepo = path.join(asbHome, 'external-plugin.git');
@@ -548,13 +548,15 @@ test('runSyncCommand dry-run keeps source checkouts and marketplace cache unchan
       `catalog = { url = "${catalogBare}", type = "clone" }`,
     ]);
 
-    const { result } = await captureConsoleOutput(() =>
+    const { result, output } = await captureConsoleOutput(() =>
       runSyncCommand({ dryRun: true, updateSources: true })
     );
 
     assert.equal(result, false);
+    assert.match(output, /remote-skill/);
     assert.equal(fs.existsSync(path.join(catalogCheckout, 'REMOTE-CHANGE')), false);
     assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(path.join(agentsHome, '.claude', 'skills')), false);
   });
 });
 

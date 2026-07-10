@@ -64,12 +64,12 @@ export function loadMcpConfig(): McpConfig {
 export function loadMcpConfigWithPlugins(scope?: ConfigScope): McpConfig {
   const base = loadMcpConfig();
   const pluginIndex = buildPluginIndex(scope);
-  pluginIndex.materializeConfigured();
+  const pluginMcpServers = pluginIndex.mcpServers;
 
-  if (pluginIndex.mcpServers.length === 0) return base;
+  if (pluginMcpServers.length === 0) return base;
 
   const merged = { ...base.mcpServers };
-  for (const ps of pluginIndex.mcpServers) {
+  for (const ps of pluginMcpServers) {
     if (!(ps.serverId in merged)) {
       merged[ps.serverId] = ps.server;
     }

@@ -37,6 +37,7 @@ import {
   getPluginsDir,
   getSkillsDir,
 } from './config/paths.js';
+import { loadConfiguredPortableSelections } from './config/plugin-selection.js';
 import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
 import {
   loadSwitchboardConfig,
@@ -1575,8 +1576,9 @@ pluginRoot
     try {
       const scope = resolveScope(options);
       const index = buildPluginIndex(scope);
-      const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-      const enabledList = config.plugins.enabled;
+      const enabledList = loadConfiguredPortableSelections(scope, {
+        pluginRef: (ref) => index.get(ref)?.id ?? ref,
+      }).pluginRefs;
       const enabledSet = new Set(enabledList);
 
       if (options.json) {
@@ -1635,21 +1637,29 @@ pluginRoot
     }
   });
 
+function selectsPlugin(
+  index: ReturnType<typeof buildPluginIndex>,
+  canonicalId: string,
+  ref: string
+): boolean {
+  return index.get(ref)?.id === canonicalId;
+}
+
 function pluginEnableAction(id: string, options: ScopeOptionInput) {
   try {
     const scope = resolveScope(options);
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
-    if (layer.config.plugins?.enabled?.includes(id)) {
-      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled in this config layer.`));
-      return;
-    }
     const index = buildPluginIndex(scope);
     const plugin = index.get(id);
     if (!plugin) {
       console.error(chalk.red(`✗ Plugin "${id}" not found.`));
       console.log(chalk.dim('  Run `asb plugin list` to see available plugins.'));
       process.exit(1);
+    }
+    if ((layer.config.plugins?.enabled ?? []).some((ref) => selectsPlugin(index, plugin.id, ref))) {
+      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled in this config layer.`));
+      return;
     }
     index.materialize([plugin.id]);
     updateConfigLayer(
@@ -1676,7 +1686,11 @@ function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string)
     const scope = resolveScope(options);
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
-    if (!layer.config.plugins?.enabled?.includes(id)) {
+    const index = buildPluginIndex(scope);
+    const plugin = index.get(id);
+    const matches = (ref: string) =>
+      ref === id || (plugin !== undefined && selectsPlugin(index, plugin.id, ref));
+    if (!(layer.config.plugins?.enabled ?? []).some(matches)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled in this config layer.`));
       return;
     }
@@ -1685,7 +1699,7 @@ function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string)
         ...l,
         plugins: {
           ...(l.plugins ?? {}),
-          enabled: (l.plugins?.enabled ?? []).filter((x) => x !== id),
+          enabled: (l.plugins?.enabled ?? []).filter((ref) => !matches(ref)),
         },
       }),
       layerOpts
@@ -1849,7 +1863,7 @@ mktRoot
 
 mktRoot
   .command('update')
-  .description('Pull latest changes for all remote sources (or a specific one)')
+  .description('Update source checkouts and materialized entries')
   .argument('[name]', 'Specific source namespace to update')
   .action((name?: string) => {
     try {
@@ -1857,9 +1871,9 @@ mktRoot
       clearPluginIndexCache();
       if (results.length === 0) {
         if (name) {
-          console.log(chalk.yellow(`⚠ No remote source named "${name}" found.`));
+          console.log(chalk.yellow(`⚠ No updatable source named "${name}" found.`));
         } else {
-          console.log(chalk.yellow('⚠ No remote sources configured.'));
+          console.log(chalk.yellow('⚠ No updatable sources found.'));
         }
         return;
       }

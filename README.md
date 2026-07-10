@@ -133,7 +133,7 @@ enabled = ["docs", "deploy"]
 enabled = ["context7", "plugin-a@team-lib"]
 
 [plugins.sources]
-team-lib = "https://github.com/org/team-library"
+team-lib = { url = "https://github.com/org/team-library.git", type = "clone" }
 ```
 
 Supported application IDs: `claude-code`, `claude-desktop`, `codex`, `cursor`, `gemini`, `opencode`, `trae`, `trae-cn`.
@@ -416,8 +416,8 @@ Plugin sources are declared in `[plugins.sources]`:
 ```toml
 [plugins.sources]
 my-plugin = "/path/to/my-plugin"
-team-lib = "https://github.com/org/team-library"
-mono-sub = "https://github.com/org/monorepo/tree/main/plugins/my-plugin"
+team-lib = { url = "https://github.com/org/team-library.git", type = "clone" }
+mono-sub = { url = "https://github.com/org/monorepo.git", type = "clone", ref = "main", subdir = "plugins/my-plugin" }
 ```
 
 Every immediate non-dotfile directory under `~/.asb/plugins/` is a first-class source whose namespace is its directory name. You can copy or clone a plugin directly into that directory and enable it selectively without a `[plugins.sources]` entry:

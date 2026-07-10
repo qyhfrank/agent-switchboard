@@ -273,12 +273,20 @@ test('external marketplace components materialize only when selected', () => {
     clearPluginIndexCache();
     const { marketplaceDir, pluginId, skillId } = createRemoteSkillMarketplace(asbHome);
     writeConfigToml(asbHome, `[plugins.sources]\nremote-catalog = "${marketplaceDir}"\n`);
+    const remoteRepo = path.join(asbHome, 'remote-plugin.git');
+    const offlineRepo = `${remoteRepo}.offline`;
+    fs.renameSync(remoteRepo, offlineRepo);
 
-    const listed = JSON.parse(runCli(['plugin', 'list', '--json']).stdout) as Array<{
-      id: string;
-      componentsResolved: boolean;
-    }>;
-    assert.equal(listed.find((entry) => entry.id === pluginId)?.componentsResolved, false);
+    try {
+      const listed = JSON.parse(runCli(['plugin', 'list', '--json']).stdout) as Array<{
+        id: string;
+        componentsResolved: boolean;
+      }>;
+      assert.equal(listed.find((entry) => entry.id === pluginId)?.componentsResolved, false);
+      assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    } finally {
+      fs.renameSync(offlineRepo, remoteRepo);
+    }
 
     const index = buildPluginIndex();
     const plugin = index.get(pluginId);
@@ -443,12 +451,160 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
     const plugin = buildPluginIndex().get('ppt-master@self-catalog');
 
     assert.ok(plugin);
-    assert.equal(plugin.meta.sourcePath, pluginRoot);
+    assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
     assert.deepEqual(plugin.components.skills, ['ppt-master@self-catalog:ppt-master']);
     assert.equal(
       fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache', 'self-catalog')),
       false
     );
+  });
+});
+
+test('same-origin git-subdir reuse resolves from a nested marketplace checkout root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const checkoutRoot = path.join(asbHome, 'source-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'nested-catalog',
+        plugins: [
+          {
+            name: 'nested-plugin',
+            source: {
+              source: 'git-subdir',
+              url: checkoutRoot,
+              path: 'packages/plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'nested.md'), '# Nested');
+    initGitRepo(checkoutRoot);
+    execFileSync('git', ['remote', 'add', 'origin', checkoutRoot], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    commitAll(checkoutRoot);
+    writeConfigToml(asbHome, `[plugins.sources]\nnested = "${marketplaceDir}"\n`);
+
+    const plugin = buildPluginIndex().get('nested-plugin@nested');
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
+    assert.deepEqual(plugin.components.commands, ['nested-plugin@nested:nested']);
+  });
+});
+
+test('same-origin entries with incompatible pins materialize the requested commit', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const checkoutRoot = path.join(asbHome, 'source-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'stable.md'), '# Stable');
+    initGitRepo(checkoutRoot);
+    execFileSync('git', ['remote', 'add', 'origin', checkoutRoot], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    commitAll(checkoutRoot);
+    const pinnedSha = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: checkoutRoot,
+      encoding: 'utf-8',
+    }).trim();
+    execFileSync('git', ['branch', 'stable'], { cwd: checkoutRoot, stdio: 'ignore' });
+
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'pinned-catalog',
+        plugins: [
+          {
+            name: 'ref-plugin',
+            source: {
+              source: 'git-subdir',
+              url: checkoutRoot,
+              path: 'packages/plugin',
+              ref: 'stable',
+            },
+          },
+          {
+            name: 'sha-plugin',
+            source: {
+              source: 'git-subdir',
+              url: checkoutRoot,
+              path: 'packages/plugin',
+              sha: pinnedSha,
+            },
+          },
+        ],
+      })
+    );
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'head-only.md'), '# Head');
+    commitAll(checkoutRoot);
+    writeConfigToml(asbHome, `[plugins.sources]\npinned = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    const refPlugin = index.get('ref-plugin@pinned');
+    const shaPlugin = index.get('sha-plugin@pinned');
+    assert.ok(refPlugin);
+    assert.ok(shaPlugin);
+    index.expand([refPlugin.id, shaPlugin.id]);
+
+    assert.deepEqual(refPlugin.components.commands, ['ref-plugin@pinned:stable']);
+    assert.deepEqual(shaPlugin.components.commands, ['sha-plugin@pinned:stable']);
+    assert.match(refPlugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+    assert.match(shaPlugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+    assert.equal(fs.existsSync(path.join(pluginRoot, 'commands', 'head-only.md')), true);
+  });
+});
+
+test('same-origin detection distinguishes repositories on different ports', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = path.join(asbHome, 'port-catalog');
+    const pluginRoot = path.join(marketplaceDir, 'packages', 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'wrong-repo.md'), '# Wrong');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'port-catalog',
+        plugins: [
+          {
+            name: 'external-plugin',
+            source: {
+              source: 'git-subdir',
+              url: 'ssh://git@example.com:3333/org/repo.git',
+              path: 'packages/plugin',
+            },
+          },
+        ],
+      })
+    );
+    initGitRepo(marketplaceDir);
+    execFileSync('git', ['remote', 'add', 'origin', 'ssh://git@example.com:2222/org/repo.git'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    commitAll(marketplaceDir);
+    writeConfigToml(asbHome, `[plugins.sources]\nports = "${marketplaceDir}"\n`);
+
+    const plugin = buildPluginIndex().get('external-plugin@ports');
+
+    assert.ok(plugin);
+    assert.equal(plugin.meta.materialized, false);
+    assert.deepEqual(plugin.components.commands, []);
   });
 });
 
@@ -725,6 +881,82 @@ test('plugin list JSON emits one canonical ref and recognizes bare enabled alias
     assert.equal(plugins[0].enabled, true);
     assert.equal('materialized' in plugins[0], false);
     assert.equal(plugins[0].componentsResolved, true);
+  });
+});
+
+test('plugin list JSON reports effective per-application enablement', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'app-json-catalog', [
+      { name: 'plugin-a', commands: ['command-a'] },
+    ]);
+    const list = () =>
+      JSON.parse(runCli(['plugin', 'list', '--json']).stdout) as Array<{
+        id: string;
+        enabled: boolean;
+      }>;
+
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications]',
+        'enabled = ["codex"]',
+        '',
+        '[plugins.sources]',
+        `catalog = "${mktDir}"`,
+        '',
+        '[applications.codex.plugins]',
+        'add = ["plugin-a"]',
+      ].join('\n')
+    );
+    assert.equal(list().find((plugin) => plugin.id === 'plugin-a@catalog')?.enabled, true);
+
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications]',
+        'enabled = ["codex"]',
+        '',
+        '[plugins]',
+        'enabled = ["plugin-a"]',
+        '',
+        '[plugins.sources]',
+        `catalog = "${mktDir}"`,
+        '',
+        '[applications.codex.plugins]',
+        'remove = ["plugin-a@catalog"]',
+      ].join('\n')
+    );
+    assert.equal(list().find((plugin) => plugin.id === 'plugin-a@catalog')?.enabled, false);
+  });
+});
+
+test('plugin enable and disable treat bare and canonical refs as one selection', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'alias-actions', [
+      { name: 'plugin-a', commands: ['command-a'] },
+    ]);
+    const config = [
+      '[plugins]',
+      'enabled = ["plugin-a"]',
+      '',
+      '[plugins.sources]',
+      `catalog = "${mktDir}"`,
+    ].join('\n');
+    writeConfigToml(asbHome, config);
+
+    const disabled = runCli(['plugin', 'disable', 'plugin-a@catalog']);
+    assert.match(disabled.stdout, /disabled/);
+    assert.doesNotMatch(fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'), /plugin-a/);
+
+    writeConfigToml(asbHome, config);
+    const enabled = runCli(['plugin', 'enable', 'plugin-a@catalog']);
+    assert.match(enabled.stdout, /already enabled/);
+    assert.equal(
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8').match(/plugin-a/g)?.length,
+      1
+    );
   });
 });
 
@@ -1236,6 +1468,80 @@ test('marketplace component roots cannot follow symlinks outside the plugin', ()
     writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
 
     assert.throws(() => buildPluginIndex(), /component path escapes the plugin root/);
+  });
+});
+
+test('plugin rules cannot follow a symlink outside the plugin root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'contained-rules', [{ name: 'my-plugin' }]);
+    const pluginDir = path.join(mktDir, 'plugins', 'my-plugin');
+    const outsideRules = path.join(asbHome, 'outside-rules');
+    fs.mkdirSync(outsideRules, { recursive: true });
+    fs.writeFileSync(path.join(outsideRules, 'secret.md'), '# Secret');
+    fs.symlinkSync(outsideRules, path.join(pluginDir, 'rules'));
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
+
+    assert.throws(() => buildPluginIndex(), /component path escapes the plugin root/);
+  });
+});
+
+test('plugin MCP config cannot follow a symlink outside the plugin root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'contained-mcp', [{ name: 'my-plugin' }]);
+    const pluginDir = path.join(mktDir, 'plugins', 'my-plugin');
+    const outsideMcp = path.join(asbHome, 'outside-mcp.json');
+    fs.writeFileSync(outsideMcp, JSON.stringify({ secret: { command: 'secret' } }));
+    fs.symlinkSync(outsideMcp, path.join(pluginDir, '.mcp.json'));
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
+
+    assert.throws(() => buildPluginIndex(), /component path escapes the plugin root/);
+  });
+});
+
+test('plugin manifests cannot follow a symlink outside the plugin root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'contained-manifest', [
+      { name: 'my-plugin', commands: ['safe'] },
+    ]);
+    const pluginDir = path.join(mktDir, 'plugins', 'my-plugin');
+    const manifestPath = path.join(pluginDir, '.claude-plugin', 'plugin.json');
+    const outsideManifest = path.join(asbHome, 'outside-plugin.json');
+    fs.writeFileSync(
+      outsideManifest,
+      JSON.stringify({ name: 'my-plugin', description: 'Must not load' })
+    );
+    fs.rmSync(manifestPath);
+    fs.symlinkSync(outsideManifest, manifestPath);
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
+
+    const plugin = buildPluginIndex().get('my-plugin@contained');
+    assert.ok(plugin);
+    assert.equal(plugin.meta.description, undefined);
+    assert.deepEqual(plugin.components.commands, ['my-plugin@contained:safe']);
+  });
+});
+
+test('marketplace manifests cannot follow a symlink outside their source root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const sourceDir = path.join(asbHome, 'catalog-source');
+    const manifestDir = path.join(sourceDir, '.claude-plugin');
+    const outsideManifest = path.join(asbHome, 'outside-marketplace.json');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      outsideManifest,
+      JSON.stringify({
+        name: 'outside',
+        plugins: [{ name: 'secret', source: './secret' }],
+      })
+    );
+    fs.symlinkSync(outsideManifest, path.join(manifestDir, 'marketplace.json'));
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${sourceDir}"\n`);
+
+    assert.equal(buildPluginIndex().get('secret@contained'), undefined);
   });
 });
 
