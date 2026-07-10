@@ -14,6 +14,7 @@ import { updateRemoteSources } from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
 import {
+  redactGitCredentials,
   releaseMarketplaceCacheLeases,
   withTemporaryMarketplaceEntryCache,
 } from '../marketplace/cache.js';
@@ -90,7 +91,7 @@ async function runSyncCommandWithCacheLeases(options: RunSyncCommandOptions): Pr
       for (const result of remoteResults) {
         if (result.status === 'updated') {
           console.log(
-            `  ${chalk.green('✓')} ${chalk.cyan(result.namespace)} ${chalk.dim(result.url)}`
+            `  ${chalk.green('✓')} ${chalk.cyan(result.namespace)} ${chalk.dim(redactGitCredentials(result.url))}`
           );
         } else {
           console.log(

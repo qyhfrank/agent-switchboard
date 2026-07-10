@@ -12,6 +12,7 @@ import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
 import { getPluginSourceLocksDir } from '../src/config/paths.js';
 import { loadSwitchboardConfig } from '../src/config/switchboard-config.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
+import { redactGitCredentials } from '../src/marketplace/cache.js';
 import { refreshMarketplacePluginCache } from '../src/marketplace/reader.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { loadRuleLibrary } from '../src/rules/library.js';
@@ -1984,7 +1985,8 @@ test('plugin marketplace CLI output redacts credential-bearing source URLs', () 
       [
         '#!/bin/sh',
         'if [ "$1" = "clone" ]; then',
-        '  exec "$REAL_GIT" clone --depth 1 "$FAKE_REMOTE" "$5"',
+        '  "$REAL_GIT" clone --depth 1 "$FAKE_REMOTE" "$5" || exit $?',
+        '  exec "$REAL_GIT" -C "$5" remote set-url origin "$4"',
         'fi',
         'exec "$REAL_GIT" "$@"',
       ].join('\n')
@@ -2034,6 +2036,71 @@ test('plugin marketplace CLI output redacts credential-bearing source URLs', () 
       `${listed.stdout}${listed.stderr}`,
       /alice|password|query-secret|fragment-secret/
     );
+  });
+});
+
+test('redactGitCredentials redacts complete URL and SCP-style principals', () => {
+  assert.equal(
+    redactGitCredentials(
+      'https://alice:p@ss@example.test/repo.git?access_token=query-secret#fragment-secret'
+    ),
+    'https://<redacted>@example.test/repo.git?access_token=<redacted>#<redacted>'
+  );
+  assert.equal(
+    redactGitCredentials('oauth2-secret@github.com:org/private.git'),
+    '<redacted>@github.com:org/private.git'
+  );
+});
+
+test('CLI help renders the fresh-home config path from the path resolver', () => {
+  withTempAsbHome((asbHome) => {
+    const freshHome = path.join(asbHome, 'fresh-home');
+    fs.mkdirSync(freshHome, { recursive: true });
+
+    const { stdout } = runCli(['--help'], {
+      ASB_CONFIG: '',
+      ASB_HOME: '',
+      HOME: freshHome,
+    });
+
+    assert.ok(stdout.includes(path.join(freshHome, '.asb', 'config.toml')));
+    assert.doesNotMatch(stdout, /\.agent-switchboard\/config\.toml/);
+  });
+});
+
+test('plugin marketplace list shows only configured sources and checkout status', () => {
+  withTempAsbHome((asbHome) => {
+    const configuredUrl = 'https://example.test/managed.git';
+    fs.mkdirSync(path.join(asbHome, 'plugins', 'direct-source', 'rules'), { recursive: true });
+    const transportRepo = path.join(asbHome, 'managed-transport');
+    fs.mkdirSync(path.join(transportRepo, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(transportRepo, 'rules', 'managed.md'), '# Managed rule\n');
+    initGitRepo(transportRepo);
+    commitAll(transportRepo);
+    const managedSource = path.join(asbHome, 'plugins', 'managed-source');
+    execFileSync('git', ['clone', transportRepo, managedSource], { stdio: 'ignore' });
+    execFileSync('git', ['remote', 'set-url', 'origin', configuredUrl], {
+      cwd: managedSource,
+      stdio: 'ignore',
+    });
+    writeConfigToml(
+      asbHome,
+      `[plugins.sources]\nmanaged-source = { url = "${configuredUrl}", type = "clone" }\n`
+    );
+
+    const json = JSON.parse(runCli(['plugin', 'marketplace', 'list', '--json']).stdout) as Array<{
+      namespace: string;
+    }>;
+    assert.deepEqual(
+      json.map((source) => source.namespace),
+      ['managed-source']
+    );
+
+    const { stdout } = runCli(['plugin', 'marketplace', 'list']);
+    assert.match(stdout, /managed-source/);
+    assert.doesNotMatch(stdout, /direct-source/);
+    assert.match(stdout, /checked out/);
+    assert.doesNotMatch(stdout, /\bcached\b/);
   });
 });
 

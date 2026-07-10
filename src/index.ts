@@ -36,6 +36,7 @@ import {
   getOpencodePath,
   getPluginsDir,
   getSkillsDir,
+  getSwitchboardConfigPath,
 } from './config/paths.js';
 import { loadConfiguredPortableSelections } from './config/plugin-selection.js';
 import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
@@ -128,7 +129,7 @@ Examples:
   $ asb sync -P .                    Sync with project-level overrides
 
 Alias: agent-switchboard
-Config: ~/.agent-switchboard/config.toml`
+Config: ${getSwitchboardConfigPath()}`
   );
 
 // Initialize library directories for commands/agents (secure permissions)
@@ -1923,7 +1924,8 @@ mktRoot
   .option('--json', 'Output inventory as JSON')
   .action((options: { json?: boolean }) => {
     try {
-      const sources = getSources();
+      const configuredNamespaces = new Set(Object.keys(loadSwitchboardConfig().plugins.sources));
+      const sources = getSources().filter((source) => configuredNamespaces.has(source.namespace));
 
       if (options.json) {
         console.log(
@@ -1971,7 +1973,7 @@ mktRoot
 
         let statusPlain: string;
         if (isRemote) {
-          statusPlain = exists ? 'cached' : 'not cached';
+          statusPlain = exists ? 'checked out' : 'not checked out';
         } else {
           statusPlain = exists ? 'ok' : 'missing';
         }

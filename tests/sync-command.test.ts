@@ -476,6 +476,65 @@ test('runSyncCommand dry-run previews changes without writing outputs', async ()
   });
 });
 
+test('runSyncCommand redacts source credentials in update output', async () => {
+  await withTempHomesAsync(async ({ asbHome }) => {
+    const transportRepo = path.join(asbHome, 'transport-repo');
+    fs.mkdirSync(path.join(transportRepo, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(transportRepo, 'rules', 'remote.md'), '# Remote rule\n');
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: transportRepo, stdio: 'pipe' });
+    execFileSync('git', ['add', '.'], { cwd: transportRepo, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'fixture'],
+      { cwd: transportRepo, stdio: 'pipe' }
+    );
+
+    const binDir = path.join(asbHome, 'bin');
+    const fakeGit = path.join(binDir, 'git');
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf-8' }).trim();
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      fakeGit,
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "clone" ]; then',
+        '  "$REAL_GIT" clone --depth 1 "$FAKE_REMOTE" "$5" || exit $?',
+        '  exec "$REAL_GIT" -C "$5" remote set-url origin "$4"',
+        'fi',
+        'exec "$REAL_GIT" "$@"',
+      ].join('\n')
+    );
+    fs.chmodSync(fakeGit, 0o755);
+
+    const secretUrl =
+      'https://alice:p@ss@example.test/repo.git?access_token=query-secret#fragment-secret';
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[plugins.sources]',
+      `credentialed = { url = "${secretUrl}", type = "clone" }`,
+    ]);
+
+    const previousFakeRemote = setEnv('FAKE_REMOTE', transportRepo);
+    const previousPath = setEnv('PATH', `${binDir}:${process.env.PATH ?? ''}`);
+    const previousRealGit = setEnv('REAL_GIT', realGit);
+    try {
+      const { result, output } = await captureConsoleOutput(() =>
+        runSyncCommand({ updateSources: true })
+      );
+
+      assert.equal(result, false);
+      assert.match(
+        output,
+        /https:\/\/<redacted>@example\.test\/repo\.git\?access_token=<redacted>#<redacted>/
+      );
+      assert.doesNotMatch(output, /alice|p@ss|query-secret|fragment-secret/);
+    } finally {
+      setEnv('FAKE_REMOTE', previousFakeRemote);
+      setEnv('PATH', previousPath);
+      setEnv('REAL_GIT', previousRealGit);
+    }
+  });
+});
+
 test('runSyncCommand dry-run previews external plugins without persistent writes', async () => {
   await withTempHomesAsync(async ({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');

@@ -91,8 +91,20 @@ function runGit(args: string[], cwd?: string, env?: NodeJS.ProcessEnv): string {
 
 export function redactGitCredentials(value: string): string {
   return value
-    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, '$1<redacted>@')
-    .replace(/([?&][^=\s&]+)=([^&\s'"]+)/g, '$1=<redacted>')
+    .replace(
+      /([a-z][a-z0-9+.-]*:\/\/)([^\s/?#]*)/gi,
+      (_match, scheme: string, authority: string) => {
+        const separator = authority.lastIndexOf('@');
+        return separator < 0
+          ? `${scheme}${authority}`
+          : `${scheme}<redacted>@${authority.slice(separator + 1)}`;
+      }
+    )
+    .replace(
+      /(^|[\s"'(])[^\s/"'()]+@((?:\[[^\]\s]+\]|[^:\s/"'()]+):[^\s"'()]+)/gi,
+      '$1<redacted>@$2'
+    )
+    .replace(/([?&][^=\s&#]+)=([^&\s#'"]+)/g, '$1=<redacted>')
     .replace(/#[^\s'"]+/g, '#<redacted>');
 }
 

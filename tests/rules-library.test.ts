@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 
+import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { ensureRulesDirectory, loadRuleLibrary } from '../src/rules/library.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -70,5 +71,26 @@ test('loadRuleLibrary surfaces frontmatter errors with file context', () => {
       /closing delimiter/,
       'should throw when closing delimiter is missing'
     );
+  });
+});
+
+test('loadRuleLibrary consumes source rules from the retained plugin index snapshot', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const sourceRulesDir = path.join(asbHome, 'plugins', 'team', 'rules');
+    const sourceRulePath = path.join(sourceRulesDir, 'snapshot.md');
+    fs.mkdirSync(sourceRulesDir, { recursive: true });
+    fs.writeFileSync(sourceRulePath, 'original snapshot');
+
+    const index = buildPluginIndex();
+    assert.equal(index.ruleSnippets[0]?.content, 'original snapshot');
+    fs.writeFileSync(sourceRulePath, 'unleased reread');
+
+    try {
+      const rule = loadRuleLibrary().find((entry) => entry.id === 'team:snapshot');
+      assert.equal(rule?.content, 'original snapshot');
+    } finally {
+      clearPluginIndexCache();
+    }
   });
 });
