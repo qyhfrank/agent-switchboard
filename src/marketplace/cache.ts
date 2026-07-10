@@ -59,7 +59,14 @@ interface MarketplaceEntryCacheMetadata {
   commit: string;
 }
 
+interface MarketplaceMaterializationStageOwner {
+  version: 1;
+  ownerIdentity: string;
+  stageName: string;
+}
+
 const METADATA_FILE = 'entry.json';
+const MATERIALIZATION_STAGE_OWNER_FILE = '.stage-owner.json';
 const temporaryCacheRoot = new AsyncLocalStorage<string>();
 const heldSourceLocks = new Map<string, () => void>();
 const activeSourceLocks = new Set<string>();
@@ -189,11 +196,18 @@ function canonicalPath(value: string): string {
   }
 }
 
+function sourceOwnerIdentity(sourceName: string, marketplacePath: string): string {
+  return digest(
+    JSON.stringify({
+      sourceName: sourceName.trim(),
+      marketplacePath: canonicalPath(marketplacePath),
+    })
+  );
+}
+
 function sourceCachePath(sourceName: string, marketplacePath: string): string {
   const normalized = sourceName.trim();
-  const ownerIdentity = digest(
-    JSON.stringify({ sourceName: normalized, marketplacePath: canonicalPath(marketplacePath) })
-  );
+  const ownerIdentity = sourceOwnerIdentity(normalized, marketplacePath);
   return path.resolve(
     configuredCacheRoot(),
     `${safeSegment(normalized)}-${ownerIdentity.slice(0, 10)}`
@@ -227,6 +241,66 @@ function assertNoCacheSymlinks(root: string, target: string): void {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
+  }
+}
+
+function materializationStageIsOwned(
+  sourcePath: string,
+  stagePath: string,
+  ownerIdentity: string
+): boolean {
+  const resolvedSourcePath = path.resolve(sourcePath);
+  const resolvedStagePath = path.resolve(stagePath);
+  assertInside(resolvedSourcePath, resolvedStagePath);
+  if (
+    path.dirname(resolvedStagePath) !== resolvedSourcePath ||
+    !path.basename(resolvedStagePath).startsWith('.tmp-')
+  ) {
+    return false;
+  }
+  try {
+    if (!fs.lstatSync(resolvedStagePath).isDirectory()) return false;
+    const markerPath = path.join(resolvedStagePath, MATERIALIZATION_STAGE_OWNER_FILE);
+    const markerStat = fs.lstatSync(markerPath);
+    if (!markerStat.isFile() || markerStat.isSymbolicLink()) return false;
+    const marker = JSON.parse(
+      fs.readFileSync(markerPath, 'utf-8')
+    ) as MarketplaceMaterializationStageOwner;
+    return (
+      marker.version === 1 &&
+      marker.ownerIdentity === ownerIdentity &&
+      marker.stageName === path.basename(resolvedStagePath)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function removeOwnedMaterializationStage(
+  cacheRoot: string,
+  sourcePath: string,
+  stagePath: string,
+  ownerIdentity: string
+): void {
+  if (!materializationStageIsOwned(sourcePath, stagePath, ownerIdentity)) return;
+  assertNoCacheSymlinks(cacheRoot, stagePath);
+  if (!materializationStageIsOwned(sourcePath, stagePath, ownerIdentity)) return;
+  fs.rmSync(stagePath, { recursive: true, force: true });
+}
+
+function recoverMaterializationStages(
+  cacheRoot: string,
+  sourcePath: string,
+  ownerIdentity: string
+): void {
+  for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    if (!entry.name.startsWith('.tmp-')) continue;
+    removeOwnedMaterializationStage(
+      cacheRoot,
+      sourcePath,
+      path.join(sourcePath, entry.name),
+      ownerIdentity
+    );
   }
 }
 
@@ -736,6 +810,7 @@ export function materializeMarketplaceEntry(
   const identity = requestIdentity(request);
   const cacheRoot = safeCacheRoot(true);
   const sourcePath = sourceCachePath(request.sourceName, request.marketplacePath);
+  const ownerIdentity = sourceOwnerIdentity(request.sourceName, request.marketplacePath);
   const entryPath = entryCachePath(request, identity);
   const ownerIsCurrent = options.ownerIsCurrent ?? request.ownerIsCurrent;
 
@@ -748,6 +823,7 @@ export function materializeMarketplaceEntry(
       }
       assertNoCacheSymlinks(cacheRoot, sourcePath);
       fs.mkdirSync(sourcePath, { recursive: true });
+      recoverMaterializationStages(cacheRoot, sourcePath, ownerIdentity);
       assertNoCacheSymlinks(cacheRoot, entryPath);
       const cached = recoverEntryBackup(request, identity, entryPath);
       if (cached && (!options.refresh || request.sha)) {
@@ -756,6 +832,16 @@ export function materializeMarketplaceEntry(
       }
 
       const tempPath = fs.mkdtempSync(path.join(sourcePath, '.tmp-'));
+      const stageOwner: MarketplaceMaterializationStageOwner = {
+        version: 1,
+        ownerIdentity,
+        stageName: path.basename(tempPath),
+      };
+      fs.writeFileSync(
+        path.join(tempPath, MATERIALIZATION_STAGE_OWNER_FILE),
+        `${JSON.stringify(stageOwner)}\n`,
+        { flag: 'wx' }
+      );
       try {
         const repoPath = path.join(tempPath, 'repo');
         const checkout = checkoutRequest(request, repoPath);
@@ -788,7 +874,7 @@ export function materializeMarketplaceEntry(
         removeSupersededPluginBackups(request);
         return materialized;
       } finally {
-        if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { recursive: true, force: true });
+        removeOwnedMaterializationStage(cacheRoot, sourcePath, tempPath, ownerIdentity);
       }
     },
     true

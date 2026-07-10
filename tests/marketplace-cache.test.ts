@@ -349,6 +349,87 @@ test('failed refresh preserves the last verified generation and removes temporar
   });
 });
 
+test('retry reclaims an interrupted owned stage without deleting foreign temp paths', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const wrapperDir = path.join(asbHome, 'git-wrapper');
+    const signalPath = path.join(asbHome, 'git-mutated');
+    const realGit = fs.realpathSync(execFileSync('which', ['git'], { encoding: 'utf-8' }).trim());
+    fs.mkdirSync(wrapperDir);
+    fs.writeFileSync(
+      path.join(wrapperDir, 'git'),
+      `#!/usr/bin/env node\n` +
+        `const { spawnSync } = require('node:child_process');\n` +
+        `const fs = require('node:fs');\n` +
+        `const result = spawnSync(${JSON.stringify(realGit)}, process.argv.slice(2), { stdio: 'inherit' });\n` +
+        `if (result.error) throw result.error;\n` +
+        `if (result.status !== 0) process.exit(result.status ?? 1);\n` +
+        `if (process.argv[2] === 'init') {\n` +
+        `  fs.writeFileSync(${JSON.stringify(signalPath)}, 'ready');\n` +
+        `  process.kill(process.ppid, 'SIGKILL');\n` +
+        `}\n`,
+      { mode: 0o755 }
+    );
+    const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
+    const source =
+      `import { materializeMarketplaceEntry } from ${JSON.stringify(cacheModule)};` +
+      'materializeMarketplaceEntry(JSON.parse(process.argv[1]));';
+
+    assert.throws(() =>
+      execFileSync(
+        process.execPath,
+        ['--import', 'tsx', '--input-type=module', '--eval', source, JSON.stringify(request)],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            ASB_HOME: asbHome,
+            ASB_AGENTS_HOME: asbHome,
+            PATH: `${wrapperDir}${path.delimiter}${process.env.PATH ?? ''}`,
+          },
+          stdio: 'pipe',
+        }
+      )
+    );
+    assert.equal(fs.readFileSync(signalPath, 'utf-8'), 'ready');
+
+    const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+    const sourcePath = path.join(cacheRoot, fs.readdirSync(cacheRoot)[0]);
+    const ownedStage = path.join(
+      sourcePath,
+      fs.readdirSync(sourcePath).find((name) => name.startsWith('.tmp-')) ?? ''
+    );
+    assert.equal(fs.existsSync(path.join(ownedStage, 'repo', '.git')), true);
+    const owner = JSON.parse(fs.readFileSync(path.join(ownedStage, '.stage-owner.json'), 'utf-8'));
+    const unownedStage = path.join(sourcePath, '.tmp-unowned');
+    const foreignStage = path.join(sourcePath, '.tmp-foreign');
+    fs.mkdirSync(unownedStage);
+    fs.writeFileSync(path.join(unownedStage, 'sentinel'), 'keep');
+    fs.mkdirSync(foreignStage);
+    fs.writeFileSync(
+      path.join(foreignStage, '.stage-owner.json'),
+      `${JSON.stringify({ ...owner, ownerIdentity: 'foreign', stageName: '.tmp-foreign' })}\n`
+    );
+    fs.writeFileSync(path.join(foreignStage, 'sentinel'), 'keep');
+
+    const materialized = materializeMarketplaceEntry(request);
+
+    assert.equal(fs.existsSync(ownedStage), false);
+    assert.equal(fs.readFileSync(path.join(unownedStage, 'sentinel'), 'utf-8'), 'keep');
+    assert.equal(fs.readFileSync(path.join(foreignStage, 'sentinel'), 'utf-8'), 'keep');
+    assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
+  });
+});
+
 test('post-switch verification failure restores the prior generation', (t) => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
