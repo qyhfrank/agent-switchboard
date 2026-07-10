@@ -68,8 +68,22 @@ test('loadRuleLibrary surfaces frontmatter errors with file context', () => {
       () => {
         loadRuleLibrary();
       },
-      /closing delimiter/,
+      /Failed to parse rule snippet "broken\.md": Rule frontmatter is missing a closing delimiter/,
       'should throw when closing delimiter is missing'
+    );
+  });
+});
+
+test('loadRuleLibrary surfaces discovered plugin rule errors with file context', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const sourceRulesDir = path.join(asbHome, 'plugins', 'team', 'rules');
+    fs.mkdirSync(sourceRulesDir, { recursive: true });
+    fs.writeFileSync(path.join(sourceRulesDir, 'broken.md'), `---\ninvalid\n`);
+
+    assert.throws(
+      () => loadRuleLibrary(),
+      /Failed to parse rule snippet "broken\.md": Rule frontmatter is missing a closing delimiter/
     );
   });
 });

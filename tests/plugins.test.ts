@@ -11,6 +11,7 @@ import {
 import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
 import { getPluginSourceLocksDir } from '../src/config/paths.js';
 import { loadSwitchboardConfig } from '../src/config/switchboard-config.js';
+import { addRemoteSource } from '../src/library/sources.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
 import { redactGitCredentials } from '../src/marketplace/cache.js';
 import { refreshMarketplacePluginCache } from '../src/marketplace/reader.js';
@@ -2097,10 +2098,43 @@ test('plugin marketplace list shows only configured sources and checkout status'
     );
 
     const { stdout } = runCli(['plugin', 'marketplace', 'list']);
+    assert.match(stdout, /Configured plugin sources:/);
+    assert.doesNotMatch(stdout, /Marketplace sources:/);
     assert.match(stdout, /managed-source/);
     assert.doesNotMatch(stdout, /direct-source/);
     assert.match(stdout, /checked out/);
     assert.doesNotMatch(stdout, /\bcached\b/);
+  });
+});
+
+test('plugin source CLI labels distinguish discovery from configured management', () => {
+  withTempAsbHome(() => {
+    const inventoryHelp = runCli(['plugin', 'list', '--help']).stdout;
+    assert.match(inventoryHelp, /discoverable plugin sources/);
+
+    const inventory = runCli(['plugin', 'list']).stdout;
+    assert.match(inventory, /discoverable plugin sources/);
+
+    const managementHelp = runCli(['plugin', 'marketplace', 'list', '--help']).stdout;
+    assert.match(managementHelp, /configured plugin sources/);
+
+    const management = runCli(['plugin', 'marketplace', 'list']).stdout;
+    assert.match(management, /No configured plugin sources/);
+  });
+});
+
+test('plugin marketplace remove accepts an owned checkout with invalid Git metadata', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createPinnedSameOriginMarketplace(asbHome, 'broken-source-remote');
+    addRemoteSource('broken-source', { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(asbHome, 'plugins', 'broken-source');
+    fs.rmSync(path.join(checkout, '.git', 'HEAD'));
+
+    const { stdout } = runCli(['plugin', 'marketplace', 'remove', 'broken-source']);
+
+    assert.match(stdout, /Removed source "broken-source"/);
+    assert.equal(fs.existsSync(checkout), false);
+    assert.deepEqual(loadSwitchboardConfig().plugins.sources, {});
   });
 });
 
@@ -2128,6 +2162,26 @@ test('plugin rules are loaded into rule library', () => {
     const ids = rules.map((r) => r.id);
     assert.ok(ids.includes('local-rule'));
     assert.ok(ids.includes('my-plugin@mkt:plugin-rule'));
+  });
+});
+
+test('marketplace plugin rule parse errors include the source file', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'broken-rules', [
+      {
+        name: 'broken-plugin',
+        rules: [{ name: 'broken-rule', content: '---\ninvalid\n' }],
+      },
+    ]);
+    writeConfigToml(asbHome, `[plugins.sources]\nbroken-rules = "${mktDir}"\n`);
+
+    assert.ok(buildPluginIndex().get('broken-plugin@broken-rules'));
+    assert.throws(
+      () => loadRuleLibrary(),
+      /Failed to parse rule snippet "broken-rule\.md": Rule frontmatter is missing a closing delimiter/
+    );
+    assert.deepEqual(fs.readdirSync(getPluginSourceLocksDir()), []);
   });
 });
 

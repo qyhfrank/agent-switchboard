@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getRulesDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
-import { buildPluginIndex } from '../plugins/index.js';
+import { buildPluginIndex, clearPluginIndexCache } from '../plugins/index.js';
 import { parseRuleMarkdown } from './parser.js';
 import type { RuleMetadata } from './schema.js';
 
@@ -94,7 +94,13 @@ export function loadRuleLibrary(scope?: ConfigScope): RuleSnippet[] {
 
   // Append source rules discovered through the leased PluginIndex snapshot.
   const pluginIndex = buildPluginIndex(scope);
-  for (const snippet of pluginIndex.ruleSnippets) {
+  const pluginRules = pluginIndex.ruleSnippets;
+  const parseError = pluginIndex.ruleErrors[0];
+  if (parseError) {
+    clearPluginIndexCache();
+    throw parseError;
+  }
+  for (const snippet of pluginRules) {
     if (!seenIds.has(snippet.id)) {
       rules.push(snippet);
       seenIds.add(snippet.id);

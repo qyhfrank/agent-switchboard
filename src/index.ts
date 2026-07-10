@@ -1559,7 +1559,9 @@ function printMarketplaceSummary(localPath: string): void {
 
 const pluginRoot = program
   .command('plugin')
-  .description('Manage plugins: interactive selection, install/uninstall, marketplace sources')
+  .description(
+    'Manage plugins: interactive selection, install/uninstall, configured plugin sources'
+  )
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
@@ -1570,7 +1572,7 @@ pluginRoot.action((_options: ScopeOptionInput) => {
 pluginRoot
   .command('list')
   .alias('ls')
-  .description('List all discoverable plugins from configured sources')
+  .description('List all plugins from discoverable plugin sources')
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .option('--json', 'Output as JSON')
@@ -1768,11 +1770,11 @@ uninstallCmd.action((id: string, opts: ScopeOptionInput) =>
 const mktRoot = pluginRoot
   .command('marketplace')
   .alias('market')
-  .description('Manage plugin sources (local paths, git repos, marketplaces)');
+  .description('Manage configured plugin sources (local paths, git repos, marketplaces)');
 
 mktRoot
   .command('add')
-  .description('Add a marketplace or library source')
+  .description('Add a configured plugin source')
   .argument('<location>', 'Local path or git URL (e.g., https://github.com/org/repo)')
   .argument('[name]', 'Namespace (defaults to repo or directory name)')
   .action((location: string, nameArg: string | undefined) => {
@@ -1862,19 +1864,13 @@ mktRoot
 mktRoot
   .command('remove')
   .alias('rm')
-  .description('Remove a marketplace source by name')
+  .description('Remove a configured plugin source by name')
   .argument('<name>', 'Source namespace to remove')
   .action((name: string) => {
     try {
-      const sources = getSources();
-      const source = sources.find((s) => s.namespace === name);
       removeSource(name);
       clearPluginIndexCache();
-      if (source?.remote) {
-        console.log(chalk.green(`\n✓ Removed source "${name}" and cleaned up cache`));
-      } else {
-        console.log(chalk.green(`\n✓ Removed source "${name}"`));
-      }
+      console.log(chalk.green(`\n✓ Removed source "${name}"`));
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1920,7 +1916,7 @@ mktRoot
 mktRoot
   .command('list')
   .alias('ls')
-  .description('List all configured marketplace sources')
+  .description('List all configured plugin sources')
   .option('--json', 'Output inventory as JSON')
   .action((options: { json?: boolean }) => {
     try {
@@ -1949,12 +1945,12 @@ mktRoot
       }
 
       if (sources.length === 0) {
-        console.log(chalk.yellow('⚠ No marketplace sources configured.'));
+        console.log(chalk.yellow('⚠ No configured plugin sources.'));
         console.log(chalk.dim('  Use `asb plugin marketplace add <location> [name]` to add one.'));
         return;
       }
 
-      console.log(chalk.blue('\nMarketplace sources:'));
+      console.log(chalk.blue('\nConfigured plugin sources:'));
       const header = ['Namespace', 'Type', 'Source', 'Status', 'Contains'];
       const rows = sources.map((src) => {
         const isRemote = !!src.remote;

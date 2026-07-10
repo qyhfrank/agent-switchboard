@@ -102,6 +102,7 @@ export interface PluginIndex {
   plugins: PluginDescriptor[];
   mcpServers: PluginMcpServer[];
   ruleSnippets: PluginRuleSnippet[];
+  ruleErrors: Error[];
   /** Look up a plugin by ID */
   get(pluginId: string): PluginDescriptor | undefined;
   /** Look up a native plugin by ASB ref or unambiguous native install ref */
@@ -142,14 +143,15 @@ function getCodexNativeWrapperPath(namespace: string): string {
 function loadRulesFromPluginDir(
   pluginDir: string,
   namespace: string
-): { ids: string[]; snippets: PluginRuleSnippet[]; pluginId: string } {
+): { ids: string[]; snippets: PluginRuleSnippet[]; errors: Error[]; pluginId: string } {
   const rulesDir = resolvePluginComponentPath(pluginDir, 'rules');
   if (!fs.existsSync(rulesDir) || !fs.statSync(rulesDir).isDirectory()) {
-    return { ids: [], snippets: [], pluginId: namespace };
+    return { ids: [], snippets: [], errors: [], pluginId: namespace };
   }
 
   const ids: string[] = [];
   const snippets: PluginRuleSnippet[] = [];
+  const errors: Error[] = [];
   const entries = fs.readdirSync(rulesDir, { withFileTypes: true }).sort(byEntryName);
 
   for (const entry of entries) {
@@ -172,12 +174,16 @@ function loadRulesFromPluginDir(
         content: parsed.content,
         pluginId: namespace,
       });
-    } catch {
-      // Skip unparseable rule files
+    } catch (error) {
+      if (error instanceof Error) {
+        errors.push(new Error(`Failed to parse rule snippet "${entry.name}": ${error.message}`));
+      } else {
+        errors.push(new Error(`Failed to parse rule snippet "${entry.name}".`));
+      }
     }
   }
 
-  return { ids, snippets, pluginId: namespace };
+  return { ids, snippets, errors, pluginId: namespace };
 }
 
 function loadMcpFromPluginDir(
@@ -275,7 +281,8 @@ function loadMarketplacePluginData(
   plugin: ResolvedPlugin,
   pluginId: string,
   allMcpServers: PluginMcpServer[],
-  allRuleSnippets: PluginRuleSnippet[]
+  allRuleSnippets: PluginRuleSnippet[],
+  allRuleErrors: Error[]
 ): PluginComponents {
   const components = loadPluginComponents(plugin, pluginId);
   const rulesResult = loadRulesFromPluginDir(plugin.localPath, pluginId);
@@ -298,6 +305,7 @@ function loadMarketplacePluginData(
 
   allMcpServers.push(...mcpResult.servers);
   allRuleSnippets.push(...rulesResult.snippets);
+  allRuleErrors.push(...rulesResult.errors);
 
   return {
     commands: components.commands.map((entry) => entry.id),
@@ -315,6 +323,7 @@ function buildFromMarketplace(
   allPlugins: PluginDescriptor[],
   allMcpServers: PluginMcpServer[],
   allRuleSnippets: PluginRuleSnippet[],
+  allRuleErrors: Error[],
   deferredLoaders: Map<string, () => void>,
   scope?: ConfigScope
 ): void {
@@ -327,7 +336,7 @@ function buildFromMarketplace(
   for (const plugin of result.plugins) {
     const pluginId = buildPluginId(plugin.name, sourceName, 'marketplace');
     const initialComponents = isResolvedPlugin(plugin)
-      ? loadMarketplacePluginData(plugin, pluginId, allMcpServers, allRuleSnippets)
+      ? loadMarketplacePluginData(plugin, pluginId, allMcpServers, allRuleSnippets, allRuleErrors)
       : emptyPluginComponents();
     const descriptor: PluginDescriptor = {
       name: plugin.name,
@@ -370,7 +379,8 @@ function buildFromMarketplace(
           resolved,
           pluginId,
           allMcpServers,
-          allRuleSnippets
+          allRuleSnippets,
+          allRuleErrors
         );
         descriptor.meta.description = resolved.description;
         descriptor.meta.version = resolved.version;
@@ -386,7 +396,8 @@ function buildFromPlugin(
   basePath: string,
   allPlugins: PluginDescriptor[],
   allMcpServers: PluginMcpServer[],
-  allRuleSnippets: PluginRuleSnippet[]
+  allRuleSnippets: PluginRuleSnippet[],
+  allRuleErrors: Error[]
 ): void {
   const commandIds = loadPluginComponentIds(basePath, namespace, 'commands');
   const agentIds = loadPluginComponentIds(basePath, namespace, 'agents');
@@ -399,6 +410,7 @@ function buildFromPlugin(
 
   const rulesResult = loadRulesFromPluginDir(basePath, namespace);
   allRuleSnippets.push(...rulesResult.snippets);
+  allRuleErrors.push(...rulesResult.errors);
 
   const hasAny =
     commandIds.length > 0 ||
@@ -473,6 +485,7 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   const plugins: PluginDescriptor[] = [];
   const mcpServers: PluginMcpServer[] = [];
   const ruleSnippets: PluginRuleSnippet[] = [];
+  const ruleErrors: Error[] = [];
   const deferredLoaders = new Map<string, () => void>();
   const sources = getSourcesRecord(scope);
 
@@ -487,12 +500,13 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
           plugins,
           mcpServers,
           ruleSnippets,
+          ruleErrors,
           deferredLoaders,
           scope
         );
       } else {
         recordSourceKind(namespace, basePath, 'plugin', scope);
-        buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets);
+        buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets, ruleErrors);
       }
       return true;
     });
@@ -642,6 +656,10 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     get ruleSnippets() {
       materializeConfigured();
       return ruleSnippets;
+    },
+    get ruleErrors() {
+      materializeConfigured();
+      return ruleErrors;
     },
 
     get(pluginId: string) {

@@ -58,7 +58,7 @@ export function printPluginInfo(plugin: PluginDescriptor): void {
 
 export function printPluginList(plugins: PluginDescriptor[], enabledList: string[]): void {
   if (plugins.length === 0) {
-    console.log(chalk.yellow('No plugins discovered from configured sources.'));
+    console.log(chalk.yellow('No plugins found in discoverable plugin sources.'));
     console.log(chalk.dim('Use: asb plugin marketplace add <path-or-url>'));
     return;
   }
