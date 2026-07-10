@@ -23,7 +23,9 @@ import {
   type MarketplaceEntryCacheRequest,
   materializeMarketplaceEntry,
   refreshMarketplaceEntryCache,
+  withMarketplaceSourceReadLease,
 } from './cache.js';
+import { localCheckoutRefForMarketplaceRef, normalizeMarketplaceGitRef } from './git-ref.js';
 import {
   type MarketplaceManifest,
   marketplaceManifestSchema,
@@ -99,6 +101,50 @@ const PLUGIN_MANIFESTS: Array<{ relativePath: string; nativeTarget: NativePlugin
   { relativePath: '.claude-plugin/plugin.json', nativeTarget: 'claude-code' },
   { relativePath: '.codex-plugin/plugin.json', nativeTarget: 'codex' },
 ];
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(canonicalJsonValue(value));
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, canonicalJsonValue(entry)])
+    );
+  }
+  return value;
+}
+
+function marketplaceEntryFingerprint(
+  manifest: MarketplaceManifest,
+  nativeTarget: NativePluginTarget,
+  entry: PluginEntry
+): string {
+  return stableJson({
+    name: manifest.name,
+    owner: manifest.owner,
+    metadata: manifest.metadata,
+    nativeTarget,
+    entry,
+  });
+}
+
+function currentMarketplaceEntryFingerprint(localPath: string, pluginName: string): string | null {
+  try {
+    const manifestInfo = getMarketplaceManifestInfo(localPath);
+    if (!manifestInfo) return null;
+    const raw = JSON.parse(fs.readFileSync(manifestInfo.manifestPath, 'utf-8'));
+    const manifest = marketplaceManifestSchema.parse(raw);
+    const entries = manifest.plugins.filter((entry) => entry.name === pluginName);
+    if (entries.length !== 1) return null;
+    return marketplaceEntryFingerprint(manifest, manifestInfo.nativeTarget, entries[0]);
+  } catch {
+    return null;
+  }
+}
 
 export interface NativeManifestInfo {
   manifestPath: string;
@@ -202,8 +248,15 @@ export function readMarketplace(
       sourceName: sourceName ?? marketplaceNamespace,
       ref: entry.ref ?? sourceString(entry.source, 'ref'),
       sha: entry.sha ?? sourceString(entry.source, 'sha'),
-      ownerIsCurrent,
     };
+    const entryFingerprint = marketplaceEntryFingerprint(
+      manifest,
+      manifestInfo.nativeTarget,
+      entry
+    );
+    resolution.ownerIsCurrent = () =>
+      (!ownerIsCurrent || ownerIsCurrent()) &&
+      currentMarketplaceEntryFingerprint(localPath, entry.name) === entryFingerprint;
     const resolved = resolvePluginDir(resolution, false);
     if (resolved === null) {
       warnings.push(`Plugin "${entry.name}": unsupported source type, skipped`);
@@ -356,13 +409,23 @@ function resolvePluginDir(
   const gitSource = getGitSource(resolution);
   if (gitSource) {
     if (canReuseMarketplaceCheckout(resolution, gitSource.url)) {
-      const checkoutRoot = getGitCheckoutRoot(marketplaceRoot);
-      if (checkoutRoot) {
-        const reused = gitSource.subdir
-          ? resolveInside(checkoutRoot, gitSource.subdir)
-          : checkoutRoot;
-        if (reused && reusablePathsAreClean(resolution, checkoutRoot, reused)) return reused;
-      }
+      const reused = withMarketplaceSourceReadLease(
+        resolution.sourceName,
+        resolution.marketplaceRoot,
+        resolution.ownerIsCurrent,
+        () => {
+          if (!canReuseMarketplaceCheckout(resolution, gitSource.url)) return null;
+          const checkoutRoot = getGitCheckoutRoot(marketplaceRoot);
+          if (!checkoutRoot) return null;
+          const pluginPath = gitSource.subdir
+            ? resolveInside(checkoutRoot, gitSource.subdir)
+            : checkoutRoot;
+          return pluginPath && reusablePathsAreClean(resolution, checkoutRoot, pluginPath)
+            ? pluginPath
+            : null;
+        }
+      );
+      if (reused) return reused;
     }
     if (!materializeRemote) return undefined;
     return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource), {
@@ -465,23 +528,15 @@ function canReuseMarketplaceCheckout(
     return false;
   }
   if (!resolution.ref) return true;
-  if (!isValidGitRef(resolution.ref)) return false;
-
-  const remoteRef = remoteTrackingRef(resolution.ref);
-  const refCommit =
-    (remoteRef
-      ? tryRunGit(['rev-parse', `${remoteRef}^{commit}`], resolution.marketplaceRoot)
-      : null) ?? tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot);
-  return refCommit === head;
-}
-
-function remoteTrackingRef(ref: string): string | null {
-  if (ref.startsWith('refs/remotes/origin/')) return ref;
-  if (ref.startsWith('refs/heads/')) {
-    return `refs/remotes/origin/${ref.slice('refs/heads/'.length)}`;
+  let normalizedRef: string;
+  try {
+    normalizedRef = normalizeMarketplaceGitRef(resolution.ref) as string;
+  } catch {
+    return false;
   }
-  if (ref.startsWith('refs/')) return null;
-  return `refs/remotes/origin/${ref}`;
+  const checkoutRef = localCheckoutRefForMarketplaceRef(normalizedRef);
+  const refCommit = tryRunGit(['rev-parse', `${checkoutRef}^{commit}`], resolution.marketplaceRoot);
+  return refCommit === head;
 }
 
 function reusablePathsAreClean(
@@ -506,16 +561,6 @@ function reusablePathsAreClean(
     indexState !== null &&
     !indexState.split('\0').some((entry) => entry !== '' && /^[a-zS] /.test(entry))
   );
-}
-
-function isValidGitRef(ref: string): boolean {
-  if (ref.startsWith('-')) return false;
-  try {
-    runGit(['check-ref-format', '--allow-onelevel', ref]);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function getGitOrigin(repoDir: string): string | null {

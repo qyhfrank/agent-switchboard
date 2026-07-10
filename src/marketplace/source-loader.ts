@@ -7,7 +7,7 @@
 import type { CommandEntry } from '../commands/library.js';
 import type { ConfigScope } from '../config/scope.js';
 import type { HookEntry } from '../hooks/library.js';
-import { getSourcesRecord, sourceOwnerIsCurrent } from '../library/sources.js';
+import { captureSourceOwnerValidator, getSourcesRecord } from '../library/sources.js';
 import { buildPluginId } from '../plugins/identity.js';
 import { buildPluginIndex } from '../plugins/index.js';
 import type { SubagentEntry } from '../subagents/library.js';
@@ -53,8 +53,10 @@ export function loadEntriesFromSources(scope?: ConfigScope): {
 
   for (const [namespace, basePath] of Object.entries(sources)) {
     if (isMarketplace(basePath)) {
-      const result = readMarketplace(basePath, namespace, () =>
-        sourceOwnerIsCurrent(namespace, basePath, scope)
+      const result = readMarketplace(
+        basePath,
+        namespace,
+        captureSourceOwnerValidator(namespace, basePath, scope)
       );
       for (const plugin of result.plugins) {
         const pluginId = buildPluginId(plugin.name, namespace, 'marketplace');

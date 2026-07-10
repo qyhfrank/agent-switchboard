@@ -215,7 +215,7 @@ export const uiSectionSchema = uiSectionBaseSchema
 
 /**
  * Source value schema for plugin sources.
- * Accepts a string (local path or git URL) or an object with url/ref/subdir.
+ * Accepts a local path string or a remote object with url/type/ref/subdir.
  * GitHub tree URLs are parsed at runtime into ref+subdir.
  */
 export const remoteSourceSchema = z.object({
@@ -255,7 +255,7 @@ const pluginExcludeSchema = z
  *   enabled = ["context7", "my-plugin@community"]
  *
  *   [plugins.sources]
- *   community = "https://github.com/anthropics/community-marketplace.git"
+ *   community = { url = "https://github.com/anthropics/community-marketplace.git", type = "clone" }
  *   team-lib = "/Users/me/team-library"
  *
  *   [plugins.exclude]
@@ -289,13 +289,7 @@ function migratePluginsSection(input: unknown): unknown {
 
   // Old legacy format: has sources sub-object but no enabled
   const s = obj.sources;
-  if (
-    s !== undefined &&
-    typeof s === 'object' &&
-    s !== null &&
-    !Array.isArray(s) &&
-    !('source' in (s as Record<string, unknown>))
-  ) {
+  if (s !== undefined && typeof s === 'object' && s !== null && !Array.isArray(s)) {
     return { ...obj, enabled: [] };
   }
 

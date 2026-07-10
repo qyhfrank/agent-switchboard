@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfigDir, getMarketplacePluginCacheDir } from '../config/paths.js';
+import { marketplaceGitFetchTargets, normalizeMarketplaceGitRef } from './git-ref.js';
 
 export interface MarketplaceEntryCacheRequest {
   sourceName: string;
@@ -30,8 +31,14 @@ export interface MarketplaceEntryCacheRefreshResult {
   removed: number;
 }
 
+export interface MarketplaceCacheRemovalStage {
+  commit: () => void;
+  rollback: () => void;
+}
+
 interface MarketplaceEntryCacheMetadata {
-  version: 1;
+  version: 2;
+  generation: number;
   identity: string;
   sourceName: string;
   marketplacePath: string;
@@ -126,16 +133,8 @@ function normalizeRequest(request: MarketplaceEntryCacheRequest): MarketplaceEnt
       'Marketplace cache source name, marketplace path, plugin name, and URL must be non-empty.'
     );
   }
-  const ref = optionalTrimmed(request.ref);
+  const ref = normalizeMarketplaceGitRef(request.ref);
   const sha = optionalTrimmed(request.sha)?.toLowerCase();
-  if (ref) {
-    if (ref.startsWith('-')) throw new Error(`Invalid marketplace plugin ref: ${ref}`);
-    try {
-      runGit(['check-ref-format', '--allow-onelevel', ref]);
-    } catch {
-      throw new Error(`Invalid marketplace plugin ref: ${ref}`);
-    }
-  }
   if (sha && !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(sha)) {
     throw new Error(`Marketplace plugin SHA must be a full 40- or 64-character object ID: ${sha}`);
   }
@@ -205,8 +204,12 @@ function assertNoCacheSymlinks(root: string, target: string): void {
   let current = root;
   for (const segment of relative.split(path.sep).filter(Boolean)) {
     current = path.join(current, segment);
-    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
-      throw new Error(`Marketplace cache path contains a symbolic link: ${current}`);
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        throw new Error(`Marketplace cache path contains a symbolic link: ${current}`);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
 }
@@ -233,6 +236,13 @@ interface CacheLockMetadata {
   startedAt: number;
   processIdentity?: string;
   lockToken?: string;
+}
+
+interface CacheLockObservation {
+  owner: CacheLockMetadata | null;
+  dev: bigint;
+  ino: bigint;
+  mtimeNs: bigint;
 }
 
 function sourceLockPath(sourceName: string, marketplacePath: string): string {
@@ -285,19 +295,39 @@ function processIsAlive(pid: number): boolean {
   }
 }
 
-function lockIsStale(lockPath: string): boolean {
-  const metadata = readLockMetadata(lockPath);
-  if (metadata) {
-    if (!processIsAlive(metadata.pid)) return true;
-    if (!metadata.processIdentity?.startsWith(PROCESS_IDENTITY_PREFIX)) return false;
-    const identity = processIdentity(metadata.pid);
-    return identity !== null && identity !== metadata.processIdentity;
-  }
+function observeLock(cacheRoot: string, lockPath: string): CacheLockObservation | null {
+  assertNoCacheSymlinks(cacheRoot, lockPath);
   try {
-    return Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS;
-  } catch {
-    return false;
+    const stat = fs.lstatSync(lockPath, { bigint: true });
+    const ownerPath = path.join(lockPath, LOCK_METADATA_FILE);
+    assertNoCacheSymlinks(cacheRoot, ownerPath);
+    return {
+      owner: readLockOwner(ownerPath),
+      dev: stat.dev,
+      ino: stat.ino,
+      mtimeNs: stat.mtimeNs,
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
   }
+}
+
+function lockObservationIsStale(observation: CacheLockObservation): boolean {
+  if (observation.owner) return lockOwnerIsStale(observation.owner);
+  return Date.now() - Number(observation.mtimeNs / 1_000_000n) > LOCK_STALE_MS;
+}
+
+function sameObservedLock(
+  before: CacheLockObservation,
+  after: CacheLockObservation | null
+): boolean {
+  return (
+    after !== null &&
+    before.dev === after.dev &&
+    before.ino === after.ino &&
+    before.owner?.token === after.owner?.token
+  );
 }
 
 function lockOwnerIsStale(metadata: CacheLockMetadata): boolean {
@@ -315,12 +345,14 @@ function pathIsOld(target: string): boolean {
   }
 }
 
-function removeStaleRecoveryClaim(claimDir: string): void {
+function removeStaleRecoveryClaim(cacheRoot: string, claimDir: string): void {
+  assertNoCacheSymlinks(cacheRoot, claimDir);
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(claimDir, { withFileTypes: true });
-  } catch {
-    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
   }
   if (entries.length === 0) {
     if (pathIsOld(claimDir)) {
@@ -335,6 +367,7 @@ function removeStaleRecoveryClaim(claimDir: string): void {
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
     const ownerPath = path.join(claimDir, entry.name);
+    assertNoCacheSymlinks(cacheRoot, ownerPath);
     const metadata = readLockOwner(ownerPath);
     if (metadata ? !lockOwnerIsStale(metadata) : !pathIsOld(ownerPath)) continue;
     try {
@@ -348,7 +381,14 @@ function removeStaleRecoveryClaim(claimDir: string): void {
   }
 }
 
-function releaseRecoveryClaim(claimDir: string, ownerPath: string, token: string): void {
+function releaseRecoveryClaim(
+  cacheRoot: string,
+  claimDir: string,
+  ownerPath: string,
+  token: string
+): void {
+  assertNoCacheSymlinks(cacheRoot, claimDir);
+  assertNoCacheSymlinks(cacheRoot, ownerPath);
   if (readLockOwner(ownerPath)?.token === token) fs.rmSync(ownerPath, { force: true });
   try {
     fs.rmdirSync(claimDir);
@@ -357,8 +397,12 @@ function releaseRecoveryClaim(claimDir: string, ownerPath: string, token: string
   }
 }
 
-function tryRecoverStaleLock(lockPath: string): boolean {
-  const observedLockToken = readLockMetadata(lockPath)?.token;
+function tryRecoverStaleLock(
+  cacheRoot: string,
+  lockPath: string,
+  observed: CacheLockObservation
+): boolean {
+  const observedLockToken = observed.owner?.token;
   const claimDir = path.join(lockPath, LOCK_RECOVERY_DIR);
   const token = randomUUID();
   const tempOwnerPath = path.join(lockPath, `.recovering-${token}.tmp`);
@@ -370,15 +414,19 @@ function tryRecoverStaleLock(lockPath: string): boolean {
     processIdentity: processIdentity(process.pid) ?? undefined,
     lockToken: observedLockToken,
   };
+  assertNoCacheSymlinks(cacheRoot, claimDir);
   try {
     fs.mkdirSync(claimDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return false;
-    removeStaleRecoveryClaim(claimDir);
+    assertNoCacheSymlinks(cacheRoot, claimDir);
+    removeStaleRecoveryClaim(cacheRoot, claimDir);
     return false;
   }
 
   try {
+    assertNoCacheSymlinks(cacheRoot, tempOwnerPath);
+    assertNoCacheSymlinks(cacheRoot, ownerPath);
     fs.writeFileSync(tempOwnerPath, `${JSON.stringify(owner)}\n`, { flag: 'wx' });
     fs.renameSync(tempOwnerPath, ownerPath);
   } catch {
@@ -393,10 +441,13 @@ function tryRecoverStaleLock(lockPath: string): boolean {
 
   let moved = false;
   try {
+    assertNoCacheSymlinks(cacheRoot, ownerPath);
+    const current = observeLock(cacheRoot, lockPath);
     if (
       readLockOwner(ownerPath)?.token !== token ||
-      readLockMetadata(lockPath)?.token !== observedLockToken ||
-      !lockIsStale(lockPath)
+      current?.owner?.token !== observedLockToken ||
+      !sameObservedLock(observed, current) ||
+      !lockObservationIsStale(observed)
     ) {
       return false;
     }
@@ -408,7 +459,7 @@ function tryRecoverStaleLock(lockPath: string): boolean {
   } catch {
     return false;
   } finally {
-    if (!moved) releaseRecoveryClaim(claimDir, ownerPath, token);
+    if (!moved) releaseRecoveryClaim(cacheRoot, claimDir, ownerPath, token);
   }
 }
 
@@ -436,6 +487,8 @@ function acquireSourceLock(sourceName: string, marketplacePath: string): () => v
         throw error;
       }
       return () => {
+        assertNoCacheSymlinks(cacheRoot, lockPath);
+        assertNoCacheSymlinks(cacheRoot, path.join(lockPath, LOCK_METADATA_FILE));
         if (readLockMetadata(lockPath)?.token === token) {
           fs.rmSync(lockPath, { recursive: true, force: true });
         }
@@ -444,7 +497,14 @@ function acquireSourceLock(sourceName: string, marketplacePath: string): () => v
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
       if (Date.now() >= nextRecoveryCheck) {
         nextRecoveryCheck = Date.now() + 1_000;
-        if (lockIsStale(lockPath) && tryRecoverStaleLock(lockPath)) continue;
+        const observed = observeLock(cacheRoot, lockPath);
+        if (
+          observed &&
+          lockObservationIsStale(observed) &&
+          tryRecoverStaleLock(cacheRoot, lockPath, observed)
+        ) {
+          continue;
+        }
       }
       if (Date.now() >= deadline) {
         throw new Error(`Timed out waiting for marketplace cache lock: ${sourceName}`);
@@ -497,13 +557,91 @@ export function withMarketplaceSourceLock<T>(
   action: () => T
 ): T {
   const lockPath = sourceLockPath(sourceName, marketplacePath);
-  const result = withSourceLock(sourceName, marketplacePath, action);
   const heldRelease = heldSourceLocks.get(lockPath);
-  if (heldRelease) {
-    heldRelease();
-    heldSourceLocks.delete(lockPath);
+  try {
+    return withSourceLock(sourceName, marketplacePath, action);
+  } finally {
+    if (heldRelease && heldSourceLocks.get(lockPath) === heldRelease) {
+      heldRelease();
+      heldSourceLocks.delete(lockPath);
+    }
   }
-  return result;
+}
+
+export function withMarketplaceSourceReadLease<T>(
+  sourceName: string,
+  marketplacePath: string,
+  ownerIsCurrent: (() => boolean) | undefined,
+  action: () => T | null | undefined
+): T | null | undefined {
+  const lockPath = sourceLockPath(sourceName, marketplacePath);
+  if (heldSourceLocks.has(lockPath) || activeSourceLocks.has(lockPath)) {
+    if (ownerIsCurrent && !ownerIsCurrent()) {
+      throw new Error(`Marketplace source "${sourceName}" is no longer active.`);
+    }
+    const result = action();
+    if (result !== null && result !== undefined && ownerIsCurrent && !ownerIsCurrent()) {
+      throw new Error(`Marketplace source "${sourceName}" is no longer active.`);
+    }
+    return result;
+  }
+  const release = acquireSourceLock(sourceName, marketplacePath);
+  activeSourceLocks.add(lockPath);
+  try {
+    if (ownerIsCurrent && !ownerIsCurrent()) {
+      throw new Error(`Marketplace source "${sourceName}" is no longer active.`);
+    }
+    const result = action();
+    if (result === null || result === undefined) {
+      release();
+      return result;
+    }
+    if (ownerIsCurrent && !ownerIsCurrent()) {
+      throw new Error(`Marketplace source "${sourceName}" is no longer active.`);
+    }
+    retainSourceLock(lockPath, release);
+    return result;
+  } catch (error) {
+    release();
+    throw error;
+  } finally {
+    activeSourceLocks.delete(lockPath);
+  }
+}
+
+export function stageMarketplaceEntryCacheRemoval(
+  sourceName: string,
+  marketplacePath: string
+): MarketplaceCacheRemovalStage {
+  const cacheRoot = safeCacheRoot(false);
+  const sourcePath = sourceCachePath(sourceName, marketplacePath);
+  if (!fs.existsSync(sourcePath)) {
+    return { commit: () => {}, rollback: () => {} };
+  }
+  assertNoCacheSymlinks(cacheRoot, sourcePath);
+  const stagedPath = path.join(cacheRoot, `.removing-${path.basename(sourcePath)}-${randomUUID()}`);
+  assertNoCacheSymlinks(cacheRoot, stagedPath);
+  fs.renameSync(sourcePath, stagedPath);
+  let staged = true;
+  return {
+    commit: () => {
+      if (!staged) return;
+      try {
+        fs.rmSync(stagedPath, { recursive: true, force: true });
+      } catch {
+        // The source is gone and the dot-prefixed staging path is not reusable cache state.
+      }
+      staged = false;
+    },
+    rollback: () => {
+      if (!staged) return;
+      if (fs.existsSync(sourcePath)) {
+        throw new Error(`Marketplace cache rollback target already exists: ${sourcePath}`);
+      }
+      fs.renameSync(stagedPath, sourcePath);
+      staged = false;
+    },
+  };
 }
 
 function resolveInside(root: string, subdir: string | undefined): string {
@@ -557,11 +695,21 @@ function checkoutRequest(
   const transportEnv = authenticatedGitEnv(request.url, persistedUrl);
   runGit(['remote', 'add', 'origin', persistedUrl], repoPath);
 
-  const target = request.ref ?? request.sha ?? 'HEAD';
-  const fetchArgs = ['fetch', '--depth', '1'];
-  if (request.subdir) fetchArgs.push('--filter=blob:none');
-  fetchArgs.push('origin', target);
-  runGit(fetchArgs, repoPath, transportEnv);
+  const targets = request.ref ? marketplaceGitFetchTargets(request.ref) : [request.sha ?? 'HEAD'];
+  let fetchError: unknown;
+  for (const target of targets) {
+    const fetchArgs = ['fetch', '--depth', '1'];
+    if (request.subdir) fetchArgs.push('--filter=blob:none');
+    fetchArgs.push('origin', target);
+    try {
+      runGit(fetchArgs, repoPath, transportEnv);
+      fetchError = undefined;
+      break;
+    } catch (error) {
+      fetchError = error;
+    }
+  }
+  if (fetchError) throw fetchError;
   const commit = runGit(['rev-parse', 'FETCH_HEAD^{commit}'], repoPath);
   fs.rmSync(path.join(repoPath, '.git', 'FETCH_HEAD'), { force: true });
   if (request.sha && commit !== request.sha) {
@@ -582,8 +730,11 @@ function checkoutRequest(
 function readMetadata(entryPath: string): MarketplaceEntryCacheMetadata | null {
   try {
     const value = JSON.parse(fs.readFileSync(path.join(entryPath, METADATA_FILE), 'utf-8'));
+    const generation = value?.generation;
     if (
-      value?.version !== 1 ||
+      value?.version !== 2 ||
+      !Number.isSafeInteger(generation) ||
+      generation < 1 ||
       typeof value.identity !== 'string' ||
       typeof value.sourceName !== 'string' ||
       typeof value.marketplacePath !== 'string' ||
@@ -592,10 +743,25 @@ function readMetadata(entryPath: string): MarketplaceEntryCacheMetadata | null {
     ) {
       return null;
     }
-    return value as MarketplaceEntryCacheMetadata;
+    return { ...value, generation } as MarketplaceEntryCacheMetadata;
   } catch {
     return null;
   }
+}
+
+function nextCacheGeneration(sourcePath: string, identity: string): number {
+  let current = 0;
+  if (!fs.existsSync(sourcePath)) return 1;
+  for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const metadata = readMetadata(path.join(sourcePath, entry.name));
+    if (metadata?.identity !== identity) continue;
+    current = Math.max(current, metadata.generation);
+  }
+  if (!Number.isSafeInteger(current + 1)) {
+    throw new Error(`Marketplace cache generation overflow: ${sourcePath}`);
+  }
+  return current + 1;
 }
 
 function cachedMaterialization(
@@ -637,27 +803,56 @@ function recoverEntryBackup(
   identity: string,
   entryPath: string
 ): MarketplaceEntryMaterialization | null {
-  let current = cachedMaterialization(request, identity, entryPath);
   const sourcePath = path.dirname(entryPath);
+  const current = cachedMaterialization(request, identity, entryPath);
+  const backups: Array<{
+    path: string;
+    generation: number;
+  }> = [];
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
     if (!entry.isDirectory() || !entry.name.startsWith('.backup-')) continue;
     const backupPath = path.join(sourcePath, entry.name);
-    if (readMetadata(backupPath)?.identity !== identity) continue;
+    const metadata = readMetadata(backupPath);
+    if (metadata?.identity !== identity) continue;
     const backup = cachedMaterialization(request, identity, backupPath);
-    if (current || !backup) {
+    if (!backup) continue;
+    backups.push({ path: backupPath, generation: metadata.generation });
+  }
+
+  if (current) {
+    for (const backup of backups) {
       try {
-        fs.rmSync(backupPath, { recursive: true, force: true });
+        fs.rmSync(backup.path, { recursive: true, force: true });
       } catch {
         // A valid current generation does not depend on redundant backup cleanup.
       }
-      continue;
     }
-    if (fs.existsSync(entryPath)) fs.rmSync(entryPath, { recursive: true, force: true });
-    fs.renameSync(backupPath, entryPath);
-    current = cachedMaterialization(request, identity, entryPath);
-    if (!current) throw new Error(`Marketplace cache recovery failed: ${entryPath}`);
+    return current;
   }
-  return current;
+
+  const winner = backups.sort(
+    (left, right) => right.generation - left.generation || right.path.localeCompare(left.path)
+  )[0];
+  if (!winner) return null;
+
+  if (fs.existsSync(entryPath)) fs.rmSync(entryPath, { recursive: true, force: true });
+  fs.renameSync(winner.path, entryPath);
+  const recovered = cachedMaterialization(request, identity, entryPath);
+  if (!recovered) {
+    if (!fs.existsSync(winner.path) && fs.existsSync(entryPath)) {
+      fs.renameSync(entryPath, winner.path);
+    }
+    throw new Error(`Marketplace cache recovery failed: ${entryPath}`);
+  }
+  for (const backup of backups) {
+    if (backup.path === winner.path) continue;
+    try {
+      fs.rmSync(backup.path, { recursive: true, force: true });
+    } catch {
+      // The recovered highest generation remains authoritative.
+    }
+  }
+  return recovered;
 }
 
 function replaceEntry(
@@ -753,7 +948,8 @@ export function materializeMarketplaceEntry(
         const repoPath = path.join(tempPath, 'repo');
         const checkout = checkoutRequest(request, repoPath);
         const metadata: MarketplaceEntryCacheMetadata = {
-          version: 1,
+          version: 2,
+          generation: nextCacheGeneration(sourcePath, identity),
           identity,
           sourceName: request.sourceName,
           marketplacePath: request.marketplacePath,

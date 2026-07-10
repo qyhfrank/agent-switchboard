@@ -5,6 +5,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
@@ -17,7 +18,11 @@ import {
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
-import { removeMarketplaceEntryCache, withMarketplaceSourceLock } from '../marketplace/cache.js';
+import {
+  removeMarketplaceEntryCache,
+  stageMarketplaceEntryCacheRemoval,
+  withMarketplaceSourceLock,
+} from '../marketplace/cache.js';
 import {
   getMarketplaceManifestInfo,
   getPluginManifestInfo,
@@ -124,6 +129,39 @@ function ensureCleanTree(dir: string): void {
   }
 }
 
+interface StagedPathRemoval {
+  commit: () => void;
+  rollback: () => void;
+}
+
+function stageOwnedPathRemoval(target: string): StagedPathRemoval {
+  if (!fs.existsSync(target)) return { commit: () => {}, rollback: () => {} };
+  const stagedPath = path.join(
+    path.dirname(target),
+    `.removing-${path.basename(target)}-${randomUUID()}`
+  );
+  fs.renameSync(target, stagedPath);
+  let staged = true;
+  return {
+    commit: () => {
+      if (!staged) return;
+      try {
+        fs.rmSync(stagedPath, { recursive: true, force: true });
+      } catch {
+        // The dot-prefixed staging path is not an active source.
+      }
+      staged = false;
+    },
+    rollback: () => {
+      if (!staged) return;
+      if (fs.existsSync(target))
+        throw new Error(`Source rollback target already exists: ${target}`);
+      fs.renameSync(stagedPath, target);
+      staged = false;
+    },
+  };
+}
+
 // ── URL detection and parsing ──────────────────────────────────────
 
 export function isGitUrl(source: string): boolean {
@@ -132,7 +170,7 @@ export function isGitUrl(source: string): boolean {
 
 /**
  * Determine whether an object-format source URL should be treated as a
- * cloneable git source (resolved via cache) rather than a direct local path.
+ * cloneable Git source with a managed checkout rather than a direct local path.
  * Matches: git transport URLs, file:// URIs, and bare-repo paths (ending in .git).
  */
 function isCloneableSource(url: string): boolean {
@@ -213,7 +251,7 @@ function resolveLocalPath(expanded: string): string {
 
 /**
  * Resolve the effective local path for a plugin source.
- * - Cloneable sources (object with git/file URL or .git suffix): resolve to cache dir
+ * - Cloneable sources (object with git/file URL or .git suffix): resolve to the managed checkout
  * - Object sources with local path URL: resolve using shared local path rules
  * - String sources: resolve using shared local path rules
  */
@@ -327,6 +365,19 @@ export function sourceOwnerIsCurrent(
   return canonicalSourcePath(currentPath) === canonicalSourcePath(expectedPath);
 }
 
+export function captureSourceOwnerValidator(
+  namespace: string,
+  expectedPath: string,
+  scope?: ConfigScope
+): () => boolean {
+  const revision = sourceRevision;
+  const descriptor = sourceDescriptorIdentity(getRawSources(scope)[namespace]);
+  return () =>
+    sourceRevision === revision &&
+    sourceDescriptorIdentity(getRawSources(scope)[namespace]) === descriptor &&
+    sourceOwnerIsCurrent(namespace, expectedPath, scope);
+}
+
 function canonicalSourcePath(value: string): string {
   const resolved = path.resolve(value);
   try {
@@ -334,6 +385,12 @@ function canonicalSourcePath(value: string): string {
   } catch {
     return resolved;
   }
+}
+
+function sourceDescriptorIdentity(value: SourceValue | undefined): string {
+  if (value === undefined) return 'discovered';
+  if (typeof value === 'string') return JSON.stringify(['local', value]);
+  return JSON.stringify(['remote', value.url, value.type, value.ref ?? null, value.subdir ?? null]);
 }
 
 export function hasSource(namespace: string, scope?: ConfigScope): boolean {
@@ -377,7 +434,7 @@ export function addLocalSource(namespace: string, libraryPath: string): void {
 }
 
 /**
- * Add a remote git source. Clones the repo into the local cache.
+ * Add a remote Git source under the first-class plugin source directory.
  */
 export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   validateNamespace(namespace);
@@ -440,7 +497,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
 }
 
 /**
- * Remove a source and clean up its cache directory if remote.
+ * Remove a configured source and its source-owned derived state.
  */
 export function removeSource(namespace: string): void {
   const raw = getRawSources();
@@ -455,36 +512,32 @@ export function removeSource(namespace: string): void {
     : effectivePath;
   withMarketplaceSourceLock(namespace, cacheOwnerPath, () => {
     const current = getRawSources()[namespace];
-    if (JSON.stringify(current) !== JSON.stringify(value)) {
+    if (sourceDescriptorIdentity(current) !== sourceDescriptorIdentity(value)) {
       throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
     }
-    removeMarketplaceEntryCache(namespace, cacheOwnerPath);
-
-    // For subtree sources, perform git rm first to avoid split-brain on failure
-    if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
-      const pluginDir = path.join(getPluginsDir(), namespace);
-      if (value.type === 'subtree') {
-        if (!isGitRepo(getConfigDir())) {
-          throw new Error(
-            `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
-          );
-        }
-        if (fs.existsSync(pluginDir)) {
-          ensureCleanTree(getConfigDir());
-          try {
-            runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
-          } catch (err) {
-            throw new Error(
-              `Failed to git rm subtree "plugins/${namespace}": ${err instanceof Error ? err.message : String(err)}`
-            );
-          }
-        }
-      } else if (fs.existsSync(pluginDir)) {
-        fs.rmSync(pluginDir, { recursive: true, force: true });
+    const remote = typeof value !== 'string' && isCloneableSource(expandHome(value.url));
+    const pluginDir = path.join(getPluginsDir(), namespace);
+    if (remote && value.type === 'subtree') {
+      if (!isGitRepo(getConfigDir())) {
+        throw new Error(
+          `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
+        );
       }
+      if (fs.existsSync(pluginDir)) ensureCleanTree(getConfigDir());
     }
 
+    let cacheStage = { commit: () => {}, rollback: () => {} };
+    let checkoutStage: StagedPathRemoval = { commit: () => {}, rollback: () => {} };
+    let subtreeTouched = false;
     try {
+      cacheStage = stageMarketplaceEntryCacheRemoval(namespace, cacheOwnerPath);
+      if (remote && value.type === 'subtree' && fs.existsSync(pluginDir)) {
+        subtreeTouched = true;
+        runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
+      } else if (remote) {
+        checkoutStage = stageOwnedPathRemoval(pluginDir);
+      }
+
       updateConfigLayer((layer) => {
         const newSources = { ...(layer.plugins?.sources ?? {}) };
         delete newSources[namespace];
@@ -496,18 +549,45 @@ export function removeSource(namespace: string): void {
           },
         };
       });
-    } catch (configErr) {
-      // Rollback git rm if config write fails (subtree only)
-      if (typeof value !== 'string' && value.type === 'subtree' && isGitRepo(getConfigDir())) {
+      markSourcesChanged();
+      checkoutStage.commit();
+      cacheStage.commit();
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      if (subtreeTouched && isGitRepo(getConfigDir())) {
         try {
-          runGit(['checkout', 'HEAD', '--', `plugins/${namespace}`], { cwd: getConfigDir() });
-        } catch {
-          /* best-effort rollback */
+          runGit(
+            ['restore', '--source=HEAD', '--staged', '--worktree', '--', `plugins/${namespace}`],
+            { cwd: getConfigDir() }
+          );
+        } catch (rollbackError) {
+          rollbackErrors.push(
+            `restore subtree: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+          );
         }
       }
-      throw configErr;
+      try {
+        checkoutStage.rollback();
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          `restore checkout: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+        );
+      }
+      try {
+        cacheStage.rollback();
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          `restore cache: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
+        );
+      }
+      if (rollbackErrors.length > 0) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new Error(`${message}\nRollback failed: ${rollbackErrors.join('; ')}`, {
+          cause: error,
+        });
+      }
+      throw error;
     }
-    markSourcesChanged();
   });
 }
 
@@ -570,65 +650,75 @@ export function updateRemoteSources(
     if (!isCloneableSource(expandHome(value.url))) continue;
     attemptedUpdate = true;
     handledNamespaces.add(namespace);
+    const effectivePath = resolveEffectivePath(namespace, value);
 
     try {
-      if (!gitChecked) {
-        ensureGitAvailable();
-        gitChecked = true;
-      }
+      withMarketplaceSourceLock(namespace, effectivePath, () => {
+        if (
+          sourceDescriptorIdentity(getRawSources(scope)[namespace]) !==
+          sourceDescriptorIdentity(value)
+        ) {
+          throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
+        }
+        if (!gitChecked) {
+          ensureGitAvailable();
+          gitChecked = true;
+        }
 
-      if (value.type === 'subtree') {
-        if (!isGitRepo(getConfigDir())) {
-          throw new Error(
-            `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root.`
-          );
-        }
-        if (!value.ref) {
-          throw new Error(
-            `Subtree source "${namespace}" requires an explicit "ref" in config.toml.`
-          );
-        }
-        const repoRoot = getConfigDir();
-        ensureCleanTree(repoRoot);
-        const prefix = `plugins/${namespace}`;
-        const prefixDir = path.join(repoRoot, prefix);
-        if (!fs.existsSync(prefixDir)) {
-          gitSubtreeAdd(repoRoot, prefix, expandHome(value.url), value.ref);
-        } else {
-          try {
-            gitSubtreePull(repoRoot, prefix, expandHome(value.url), value.ref);
-          } catch (pullErr) {
-            // Abort merge if conflict left repo in unmerged state
+        if (value.type === 'subtree') {
+          if (!isGitRepo(getConfigDir())) {
+            throw new Error(
+              `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root.`
+            );
+          }
+          if (!value.ref) {
+            throw new Error(
+              `Subtree source "${namespace}" requires an explicit "ref" in config.toml.`
+            );
+          }
+          const repoRoot = getConfigDir();
+          ensureCleanTree(repoRoot);
+          const prefix = `plugins/${namespace}`;
+          const prefixDir = path.join(repoRoot, prefix);
+          if (!fs.existsSync(prefixDir)) {
+            gitSubtreeAdd(repoRoot, prefix, expandHome(value.url), value.ref);
+          } else {
             try {
-              const mergeHeadPath = runGit(['rev-parse', '--git-path', 'MERGE_HEAD'], {
-                cwd: repoRoot,
-              });
-              if (fs.existsSync(path.resolve(repoRoot, mergeHeadPath))) {
-                runGit(['merge', '--abort'], { cwd: repoRoot });
+              gitSubtreePull(repoRoot, prefix, expandHome(value.url), value.ref);
+            } catch (pullErr) {
+              // Abort merge if conflict left repo in unmerged state
+              try {
+                const mergeHeadPath = runGit(['rev-parse', '--git-path', 'MERGE_HEAD'], {
+                  cwd: repoRoot,
+                });
+                if (fs.existsSync(path.resolve(repoRoot, mergeHeadPath))) {
+                  runGit(['merge', '--abort'], { cwd: repoRoot });
+                }
+              } catch {
+                /* best-effort cleanup */
               }
-            } catch {
-              /* best-effort cleanup */
+              throw pullErr;
             }
-            throw pullErr;
+          }
+        } else {
+          const cloneDir = path.join(getPluginsDir(), namespace);
+          const gitDir = path.join(cloneDir, '.git');
+          if (!fs.existsSync(gitDir)) {
+            gitClone(expandHome(value.url), cloneDir, value.ref);
+          } else {
+            gitPull(cloneDir);
           }
         }
-      } else {
-        const cloneDir = path.join(getPluginsDir(), namespace);
-        const gitDir = path.join(cloneDir, '.git');
-        if (!fs.existsSync(gitDir)) {
-          gitClone(expandHome(value.url), cloneDir, value.ref);
+        if (getMarketplaceManifestInfo(effectivePath)) {
+          refreshMarketplacePluginCache(
+            effectivePath,
+            namespace,
+            captureSourceOwnerValidator(namespace, effectivePath, scope)
+          );
         } else {
-          gitPull(cloneDir);
+          removeMarketplaceEntryCache(namespace, effectivePath);
         }
-      }
-      const effectivePath = resolveEffectivePath(namespace, value);
-      if (getMarketplaceManifestInfo(effectivePath)) {
-        refreshMarketplacePluginCache(effectivePath, namespace, () =>
-          sourceOwnerIsCurrent(namespace, effectivePath, scope)
-        );
-      } else {
-        removeMarketplaceEntryCache(namespace, effectivePath);
-      }
+      });
       results.push({ namespace, url: value.url, status: 'updated' });
     } catch (err) {
       results.push({
@@ -646,9 +736,18 @@ export function updateRemoteSources(
     if (!getMarketplaceManifestInfo(source.path)) continue;
     attemptedUpdate = true;
     try {
-      refreshMarketplacePluginCache(source.path, source.namespace, () =>
-        sourceOwnerIsCurrent(source.namespace, source.path, scope)
-      );
+      withMarketplaceSourceLock(source.namespace, source.path, () => {
+        if (!sourceOwnerIsCurrent(source.namespace, source.path, scope)) {
+          throw new Error(
+            `Source "${source.namespace}" changed while waiting for its lifecycle lock.`
+          );
+        }
+        refreshMarketplacePluginCache(
+          source.path,
+          source.namespace,
+          captureSourceOwnerValidator(source.namespace, source.path, scope)
+        );
+      });
       results.push({ namespace: source.namespace, url: source.path, status: 'updated' });
     } catch (err) {
       results.push({

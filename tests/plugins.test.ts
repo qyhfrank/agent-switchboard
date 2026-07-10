@@ -316,6 +316,21 @@ test('buildPluginIndex discovers marketplace plugins', () => {
   });
 });
 
+test('plugin source namespace may be named source', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = createMarketplaceFixture(asbHome, 'source-catalog', [
+      { name: 'demo', commands: ['one'] },
+    ]);
+    writeConfigToml(asbHome, `[plugins.sources]\nsource = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+
+    assert.ok(index.get('demo@source'));
+    assert.equal(index.get('demo@sources'), undefined);
+  });
+});
+
 test('external marketplace components materialize only when selected', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -360,6 +375,31 @@ test('external marketplace components materialize only when selected', () => {
     const selectedSkill = loadSkillLibrary().find((skill) => skill.id === skillId);
     assert.ok(selectedSkill);
     assert.equal(fs.existsSync(selectedSkill.skillPath), true);
+  });
+});
+
+test('deferred marketplace descriptors reject catalog entry replacement', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const { marketplaceDir, pluginId } = createRemoteSkillMarketplace(asbHome);
+    writeConfigToml(asbHome, `[plugins.sources]\nremote-catalog = "${marketplaceDir}"\n`);
+    const index = buildPluginIndex();
+    const plugin = index.get(pluginId);
+    assert.ok(plugin);
+
+    const manifestPath = path.join(marketplaceDir, '.claude-plugin', 'marketplace.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
+    manifest.plugins[0].source.url = path.join(asbHome, 'replacement.git');
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest));
+
+    assert.throws(() => index.expand([plugin.id]), /source .* no longer active/i);
+    const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+    const entries = fs.existsSync(cacheRoot)
+      ? fs
+          .readdirSync(cacheRoot, { recursive: true })
+          .filter((entry) => String(entry).endsWith('entry.json'))
+      : [];
+    assert.deepEqual(entries, []);
   });
 });
 
@@ -494,6 +534,10 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
       stdio: 'ignore',
     });
     commitAll(marketplaceDir);
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
     writeConfigToml(asbHome, `[plugins.sources]\nself-catalog = "${marketplaceDir}"\n`);
 
     const plugin = buildPluginIndex().get('ppt-master@self-catalog');
@@ -540,6 +584,10 @@ test('same-origin git-subdir reuse resolves from a nested marketplace checkout r
       stdio: 'ignore',
     });
     commitAll(checkoutRoot);
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
     writeConfigToml(asbHome, `[plugins.sources]\nnested = "${marketplaceDir}"\n`);
 
     const plugin = buildPluginIndex().get('nested-plugin@nested');
@@ -586,6 +634,10 @@ test('pinned same-origin entries do not reuse a dirty plugin worktree', () => {
       stdio: 'ignore',
     });
     commitAll(checkoutRoot);
+    execFileSync('git', ['update-ref', 'refs/remotes/origin/main', 'HEAD'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
     fs.writeFileSync(path.join(pluginRoot, 'commands', 'dirty.md'), '# Dirty');
     fs.writeFileSync(path.join(pluginRoot, 'commands', 'ignored.md'), '# Ignored');
     writeConfigToml(asbHome, `[plugins.sources]\ndirty = "${marketplaceDir}"\n`);
@@ -634,6 +686,94 @@ test('same-origin ref validation follows the remote-tracking branch', () => {
 
     assert.deepEqual(plugin.components.commands, ['pinned-plugin@remote-ref:committed']);
     assert.match(plugin.meta.sourcePath, /state[/\\]marketplace-plugins/);
+  });
+});
+
+test('short refs resolve the same branch for reuse and materialization', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const bareRepo = path.join(asbHome, 'collision.git');
+    const checkoutRoot = path.join(asbHome, 'collision-checkout');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], {
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['clone', bareRepo, checkoutRoot], { stdio: 'ignore' });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'branch.md'), '# Branch');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'collision-catalog',
+        plugins: [
+          {
+            name: 'branch-plugin',
+            source: {
+              source: 'git-subdir',
+              url: bareRepo,
+              path: 'packages/plugin',
+              ref: 'collision',
+            },
+          },
+          {
+            name: 'tag-plugin',
+            source: {
+              source: 'git-subdir',
+              url: bareRepo,
+              path: 'packages/plugin',
+              ref: 'refs/tags/collision',
+            },
+          },
+        ],
+      })
+    );
+    commitAll(checkoutRoot);
+    execFileSync('git', ['branch', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    fs.rmSync(path.join(pluginRoot, 'commands', 'branch.md'));
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'tag.md'), '# Tag');
+    commitAll(checkoutRoot);
+    execFileSync('git', ['tag', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/collision'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['checkout', 'collision'], { cwd: checkoutRoot, stdio: 'ignore' });
+    execFileSync(
+      'git',
+      ['fetch', 'origin', '+refs/heads/collision:refs/remotes/origin/collision'],
+      { cwd: checkoutRoot, stdio: 'ignore' }
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\ncollision = "${marketplaceDir}"\n`);
+
+    const cleanIndex = buildPluginIndex();
+    const cleanBranch = cleanIndex.get('branch-plugin@collision');
+    const tagPlugin = cleanIndex.get('tag-plugin@collision');
+    assert.ok(cleanBranch);
+    assert.ok(tagPlugin);
+    cleanIndex.expand([cleanBranch.id, tagPlugin.id]);
+    assert.deepEqual(cleanBranch.components.commands, ['branch-plugin@collision:branch']);
+    assert.deepEqual(tagPlugin.components.commands, ['tag-plugin@collision:tag']);
+
+    fs.writeFileSync(path.join(pluginRoot, 'untracked.txt'), 'dirty');
+    clearPluginIndexCache();
+    const dirtyIndex = buildPluginIndex();
+    const dirtyBranch = dirtyIndex.get('branch-plugin@collision');
+    assert.ok(dirtyBranch);
+    dirtyIndex.expand([dirtyBranch.id]);
+
+    assert.deepEqual(dirtyBranch.components.commands, ['branch-plugin@collision:branch']);
+    assert.match(dirtyBranch.meta.sourcePath, /state[/\\]marketplace-plugins/);
   });
 });
 

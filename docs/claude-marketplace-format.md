@@ -345,6 +345,8 @@ Portable plugin selection and direct component selection are materialization bou
 
 The derived entry identity includes the configured source, canonical marketplace root, plugin name, Git URL, ref, full 40- or 64-character SHA, and subdirectory. Subdirectory entries use sparse checkout. A refresh writes and verifies a replacement before switching generations; a failed refresh preserves the prior verified entry. Exact SHA entries are immutable and reused. Updating a remote source refreshes only entries already materialized for that source, while source removal cleans only that source's derived entries. `asb sync --dry-run` uses temporary materialization and does not mutate the durable cache or update source checkouts.
 
+A short Git ref resolves a same-named branch before falling back to a tag. Full `refs/heads/*` and `refs/tags/*` values select that exact ref; `refs/remotes/*` values are local checkout state and are rejected. When both `ref` and `sha` are present, the selected ref must resolve to the full SHA.
+
 ### ASB `.mcp.json` Compatibility
 
 Claude Code's official `.mcp.json` wraps servers under `"mcpServers"`:

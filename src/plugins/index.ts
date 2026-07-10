@@ -17,7 +17,11 @@ import { getConfigDir } from '../config/paths.js';
 import { loadConfiguredPortableSelections } from '../config/plugin-selection.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
-import { getSourceRevision, getSourcesRecord, sourceOwnerIsCurrent } from '../library/sources.js';
+import {
+  captureSourceOwnerValidator,
+  getSourceRevision,
+  getSourcesRecord,
+} from '../library/sources.js';
 import {
   loadPluginComponents,
   loadPluginHookEntries,
@@ -309,8 +313,10 @@ function buildFromMarketplace(
   deferredLoaders: Map<string, () => void>,
   scope?: ConfigScope
 ): void {
-  const result = readMarketplace(basePath, sourceName, () =>
-    sourceOwnerIsCurrent(sourceName, basePath, scope)
+  const result = readMarketplace(
+    basePath,
+    sourceName,
+    captureSourceOwnerValidator(sourceName, basePath, scope)
   );
 
   for (const plugin of result.plugins) {
