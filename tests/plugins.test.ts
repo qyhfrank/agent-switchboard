@@ -377,7 +377,7 @@ test('plugin MCP servers are merged into config', () => {
   });
 });
 
-test('buildPluginIndex warns and skips plugin hook files that are not in ASB hook format', () => {
+test('buildPluginIndex silently skips valid GitHub Copilot v1 hook files', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const pluginDir = path.join(asbHome, 'external', 'copilot-hook-plugin');
@@ -403,6 +403,10 @@ test('buildPluginIndex warns and skips plugin hook files that are not in ASB hoo
         },
       })
     );
+    fs.writeFileSync(
+      path.join(pluginDir, 'hooks', 'disabled-copilot-hooks.json'),
+      JSON.stringify({ version: 1, disableAllHooks: true, hooks: {} })
+    );
 
     writeConfigToml(asbHome, `[plugins.sources]\ncopilot-hook-plugin = "${pluginDir}"\n`);
 
@@ -416,7 +420,14 @@ test('buildPluginIndex warns and skips plugin hook files that are not in ASB hoo
       assert.ok(plugin);
       assert.deepEqual(plugin.components.commands, ['copilot-hook-plugin:do-thing']);
       assert.deepEqual(plugin.components.hooks, []);
-      assert.ok(warnings.some((w) => w.includes('copilot-hooks.json')));
+      assert.equal(
+        warnings.some((w) => w.includes('copilot-hooks.json')),
+        false
+      );
+      assert.equal(
+        warnings.some((w) => w.includes('disabled-copilot-hooks.json')),
+        false
+      );
     } finally {
       console.warn = originalWarn;
     }
@@ -441,6 +452,13 @@ test('buildPluginIndex warns and skips malformed single-file plugin hooks', () =
         },
       })
     );
+    fs.writeFileSync(
+      path.join(pluginDir, 'hooks', 'broken-copilot-hooks.json'),
+      JSON.stringify({
+        version: 1,
+        hooks: { postToolUse: [{ type: 'http', url: 'not-a-url' }] },
+      })
+    );
 
     writeConfigToml(asbHome, `[plugins.sources]\nbroken-hook-plugin = "${pluginDir}"\n`);
 
@@ -455,6 +473,7 @@ test('buildPluginIndex warns and skips malformed single-file plugin hooks', () =
       assert.deepEqual(plugin.components.commands, ['broken-hook-plugin:do-thing']);
       assert.deepEqual(plugin.components.hooks, []);
       assert.ok(warnings.some((w) => w.includes('hooks.json')));
+      assert.ok(warnings.some((w) => w.includes('broken-copilot-hooks.json')));
     } finally {
       console.warn = originalWarn;
     }
