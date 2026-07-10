@@ -12,6 +12,7 @@ import { distributeHooks } from '../hooks/distribution.js';
 import { updateRemoteSources } from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
+import { withTemporaryMarketplaceEntryCache } from '../marketplace/cache.js';
 import { distributeMcp } from '../mcp/distribution.js';
 import {
   distributeClaudeNativePlugins,
@@ -21,7 +22,7 @@ import {
   distributeCodexNativePlugins,
   validateCodexNativePlugins,
 } from '../native-plugins/codex.js';
-import { buildPluginIndex } from '../plugins/index.js';
+import { buildPluginIndex, clearPluginIndexCache } from '../plugins/index.js';
 import { distributeRules } from '../rules/distribution.js';
 import { distributeSkills } from '../skills/distribution.js';
 import { distributeSubagents } from '../subagents/distribution.js';
@@ -67,8 +68,11 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
   // CLI flag overrides config; config defaults to false
   const shouldUpdate = updateSources ?? config.plugins.auto_update;
 
-  if (shouldUpdate) {
+  let sourceUpdateFailed = false;
+  if (shouldUpdate && !dryRun) {
     const remoteResults = updateRemoteSources(scope);
+    clearPluginIndexCache();
+    sourceUpdateFailed = remoteResults.some((result) => result.status === 'error');
     if (remoteResults.length > 0) {
       console.log(chalk.blue('Sources:'));
       for (const result of remoteResults) {
@@ -93,14 +97,18 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
   }
 
   if (dryRun) {
-    const result = await runSyncPhase({ scope, config, layers, dryRun: true });
+    clearPluginIndexCache();
+    const result = await withTemporaryMarketplaceEntryCache(() =>
+      runSyncPhase({ scope, config, layers, dryRun: true })
+    );
+    clearPluginIndexCache();
     console.log();
     console.log(chalk.yellow('[dry-run] No files were modified.'));
-    return result.hasErrors;
+    return result.hasErrors || sourceUpdateFailed;
   }
 
   const result = await runSyncPhase({ scope, config, layers });
-  return result.hasErrors;
+  return result.hasErrors || sourceUpdateFailed;
 }
 
 export async function runSyncPhase({

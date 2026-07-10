@@ -68,7 +68,7 @@ import { loadManifest, saveManifest } from './manifest/store.js';
 import type { ProjectDistributionManifest } from './manifest/types.js';
 import { readMarketplace } from './marketplace/reader.js';
 import { distributeMcp } from './mcp/distribution.js';
-import { buildPluginIndex } from './plugins/index.js';
+import { buildPluginIndex, clearPluginIndexCache } from './plugins/index.js';
 import {
   distributeRules,
   listIndirectAgents,
@@ -1833,6 +1833,7 @@ mktRoot
       const sources = getSources();
       const source = sources.find((s) => s.namespace === name);
       removeSource(name);
+      clearPluginIndexCache();
       if (source?.remote) {
         console.log(chalk.green(`\n✓ Removed source "${name}" and cleaned up cache`));
       } else {
@@ -1852,9 +1853,9 @@ mktRoot
   .argument('[name]', 'Specific source namespace to update')
   .action((name?: string) => {
     try {
-      const results = updateRemoteSources();
-      const filtered = name ? results.filter((r) => r.namespace === name) : results;
-      if (filtered.length === 0) {
+      const results = updateRemoteSources(undefined, name);
+      clearPluginIndexCache();
+      if (results.length === 0) {
         if (name) {
           console.log(chalk.yellow(`⚠ No remote source named "${name}" found.`));
         } else {
@@ -1862,13 +1863,14 @@ mktRoot
         }
         return;
       }
-      for (const r of filtered) {
+      for (const r of results) {
         if (r.status === 'updated') {
           console.log(chalk.green(`  ✓ ${r.namespace}: updated from ${r.url}`));
         } else {
           console.log(chalk.red(`  ✗ ${r.namespace}: ${r.error}`));
         }
       }
+      if (results.some((result) => result.status === 'error')) process.exit(1);
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
