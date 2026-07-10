@@ -1030,6 +1030,95 @@ test('strict marketplace entry supports direct SKILL.md custom path', () => {
   });
 });
 
+test('marketplace custom component paths cannot escape the plugin root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'contained-components');
+    const pluginDir = path.join(mktDir, 'my-plugin');
+    fs.mkdirSync(path.join(mktDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(mktDir, 'outside.md'),
+      '---\ndescription: outside\n---\nMust not load'
+    );
+    fs.writeFileSync(
+      path.join(mktDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'contained-components',
+        plugins: [
+          {
+            name: 'my-plugin',
+            source: './my-plugin',
+            commands: ['../outside.md'],
+          },
+        ],
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'my-plugin' })
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
+
+    assert.throws(() => buildPluginIndex(), /component path escapes the plugin root/);
+  });
+});
+
+test('marketplace component roots cannot follow symlinks outside the plugin', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'contained-symlinks');
+    const pluginDir = path.join(mktDir, 'my-plugin');
+    const outsideSkills = path.join(mktDir, 'outside-skills');
+    fs.mkdirSync(path.join(mktDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(outsideSkills, 'secret'), { recursive: true });
+    fs.writeFileSync(
+      path.join(outsideSkills, 'secret', 'SKILL.md'),
+      '---\nname: secret\ndescription: Must not load\n---\nSecret'
+    );
+    fs.symlinkSync(outsideSkills, path.join(pluginDir, 'skills'));
+    fs.writeFileSync(
+      path.join(mktDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'contained-symlinks',
+        plugins: [{ name: 'my-plugin', source: './my-plugin' }],
+      })
+    );
+    fs.writeFileSync(
+      path.join(pluginDir, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: 'my-plugin' })
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
+
+    assert.throws(() => buildPluginIndex(), /component path escapes the plugin root/);
+  });
+});
+
+test('relative marketplace plugin sources cannot escape the marketplace root', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = path.join(asbHome, 'marketplaces', 'contained-sources');
+    const outsidePlugin = path.join(asbHome, 'marketplaces', 'outside-plugin');
+    fs.mkdirSync(path.join(mktDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(outsidePlugin, 'skills', 'secret'), { recursive: true });
+    fs.writeFileSync(
+      path.join(outsidePlugin, 'skills', 'secret', 'SKILL.md'),
+      '---\nname: secret\ndescription: Must not load\n---\nSecret'
+    );
+    fs.writeFileSync(
+      path.join(mktDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'contained-sources',
+        plugins: [{ name: 'outside-plugin', source: '../outside-plugin' }],
+      })
+    );
+    writeConfigToml(asbHome, `[plugins.sources]\ncontained = "${mktDir}"\n`);
+
+    assert.equal(buildPluginIndex().get('outside-plugin@contained'), undefined);
+  });
+});
+
 test('marketplace default skills scan ignores non-path native skills metadata', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
