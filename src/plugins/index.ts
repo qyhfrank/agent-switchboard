@@ -14,6 +14,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { getConfigDir } from '../config/paths.js';
+import { loadConfiguredPortableSelections } from '../config/plugin-selection.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { getSourcesRecord } from '../library/sources.js';
@@ -96,6 +97,8 @@ export interface PluginIndex {
   expand(pluginIds: string[]): PluginComponents;
   /** Materialize selected marketplace plugins without expanding their components */
   materialize(pluginIds: string[]): PluginDescriptor[];
+  /** Materialize portable plugins and component owners selected by configuration */
+  materializeConfigured(): void;
   /** Normalize legacy or aliased component refs to canonical IDs */
   normalizeComponentId(componentId: string): string;
 }
@@ -542,10 +545,39 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     return result;
   };
 
+  const normalizeComponentId = (componentId: string): string => {
+    const existing = componentAliases.get(componentId);
+    if (existing) return existing;
+
+    const parsed = splitComponentId(componentId);
+    if (parsed && byId.has(parsed.pluginId)) {
+      materialize([parsed.pluginId]);
+    }
+    return componentAliases.get(componentId) ?? componentId;
+  };
+
+  let configuredSelectionKey = '';
+  const materializeConfigured = (): void => {
+    const configured = loadConfiguredPortableSelections(scope);
+    const selectionKey = JSON.stringify(configured);
+    if (selectionKey === configuredSelectionKey) return;
+    materialize(configured.pluginRefs);
+    for (const componentRef of configured.componentRefs) {
+      normalizeComponentId(componentRef);
+    }
+    configuredSelectionKey = selectionKey;
+  };
+
   const index: PluginIndex = {
     plugins,
-    mcpServers,
-    ruleSnippets,
+    get mcpServers() {
+      materializeConfigured();
+      return mcpServers;
+    },
+    get ruleSnippets() {
+      materializeConfigured();
+      return ruleSnippets;
+    },
 
     get(pluginId: string) {
       return byId.get(pluginId);
@@ -565,6 +597,7 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     },
 
     materialize,
+    materializeConfigured,
 
     expand(pluginIds: string[]): PluginComponents {
       const result: PluginComponents = {
@@ -586,14 +619,7 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
     },
 
     normalizeComponentId(componentId: string) {
-      const existing = componentAliases.get(componentId);
-      if (existing) return existing;
-
-      const parsed = splitComponentId(componentId);
-      if (parsed && byId.has(parsed.pluginId)) {
-        materialize([parsed.pluginId]);
-      }
-      return componentAliases.get(componentId) ?? componentId;
+      return normalizeComponentId(componentId);
     },
   };
 

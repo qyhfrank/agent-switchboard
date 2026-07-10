@@ -64,6 +64,7 @@ export function loadMcpConfig(): McpConfig {
 export function loadMcpConfigWithPlugins(scope?: ConfigScope): McpConfig {
   const base = loadMcpConfig();
   const pluginIndex = buildPluginIndex(scope);
+  pluginIndex.materializeConfigured();
 
   if (pluginIndex.mcpServers.length === 0) return base;
 
