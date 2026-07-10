@@ -51,7 +51,7 @@ Cursor rules are composed into a single `asb-rules.mdc` file at `~/.cursor/rules
 npm i -g agent-switchboard    # or: npx agent-switchboard@latest mcp
 ```
 
-1. **Pick your agents** -- create `~/.agent-switchboard/config.toml`:
+1. **Pick your agents** -- create `~/.asb/config.toml`:
 
 ```toml
 [applications]
@@ -83,7 +83,7 @@ Preview without writing:
 asb sync --dry-run
 ```
 
-Library content lives under `~/.agent-switchboard/` and agent configs are updated in place.
+Library content lives under `~/.asb/` and agent configs are updated in place.
 
 ## Command Reference
 
@@ -99,12 +99,13 @@ Library content lives under `~/.agent-switchboard/` and agent configs are update
 | `asb <lib> load`                | Import files from a platform into the library        |
 | `asb <lib> list`                | Show inventory, enabled state, and sync timestamps   |
 | `asb plugin list`               | List all discovered plugins and their states         |
-| `asb plugin info <ref>`         | Show plugin details and components                   |
+| `asb plugin info <ref>`         | Show catalog metadata and resolved components        |
 | `asb plugin enable <ref>`       | Enable a plugin                                      |
 | `asb plugin disable <ref>`      | Remove a plugin from the enabled list                |
 | `asb plugin uninstall <ref>`    | Alias for `disable`                                  |
 | `asb plugin marketplace add`    | Add a plugin source (local path or git URL)          |
 | `asb plugin marketplace remove` | Remove a plugin source                               |
+| `asb plugin marketplace update` | Update remote sources and materialized entries       |
 | `asb plugin marketplace list`   | List configured plugin sources                       |
 
 `<lib>` = `rule`, `command`, `agent`, `skill`, or `hook`. `<ref>` = `plugin` or `plugin@source`.
@@ -115,7 +116,7 @@ Library content lives under `~/.agent-switchboard/` and agent configs are update
 
 ### `config.toml`
 
-The central config file at `~/.agent-switchboard/config.toml` controls target applications, entry-level selections, and plugin sources:
+The central config file at `~/.asb/config.toml` controls target applications, entry-level selections, and plugin sources:
 
 ```toml
 [applications]
@@ -145,7 +146,7 @@ enabled = ["claude-code", "codex"]
 assume_installed = ["codex"]    # distribute even if ~/.codex/ is missing
 ```
 
-All entry-level sections (`rules`, `commands`, `agents`, `skills`, `hooks`, `plugins`) use `enabled = [...]` where array order defines composition priority. Plugin references in `enabled` arrays use `plugin:bareId` or `plugin@source:bareId` syntax.
+All entry-level sections (`rules`, `commands`, `agents`, `skills`, `hooks`, `plugins`) use `enabled = [...]` where array order defines composition priority. `[plugins].enabled` accepts `plugin` or `plugin@source`. Component sections accept `plugin:bareId` or `plugin@source:bareId`.
 
 The `[plugins.sources]` sub-table declares explicit plugin locations. Local plugins in `~/.asb/plugins/` are auto-discovered without configuration.
 
@@ -178,7 +179,7 @@ enabled = ["cowart"]
 scope = "user"
 ```
 
-Do not also add the same plugin to `[plugins].enabled`; that path expands portable ASB components to every active target.
+Keep a native plugin out of the same target's effective portable plugin selection. Portable selection includes `[plugins].enabled` plus `[applications.<app>.plugins]` overrides.
 
 When a remote source is written directly into `config.toml`, run `asb sync --update` once so the checkout exists under `~/.asb/plugins/`. If the marketplace is already present at `~/.asb/plugins/openai-codex`, the `[plugins.sources.openai-codex]` table is optional.
 
@@ -190,11 +191,20 @@ Fine-tune which library entries reach each application using `add` / `remove` / 
 [applications]
 enabled = ["claude-code", "codex", "opencode"]
 
-codex.skills.remove = ["skill-codex"]
-codex.rules.remove  = ["skill-codex"]
+[plugins]
+enabled = ["shared-tools@team-lib"]
 
-gemini.commands.add    = ["cmd-gemini-only"]
-gemini.skills.remove   = ["skill-go"]
+[applications.codex.plugins]
+add = ["codex-tools@team-lib"]
+
+[applications.opencode.plugins]
+remove = ["shared-tools@team-lib"]
+
+[applications.codex.skills]
+remove = ["codex-tools@team-lib:legacy-skill"]
+
+[applications.opencode.commands]
+add = ["cmd-opencode-only"]
 ```
 
 | Syntax                            | Behavior                   |
@@ -202,6 +212,13 @@ gemini.skills.remove   = ["skill-go"]
 | `<app>.<section>.enabled = [...]` | Replace the global list    |
 | `<app>.<section>.add = [...]`     | Append to the global list  |
 | `<app>.<section>.remove = [...]`  | Remove from the global list|
+
+Portable plugin selection is resolved in this order:
+
+1. Start with `[plugins].enabled`.
+2. Apply `[applications.<app>.plugins]`; `enabled` replaces the global list, otherwise `remove` and `add` adjust it.
+3. Expand the selected plugins and apply `[plugins.exclude]` to plugin-derived components.
+4. Apply the application's component-level overrides. An explicitly enabled component remains selected even when the same ID appears in `[plugins.exclude]`.
 
 Sections: `mcp`, `rules`, `commands`, `agents`, `skills`, `hooks`.
 
@@ -262,7 +279,7 @@ Managed-mode collision policy controls what happens when ASB encounters a foreig
 
 All library types follow the same pattern:
 
-1. **Store** entries in `~/.agent-switchboard/<type>/` as Markdown files (or directories for skills).
+1. **Store** entries in `~/.asb/<type>/` as Markdown files (or directories for skills).
 2. **Import** existing platform files: `asb <type> load <platform> [path] [-r]`.
 3. **Select** active entries: `asb <type>` (interactive fuzzy-search selector).
 4. **Audit** inventory: `asb <type> list [--json]`.
@@ -271,7 +288,7 @@ Selections are saved into the highest-priority config layer. Distribution writes
 
 ### Rules
 
-Snippets in `~/.agent-switchboard/rules/` with optional YAML frontmatter:
+Snippets in `~/.asb/rules/` with optional YAML frontmatter:
 
 ```markdown
 ---
@@ -310,7 +327,7 @@ The interactive selector lets you **reorder** snippets. For most agents, rules a
 
 ### Commands
 
-Markdown files in `~/.agent-switchboard/commands/` with optional `description` and `extras.<platform>`:
+Markdown files in `~/.asb/commands/` with optional `description` and `extras.<platform>`:
 
 ```bash
 asb command load claude-code           # import from ~/.claude/commands/
@@ -321,7 +338,7 @@ Platforms: `claude-code`, `codex`, `cursor`, `gemini`, `opencode`.
 
 ### Agents
 
-Same format as commands, stored in `~/.agent-switchboard/agents/`.
+Same format as commands, stored in `~/.asb/agents/`.
 
 ```bash
 asb agent load claude-code             # import from ~/.claude/agents/
@@ -331,10 +348,10 @@ Platforms: `claude-code`, `codex`, `cursor`, `opencode`.
 
 ### Skills
 
-Multi-file directory bundles in `~/.agent-switchboard/skills/<skill-id>/`, each containing a `SKILL.md` entry file:
+Multi-file directory bundles in `~/.asb/skills/<skill-id>/`, each containing a `SKILL.md` entry file:
 
 ```
-~/.agent-switchboard/skills/my-skill/
+~/.asb/skills/my-skill/
 ├── SKILL.md          # name + description in frontmatter
 ├── helper.py
 └── templates/
@@ -352,8 +369,8 @@ Entire directories are copied to each agent's skill location. Deactivated skills
 
 JSON-based hook definitions distributed to Claude Code's `settings.json` and Codex's `hooks.json`. Two storage formats:
 
-- **Single file**: `~/.agent-switchboard/hooks/<id>.json`
-- **Bundle**: `~/.agent-switchboard/hooks/<id>/hook.json` plus script files
+- **Single file**: `~/.asb/hooks/<id>.json`
+- **Bundle**: `~/.asb/hooks/<id>/hook.json` plus script files
 
 ```bash
 asb hook load claude-code              # import from ~/.claude/settings.json
@@ -370,7 +387,7 @@ Codex hook sync writes `~/.codex/hooks.json` for global scope or `<project>/.cod
 
 ## Plugins
 
-A plugin bundles related capabilities (rules, commands, agents, skills, hooks, MCP servers) into a single directory that can be enabled/disabled as a unit. Instead of managing dozens of individual files in `~/.agent-switchboard/`, you point agent-switchboard at a plugin and get all its components at once.
+A plugin bundles related capabilities (rules, commands, agents, skills, hooks, MCP servers) into a single directory that can be enabled or disabled as a unit. Instead of managing dozens of individual files in `~/.asb/`, you point agent-switchboard at a plugin and get all its components at once.
 
 ### Plugin Structure
 
@@ -403,7 +420,17 @@ team-lib = "https://github.com/org/team-library"
 mono-sub = "https://github.com/org/monorepo/tree/main/plugins/my-plugin"
 ```
 
-Local plugins placed in `~/.asb/plugins/` are auto-discovered without explicit configuration.
+Every immediate non-dotfile directory under `~/.asb/plugins/` is a first-class source whose namespace is its directory name. You can copy or clone a plugin directly into that directory and enable it selectively without a `[plugins.sources]` entry:
+
+```bash
+git clone https://github.com/org/team-library ~/.asb/plugins/team-lib
+asb plugin list
+asb plugin enable team-lib
+```
+
+A standalone plugin uses the source namespace (`team-lib`). A marketplace entry uses `plugin-a@team-lib`. Bare marketplace names are accepted only when they identify one plugin unambiguously.
+
+Use dotfile directory names for internal data under `~/.asb/plugins/`; discovery ignores them.
 
 agent-switchboard auto-detects two source kinds:
 
@@ -412,11 +439,26 @@ agent-switchboard auto-detects two source kinds:
 | `marketplace` | Contains `.claude-plugin/marketplace.json` or `.agents/plugins/marketplace.json`                 | Multiple plugins, each in its own subdirectory |
 | `plugin`      | Everything else, including formal `.claude-plugin/plugin.json` or `.codex-plugin/plugin.json`    | Single plugin                                  |
 
+Source storage, marketplace inventory, and external entry materialization have separate owners:
+
+| Layer | Meaning | Storage |
+|:------|:--------|:--------|
+| Source | A user-managed or ASB-managed plugin or marketplace checkout | `~/.asb/plugins/<source>/` or a configured local path |
+| Catalog | Plugin identities and source metadata read from a marketplace manifest | In memory; discovery does not fetch external entries |
+| Materialized entry | Files needed by a selected portable plugin or component whose Git source is outside the marketplace checkout | `ASB_HOME/state/marketplace-plugins/` |
+
+A relative marketplace entry resolves inside its source checkout. A `git-subdir` entry that points to the same repository and compatible pin also reuses that checkout. Other selected Git entries use the state-owned materialization cache. The cache is derived runtime state, not a plugin source and not an enablement surface, so it cannot create duplicate plugin identities through auto-discovery.
+
+`asb plugin list` reads catalog metadata without fetching external entries. ASB materializes an external entry when portable plugin expansion or a directly selected component requires its files. Full commit SHA pins are reused as immutable entries; subdirectory sources use sparse checkout. Refresh replaces a verified entry atomically so a failed fetch leaves the previous materialization usable.
+
+In `asb plugin list --json`, `componentsResolved: false` means an external entry remains metadata-only for that inventory command; its zero component counts are not a declaration that the plugin contains no components.
+
 ### CLI
 
 ```bash
 asb plugin marketplace add /path/to/my-plugin            # register source
 asb plugin marketplace add https://github.com/org/repo   # git source
+asb plugin marketplace update [source]                    # update source and materialized entries
 asb plugin marketplace list                               # list sources
 asb plugin marketplace remove my-plugin                   # remove source
 
@@ -424,14 +466,16 @@ asb plugin enable context7            # activate (all components enter distribut
 asb plugin disable context7           # remove from the enabled list
 asb plugin uninstall context7         # alias for disable
 asb plugin list                       # show all discovered plugins
-asb plugin info context7              # show plugin details + components
+asb plugin info context7              # show metadata + currently resolved components
 ```
 
 Discovered plugin MCP servers appear in the MCP picker alongside locally-defined servers and can be enabled per user, profile, or project scope.
 
-Enabled plugin components are expanded into entry-level `enabled` arrays during `asb sync`. Components appear with a namespace prefix (e.g. `context7:docs-researcher`) and can be individually controlled via per-application overrides.
+During `asb sync`, each application receives the components from its effective portable plugin selection. Components use a namespace prefix such as `context7:docs-researcher` or `plugin-a@team-lib:docs-researcher`, and component-level application overrides run after plugin expansion.
 
 Plugin MCP servers are also addressable directly through `[mcp].enabled` and the `asb mcp` selector. As long as the plugin source is discoverable, a plugin MCP server can be enabled directly without adding its parent plugin to `[plugins].enabled`.
+
+`asb plugin marketplace update [source]` refreshes remote source checkouts and only the external entries already present in the derived cache. Removing a configured source removes only that source's derived entries. `asb sync --update` performs the same refresh before sync. `asb sync --dry-run` skips durable source updates and uses a temporary entry cache for any materialization needed to calculate the preview.
 
 ### Native Plugins
 
@@ -462,7 +506,7 @@ enabled = ["cowart"]
 scope = "user"
 ```
 
-`asb sync --dry-run` reports the planned native plugin action. A real `asb sync` validates Claude marketplaces before installing them through Claude Code. For Codex, ASB registers the marketplace with the Codex CLI and installs the plugin ref; bare `.codex-plugin` directories are first wrapped in `ASB_HOME/state/native-plugins/codex/`. Native plugins are rejected if the same plugin is also enabled through `[plugins].enabled`.
+`asb sync --dry-run` reports the planned native plugin action. A real `asb sync` validates Claude marketplaces before installing them through Claude Code. For Codex, ASB registers the marketplace with the Codex CLI and installs the plugin ref; bare `.codex-plugin` directories are first wrapped in `ASB_HOME/state/native-plugins/codex/`. A native plugin is rejected when the same plugin is present in that target's effective portable plugin selection.
 
 ## Sync
 
@@ -484,7 +528,7 @@ For project scope, sync honors `[distribution.project].mode`:
 
 | Variable         | Default                    | Purpose                                      |
 |:-----------------|:---------------------------|:---------------------------------------------|
-| `ASB_HOME`       | `~/.agent-switchboard`     | Library, config, and state directory          |
+| `ASB_HOME`       | `~/.asb`                   | Library, config, and state directory          |
 | `ASB_AGENTS_HOME`| OS user home               | Base path for agent config locations          |
 
 ## Development
