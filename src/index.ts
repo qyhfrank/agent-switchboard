@@ -1583,12 +1583,10 @@ pluginRoot
         console.log(
           JSON.stringify(
             index.plugins.map((p) => {
-              const ref =
-                p.meta.sourceKind === 'marketplace' ? `${p.id}@${p.meta.sourceName}` : p.id;
               return {
                 id: p.id,
-                ref,
-                enabled: enabledSet.has(ref),
+                ref: p.id,
+                enabled: p.refs.some((candidate) => enabledSet.has(candidate)),
                 ...p.meta,
                 components: Object.fromEntries(
                   Object.entries(p.components).map(([k, v]) => [k, v.length])

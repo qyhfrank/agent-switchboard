@@ -7,7 +7,12 @@
  */
 
 import type { NativePluginTarget } from '../marketplace/reader.js';
-import { buildPluginIndex, type PluginComponentSection } from '../plugins/index.js';
+import { buildComponentId, splitComponentId } from '../plugins/identity.js';
+import {
+  buildPluginIndex,
+  type PluginComponentSection,
+  type PluginIndex,
+} from '../plugins/index.js';
 import { loadMergedSwitchboardConfig, loadWritableConfigLayer } from './layered-config.js';
 import { mergeIncrementalSelection } from './plugin-selection.js';
 import type {
@@ -86,6 +91,16 @@ function getApplicationNativePluginsOverrideFromConfig(
   return overrideObj.native_plugins as NativePluginSelection | undefined;
 }
 
+function getApplicationPluginsOverrideFromConfig(
+  config: ApplicationConfigSource,
+  appId: string
+): IncrementalSelection | undefined {
+  const applications = (config.applications ?? {}) as Record<string, unknown>;
+  const appOverrides = applications[appId];
+  if (!appOverrides || typeof appOverrides !== 'object') return undefined;
+  return (appOverrides as Record<string, unknown>).plugins as IncrementalSelection | undefined;
+}
+
 function getGlobalEnabled(config: ApplicationConfigSource, section: ConfigSection): string[] {
   const sectionConfig = config[section] as { enabled?: string[] } | undefined;
   return Array.isArray(sectionConfig?.enabled) ? [...sectionConfig.enabled] : [];
@@ -116,6 +131,46 @@ function getPluginEnabledRefs(config: ApplicationConfigSource): string[] {
   return Array.isArray(config.plugins?.enabled) ? [...config.plugins.enabled] : [];
 }
 
+function normalizePluginRefs(ids: string[], index: PluginIndex): string[] {
+  return dedupeIds(ids.map((id) => index.get(id)?.id ?? id));
+}
+
+function canonicalizeComponentRefs(ids: string[], index: PluginIndex): string[] {
+  return dedupeIds(
+    ids.map((id) => {
+      const parsed = splitComponentId(id);
+      if (!parsed) return id;
+      const plugin = index.get(parsed.pluginId);
+      return plugin ? buildComponentId(plugin.id, parsed.bareId) : id;
+    })
+  );
+}
+
+function normalizePluginSelection(
+  override: IncrementalSelection | undefined,
+  index: PluginIndex
+): IncrementalSelection | undefined {
+  if (!override) return undefined;
+  const normalized: IncrementalSelection = {};
+  if (override.enabled) normalized.enabled = normalizePluginRefs(override.enabled, index);
+  if (override.add) normalized.add = normalizePluginRefs(override.add, index);
+  if (override.remove) normalized.remove = normalizePluginRefs(override.remove, index);
+  return normalized;
+}
+
+function resolvePortablePluginRefsFromConfig(
+  config: ApplicationConfigSource,
+  appId: string,
+  index: PluginIndex
+): string[] {
+  const globalPluginRefs = normalizePluginRefs(getPluginEnabledRefs(config), index);
+  const pluginOverride = normalizePluginSelection(
+    getApplicationPluginsOverrideFromConfig(config, appId),
+    index
+  );
+  return mergeIncrementalSelection(globalPluginRefs, pluginOverride);
+}
+
 function getPluginExcludeList(
   config: ApplicationConfigSource,
   section: PluginComponentSection
@@ -126,21 +181,20 @@ function getPluginExcludeList(
 }
 
 function normalizeIncrementalSelection(
-  section: ConfigSection,
   override: IncrementalSelection | undefined,
-  scope?: ConfigScope
+  index: PluginIndex
 ): IncrementalSelection | undefined {
   if (!override) return undefined;
 
   const normalized: IncrementalSelection = {};
   if (override.enabled) {
-    normalized.enabled = normalizeSectionEntryIds(section, override.enabled, scope);
+    normalized.enabled = canonicalizeComponentRefs(override.enabled, index);
   }
   if (override.add) {
-    normalized.add = normalizeSectionEntryIds(section, override.add, scope);
+    normalized.add = canonicalizeComponentRefs(override.add, index);
   }
   if (override.remove) {
-    normalized.remove = normalizeSectionEntryIds(section, override.remove, scope);
+    normalized.remove = canonicalizeComponentRefs(override.remove, index);
   }
   return normalized;
 }
@@ -167,45 +221,24 @@ function resolveSectionConfigFromConfig(
   appId: string,
   scope?: ConfigScope
 ): ResolvedSectionConfig {
-  const globalEnabled = normalizeSectionEntryIds(section, getGlobalEnabled(config, section), scope);
-  const enabledPluginRefs = getPluginEnabledRefs(config);
   const index = buildPluginIndex(scope);
-
-  let merged: string[];
-  if (enabledPluginRefs.length > 0) {
-    const expanded = index.expand(enabledPluginRefs);
-    const pluginSection = section as PluginComponentSection;
-    const pluginEntryIds = expanded[pluginSection] ?? [];
-
-    const seen = new Set(globalEnabled);
-    merged = [...globalEnabled];
-    for (const id of pluginEntryIds) {
-      if (!seen.has(id)) {
-        merged.push(id);
-        seen.add(id);
-      }
-    }
-
-    const excludeList = normalizeSectionEntryIds(
-      section,
-      getPluginExcludeList(config, pluginSection),
-      scope
-    );
-    if (excludeList.length > 0) {
-      const excludeSet = new Set(excludeList);
-      merged = merged.filter((id) => !excludeSet.has(id));
-    }
-  } else {
-    merged = globalEnabled;
-  }
+  const globalEnabled = canonicalizeComponentRefs(getGlobalEnabled(config, section), index);
+  const enabledPluginRefs = resolvePortablePluginRefsFromConfig(config, appId, index);
+  const pluginSection = section as PluginComponentSection;
+  const expanded = index.expand(enabledPluginRefs);
+  const excludeSet = new Set(
+    canonicalizeComponentRefs(getPluginExcludeList(config, pluginSection), index)
+  );
+  const pluginEntryIds = (expanded[pluginSection] ?? []).filter((id) => !excludeSet.has(id));
+  const merged = dedupeIds([...globalEnabled, ...pluginEntryIds]);
 
   const override = normalizeIncrementalSelection(
-    section,
     getApplicationOverrideFromConfig(config, appId, section),
-    scope
+    index
   );
+  const effective = mergeIncrementalSelection(merged, override);
   return {
-    enabled: mergeIncrementalSelection(merged, override),
+    enabled: dedupeIds(effective.map((id) => index.normalizeComponentId(id))),
   };
 }
 
@@ -270,9 +303,9 @@ export function getApplicationsWithOverrides(config: SwitchboardConfig): string[
 /**
  * Resolve the effective enabled list for a section, merging:
  *   1. Global `config.<section>.enabled`
- *   2. Plugin expansion: `config.plugins.enabled` -> PluginIndex.expand -> per-section IDs
- *   3. Plugin exclude: `config.plugins.exclude.<section>` removals
- *   4. Per-application overrides (`add`/`remove`/`enabled`)
+ *   2. Per-application plugin selection over `config.plugins.enabled`
+ *   3. Plugin expansion and `config.plugins.exclude.<section>` filtering
+ *   4. Per-application component overrides (`add`/`remove`/`enabled`)
  *
  * This is the function distribution modules should use to determine
  * what entries to distribute for a given app.
@@ -325,4 +358,17 @@ export function resolveScopedNativePluginConfig(
 
   const layer = loadWritableConfigLayer(scopeToLayerOptions(scope));
   return resolveNativePluginConfigFromConfig(layer.config, appId, scope);
+}
+
+export function resolveScopedPortablePluginConfig(
+  appId: string,
+  scope?: ConfigScope
+): ResolvedSectionConfig {
+  const layerOptions = scopeToLayerOptions(scope);
+  const config =
+    scope?.profile || scope?.project
+      ? loadWritableConfigLayer(layerOptions).config
+      : loadMergedSwitchboardConfig(layerOptions).config;
+  const index = buildPluginIndex(scope);
+  return { enabled: resolvePortablePluginRefsFromConfig(config, appId, index) };
 }

@@ -12,6 +12,11 @@ export interface ConfiguredPortableSelections {
   componentRefs: string[];
 }
 
+export interface PortableSelectionNormalizers {
+  pluginRef?: (ref: string) => string;
+  componentRef?: (ref: string) => string;
+}
+
 const COMPONENT_SECTIONS: PortableComponentSection[] = [
   'mcp',
   'commands',
@@ -54,17 +59,27 @@ function unionEffectiveSelections(
   base: string[],
   config: SelectionConfig,
   activeAppIds: string[],
-  section: PortableComponentSection | 'plugins'
+  section: PortableComponentSection | 'plugins',
+  normalize?: (ref: string) => string
 ): string[] {
-  if (activeAppIds.length === 0) return [...base];
+  const normalizeRefs = (refs: string[]) => (normalize ? refs.map(normalize) : [...refs]);
+  const normalizedBase = normalizeRefs(base);
+  if (activeAppIds.length === 0) return normalizedBase;
 
   const result: string[] = [];
   const seen = new Set<string>();
   for (const appId of activeAppIds) {
-    const effective = mergeIncrementalSelection(
-      base,
-      getApplicationSelection(config, appId, section)
-    );
+    const configuredOverride = getApplicationSelection(config, appId, section);
+    const override = configuredOverride
+      ? {
+          enabled: configuredOverride.enabled
+            ? normalizeRefs(configuredOverride.enabled)
+            : undefined,
+          add: configuredOverride.add ? normalizeRefs(configuredOverride.add) : undefined,
+          remove: configuredOverride.remove ? normalizeRefs(configuredOverride.remove) : undefined,
+        }
+      : undefined;
+    const effective = mergeIncrementalSelection(normalizedBase, override);
     for (const id of effective) {
       if (seen.has(id)) continue;
       seen.add(id);
@@ -76,19 +91,32 @@ function unionEffectiveSelections(
 
 export function collectConfiguredPortableSelections(
   config: SelectionConfig,
-  activeAppIds: string[]
+  activeAppIds: string[],
+  normalizers: PortableSelectionNormalizers = {}
 ): ConfiguredPortableSelections {
   const globalPluginRefs = Array.isArray(config.plugins?.enabled)
     ? [...config.plugins.enabled]
     : [];
-  const pluginRefs = unionEffectiveSelections(globalPluginRefs, config, activeAppIds, 'plugins');
+  const pluginRefs = unionEffectiveSelections(
+    globalPluginRefs,
+    config,
+    activeAppIds,
+    'plugins',
+    normalizers.pluginRef
+  );
 
   const componentRefs: string[] = [];
   const seen = new Set<string>();
   for (const section of COMPONENT_SECTIONS) {
     const sectionConfig = config[section] as { enabled?: string[] } | undefined;
     const base = Array.isArray(sectionConfig?.enabled) ? [...sectionConfig.enabled] : [];
-    for (const id of unionEffectiveSelections(base, config, activeAppIds, section)) {
+    for (const id of unionEffectiveSelections(
+      base,
+      config,
+      activeAppIds,
+      section,
+      normalizers.componentRef
+    )) {
       if (seen.has(id)) continue;
       seen.add(id);
       componentRefs.push(id);
@@ -99,11 +127,16 @@ export function collectConfiguredPortableSelections(
 }
 
 export function loadConfiguredPortableSelections(
-  scope?: ConfigScope
+  scope?: ConfigScope,
+  normalizers: PortableSelectionNormalizers = {}
 ): ConfiguredPortableSelections {
   const layerOptions = scopeToLayerOptions(scope);
   const { config: mergedConfig } = loadMergedSwitchboardConfig(layerOptions);
   const selectionConfig =
     scope?.profile || scope?.project ? loadWritableConfigLayer(layerOptions).config : mergedConfig;
-  return collectConfiguredPortableSelections(selectionConfig, mergedConfig.applications.enabled);
+  return collectConfiguredPortableSelections(
+    selectionConfig,
+    mergedConfig.applications.enabled,
+    normalizers
+  );
 }
