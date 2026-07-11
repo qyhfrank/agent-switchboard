@@ -1580,9 +1580,9 @@ pluginRoot
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('-P, --project <path>', 'Project directory containing .asb.toml')
   .option('--json', 'Output as JSON')
-  .action((options: { json?: boolean } & ScopeOptionInput) => {
+  .action((options: { json?: boolean }, command: Command) => {
     try {
-      const scope = resolveScope(options);
+      const scope = resolveCommandScope(command);
       const index = buildPluginIndex(scope);
       const enabledList = loadConfiguredPortableSelections(scope, {
         pluginRef: (ref) => index.get(ref)?.id ?? ref,
@@ -1624,9 +1624,11 @@ pluginRoot
 pluginRoot
   .command('info <id>')
   .description('Show detailed information about a plugin')
-  .action((id: string) => {
+  .option('-p, --profile <name>', 'Profile configuration to use')
+  .option('-P, --project <path>', 'Project directory containing .asb.toml')
+  .action((id: string, _options: unknown, command: Command) => {
     try {
-      const index = buildPluginIndex();
+      const index = buildPluginIndex(resolveCommandScope(command));
       const plugin = index.get(id);
       if (!plugin) {
         console.error(chalk.red(`✗ Plugin "${id}" not found.`));
@@ -1653,9 +1655,9 @@ function selectsPlugin(
   return index.get(ref)?.id === canonicalId;
 }
 
-function pluginEnableAction(id: string, options: ScopeOptionInput) {
+function pluginEnableAction(id: string, _options: unknown, command: Command) {
   try {
-    const scope = resolveScope(options);
+    const scope = resolveCommandScope(command);
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
     const index = buildPluginIndex(scope);
@@ -1708,9 +1710,9 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
   }
 }
 
-function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string) {
+function pluginRemoveAction(id: string, command: Command, verb: string) {
   try {
-    const scope = resolveScope(options);
+    const scope = resolveCommandScope(command);
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
     const index = buildPluginIndex(scope);
@@ -1759,14 +1761,16 @@ const disableCmd = pluginRoot
   .command('disable <id>')
   .description('Remove a plugin from the enabled list');
 for (const [flag, desc] of pluginScopeOpts) disableCmd.option(flag, desc);
-disableCmd.action((id: string, opts: ScopeOptionInput) => pluginRemoveAction(id, opts, 'disabled'));
+disableCmd.action((id: string, _options: unknown, command: Command) =>
+  pluginRemoveAction(id, command, 'disabled')
+);
 
 const uninstallCmd = pluginRoot
   .command('uninstall <id>')
   .description('Remove a plugin from the enabled list (alias for disable)');
 for (const [flag, desc] of pluginScopeOpts) uninstallCmd.option(flag, desc);
-uninstallCmd.action((id: string, opts: ScopeOptionInput) =>
-  pluginRemoveAction(id, opts, 'uninstalled')
+uninstallCmd.action((id: string, _options: unknown, command: Command) =>
+  pluginRemoveAction(id, command, 'uninstalled')
 );
 
 // ── Plugin marketplace (source management) ─────────────────────────

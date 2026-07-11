@@ -8,6 +8,7 @@ import {
   resolveApplicationSectionConfig,
   resolveEffectiveSectionConfig,
 } from '../src/config/application-config.js';
+import { loadConfigLayers } from '../src/config/layered-config.js';
 import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
 import { getPluginSourceLocksDir } from '../src/config/paths.js';
 import { loadSwitchboardConfig } from '../src/config/switchboard-config.js';
@@ -2005,6 +2006,77 @@ test('plugin enable persists the canonical ID and removes equivalent aliases', (
     runCli(['plugin', 'enable', 'plugin-a@catalog']);
 
     assert.deepEqual(loadSwitchboardConfig().plugins.enabled, ['plugin-a@catalog']);
+  });
+});
+
+test('plugin leaves honor profile scope declared before the leaf command', () => {
+  withTempAsbHome((asbHome) => {
+    const marketplaceDir = createMarketplaceFixture(asbHome, 'profile-leaf-scope', [
+      { name: 'plugin-a', commands: ['command-a'] },
+    ]);
+    fs.writeFileSync(
+      path.join(asbHome, 'team.toml'),
+      `[plugins.sources]\ncatalog = "${marketplaceDir}"\n`
+    );
+    const scoped = (...args: string[]) => runCli(['plugin', '--profile', 'team', ...args]);
+    const selections = () => {
+      const layers = loadConfigLayers({ profile: 'team' });
+      return {
+        profile: layers.profile?.config.plugins?.enabled ?? [],
+        user: layers.user.config.plugins?.enabled ?? [],
+      };
+    };
+
+    const listed = JSON.parse(scoped('list', '--json').stdout) as Array<{ id: string }>;
+    assert.ok(listed.some((plugin) => plugin.id === 'plugin-a@catalog'));
+    assert.match(scoped('info', 'plugin-a@catalog').stdout, /plugin-a@catalog/);
+
+    scoped('enable', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { profile: ['plugin-a@catalog'], user: [] });
+    scoped('disable', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { profile: [], user: [] });
+
+    scoped('install', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { profile: ['plugin-a@catalog'], user: [] });
+    scoped('uninstall', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { profile: [], user: [] });
+  });
+});
+
+test('plugin leaves honor project scope declared after the leaf command', () => {
+  withTempAsbHome((asbHome) => {
+    const marketplaceDir = createMarketplaceFixture(asbHome, 'project-leaf-scope', [
+      { name: 'plugin-a', commands: ['command-a'] },
+    ]);
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(projectRoot, { recursive: true });
+    fs.writeFileSync(
+      path.join(projectRoot, '.asb.toml'),
+      `[plugins.sources]\ncatalog = "${marketplaceDir}"\n`
+    );
+    const scoped = (command: string, ...args: string[]) =>
+      runCli(['plugin', command, ...args, '--project', projectRoot]);
+    const selections = () => {
+      const layers = loadConfigLayers({ projectPath: projectRoot });
+      return {
+        project: layers.project?.config.plugins?.enabled ?? [],
+        user: layers.user.config.plugins?.enabled ?? [],
+      };
+    };
+
+    const listed = JSON.parse(scoped('list', '--json').stdout) as Array<{ id: string }>;
+    assert.ok(listed.some((plugin) => plugin.id === 'plugin-a@catalog'));
+    assert.match(scoped('info', 'plugin-a@catalog').stdout, /plugin-a@catalog/);
+
+    scoped('enable', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { project: ['plugin-a@catalog'], user: [] });
+    scoped('disable', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { project: [], user: [] });
+
+    scoped('install', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { project: ['plugin-a@catalog'], user: [] });
+    scoped('uninstall', 'plugin-a@catalog');
+    assert.deepEqual(selections(), { project: [], user: [] });
   });
 });
 
