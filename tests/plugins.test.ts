@@ -840,6 +840,9 @@ test('plugin list reports effective application and scoped enabled state', () =>
         '[applications.codex.plugins]',
         'add = ["plugin-a"]',
         '',
+        '[applications.opencode.plugins]',
+        'remove = ["plugin-a"]',
+        '',
         '[plugins.sources]',
         `catalog = "${mktDir}"`,
       ].join('\n')
@@ -853,6 +856,12 @@ test('plugin list reports effective application and scoped enabled state', () =>
     runCli(['plugin', 'disable', 'plugin-a@catalog']);
     plugins = JSON.parse(runCli(['plugin', 'list', '--json']).stdout);
     assert.equal(plugins[0]?.enabled, false);
+
+    runCli(['plugin', 'enable', 'plugin-a@catalog']);
+    assert.match(
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'),
+      /\[applications\.opencode\.plugins\][\s\S]*?remove = \[\s*"plugin-a"\s*\]/
+    );
 
     fs.writeFileSync(path.join(asbHome, 'team.toml'), '[plugins]\nenabled = []\n');
     plugins = JSON.parse(runCli(['plugin', 'list', '--profile', 'team', '--json']).stdout);

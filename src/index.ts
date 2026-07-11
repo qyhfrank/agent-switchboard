@@ -1648,12 +1648,14 @@ function updatePluginSelection(
   pluginId: string,
   action: 'enable' | 'disable',
   index: PluginIndex,
+  activeAppIds: ReadonlySet<string>,
   options?: UpdateConfigLayerOptions
 ): void {
   updateConfigLayer((layer) => {
     const applications = layer.applications ? { ...layer.applications } : undefined;
     if (applications) {
       for (const [appId, rawOverride] of Object.entries(applications)) {
+        if (!activeAppIds.has(appId)) continue;
         if (!rawOverride || typeof rawOverride !== 'object' || Array.isArray(rawOverride)) {
           continue;
         }
@@ -1692,10 +1694,12 @@ function updatePluginSelection(
 function hasPluginSelection(
   layer: { plugins?: { enabled?: string[] }; applications?: Record<string, unknown> },
   pluginId: string,
-  index: PluginIndex
+  index: PluginIndex,
+  activeAppIds: ReadonlySet<string>
 ): boolean {
   if (canonicalPluginRefs(layer.plugins?.enabled ?? [], index).includes(pluginId)) return true;
-  for (const rawOverride of Object.values(layer.applications ?? {})) {
+  for (const [appId, rawOverride] of Object.entries(layer.applications ?? {})) {
+    if (!activeAppIds.has(appId)) continue;
     if (!rawOverride || typeof rawOverride !== 'object' || Array.isArray(rawOverride)) continue;
     const plugins = (rawOverride as ApplicationConfigOverride).plugins;
     if (!plugins) continue;
@@ -1740,6 +1744,7 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
     const index = buildPluginIndex(scope);
+    const activeAppIds = new Set(loadSwitchboardConfig(layerOpts).applications.enabled);
     const plugin = index.get(id);
     if (!plugin) {
       console.error(chalk.red(`✗ Plugin "${id}" not found.`));
@@ -1753,6 +1758,7 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       plugin.id,
       'enable',
       index,
+      activeAppIds,
       layerOpts
     );
     console.log(chalk.green(`✓ Plugin "${plugin.id}" enabled.`));
@@ -1770,9 +1776,10 @@ function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string)
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
     const index = buildPluginIndex(scope);
+    const activeAppIds = new Set(loadSwitchboardConfig(layerOpts).applications.enabled);
     const pluginId = index.get(id)?.id ?? id;
     const existing = canonicalPluginRefs(layer.config.plugins?.enabled ?? [], index);
-    if (!hasPluginSelection(layer.config, pluginId, index)) {
+    if (!hasPluginSelection(layer.config, pluginId, index, activeAppIds)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled in this config layer.`));
       return;
     }
@@ -1781,6 +1788,7 @@ function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string)
       pluginId,
       'disable',
       index,
+      activeAppIds,
       layerOpts
     );
     console.log(chalk.green(`✓ Plugin "${pluginId}" ${verb}.`));
