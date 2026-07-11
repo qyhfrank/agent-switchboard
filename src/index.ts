@@ -18,7 +18,11 @@ import type { CommandPlatform as CmdPlatform } from './commands/importer.js';
 import { importCommandFromFile } from './commands/importer.js';
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
-import { loadWritableConfigLayer, updateConfigLayer } from './config/layered-config.js';
+import {
+  loadWritableConfigLayer,
+  type UpdateConfigLayerOptions,
+  updateConfigLayer,
+} from './config/layered-config.js';
 import {
   loadMcpConfig,
   loadMcpConfigWithPlugins,
@@ -37,6 +41,7 @@ import {
   getPluginsDir,
   getSkillsDir,
 } from './config/paths.js';
+import { loadConfiguredPortableSelections } from './config/plugin-selection.js';
 import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
 import {
   loadSwitchboardConfig,
@@ -66,9 +71,10 @@ import {
 import { loadLibraryStateSection, saveMcpEnabledState } from './library/state.js';
 import { loadManifest, saveManifest } from './manifest/store.js';
 import type { ProjectDistributionManifest } from './manifest/types.js';
+import { credentialFreeGitUrl } from './marketplace/git-transport.js';
 import { readMarketplace } from './marketplace/reader.js';
 import { distributeMcp } from './mcp/distribution.js';
-import { buildPluginIndex, clearPluginIndexCache } from './plugins/index.js';
+import { buildPluginIndex, clearPluginIndexCache, type PluginIndex } from './plugins/index.js';
 import {
   distributeRules,
   listIndirectAgents,
@@ -1560,6 +1566,14 @@ const pluginRoot = program
   .option('-p, --profile <name>', 'Profile configuration to use')
   .option('-P, --project <path>', 'Project directory containing .asb.toml');
 
+function resolvePluginScope(input?: ScopeOptionInput): ConfigScope | undefined {
+  const rootOptions = pluginRoot.opts<ScopeOptionInput>();
+  return resolveScope({
+    profile: input?.profile ?? rootOptions.profile,
+    project: input?.project ?? rootOptions.project,
+  });
+}
+
 pluginRoot.action((_options: ScopeOptionInput) => {
   pluginRoot.outputHelp();
 });
@@ -1573,10 +1587,11 @@ pluginRoot
   .option('--json', 'Output as JSON')
   .action((options: { json?: boolean } & ScopeOptionInput) => {
     try {
-      const scope = resolveScope(options);
+      const scope = resolvePluginScope(options);
       const index = buildPluginIndex(scope);
-      const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
-      const enabledList = config.plugins.enabled;
+      const enabledList = loadConfiguredPortableSelections(scope, {
+        pluginRef: (ref) => index.get(ref)?.id ?? ref,
+      }).pluginRefs;
       const enabledSet = new Set(enabledList);
 
       if (options.json) {
@@ -1587,7 +1602,7 @@ pluginRoot
               return {
                 id: p.id,
                 ref: p.id,
-                enabled: p.refs.some((candidate) => enabledSet.has(candidate)),
+                enabled: enabledSet.has(p.id),
                 ...publicMeta,
                 componentsResolved: p.meta.materialized !== false,
                 components: Object.fromEntries(
@@ -1610,6 +1625,23 @@ pluginRoot
       process.exit(1);
     }
   });
+
+function canonicalPluginRefs(refs: string[], index: PluginIndex): string[] {
+  return [...new Set(refs.map((ref) => index.get(ref)?.id ?? ref))];
+}
+
+function updatePluginSelection(enabled: string[], options?: UpdateConfigLayerOptions): void {
+  updateConfigLayer(
+    (layer) => ({
+      ...layer,
+      plugins: {
+        ...(layer.plugins ?? {}),
+        enabled,
+      },
+    }),
+    options
+  );
+}
 
 pluginRoot
   .command('info <id>')
@@ -1637,13 +1669,9 @@ pluginRoot
 
 function pluginEnableAction(id: string, options: ScopeOptionInput) {
   try {
-    const scope = resolveScope(options);
+    const scope = resolvePluginScope(options);
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
-    if (layer.config.plugins?.enabled?.includes(id)) {
-      console.log(chalk.yellow(`⚠ Plugin "${id}" is already enabled in this config layer.`));
-      return;
-    }
     const index = buildPluginIndex(scope);
     const plugin = index.get(id);
     if (!plugin) {
@@ -1651,18 +1679,17 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       console.log(chalk.dim('  Run `asb plugin list` to see available plugins.'));
       process.exit(1);
     }
+    const existing = canonicalPluginRefs(layer.config.plugins?.enabled ?? [], index);
+    if (existing.includes(plugin.id)) {
+      if (JSON.stringify(existing) !== JSON.stringify(layer.config.plugins?.enabled ?? [])) {
+        updatePluginSelection(existing, layerOpts);
+      }
+      console.log(chalk.yellow(`⚠ Plugin "${plugin.id}" is already enabled in this config layer.`));
+      return;
+    }
     index.materialize([plugin.id]);
-    updateConfigLayer(
-      (l) => ({
-        ...l,
-        plugins: {
-          ...(l.plugins ?? {}),
-          enabled: [...(l.plugins?.enabled ?? []), id],
-        },
-      }),
-      layerOpts
-    );
-    console.log(chalk.green(`✓ Plugin "${id}" enabled.`));
+    updatePluginSelection([...existing, plugin.id], layerOpts);
+    console.log(chalk.green(`✓ Plugin "${plugin.id}" enabled.`));
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1673,24 +1700,21 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
 
 function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string) {
   try {
-    const scope = resolveScope(options);
+    const scope = resolvePluginScope(options);
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
-    if (!layer.config.plugins?.enabled?.includes(id)) {
+    const index = buildPluginIndex(scope);
+    const pluginId = index.get(id)?.id ?? id;
+    const existing = canonicalPluginRefs(layer.config.plugins?.enabled ?? [], index);
+    if (!existing.includes(pluginId)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled in this config layer.`));
       return;
     }
-    updateConfigLayer(
-      (l) => ({
-        ...l,
-        plugins: {
-          ...(l.plugins ?? {}),
-          enabled: (l.plugins?.enabled ?? []).filter((x) => x !== id),
-        },
-      }),
+    updatePluginSelection(
+      existing.filter((candidate) => candidate !== pluginId),
       layerOpts
     );
-    console.log(chalk.green(`✓ Plugin "${id}" ${verb}.`));
+    console.log(chalk.green(`✓ Plugin "${pluginId}" ${verb}.`));
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1745,7 +1769,8 @@ mktRoot
       const name = nameArg ?? inferSourceName(location);
       if (isGitUrl(location)) {
         const parsed = parseGitUrl(location);
-        const spinner = ora(`Cloning ${parsed.url}...`).start();
+        const displayUrl = credentialFreeGitUrl(parsed.url);
+        const spinner = ora(`Cloning ${displayUrl}...`).start();
         try {
           addRemoteSource(name, {
             url: parsed.url,
@@ -1753,7 +1778,7 @@ mktRoot
             subdir: parsed.subdir,
             type: 'clone',
           });
-          spinner.succeed(chalk.green(`✓ Cloned ${parsed.url}`));
+          spinner.succeed(chalk.green(`✓ Cloned ${displayUrl}`));
         } catch (err) {
           spinner.fail(chalk.red('Failed to clone'));
           throw err;
@@ -1773,7 +1798,7 @@ mktRoot
           process.exit(1);
         }
 
-        console.log(chalk.green(`\n✓ Added source "${name}" from ${parsed.url}`));
+        console.log(chalk.green(`\n✓ Added source "${name}" from ${displayUrl}`));
         if (parsed.ref) console.log(chalk.dim(`  Ref: ${parsed.ref}`));
         if (parsed.subdir) console.log(chalk.dim(`  Subdir: ${parsed.subdir}`));
         if (validation.kind === 'marketplace') {
@@ -1914,7 +1939,7 @@ mktRoot
             : isRemote
               ? 'plugin (remote)'
               : 'plugin';
-        const sourcePlain = isRemote ? (src.remote?.url ?? src.path) : src.path;
+        const sourcePlain = isRemote ? credentialFreeGitUrl(src.remote?.url ?? src.path) : src.path;
 
         let statusPlain: string;
         if (isRemote) {

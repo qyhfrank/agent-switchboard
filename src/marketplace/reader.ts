@@ -12,7 +12,6 @@
  *   - `ref` / `sha` pin support for reproducible builds
  */
 
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -24,6 +23,7 @@ import {
   materializeMarketplaceEntry,
   refreshMarketplaceEntryCache,
 } from './cache.js';
+import { runGit } from './git-transport.js';
 import {
   type MarketplaceManifest,
   marketplaceManifestSchema,
@@ -226,7 +226,7 @@ export function refreshMarketplacePluginCache(
   const requests: MarketplaceEntryCacheRequest[] = [];
   for (const plugin of marketplace.plugins) {
     const gitSource = getGitSource(plugin.resolution);
-    if (!gitSource || canReuseMarketplaceCheckout(plugin.resolution, gitSource.url)) continue;
+    if (!gitSource || getReusableMarketplaceRoot(plugin.resolution, gitSource.url)) continue;
     requests.push(toCacheRequest(plugin.resolution, gitSource));
   }
   return refreshMarketplaceEntryCache(sourceName, localPath, requests);
@@ -324,8 +324,9 @@ function resolvePluginDir(
   const gitSource = getGitSource(resolution);
   if (gitSource) {
     if (!materializeRemote) return undefined;
-    if (canReuseMarketplaceCheckout(resolution, gitSource.url)) {
-      return gitSource.subdir ? resolveInside(marketplaceRoot, gitSource.subdir) : marketplaceRoot;
+    const reusableRoot = getReusableMarketplaceRoot(resolution, gitSource.url);
+    if (reusableRoot) {
+      return gitSource.subdir ? resolveInside(reusableRoot, gitSource.subdir) : reusableRoot;
     }
     return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource)).pluginPath;
   }
@@ -401,39 +402,53 @@ function sourceString(source: string | Record<string, unknown>, key: string): st
   return typeof source[key] === 'string' ? source[key] : undefined;
 }
 
-function canReuseMarketplaceCheckout(
+function getReusableMarketplaceRoot(
   resolution: MarketplacePluginResolution,
   sourceUrl: string
-): boolean {
+): string | null {
   const origin = getGitOrigin(resolution.marketplaceRoot);
-  if (!origin) return false;
+  if (!origin) return null;
   if (
     normalizeGitIdentity(origin, resolution.marketplaceRoot) !==
     normalizeGitIdentity(sourceUrl, resolution.marketplaceRoot)
   ) {
-    return false;
+    return null;
   }
 
   const head = tryRunGit(['rev-parse', 'HEAD'], resolution.marketplaceRoot);
-  if (!head) return false;
+  const repoRoot = tryRunGit(['rev-parse', '--show-toplevel'], resolution.marketplaceRoot);
+  if (!head || !repoRoot) return null;
+  const canonicalRoot = fs.realpathSync.native(repoRoot);
+  const canonicalMarketplace = fs.realpathSync.native(resolution.marketplaceRoot);
+  const marketplaceRelative = path.relative(canonicalRoot, canonicalMarketplace);
+  if (marketplaceRelative.startsWith('..') || path.isAbsolute(marketplaceRelative)) return null;
   if (
     resolution.sha &&
     (!/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/.test(resolution.sha) ||
       head.toLowerCase() !== resolution.sha.toLowerCase())
   ) {
-    return false;
+    return null;
   }
-  if (!resolution.ref) return true;
-  if (!isValidGitRef(resolution.ref)) return false;
+  if (!resolution.ref) return canonicalRoot;
+  if (!isValidGitRef(resolution.ref)) return null;
 
-  const refCommit =
-    tryRunGit(['rev-parse', `${resolution.ref}^{commit}`], resolution.marketplaceRoot) ??
-    tryRunGit(['rev-parse', `origin/${resolution.ref}^{commit}`], resolution.marketplaceRoot);
-  return refCommit === head;
+  const candidates =
+    resolution.ref === 'HEAD' || resolution.ref.startsWith('refs/')
+      ? [resolution.ref]
+      : [
+          `refs/heads/${resolution.ref}`,
+          `refs/remotes/origin/${resolution.ref}`,
+          `refs/tags/${resolution.ref}`,
+        ];
+  for (const candidate of candidates) {
+    const refCommit = tryRunGit(['rev-parse', `${candidate}^{commit}`], resolution.marketplaceRoot);
+    if (refCommit) return refCommit === head ? canonicalRoot : null;
+  }
+  return null;
 }
 
 function isValidGitRef(ref: string): boolean {
-  if (ref.startsWith('-')) return false;
+  if (ref.startsWith('-') || ref.startsWith('refs/remotes/')) return false;
   try {
     runGit(['check-ref-format', '--allow-onelevel', ref]);
     return true;
@@ -468,7 +483,7 @@ function normalizeGitIdentity(value: string, cwd: string): string {
 
   try {
     const url = new URL(trimmed);
-    return `${url.hostname.toLowerCase()}/${stripGitSuffix(url.pathname)}`;
+    return `${url.host.toLowerCase()}/${stripGitSuffix(url.pathname)}`;
   } catch {
     return stripGitSuffix(trimmed);
   }
@@ -500,15 +515,6 @@ function resolveInside(root: string, subpath: string): string | null {
   } catch {
     return null;
   }
-}
-
-function runGit(args: string[], options?: { cwd?: string }): string {
-  return execFileSync('git', args, {
-    ...options,
-    stdio: 'pipe',
-    encoding: 'utf-8',
-    timeout: 120_000,
-  }).trim();
 }
 
 // ── Plugin manifest ────────────────────────────────────────────────

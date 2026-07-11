@@ -14,7 +14,7 @@ import {
   type PluginIndex,
 } from '../plugins/index.js';
 import { loadMergedSwitchboardConfig, loadWritableConfigLayer } from './layered-config.js';
-import { mergeIncrementalSelection } from './plugin-selection.js';
+import { mergeIncrementalSelection, resolveEffectiveSelection } from './plugin-selection.js';
 import type {
   IncrementalSelection,
   NativePluginSelection,
@@ -91,16 +91,6 @@ function getApplicationNativePluginsOverrideFromConfig(
   return overrideObj.native_plugins as NativePluginSelection | undefined;
 }
 
-function getApplicationPluginsOverrideFromConfig(
-  config: ApplicationConfigSource,
-  appId: string
-): IncrementalSelection | undefined {
-  const applications = (config.applications ?? {}) as Record<string, unknown>;
-  const appOverrides = applications[appId];
-  if (!appOverrides || typeof appOverrides !== 'object') return undefined;
-  return (appOverrides as Record<string, unknown>).plugins as IncrementalSelection | undefined;
-}
-
 function getGlobalEnabled(config: ApplicationConfigSource, section: ConfigSection): string[] {
   const sectionConfig = config[section] as { enabled?: string[] } | undefined;
   return Array.isArray(sectionConfig?.enabled) ? [...sectionConfig.enabled] : [];
@@ -127,14 +117,6 @@ export function normalizeSectionEntryIds(
   return dedupeIds(ids.map((id) => index.normalizeComponentId(id)));
 }
 
-function getPluginEnabledRefs(config: ApplicationConfigSource): string[] {
-  return Array.isArray(config.plugins?.enabled) ? [...config.plugins.enabled] : [];
-}
-
-function normalizePluginRefs(ids: string[], index: PluginIndex): string[] {
-  return dedupeIds(ids.map((id) => index.get(id)?.id ?? id));
-}
-
 function canonicalizeComponentRefs(ids: string[], index: PluginIndex): string[] {
   return dedupeIds(
     ids.map((id) => {
@@ -146,29 +128,21 @@ function canonicalizeComponentRefs(ids: string[], index: PluginIndex): string[] 
   );
 }
 
-function normalizePluginSelection(
-  override: IncrementalSelection | undefined,
-  index: PluginIndex
-): IncrementalSelection | undefined {
-  if (!override) return undefined;
-  const normalized: IncrementalSelection = {};
-  if (override.enabled) normalized.enabled = normalizePluginRefs(override.enabled, index);
-  if (override.add) normalized.add = normalizePluginRefs(override.add, index);
-  if (override.remove) normalized.remove = normalizePluginRefs(override.remove, index);
-  return normalized;
-}
-
 function resolvePortablePluginRefsFromConfig(
   config: ApplicationConfigSource,
   appId: string,
   index: PluginIndex
 ): string[] {
-  const globalPluginRefs = normalizePluginRefs(getPluginEnabledRefs(config), index);
-  const pluginOverride = normalizePluginSelection(
-    getApplicationPluginsOverrideFromConfig(config, appId),
-    index
+  const globalPluginRefs = Array.isArray(config.plugins?.enabled)
+    ? [...config.plugins.enabled]
+    : [];
+  return resolveEffectiveSelection(
+    globalPluginRefs,
+    config,
+    appId,
+    'plugins',
+    (ref) => index.get(ref)?.id ?? ref
   );
-  return mergeIncrementalSelection(globalPluginRefs, pluginOverride);
 }
 
 function getPluginExcludeList(

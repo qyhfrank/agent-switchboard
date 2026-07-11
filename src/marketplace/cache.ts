@@ -1,15 +1,10 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfigDir, getMarketplacePluginCacheDir } from '../config/paths.js';
-import {
-  authenticatedGitEnv,
-  credentialFreeGitUrl,
-  redactGitCredentials,
-} from './git-transport.js';
+import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from './git-transport.js';
 
 export interface MarketplaceEntryCacheRequest {
   sourceName: string;
@@ -51,29 +46,6 @@ const temporaryCacheRoot = new AsyncLocalStorage<string>();
 
 function configuredCacheRoot(): string {
   return temporaryCacheRoot.getStore() ?? getMarketplacePluginCacheDir();
-}
-
-function runGit(args: string[], cwd?: string, env?: NodeJS.ProcessEnv): string {
-  try {
-    return execFileSync('git', args, {
-      cwd,
-      env,
-      stdio: 'pipe',
-      encoding: 'utf-8',
-      timeout: 120_000,
-    }).trim();
-  } catch (error) {
-    const execError = error as { stderr?: Buffer | string };
-    const stderr =
-      typeof execError.stderr === 'string'
-        ? execError.stderr.trim()
-        : (execError.stderr?.toString().trim() ?? '');
-    throw new Error(
-      redactGitCredentials(
-        `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
-      )
-    );
-  }
 }
 
 function digest(value: string): string {
@@ -244,10 +216,10 @@ function checkoutRequest(
   repoPath: string
 ): { commit: string; pluginPath: string } {
   fs.mkdirSync(repoPath, { recursive: true });
-  runGit(['init'], repoPath);
+  runGit(['init'], { cwd: repoPath });
   const persistedUrl = credentialFreeGitUrl(request.url);
   const env = authenticatedGitEnv(request.url, persistedUrl);
-  runGit(['remote', 'add', 'origin', persistedUrl], repoPath);
+  runGit(['remote', 'add', 'origin', persistedUrl], { cwd: repoPath });
 
   let fetchError: unknown;
   for (const target of fetchTargets(request.ref, request.sha)) {
@@ -255,7 +227,11 @@ function checkoutRequest(
     if (request.subdir) fetchArgs.push('--filter=blob:none');
     fetchArgs.push('origin', target);
     try {
-      runGit(fetchArgs, repoPath, env);
+      runGit(fetchArgs, {
+        cwd: repoPath,
+        env,
+        sensitiveUrls: [request.url],
+      });
       fetchError = undefined;
       break;
     } catch (error) {
@@ -263,7 +239,7 @@ function checkoutRequest(
     }
   }
   if (fetchError) throw fetchError;
-  const commit = runGit(['rev-parse', 'FETCH_HEAD^{commit}'], repoPath);
+  const commit = runGit(['rev-parse', 'FETCH_HEAD^{commit}'], { cwd: repoPath });
   fs.rmSync(path.join(repoPath, '.git', 'FETCH_HEAD'), { force: true });
   if (request.sha && commit !== request.sha) {
     throw new Error(
@@ -272,10 +248,10 @@ function checkoutRequest(
   }
 
   if (request.subdir) {
-    runGit(['sparse-checkout', 'init', '--cone'], repoPath);
-    runGit(['sparse-checkout', 'set', '--', request.subdir], repoPath);
+    runGit(['sparse-checkout', 'init', '--cone'], { cwd: repoPath });
+    runGit(['sparse-checkout', 'set', '--', request.subdir], { cwd: repoPath });
   }
-  runGit(['checkout', '--detach', commit], repoPath);
+  runGit(['checkout', '--detach', commit], { cwd: repoPath });
 
   return { commit, pluginPath: resolveInside(repoPath, request.subdir) };
 }
@@ -317,8 +293,11 @@ function cachedMaterialization(
   }
   try {
     assertNoCacheSymlinks(configuredCacheRoot(), path.join(repoPath, '.git'));
-    if (runGit(['rev-parse', 'HEAD'], repoPath) !== metadata.commit) return null;
-    if (runGit(['remote', 'get-url', 'origin'], repoPath) !== credentialFreeGitUrl(request.url)) {
+    if (runGit(['rev-parse', 'HEAD'], { cwd: repoPath }) !== metadata.commit) return null;
+    if (
+      runGit(['remote', 'get-url', 'origin'], { cwd: repoPath }) !==
+      credentialFreeGitUrl(request.url)
+    ) {
       return null;
     }
     return {

@@ -4,7 +4,6 @@
  * Supports both local directory paths and remote git repository URLs.
  */
 
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
@@ -13,11 +12,7 @@ import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
-import {
-  authenticatedGitEnv,
-  credentialFreeGitUrl,
-  redactGitCredentials,
-} from '../marketplace/git-transport.js';
+import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from '../marketplace/git-transport.js';
 import {
   getMarketplaceManifestInfo,
   getPluginManifestInfo,
@@ -49,28 +44,6 @@ function markSourcesChanged(): void {
 
 // ── Git utilities ──────────────────────────────────────────────────
 
-function runGit(args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }): string {
-  try {
-    return execFileSync('git', args, {
-      ...options,
-      stdio: 'pipe',
-      encoding: 'utf-8',
-      timeout: 120_000,
-    }).trim();
-  } catch (error: unknown) {
-    const execError = error as { stderr?: Buffer | string };
-    const stderr =
-      typeof execError.stderr === 'string'
-        ? execError.stderr.trim()
-        : (execError.stderr?.toString().trim() ?? '');
-    throw new Error(
-      redactGitCredentials(
-        `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
-      )
-    );
-  }
-}
-
 function ensureGitAvailable(): void {
   try {
     runGit(['--version']);
@@ -89,12 +62,24 @@ function gitClone(url: string, targetDir: string, ref?: string): void {
   if (ref) args.push('--branch', ref);
   const persistedUrl = credentialFreeGitUrl(url);
   args.push(persistedUrl, targetDir);
-  runGit(args, { env: authenticatedGitEnv(url, persistedUrl) });
+  runGit(args, {
+    env: authenticatedGitEnv(url, persistedUrl),
+    sensitiveUrls: [url],
+  });
 }
 
 function gitPull(repoDir: string, url: string): void {
   const persistedUrl = credentialFreeGitUrl(url);
-  runGit(['pull'], { cwd: repoDir, env: authenticatedGitEnv(url, persistedUrl) });
+  try {
+    runGit(['pull'], {
+      cwd: repoDir,
+      env: authenticatedGitEnv(url, persistedUrl),
+      sensitiveUrls: [url],
+    });
+  } catch (error) {
+    abortMerge(repoDir);
+    throw error;
+  }
 }
 
 function gitSubtreeAdd(repoRoot: string, prefix: string, url: string, ref: string): void {
@@ -102,6 +87,7 @@ function gitSubtreeAdd(repoRoot: string, prefix: string, url: string, ref: strin
   runGit(['subtree', 'add', '--prefix', prefix, persistedUrl, ref], {
     cwd: repoRoot,
     env: authenticatedGitEnv(url, persistedUrl),
+    sensitiveUrls: [url],
   });
 }
 
@@ -110,7 +96,19 @@ function gitSubtreePull(repoRoot: string, prefix: string, url: string, ref: stri
   runGit(['subtree', 'pull', '--prefix', prefix, persistedUrl, ref], {
     cwd: repoRoot,
     env: authenticatedGitEnv(url, persistedUrl),
+    sensitiveUrls: [url],
   });
+}
+
+function abortMerge(repoDir: string): void {
+  try {
+    const mergeHeadPath = runGit(['rev-parse', '--git-path', 'MERGE_HEAD'], { cwd: repoDir });
+    if (fs.existsSync(path.resolve(repoDir, mergeHeadPath))) {
+      runGit(['merge', '--abort'], { cwd: repoDir });
+    }
+  } catch {
+    // Preserve the original Git failure when no merge can be aborted.
+  }
 }
 
 function isGitRepo(dir: string): boolean {
@@ -188,7 +186,7 @@ export function parseGitUrl(input: string): { url: string; ref?: string; subdir?
  */
 export function inferSourceName(location: string): string {
   if (isGitUrl(location)) {
-    const { url } = parseGitUrl(location);
+    const url = credentialFreeGitUrl(parseGitUrl(location).url);
     const httpsMatch = url.match(/\/([^/]+?)(?:\.git)?$/);
     if (httpsMatch) return httpsMatch[1];
     const sshMatch = url.match(/:([^/]+?)(?:\.git)?$/);
@@ -305,7 +303,11 @@ export function getSources(scope?: ConfigScope): Source[] {
       typeof entry.value !== 'string' &&
       isCloneableSource(expandHome(entry.value.url))
     ) {
-      return { namespace, path: entry.path, remote: entry.value };
+      return {
+        namespace,
+        path: entry.path,
+        remote: { ...entry.value, url: credentialFreeGitUrl(entry.value.url) },
+      };
     }
     return { namespace, path: entry.path };
   });
@@ -441,6 +443,9 @@ export function removeSource(namespace: string): void {
 
   const value = raw[namespace];
   const effectivePath = resolveEffectivePath(namespace, value);
+  const cacheOwnerPath = fs.existsSync(effectivePath)
+    ? fs.realpathSync.native(effectivePath)
+    : path.resolve(effectivePath);
 
   // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
@@ -492,7 +497,7 @@ export function removeSource(namespace: string): void {
     throw configErr;
   }
   markSourcesChanged();
-  removeMarketplaceEntryCache(namespace, effectivePath);
+  removeMarketplaceEntryCache(namespace, cacheOwnerPath);
 }
 
 /**
@@ -580,17 +585,7 @@ export function updateRemoteSources(
           try {
             gitSubtreePull(repoRoot, prefix, expandHome(value.url), value.ref);
           } catch (pullErr) {
-            // Abort merge if conflict left repo in unmerged state
-            try {
-              const mergeHeadPath = runGit(['rev-parse', '--git-path', 'MERGE_HEAD'], {
-                cwd: repoRoot,
-              });
-              if (fs.existsSync(path.resolve(repoRoot, mergeHeadPath))) {
-                runGit(['merge', '--abort'], { cwd: repoRoot });
-              }
-            } catch {
-              /* best-effort cleanup */
-            }
+            abortMerge(repoRoot);
             throw pullErr;
           }
         }
@@ -609,11 +604,15 @@ export function updateRemoteSources(
       } else {
         removeMarketplaceEntryCache(namespace, effectivePath);
       }
-      results.push({ namespace, url: value.url, status: 'updated' });
+      results.push({
+        namespace,
+        url: credentialFreeGitUrl(value.url),
+        status: 'updated',
+      });
     } catch (err) {
       results.push({
         namespace,
-        url: value.url,
+        url: credentialFreeGitUrl(value.url),
         status: 'error',
         error: err instanceof Error ? err.message : String(err),
       });

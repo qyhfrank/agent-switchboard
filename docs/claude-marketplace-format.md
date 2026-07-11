@@ -345,7 +345,7 @@ Portable plugin selection and direct component selection are materialization bou
 
 The derived entry identity includes the configured source, canonical marketplace root, plugin name, credential-free Git URL, ref, full 40- or 64-character SHA, and subdirectory. Short refs resolve a same-named branch before a tag; fully qualified refs are fetched exactly. Subdirectory entries use sparse checkout. A refresh writes and verifies a replacement before switching generations; a failed refresh preserves the prior verified entry. Exact SHA entries are immutable and reused. Updating a remote source refreshes only entries already materialized for that source, while source removal cleans only that source's derived entries. `asb sync --dry-run` uses temporary materialization and does not mutate the durable cache or update source checkouts.
 
-Credential-bearing source URLs are transport inputs. ASB removes user info, query parameters, and fragments before persisting a source URL or cache remote and before reporting Git errors.
+Credential-bearing source URLs are transport inputs. ASB preserves SSH usernames, but removes passwords, non-SSH user info, query parameters, and fragments before persisting a source URL or cache remote and before reporting Git errors.
 
 ### ASB `.mcp.json` Compatibility
 
