@@ -414,7 +414,7 @@ test('failed refresh preserves the last verified generation and removes temporar
   });
 });
 
-test('retry reclaims a pre-claim binding and empty stage', () => {
+test('retry preserves a pre-claim empty stage replacement', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -467,17 +467,22 @@ test('retry reclaims a pre-claim binding and empty stage', () => {
     assert.equal(binding.version, 0);
     assert.equal(fs.existsSync(claimPath), false);
     assert.deepEqual(fs.readdirSync(ownedStage), []);
+    const originalStage = path.join(asbHome, 'original-pre-claim-stage');
+    const originalIdentity = fileIdentity(ownedStage);
+    fs.renameSync(ownedStage, originalStage);
+    fs.mkdirSync(ownedStage);
+    assert.notDeepEqual(fileIdentity(ownedStage), originalIdentity);
 
     const materialized = materializeMarketplaceEntry(request);
 
-    assert.equal(fs.existsSync(ownedStage), false);
+    assert.deepEqual(fs.readdirSync(ownedStage), []);
     assert.equal(fs.existsSync(claimPath), false);
-    assert.equal(fs.existsSync(bindingPath), false);
+    assert.equal(fs.existsSync(bindingPath), true);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
 });
 
-test('retry recovers when binding publication is interrupted', () => {
+test('retry preserves a stage interrupted before binding publication', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -532,14 +537,14 @@ test('retry recovers when binding publication is interrupted', () => {
 
     const materialized = materializeMarketplaceEntry(request);
 
-    assert.equal(fs.existsSync(claimPath), false);
-    assert.equal(fs.existsSync(bindingPath), false);
-    assert.equal(fs.existsSync(stagePath), false);
+    assert.equal(fs.existsSync(claimPath), true);
+    assert.equal(fs.existsSync(bindingPath), true);
+    assert.deepEqual(fs.readdirSync(stagePath), []);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
 });
 
-test('retry reclaims an interrupted ready stage bound to its original inode', () => {
+test('retry preserves an interrupted ready stage without its creation-time identity', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -560,13 +565,13 @@ test('retry reclaims an interrupted ready stage bound to its original inode', ()
     const reused = materializeMarketplaceEntry(request);
 
     assert.equal(reused.entryPath, current.entryPath);
-    assert.equal(fs.existsSync(interrupted.stagePath), false);
-    assert.equal(fs.existsSync(interrupted.intentPath), false);
-    assert.equal(fs.existsSync(`${interrupted.intentPath}.ready`), false);
+    assert.equal(fs.existsSync(path.join(interrupted.stagePath, 'repo', '.git')), true);
+    assert.equal(fs.existsSync(interrupted.intentPath), true);
+    assert.equal(fs.existsSync(`${interrupted.intentPath}.ready`), true);
   });
 });
 
-test('retry preserves a foreign replacement at a claimed ready stage', () => {
+test('retry preserves a claimed empty stage replacement', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -581,32 +586,22 @@ test('retry preserves a foreign replacement at a claimed ready stage', () => {
     const interrupted = interruptReadyMaterialization(asbHome, request);
     const intentPath = interrupted.intentPath;
     const ownedStage = interrupted.stagePath;
-    const sourcePath = path.dirname(ownedStage);
     assert.equal(fs.existsSync(path.join(ownedStage, 'repo', '.git')), true);
     assert.equal(fs.existsSync(`${intentPath}.ready`), true);
     assert.equal(fs.existsSync(path.join(ownedStage, '.stage-owner.json')), false);
     fs.renameSync(ownedStage, path.join(asbHome, 'interrupted-stage'));
     fs.mkdirSync(ownedStage);
-    fs.writeFileSync(path.join(ownedStage, 'sentinel'), 'keep');
-    const forgedStage = path.join(sourcePath, '.tmp-forged');
-    fs.mkdirSync(forgedStage);
-    fs.writeFileSync(
-      path.join(forgedStage, '.stage-owner.json'),
-      `${JSON.stringify({ version: 1, ownerIdentity: 'forged', stageName: '.tmp-forged' })}\n`
-    );
-    fs.writeFileSync(path.join(forgedStage, 'sentinel'), 'keep');
 
     const materialized = materializeMarketplaceEntry(request);
 
-    assert.equal(fs.readFileSync(path.join(ownedStage, 'sentinel'), 'utf-8'), 'keep');
-    assert.equal(fs.readFileSync(path.join(forgedStage, 'sentinel'), 'utf-8'), 'keep');
-    assert.equal(fs.existsSync(intentPath), false);
-    assert.equal(fs.existsSync(`${intentPath}.ready`), false);
+    assert.deepEqual(fs.readdirSync(ownedStage), []);
+    assert.equal(fs.existsSync(intentPath), true);
+    assert.equal(fs.existsSync(`${intentPath}.ready`), true);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
 });
 
-test('retry preserves a forged ready-stage pair not sealed by the original claim', () => {
+test('retry preserves forged mutually consistent ready-stage records', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -621,33 +616,43 @@ test('retry preserves a forged ready-stage pair not sealed by the original claim
     const interrupted = interruptReadyMaterialization(asbHome, request);
     const bindingPath = `${interrupted.intentPath}.ready`;
     const claim = JSON.parse(fs.readFileSync(interrupted.intentPath, 'utf-8'));
-    assert.deepEqual(claim.binding, fileIdentity(bindingPath));
 
+    fs.renameSync(interrupted.intentPath, path.join(asbHome, 'original-ready-claim'));
     fs.renameSync(bindingPath, path.join(asbHome, 'original-ready-binding'));
     fs.renameSync(interrupted.stagePath, path.join(asbHome, 'original-ready-stage'));
+    fs.writeFileSync(bindingPath, '{}\n');
     fs.mkdirSync(interrupted.stagePath);
     fs.writeFileSync(path.join(interrupted.stagePath, 'sentinel'), 'keep');
+    const bindingIdentity = fileIdentity(bindingPath);
+    const stageIdentity = fileIdentity(interrupted.stagePath);
+    fs.writeFileSync(
+      interrupted.intentPath,
+      `${JSON.stringify({
+        ...claim,
+        binding: bindingIdentity,
+        stage: stageIdentity,
+      })}\n`
+    );
     fs.writeFileSync(
       bindingPath,
       `${JSON.stringify({
         version: 1,
         token: claim.token,
         claim: fileIdentity(interrupted.intentPath),
-        stage: fileIdentity(interrupted.stagePath),
+        stage: stageIdentity,
       })}\n`
     );
-    assert.notDeepEqual(fileIdentity(bindingPath), claim.binding);
 
     const materialized = materializeMarketplaceEntry(request);
 
     assert.equal(fs.readFileSync(path.join(interrupted.stagePath, 'sentinel'), 'utf-8'), 'keep');
     assert.equal(fs.existsSync(bindingPath), true);
-    assert.equal(fs.existsSync(interrupted.intentPath), false);
+    assert.equal(fs.existsSync(interrupted.intentPath), true);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
 });
 
-test('retry preserves a stage replacement when its binding is rewritten in place', () => {
+test('retry preserves a stage replacement when ready payloads are rewritten in place', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -662,28 +667,35 @@ test('retry preserves a stage replacement when its binding is rewritten in place
     const interrupted = interruptReadyMaterialization(asbHome, request);
     const bindingPath = `${interrupted.intentPath}.ready`;
     const claim = JSON.parse(fs.readFileSync(interrupted.intentPath, 'utf-8'));
+    const claimIdentity = fileIdentity(interrupted.intentPath);
     const bindingIdentity = fileIdentity(bindingPath);
     assert.deepEqual(claim.stage, fileIdentity(interrupted.stagePath));
 
     fs.renameSync(interrupted.stagePath, path.join(asbHome, 'original-ready-stage'));
     fs.mkdirSync(interrupted.stagePath);
     fs.writeFileSync(path.join(interrupted.stagePath, 'sentinel'), 'keep');
+    const stageIdentity = fileIdentity(interrupted.stagePath);
+    fs.writeFileSync(
+      interrupted.intentPath,
+      `${JSON.stringify({ ...claim, stage: stageIdentity })}\n`
+    );
     fs.writeFileSync(
       bindingPath,
       `${JSON.stringify({
         version: 1,
         token: claim.token,
-        claim: fileIdentity(interrupted.intentPath),
-        stage: fileIdentity(interrupted.stagePath),
+        claim: claimIdentity,
+        stage: stageIdentity,
       })}\n`
     );
+    assert.deepEqual(fileIdentity(interrupted.intentPath), claimIdentity);
     assert.deepEqual(fileIdentity(bindingPath), bindingIdentity);
 
     const materialized = materializeMarketplaceEntry(request);
 
     assert.equal(fs.readFileSync(path.join(interrupted.stagePath, 'sentinel'), 'utf-8'), 'keep');
-    assert.equal(fs.existsSync(bindingPath), false);
-    assert.equal(fs.existsSync(interrupted.intentPath), false);
+    assert.equal(fs.existsSync(bindingPath), true);
+    assert.equal(fs.existsSync(interrupted.intentPath), true);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
 });
