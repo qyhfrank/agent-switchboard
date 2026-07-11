@@ -449,7 +449,9 @@ Source storage, marketplace inventory, and external entry materialization have s
 
 A relative marketplace entry resolves inside its source checkout. A `git-subdir` entry that points to the same repository and compatible pin also reuses that checkout. Other selected Git entries use the state-owned materialization cache. The cache is derived runtime state, not a plugin source and not an enablement surface, so it cannot create duplicate plugin identities through auto-discovery.
 
-`asb plugin list` reads catalog metadata without fetching external entries. ASB materializes an external entry when portable plugin expansion or a directly selected component requires its files. Full commit SHA pins are reused as immutable entries; subdirectory sources use sparse checkout. Refresh replaces a verified entry atomically so a failed fetch leaves the previous materialization usable.
+`asb plugin list` reads catalog metadata without fetching external entries. ASB materializes an external entry when portable plugin expansion or a directly selected component requires its files. A short `ref` selects a same-named branch before a tag; a fully qualified ref is used exactly. Full commit SHA pins are reused as immutable entries, and subdirectory sources use sparse checkout. Refresh replaces a verified entry atomically so a failed fetch leaves the previous materialization usable.
+
+Git credentials supplied in a source URL are used for transport only. ASB removes URL user info, query parameters, and fragments from persisted source and cache metadata and from Git errors.
 
 In `asb plugin list --json`, `componentsResolved: false` means an external entry remains metadata-only for that inventory command; its zero component counts are not a declaration that the plugin contains no components.
 
