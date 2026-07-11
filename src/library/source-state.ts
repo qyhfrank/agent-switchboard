@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfigDir, getPluginSourceStateDir } from '../config/paths.js';
 import { type SourceValue, sourceValueSchema } from '../config/schemas.js';
+import { credentialFreeGitUrl } from '../marketplace/git-identity.js';
 
 export interface SourceRemovalPathState {
   activePath: string;
@@ -300,7 +301,9 @@ function readStateFile(filePath: string): PluginSourceState | null {
   const stateRoot = safeStateRoot(false);
   assertNoStateSymlinks(stateRoot, filePath);
   try {
-    return parseState(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
+    const state = parseState(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
+    if (state) fs.chmodSync(filePath, 0o600);
+    return state;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
@@ -313,11 +316,24 @@ function writeStateFile(filePath: string, state: PluginSourceState): void {
   const tempPath = path.join(stateRoot, `.${path.basename(filePath)}.${randomUUID()}.tmp`);
   assertNoStateSymlinks(stateRoot, tempPath);
   try {
-    fs.writeFileSync(tempPath, `${JSON.stringify(state, null, 2)}\n`, { flag: 'wx' });
+    fs.writeFileSync(tempPath, `${JSON.stringify(sanitizeState(state), null, 2)}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
     fs.renameSync(tempPath, filePath);
   } finally {
     fs.rmSync(tempPath, { force: true });
   }
+}
+
+function sanitizeDescriptor(descriptor: SourceValue | null): SourceValue | null {
+  return descriptor && typeof descriptor !== 'string'
+    ? { ...descriptor, url: credentialFreeGitUrl(descriptor.url) }
+    : descriptor;
+}
+
+function sanitizeState(state: PluginSourceState): PluginSourceState {
+  return { ...state, descriptor: sanitizeDescriptor(state.descriptor) };
 }
 
 function newState(
@@ -331,7 +347,7 @@ function newState(
     version: 1,
     namespace,
     configPath: path.resolve(configPath),
-    descriptor,
+    descriptor: sanitizeDescriptor(descriptor),
     descriptorKey,
     marketplacePath: path.resolve(marketplacePath),
     incarnation: randomUUID(),
@@ -354,7 +370,10 @@ export function ensurePluginSourceState(
   const stateRoot = safeStateRoot(true);
   assertNoStateSymlinks(stateRoot, filePath);
   try {
-    fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, { flag: 'wx' });
+    fs.writeFileSync(filePath, `${JSON.stringify(sanitizeState(state), null, 2)}\n`, {
+      flag: 'wx',
+      mode: 0o600,
+    });
     return state;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
@@ -532,7 +551,7 @@ export function deletePluginSourceState(state: PluginSourceState): void {
   fs.rmSync(filePath, { force: true });
 }
 
-function listPluginSourceStates(): PluginSourceState[] {
+export function listPluginSourceStates(): PluginSourceState[] {
   const stateRoot = safeStateRoot(false);
   if (!fs.existsSync(stateRoot)) return [];
   const records: PluginSourceState[] = [];

@@ -6,6 +6,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { pathToFileURL } from 'node:url';
 import {
+  getMarketplacePluginCacheDir,
   getPluginSourceLocksDir,
   getPluginSourceStateDir,
   getPluginsDir,
@@ -25,6 +26,7 @@ import {
   validateSourcePath,
 } from '../src/library/sources.js';
 import { withTemporaryMarketplaceEntryCache } from '../src/marketplace/cache.js';
+import { credentialFreeGitUrl } from '../src/marketplace/git-identity.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -1954,10 +1956,74 @@ function createManagedMarketplaceSource(
   };
 }
 
+function createLayeredSubdirMarketplaceSource(
+  asbHome: string,
+  namespace: string
+): { checkoutPath: string; lowerMaterialized: string; higherMaterialized: string } {
+  clearPluginIndexCache();
+  const profile = { profile: 'team' };
+  const entryRemote = createBareRemote(path.join(asbHome, `${namespace}-entry`));
+  const catalogRemote = createBareRemote(path.join(asbHome, `${namespace}-catalog`));
+  for (const [subdir, pluginName] of [
+    ['lower', 'lower-plugin'],
+    ['higher', 'higher-plugin'],
+  ] as const) {
+    const manifestDir = path.join(catalogRemote.workDir, subdir, '.claude-plugin');
+    fs.mkdirSync(manifestDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(manifestDir, 'marketplace.json'),
+      JSON.stringify({
+        name: `${namespace}-${subdir}`,
+        plugins: [
+          {
+            name: pluginName,
+            source: { source: 'url', url: entryRemote.bareRepo },
+          },
+        ],
+      })
+    );
+  }
+  execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+  execFileSync(
+    'git',
+    ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'subdirs'],
+    { cwd: catalogRemote.workDir, stdio: 'pipe' }
+  );
+  execFileSync('git', ['push', 'origin', 'main'], {
+    cwd: catalogRemote.workDir,
+    stdio: 'pipe',
+  });
+  addRemoteSource(namespace, {
+    url: catalogRemote.bareRepo,
+    type: 'clone',
+    ref: 'main',
+    subdir: 'lower',
+  });
+  const checkoutPath = path.join(getPluginsDir(), namespace);
+  const lowerIndex = buildPluginIndex();
+  const lowerPlugin = lowerIndex.get(`lower-plugin@${namespace}`);
+  assert.ok(lowerPlugin);
+  lowerIndex.expand([lowerPlugin.id]);
+  const lowerMaterialized = lowerPlugin.meta.sourcePath;
+  clearPluginIndexCache();
+  fs.writeFileSync(
+    getProfileConfigPath('team'),
+    `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(catalogRemote.bareRepo)}, type = "clone", ref = "main", subdir = "higher" }\n`
+  );
+  const higherIndex = buildPluginIndex(profile);
+  const higherPlugin = higherIndex.get(`higher-plugin@${namespace}`);
+  assert.ok(higherPlugin);
+  higherIndex.expand([higherPlugin.id]);
+  const higherMaterialized = higherPlugin.meta.sourcePath;
+  clearPluginIndexCache();
+  return { checkoutPath, lowerMaterialized, higherMaterialized };
+}
+
 async function stopRemovalAtCrashPoint(
   asbHome: string,
   namespace: string,
-  crashPoint: 'before-config' | 'after-config'
+  crashPoint: 'before-config' | 'after-config' | 'after-config-publication',
+  scope?: { profile?: string; project?: string }
 ): Promise<void> {
   const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
   const configuredPath = process.env.ASB_CONFIG?.trim() || path.join(asbHome, 'config.toml');
@@ -1980,13 +2046,15 @@ async function stopRemovalAtCrashPoint(
     '};' +
     'fs.renameSync = (from, to) => {' +
     'if (crashPoint === "before-config" && String(to) === configPath) wait();' +
-    'return originalRename(from, to);' +
+    'const result = originalRename(from, to);' +
+    'if (crashPoint === "after-config-publication" && String(to) === configPath) wait();' +
+    'return result;' +
     '};' +
     'fs.rmSync = (target, options) => {' +
     'if (crashPoint === "after-config" && String(target).includes(".removing-")) wait();' +
     'return originalRemove(target, options);' +
     '};' +
-    `removeSource(${JSON.stringify(namespace)});`;
+    `removeSource(${JSON.stringify(namespace)}, ${JSON.stringify(scope)});`;
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '--eval', childSource],
@@ -2012,6 +2080,65 @@ async function stopRemovalAtCrashPoint(
       if (output.includes('CHECKPOINT\n')) resolve();
       else if (child.exitCode !== null) reject(new Error(stderr || 'removal exited early'));
       else if (Date.now() >= deadline) reject(new Error(stderr || 'removal checkpoint timed out'));
+      else setTimeout(poll, 10);
+    };
+    poll();
+  });
+  const closed = new Promise<void>((resolve) => child.once('close', () => resolve()));
+  child.kill('SIGKILL');
+  await closed;
+}
+
+async function stopInactiveRetirementAfterState(
+  asbHome: string,
+  namespace: string,
+  replacement: string
+): Promise<void> {
+  const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+  const childSource =
+    'import fs from "node:fs";' +
+    `import { addLocalSource } from ${JSON.stringify(sourcesModule)};` +
+    'const originalRename = fs.renameSync.bind(fs);' +
+    'let stopped = false;' +
+    'fs.renameSync = (from, to) => {' +
+    'const result = originalRename(from, to);' +
+    'if (!stopped && String(to).endsWith(".json")) {' +
+    'const state = JSON.parse(fs.readFileSync(String(to), "utf-8"));' +
+    'if (state.removal) {' +
+    'stopped = true;process.stdout.write("CHECKPOINT\\n");' +
+    'Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);' +
+    '}' +
+    '}' +
+    'return result;' +
+    '};' +
+    `addLocalSource(${JSON.stringify(namespace)}, ${JSON.stringify(replacement)}, { profile: "team" });`;
+  const child = spawn(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '--eval', childSource],
+    {
+      cwd: process.cwd(),
+      env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }
+  );
+  child.stdout.setEncoding('utf-8');
+  child.stderr.setEncoding('utf-8');
+  let output = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    output += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+  await new Promise<void>((resolve, reject) => {
+    const deadline = Date.now() + 10_000;
+    const poll = () => {
+      if (output.includes('CHECKPOINT\n')) resolve();
+      else if (child.exitCode !== null)
+        reject(new Error(stderr || 'inactive retirement exited early'));
+      else if (Date.now() >= deadline)
+        reject(new Error(stderr || 'inactive retirement checkpoint timed out'));
       else setTimeout(poll, 10);
     };
     poll();
@@ -3037,7 +3164,9 @@ test('addRemoteSource rejects a missing subdirectory beneath an escaping symlink
     );
     assert.equal(fs.existsSync(path.join(getPluginsDir(), 'escaping-subdir')), false);
     assert.deepEqual(
-      fs.readdirSync(getPluginsDir()).filter((name) => name.startsWith('.adding-')),
+      fs
+        .readdirSync(getPluginsDir())
+        .filter((name) => name.startsWith('.') && name.includes('escaping-subdir')),
       []
     );
     assert.equal(
@@ -3936,5 +4065,670 @@ test('subtree fallback persists type as requested when subtree succeeds', () => 
     const src = sources.find((s) => s.namespace === 'persist-test');
     assert.ok(src?.remote);
     assert.equal(src.remote.type, 'subtree');
+  });
+});
+
+test('scoped managed sources stay out of unrelated discovery views', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'profile-managed';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'profile-managed-remote'));
+    const direct = path.join(getPluginsDir(), 'direct-unowned');
+    fs.mkdirSync(path.join(direct, 'rules'), { recursive: true });
+
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }, profile);
+
+    assert.equal(namespace in getSourcesRecord(), false);
+    assert.equal(getSourcesRecord()['direct-unowned'], direct);
+    assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.rmSync(checkout, { recursive: true, force: true });
+    fs.mkdirSync(path.join(checkout, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(checkout, 'rules', 'foreign.md'), '# Foreign');
+    assert.equal(namespace in getSourcesRecord(), false);
+  });
+});
+
+test('clone publication revalidates the active checkout and preserves late tampering', (t) => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'late-clone-tamper';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'late-clone-remote'));
+    const checkout = path.join(getPluginsDir(), namespace);
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      const result = originalRename(from, to);
+      if (path.resolve(String(to)) === checkout) {
+        fs.writeFileSync(path.join(checkout, 'rules', 'v1.md'), '# Tampered');
+      }
+      return result;
+    });
+
+    assert.throws(
+      () => addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }),
+      /local changes|checkout.*changed/i
+    );
+    assert.equal(fs.existsSync(checkout), false);
+    const preserved = fs
+      .readdirSync(getPluginsDir())
+      .find((name) => name.startsWith(`.preserved-${namespace}-`));
+    assert.ok(preserved);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), preserved, 'rules', 'v1.md'), 'utf-8'),
+      '# Tampered'
+    );
+    assert.doesNotMatch(
+      fs.existsSync(path.join(asbHome, 'config.toml'))
+        ? fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8')
+        : '',
+      new RegExp(namespace)
+    );
+  });
+});
+
+test('clone removal revalidates its staged checkout before disposal', (t) => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'late-remove-tamper';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'late-remove-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      const result = originalRename(from, to);
+      if (
+        path.resolve(String(from)) === checkout &&
+        path.basename(String(to)).startsWith(`.removing-${namespace}-`)
+      ) {
+        fs.writeFileSync(path.join(String(to), 'rules', 'v1.md'), '# Late mutation');
+      }
+      return result;
+    });
+
+    removeSource(namespace);
+
+    assert.equal(fs.existsSync(checkout), false);
+    const preserved = fs
+      .readdirSync(getPluginsDir())
+      .find((name) => name.startsWith(`.preserved-${namespace}-`));
+    assert.ok(preserved);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), preserved, 'rules', 'v1.md'), 'utf-8'),
+      '# Late mutation'
+    );
+  });
+});
+
+test('inactive clone retirement stages and preserves late tampering', (t) => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'inactive-retirement';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'inactive-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), '[plugins]\nenabled = []\n');
+    const replacement = path.join(asbHome, 'replacement');
+    fs.mkdirSync(path.join(replacement, 'rules'), { recursive: true });
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      const result = originalRename(from, to);
+      if (
+        path.resolve(String(from)) === checkout &&
+        path.basename(String(to)).startsWith(`.removing-${namespace}-`)
+      ) {
+        fs.writeFileSync(path.join(String(to), 'rules', 'v1.md'), '# Late retirement mutation');
+      }
+      return result;
+    });
+
+    addLocalSource(namespace, replacement);
+
+    const preserved = fs
+      .readdirSync(getPluginsDir())
+      .find((name) => name.startsWith(`.preserved-${namespace}-`));
+    assert.ok(preserved);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), preserved, 'rules', 'v1.md'), 'utf-8'),
+      '# Late retirement mutation'
+    );
+    assert.equal(getSourcesRecord()[namespace], replacement);
+  });
+});
+
+test('inactive retirement recovery transfers state across every locked config carrier', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-inactive-owner-transfer-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    clearPluginIndexCache();
+    const namespace = 'inactive-carrier-transfer';
+    const profile = { profile: 'team' };
+    const { checkoutPath, materializedPath } = createManagedMarketplaceSource(asbHome, namespace);
+    const userConfig = fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8');
+    fs.writeFileSync(getProfileConfigPath('team'), userConfig);
+    const adopted = updateRemoteSources(profile, namespace);
+    assert.equal(adopted[0]?.status, 'updated', adopted[0]?.error);
+    assert.equal(
+      fs.readdirSync(getPluginSourceStateDir()).filter((name) => name.endsWith('.json')).length,
+      2
+    );
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), '[plugins]\nenabled = []\n');
+    fs.writeFileSync(getProfileConfigPath('team'), '[plugins]\nenabled = []\n');
+    const replacement = path.join(root, 'replacement');
+    fs.mkdirSync(path.join(replacement, 'rules'), { recursive: true });
+
+    await stopInactiveRetirementAfterState(asbHome, namespace, replacement);
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), userConfig);
+
+    assert.equal(getSourcesRecord(profile)[namespace], checkoutPath);
+    assert.equal(fs.existsSync(path.join(checkoutPath, 'rules', 'v1.md')), true);
+    assert.equal(fs.existsSync(materializedPath), true);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(states.length, 1);
+    assert.equal(states[0].configPath, fs.realpathSync.native(path.join(asbHome, 'config.toml')));
+    assert.equal(states[0].removal, undefined);
+  } finally {
+    clearPluginIndexCache();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('clone removal preserves ignored content and hidden index changes', () => {
+  withTempAsbHome((asbHome) => {
+    for (const variant of ['ignored', 'assume-unchanged', 'skip-worktree'] as const) {
+      const namespace = `clone-${variant}`;
+      const { bareRepo } = createBareRemote(path.join(asbHome, `${variant}-remote`));
+      addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+      const checkout = path.join(getPluginsDir(), namespace);
+      if (variant === 'ignored') {
+        fs.appendFileSync(path.join(checkout, '.git', 'info', 'exclude'), 'private.txt\n');
+        fs.writeFileSync(path.join(checkout, 'private.txt'), 'preserve ignored');
+      } else {
+        const flag = variant === 'assume-unchanged' ? '--assume-unchanged' : '--skip-worktree';
+        execFileSync('git', ['update-index', flag, 'rules/v1.md'], {
+          cwd: checkout,
+          stdio: 'pipe',
+        });
+        fs.writeFileSync(path.join(checkout, 'rules', 'v1.md'), `preserve ${variant}`);
+      }
+
+      removeSource(namespace);
+
+      const preserved = fs
+        .readdirSync(getPluginsDir())
+        .find((name) => name.startsWith(`.preserved-${namespace}-`));
+      assert.ok(preserved, variant);
+      const preservedPath = path.join(getPluginsDir(), preserved);
+      assert.equal(
+        fs.readFileSync(
+          variant === 'ignored'
+            ? path.join(preservedPath, 'private.txt')
+            : path.join(preservedPath, 'rules', 'v1.md'),
+          'utf-8'
+        ),
+        variant === 'ignored' ? 'preserve ignored' : `preserve ${variant}`
+      );
+    }
+  });
+});
+
+test('subtree removal rejects hidden index state beneath its prefix', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'subtree-hidden-index';
+    const { bareRepo } = createBareRemote(path.join(path.dirname(asbHome), 'hidden-index-remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const relative = `plugins/${namespace}/rules/v1.md`;
+    execFileSync('git', ['update-index', '--skip-worktree', relative], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const tracked = path.join(asbHome, relative);
+    fs.writeFileSync(tracked, '# Hidden mutation');
+
+    assert.throws(() => removeSource(namespace), /hidden index|index state/i);
+    assert.equal(fs.readFileSync(tracked, 'utf-8'), '# Hidden mutation');
+    assert.equal(hasSource(namespace), true);
+  });
+});
+
+test('profile-scoped subtree lifecycle ignores all held config locks', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'profile-subtree';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(
+      path.join(path.dirname(asbHome), 'profile-subtree-remote')
+    );
+    initAsbAsGitRepo(asbHome);
+
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' }, profile);
+
+    assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
+  });
+});
+
+test('legacy clone adoption safely creates a missing Git exclude path', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'missing-exclude';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'missing-exclude-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.rmSync(getPluginSourceStateDir(), { recursive: true, force: true });
+    fs.rmSync(path.join(checkout, '.asb-source-owner'));
+    fs.rmSync(path.join(checkout, '.git', 'info'), { recursive: true, force: true });
+
+    const result = updateRemoteSources(undefined, namespace);
+
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.match(
+      fs.readFileSync(path.join(checkout, '.git', 'info', 'exclude'), 'utf-8'),
+      /^\.asb-source-owner$/m
+    );
+  });
+});
+
+test('removal recovery decides from its original owning config carrier', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-removal-owner-carrier-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'carrier-recovery';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(root, 'carrier-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    await stopRemovalAtCrashPoint(asbHome, namespace, 'before-config', profile);
+    const local = path.join(root, 'profile-local');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = ${JSON.stringify(local)}\n`
+    );
+
+    assert.equal(getSourcesRecord(profile)[namespace], local);
+    assert.equal(getSourcesRecord()[namespace], checkout);
+    assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
+  } finally {
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('removal recovery transfers staged checkout and cache to a recorded matching carrier', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-removal-owner-transfer-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    clearPluginIndexCache();
+    const namespace = 'carrier-transfer';
+    const profile = { profile: 'team' };
+    const { checkoutPath, materializedPath } = createManagedMarketplaceSource(asbHome, namespace);
+    const userStateFile = fs
+      .readdirSync(getPluginSourceStateDir())
+      .find((name) => name.endsWith('.json'));
+    assert.ok(userStateFile);
+    const userState = JSON.parse(
+      fs.readFileSync(path.join(getPluginSourceStateDir(), userStateFile), 'utf-8')
+    );
+    const profileConfig = `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(userState.descriptor.url)}, type = "clone" }\n`;
+    fs.writeFileSync(getProfileConfigPath('team'), profileConfig);
+    const adopted = updateRemoteSources(profile, namespace);
+    assert.equal(adopted[0]?.status, 'updated', adopted[0]?.error);
+    assert.equal(
+      fs.readdirSync(getPluginSourceStateDir()).filter((name) => name.endsWith('.json')).length,
+      2
+    );
+    fs.writeFileSync(getProfileConfigPath('team'), '[plugins]\nenabled = []\n');
+
+    await stopRemovalAtCrashPoint(asbHome, namespace, 'after-config', profile);
+    assert.equal(fs.existsSync(checkoutPath), false);
+    assert.equal(fs.existsSync(materializedPath), false);
+    fs.writeFileSync(getProfileConfigPath('team'), profileConfig);
+
+    assert.equal(getSourcesRecord(profile)[namespace], checkoutPath);
+    assert.equal(fs.existsSync(path.join(checkoutPath, 'rules', 'v1.md')), true);
+    assert.equal(fs.existsSync(materializedPath), true);
+    assert.equal(namespace in getSourcesRecord(), false);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(states.length, 1);
+    assert.equal(states[0].configPath, fs.realpathSync.native(getProfileConfigPath('team')));
+    assert.equal(states[0].removal, undefined);
+  } finally {
+    clearPluginIndexCache();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('removal recovery transfers a staged subtree to a recorded matching carrier', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subtree-owner-transfer-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'subtree-carrier-transfer';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(root, 'subtree-transfer-remote'));
+    const profileConfig = `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(bareRepo)}, type = "subtree", ref = "main" }\n`;
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure user subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(getProfileConfigPath('team'), profileConfig);
+    execFileSync('git', ['add', 'team.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'configure profile subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const adopted = updateRemoteSources(profile, namespace);
+    assert.equal(adopted[0]?.status, 'updated', adopted[0]?.error);
+    fs.writeFileSync(getProfileConfigPath('team'), '[plugins]\nenabled = []\n');
+    execFileSync('git', ['add', 'team.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'clear profile subtree'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+
+    await stopRemovalAtCrashPoint(asbHome, namespace, 'after-config-publication', profile);
+    const tracked = path.join(getPluginsDir(), namespace, 'rules', 'v1.md');
+    assert.equal(fs.existsSync(tracked), false);
+    fs.writeFileSync(getProfileConfigPath('team'), profileConfig);
+    const pendingStates = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(
+      pendingStates.some((state) => state.removal?.subtree),
+      true,
+      JSON.stringify(pendingStates)
+    );
+
+    assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
+    assert.equal(fs.existsSync(tracked), true);
+    assert.equal(fs.readFileSync(tracked, 'utf-8'), '# V1');
+    assert.equal(namespace in getSourcesRecord(), false);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(states.length, 1);
+    assert.equal(states[0].configPath, fs.realpathSync.native(getProfileConfigPath('team')));
+    assert.equal(states[0].removal, undefined);
+  } finally {
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('removing an identical higher-layer descriptor retains shared physical state', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const namespace = 'shared-layer-owner';
+    const { checkoutPath, materializedPath } = createManagedMarketplaceSource(asbHome, namespace);
+    const profile = { profile: 'team' };
+    const stateFile = fs
+      .readdirSync(getPluginSourceStateDir())
+      .find((name) => name.endsWith('.json'));
+    assert.ok(stateFile);
+    const state = JSON.parse(
+      fs.readFileSync(path.join(getPluginSourceStateDir(), stateFile), 'utf-8')
+    );
+    const profileUrl = `file://audit-user:audit-password@localhost${state.descriptor.url}`;
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(profileUrl)}, type = "clone" }\n`
+    );
+
+    removeSource(namespace, profile);
+
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(materializedPath), true);
+    assert.equal(getSourcesRecord()[namespace], checkoutPath);
+    assert.doesNotMatch(
+      fs.readFileSync(getProfileConfigPath('team'), 'utf-8'),
+      new RegExp(namespace)
+    );
+  });
+});
+
+test('removing a higher subdir owner retains the shared checkout and lower cache', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'layered-subdir-owner';
+    const profile = { profile: 'team' };
+    const { checkoutPath, lowerMaterialized, higherMaterialized } =
+      createLayeredSubdirMarketplaceSource(asbHome, namespace);
+    assert.equal(fs.existsSync(lowerMaterialized), true);
+    assert.equal(fs.existsSync(higherMaterialized), true);
+
+    removeSource(namespace, profile);
+
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(lowerMaterialized), true);
+    assert.equal(fs.existsSync(higherMaterialized), false);
+    assert.equal(getSourcesRecord()[namespace], path.join(checkoutPath, 'lower'));
+    assert.doesNotMatch(
+      fs.readFileSync(getProfileConfigPath('team'), 'utf-8'),
+      new RegExp(namespace)
+    );
+  });
+});
+
+test('inactive higher subdir retirement retains the shared checkout and lower cache', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'inactive-layered-subdir';
+    const profile = { profile: 'team' };
+    const { checkoutPath, lowerMaterialized, higherMaterialized } =
+      createLayeredSubdirMarketplaceSource(asbHome, namespace);
+    fs.writeFileSync(getProfileConfigPath('team'), '[plugins]\nenabled = []\n');
+    const replacement = path.join(asbHome, 'replacement');
+    fs.mkdirSync(path.join(replacement, 'rules'), { recursive: true });
+
+    addLocalSource(namespace, replacement, profile);
+
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(lowerMaterialized), true);
+    assert.equal(fs.existsSync(higherMaterialized), false);
+    assert.equal(getSourcesRecord()[namespace], path.join(checkoutPath, 'lower'));
+    assert.equal(getSourcesRecord(profile)[namespace], replacement);
+  });
+});
+
+test('removal recovery retains a shared checkout but retires a different subdir cache', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subdir-owner-recovery-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'layered-subdir-recovery';
+    const profile = { profile: 'team' };
+    const { checkoutPath, lowerMaterialized, higherMaterialized } =
+      createLayeredSubdirMarketplaceSource(asbHome, namespace);
+
+    await stopRemovalAtCrashPoint(asbHome, namespace, 'after-config', profile);
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(lowerMaterialized), true);
+    assert.equal(fs.existsSync(higherMaterialized), false);
+
+    assert.equal(getSourcesRecord(profile)[namespace], path.join(checkoutPath, 'lower'));
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(lowerMaterialized), true);
+    assert.equal(fs.existsSync(higherMaterialized), false);
+    assert.equal(
+      fs.readdirSync(getMarketplacePluginCacheDir()).some((name) => name.startsWith('.removing-')),
+      false
+    );
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      );
+    assert.equal(states.length, 1);
+    assert.equal(states[0].configPath, fs.realpathSync.native(path.join(asbHome, 'config.toml')));
+    assert.equal(states[0].removal, undefined);
+  } finally {
+    clearPluginIndexCache();
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('credential-free Git transport keeps authenticated URLs out of arguments and state', (t) => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'authenticated-transport';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'authenticated-remote'));
+    const authenticatedUrl =
+      'https://audit-user:audit-password@example.invalid/repo.git?access_token=query-secret#fragment-secret';
+    const persistedUrl = 'https://example.invalid/repo.git';
+    assert.equal(credentialFreeGitUrl(authenticatedUrl), persistedUrl);
+    assert.equal(
+      credentialFreeGitUrl('file://audit-user:audit-password@localhost/tmp/repo.git'),
+      'file://localhost/tmp/repo.git'
+    );
+    assert.equal(
+      credentialFreeGitUrl('git@example.com:team/repo.git?token=secret#fragment'),
+      'git@example.com:team/repo.git'
+    );
+
+    const realGit = execFileSync('which', ['git'], { encoding: 'utf-8' }).trim();
+    const binDir = path.join(asbHome, 'git-bin');
+    const gitLog = path.join(asbHome, 'git-args.jsonl');
+    const gitShim = path.join(binDir, 'git');
+    fs.mkdirSync(binDir, { recursive: true });
+    fs.writeFileSync(
+      gitShim,
+      [
+        `#!${process.execPath}`,
+        "const fs = require('node:fs');",
+        "const { spawnSync } = require('node:child_process');",
+        'const args = process.argv.slice(2);',
+        "fs.appendFileSync(process.env.ASB_TEST_GIT_LOG, JSON.stringify(args) + '\\n');",
+        'const env = { ...process.env };',
+        'for (const key of Object.keys(env)) if (/^GIT_CONFIG_(?:COUNT|KEY_|VALUE_)/.test(key)) delete env[key];',
+        "if (args[0] === 'clone') {",
+        '  const requested = args.at(-2);',
+        '  const target = args.at(-1);',
+        '  const cloneArgs = [...args];',
+        '  cloneArgs[cloneArgs.length - 2] = process.env.ASB_TEST_GIT_REMOTE;',
+        '  const cloned = spawnSync(process.env.ASB_TEST_REAL_GIT, cloneArgs, { stdio: "inherit", env });',
+        '  if (cloned.status !== 0) process.exit(cloned.status ?? 1);',
+        '  const configured = spawnSync(process.env.ASB_TEST_REAL_GIT, ["-C", target, "remote", "set-url", "origin", requested], { stdio: "inherit", env });',
+        '  process.exit(configured.status ?? 1);',
+        '}',
+        'const result = spawnSync(process.env.ASB_TEST_REAL_GIT, args, { stdio: "inherit", env });',
+        'process.exit(result.status ?? 1);',
+        '',
+      ].join('\n'),
+      { mode: 0o700 }
+    );
+    const previousPath = process.env.PATH;
+    const previousLog = process.env.ASB_TEST_GIT_LOG;
+    const previousRemote = process.env.ASB_TEST_GIT_REMOTE;
+    const previousRealGit = process.env.ASB_TEST_REAL_GIT;
+    process.env.PATH = `${binDir}${path.delimiter}${previousPath ?? ''}`;
+    process.env.ASB_TEST_GIT_LOG = gitLog;
+    process.env.ASB_TEST_GIT_REMOTE = bareRepo;
+    process.env.ASB_TEST_REAL_GIT = realGit;
+    const stateTempModes: number[] = [];
+    const originalRename = fs.renameSync.bind(fs);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (
+        path.dirname(String(from)) === getPluginSourceStateDir() &&
+        path.basename(String(from)).endsWith('.tmp')
+      ) {
+        stateTempModes.push(fs.statSync(String(from)).mode & 0o777);
+      }
+      return originalRename(from, to);
+    });
+    try {
+      addRemoteSource(namespace, {
+        url: authenticatedUrl,
+        type: 'clone',
+        ref: 'main',
+      });
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH;
+      else process.env.PATH = previousPath;
+      if (previousLog === undefined) delete process.env.ASB_TEST_GIT_LOG;
+      else process.env.ASB_TEST_GIT_LOG = previousLog;
+      if (previousRemote === undefined) delete process.env.ASB_TEST_GIT_REMOTE;
+      else process.env.ASB_TEST_GIT_REMOTE = previousRemote;
+      if (previousRealGit === undefined) delete process.env.ASB_TEST_REAL_GIT;
+      else process.env.ASB_TEST_REAL_GIT = previousRealGit;
+    }
+
+    const checkout = path.join(getPluginsDir(), namespace);
+    const gitConfig = fs.readFileSync(path.join(checkout, '.git', 'config'), 'utf-8');
+    assert.match(gitConfig, new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(gitConfig, /audit-user|audit-password|query-secret|fragment-secret/);
+    const argumentsLog = fs.readFileSync(gitLog, 'utf-8');
+    assert.match(argumentsLog, new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(argumentsLog, /audit-user|audit-password|query-secret|fragment-secret/);
+    const stateFiles = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) => path.join(getPluginSourceStateDir(), name));
+    assert.ok(stateFiles.length > 0);
+    assert.ok(stateTempModes.length > 0);
+    assert.deepEqual(new Set(stateTempModes), new Set([0o600]));
+    for (const stateFile of stateFiles) {
+      assert.equal(fs.statSync(stateFile).mode & 0o777, 0o600);
+      const persisted = fs.readFileSync(stateFile, 'utf-8');
+      assert.match(persisted, new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      assert.doesNotMatch(persisted, /audit-user|audit-password|query-secret|fragment-secret/);
+    }
   });
 });

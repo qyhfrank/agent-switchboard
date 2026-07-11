@@ -23,6 +23,50 @@ export function normalizeLocalGitPath(value: string): string {
   }
 }
 
+export function credentialFreeGitUrl(value: string): string {
+  const trimmed = value.trim();
+  if (path.isAbsolute(trimmed) || trimmed.startsWith('./') || trimmed.startsWith('../')) {
+    return trimmed;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      return url.toString();
+    } catch {
+      return trimmed.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#]*@/i, '$1').replace(/[?#].*$/, '');
+    }
+  }
+
+  return isScpGitUrl(trimmed) ? trimmed.replace(/[?#].*$/, '') : trimmed;
+}
+
+export function authenticatedGitEnv(
+  authenticatedUrl: string,
+  persistedUrl: string
+): NodeJS.ProcessEnv | undefined {
+  if (authenticatedUrl === persistedUrl) return undefined;
+
+  const inheritedCount = process.env.GIT_CONFIG_COUNT;
+  let index = inheritedCount && /^\d+$/.test(inheritedCount) ? Number(inheritedCount) : 0;
+  while (
+    process.env[`GIT_CONFIG_KEY_${index}`] !== undefined ||
+    process.env[`GIT_CONFIG_VALUE_${index}`] !== undefined
+  ) {
+    index++;
+  }
+  return {
+    ...process.env,
+    GIT_CONFIG_COUNT: String(index + 1),
+    [`GIT_CONFIG_KEY_${index}`]: `url.${authenticatedUrl}.insteadOf`,
+    [`GIT_CONFIG_VALUE_${index}`]: persistedUrl,
+  };
+}
+
 export function normalizeGitIdentity(value: string, cwd: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('file://')) {
