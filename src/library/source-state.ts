@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { getConfigDir, getPluginSourceStateDir } from '../config/paths.js';
+import { expandHome, getConfigDir, getPluginSourceStateDir } from '../config/paths.js';
 import { type SourceValue, sourceValueSchema } from '../config/schemas.js';
-import { credentialFreeGitUrl } from '../marketplace/git-identity.js';
+import { credentialFreeGitUrl, normalizeGitIdentity } from '../marketplace/git-identity.js';
+import { normalizeMarketplaceGitRef } from '../marketplace/git-ref.js';
 
 export interface SourceRemovalPathState {
   activePath: string;
@@ -60,6 +61,7 @@ export interface SourceCheckoutState {
   path: string;
   owner: string;
   identity: SourcePathIdentity;
+  managedRef?: string;
 }
 
 export interface SourceSubtreeState {
@@ -74,6 +76,7 @@ export interface PluginSourceState {
   configPath: string;
   descriptor: SourceValue | null;
   descriptorKey: string;
+  gitOwnerKey?: string;
   marketplacePath: string;
   incarnation: string;
   sourceKind?: 'marketplace' | 'plugin';
@@ -153,6 +156,7 @@ function parseState(value: unknown): PluginSourceState | null {
     (state.descriptor !== null && !sourceValueSchema.safeParse(state.descriptor).success) ||
     typeof state.descriptorKey !== 'string' ||
     !/^[0-9a-f]{64}$/.test(state.descriptorKey) ||
+    (state.gitOwnerKey !== undefined && !/^[0-9a-f]{64}$/.test(state.gitOwnerKey)) ||
     typeof state.marketplacePath !== 'string' ||
     !path.isAbsolute(state.marketplacePath) ||
     typeof state.incarnation !== 'string' ||
@@ -236,8 +240,20 @@ function validCheckoutState(value: unknown): value is SourceCheckoutState {
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
       checkout.owner
     ) &&
+    (checkout.managedRef === undefined || validManagedRef(checkout.managedRef)) &&
     validPathIdentity(checkout.identity)
   );
+}
+
+function validManagedRef(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  if (value === 'HEAD') return true;
+  if (!value.startsWith('refs/heads/') && !value.startsWith('refs/tags/')) return false;
+  try {
+    return normalizeMarketplaceGitRef(value) === value;
+  } catch {
+    return false;
+  }
 }
 
 function validSubtreeState(value: unknown): value is SourceSubtreeState {
@@ -343,12 +359,19 @@ function newState(
   descriptorKey: string,
   marketplacePath: string
 ): PluginSourceState {
+  const gitOwnerKey =
+    descriptor && typeof descriptor !== 'string'
+      ? createHash('sha256')
+          .update(normalizeGitIdentity(expandHome(descriptor.url), process.cwd()))
+          .digest('hex')
+      : undefined;
   return {
     version: 1,
     namespace,
     configPath: path.resolve(configPath),
     descriptor: sanitizeDescriptor(descriptor),
     descriptorKey,
+    ...(gitOwnerKey ? { gitOwnerKey } : {}),
     marketplacePath: path.resolve(marketplacePath),
     incarnation: randomUUID(),
   };
@@ -571,13 +594,29 @@ export function deletePluginSourceState(state: PluginSourceState): void {
   fs.rmSync(filePath, { force: true });
 }
 
-export function listPluginSourceStates(): PluginSourceState[] {
+function listStateJsonPaths(): string[] {
   const stateRoot = safeStateRoot(false);
   if (!fs.existsSync(stateRoot)) return [];
-  const records: PluginSourceState[] = [];
+  const paths: string[] = [];
   for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const state = readStateFile(path.join(stateRoot, entry.name));
+    if (!entry.name.endsWith('.json')) continue;
+    const filePath = path.join(stateRoot, entry.name);
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Plugin source state file is a symbolic link: ${filePath}`);
+    }
+    if (!stat.isFile()) {
+      throw new Error(`Plugin source state file is not a regular file: ${filePath}`);
+    }
+    paths.push(filePath);
+  }
+  return paths;
+}
+
+export function listPluginSourceStates(): PluginSourceState[] {
+  const records: PluginSourceState[] = [];
+  for (const filePath of listStateJsonPaths()) {
+    const state = readStateFile(filePath);
     if (state) records.push(state);
   }
   return records;
@@ -622,10 +661,7 @@ function managedNamespaceHint(value: unknown): string | null {
 export function listManagedPluginSourceNamespaceHints(): Set<string> {
   const stateRoot = safeStateRoot(false);
   const namespaces = new Set<string>();
-  if (!fs.existsSync(stateRoot)) return namespaces;
-  for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const filePath = path.join(stateRoot, entry.name);
+  for (const filePath of listStateJsonPaths()) {
     assertNoStateSymlinks(stateRoot, filePath);
     let value: unknown;
     try {
@@ -643,10 +679,7 @@ export function listManagedPluginSourceNamespaceHints(): Set<string> {
 export function listMalformedPluginSourceNamespaceHints(): Set<string> {
   const stateRoot = safeStateRoot(false);
   const namespaces = new Set<string>();
-  if (!fs.existsSync(stateRoot)) return namespaces;
-  for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
-    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const filePath = path.join(stateRoot, entry.name);
+  for (const filePath of listStateJsonPaths()) {
     assertNoStateSymlinks(stateRoot, filePath);
     const value = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
     const namespace = sourceStateNamespaceHint(value);

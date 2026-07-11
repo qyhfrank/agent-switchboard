@@ -72,7 +72,23 @@ export function authenticatedGitEnv(
 export function normalizeGitIdentity(value: string, cwd: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('file://')) {
-    return normalizeLocalGitPath(fileURLToPath(trimmed));
+    let principal = '';
+    let sanitized = trimmed;
+    try {
+      const url = new URL(trimmed);
+      principal = url.username ? `${url.username}@` : '';
+      url.username = '';
+      url.password = '';
+      url.search = '';
+      url.hash = '';
+      sanitized = url.toString();
+    } catch {
+      const credentials = /^file:\/\/([^@/?#]+)@/i.exec(trimmed)?.[1];
+      principal = credentials ? `${credentials.split(':', 1)[0]}@` : '';
+      sanitized = credentialFreeGitUrl(trimmed);
+    }
+    const localPath = normalizeLocalGitPath(fileURLToPath(sanitized));
+    return principal ? `file://${principal}${localPath}` : localPath;
   }
   if (path.isAbsolute(trimmed) || trimmed.startsWith('./') || trimmed.startsWith('../')) {
     return normalizeLocalGitPath(path.resolve(cwd, trimmed));
@@ -94,6 +110,10 @@ export function normalizeGitIdentity(value: string, cwd: string): string {
   } catch {
     return stripGitSuffix(trimmed);
   }
+}
+
+export function normalizeGitTransportIdentity(value: string, cwd: string): string {
+  return normalizeGitIdentity(credentialFreeGitUrl(value), cwd);
 }
 
 function stripGitSuffix(value: string): string {

@@ -25,7 +25,12 @@ import {
   refreshMarketplaceEntryCache,
   withMarketplaceSourceReadLease,
 } from './cache.js';
-import { isScpGitUrl, normalizeGitIdentity, normalizeLocalGitPath } from './git-identity.js';
+import {
+  isScpGitUrl,
+  normalizeGitIdentity,
+  normalizeGitTransportIdentity,
+  normalizeLocalGitPath,
+} from './git-identity.js';
 import { normalizeMarketplaceGitRef } from './git-ref.js';
 import {
   type MarketplaceManifest,
@@ -526,8 +531,8 @@ function canReuseMarketplaceCheckout(
   const origin = getGitOrigin(resolution.marketplaceRoot);
   if (!origin) return false;
   if (
-    normalizeGitIdentity(origin, checkoutRoot) !==
-    normalizeGitIdentity(sourceUrl, resolution.marketplaceRoot)
+    normalizeGitTransportIdentity(origin, checkoutRoot) !==
+    normalizeGitTransportIdentity(sourceUrl, resolution.marketplaceRoot)
   ) {
     return false;
   }

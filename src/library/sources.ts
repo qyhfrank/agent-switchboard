@@ -45,6 +45,7 @@ import {
   credentialFreeGitUrl,
   isScpGitUrl,
   normalizeGitIdentity,
+  normalizeGitTransportIdentity,
 } from '../marketplace/git-identity.js';
 import { normalizeMarketplaceGitRef } from '../marketplace/git-ref.js';
 import {
@@ -340,6 +341,19 @@ function configuredCheckoutBranch(repoDir: string, ref: string | undefined): str
   throw new Error(`Managed source checkout does not match configured ref "${ref}".`);
 }
 
+function resolvedManagedRefOwnerIdentity(repoDir: string, ref: string | undefined): string {
+  const normalizedRef = normalizeMarketplaceGitRef(ref);
+  if (!normalizedRef || normalizedRef === 'HEAD') return 'HEAD';
+  if (normalizedRef.startsWith('refs/')) return normalizedRef;
+  const branch = `refs/heads/${normalizedRef}`;
+  if (symbolicHead(repoDir) === branch) return branch;
+  const tag = `refs/tags/${normalizedRef}`;
+  const head = runGit(['rev-parse', 'HEAD'], { cwd: repoDir });
+  const tagHead = tryRunGit(['rev-parse', `${tag}^{commit}`], repoDir);
+  if (!symbolicHead(repoDir) && tagHead === head) return tag;
+  throw new Error(`Managed source checkout does not resolve configured ref "${ref}".`);
+}
+
 function assertManagedCheckoutIdentity(
   repoDir: string,
   url: string,
@@ -359,8 +373,8 @@ function assertManagedCheckoutIdentity(
   const origin = tryRunGit(['config', '--get', 'remote.origin.url'], repoDir);
   if (
     !origin ||
-    normalizeGitIdentity(origin, repoDir) !==
-      normalizeGitIdentity(credentialFreeGitUrl(expandHome(url)), process.cwd())
+    normalizeGitTransportIdentity(origin, repoDir) !==
+      normalizeGitTransportIdentity(expandHome(url), process.cwd())
   ) {
     throw new Error(`Managed source checkout origin does not match its configured source.`);
   }
@@ -893,6 +907,7 @@ function assertConfiguredCheckoutIfPresent(namespace: string, value: SourceValue
 
 function managedLifecycleNamespaces(): Set<string> {
   const managed = listManagedPluginSourceNamespaceHints();
+  for (const namespace of listMalformedPluginSourceNamespaceHints()) managed.add(namespace);
   for (const state of listPluginSourceStates()) {
     if (
       (state.checkout &&
@@ -1064,8 +1079,10 @@ function ensureCheckoutProvenance(
   ref: string | undefined
 ): PluginSourceState {
   if (state.checkout) {
-    assertCheckoutProvenance(state);
-    return state;
+    const checkout = assertCheckoutProvenance(state);
+    if (checkout.managedRef) return state;
+    const managedRef = resolvedManagedRefOwnerIdentity(checkout.path, ref);
+    return setPluginSourceCheckout(state, { ...checkout, managedRef });
   }
   const checkoutPath = managedCheckoutPath(state.namespace);
   assertManagedCheckoutIdentity(checkoutPath, url, ref);
@@ -1089,6 +1106,7 @@ function ensureCheckoutProvenance(
     path: checkoutPath,
     owner,
     identity: sourcePathIdentity(checkoutPath),
+    managedRef: resolvedManagedRefOwnerIdentity(checkoutPath, ref),
   });
 }
 
@@ -1155,12 +1173,9 @@ function ensureSubtreeProvenance(state: PluginSourceState): PluginSourceState {
 function assertCompatibleSubtreeOwners(state: PluginSourceState): void {
   const descriptor = state.descriptor;
   if (!descriptor || typeof descriptor === 'string' || descriptor.type !== 'subtree') return;
-  const expected = sourceManagedCheckoutOwnerIdentity(state.namespace, descriptor);
+  const expected = stateManagedCheckoutOwnerIdentity(state);
   const conflict = currentSourceOwners(state.namespace).find((owner) => {
-    const identity =
-      owner.value === undefined
-        ? null
-        : sourceManagedCheckoutOwnerIdentity(state.namespace, owner.value);
+    const identity = currentSourceOwnerManagedIdentity(state.namespace, owner);
     return identity !== null && identity !== expected;
   });
   if (conflict) {
@@ -1203,7 +1218,13 @@ function retireInactivePluginSourceState(
           );
           const retainManagedCheckout = Boolean(
             current.descriptor &&
-              sourceManagedCheckoutHasOwner(namespace, current.descriptor, survivingOwners)
+              sourceManagedCheckoutHasOwner(
+                namespace,
+                current.descriptor,
+                survivingOwners,
+                current.gitOwnerKey,
+                current.checkout?.managedRef
+              )
           );
           if (
             !retainManagedCheckout &&
@@ -1310,9 +1331,7 @@ function reconcilePluginSourceState(
 
         const managedPath = managedCheckoutPath(namespace);
         const retainsManagedCheckout = Boolean(
-          state.descriptor &&
-            descriptor !== undefined &&
-            sharesManagedCheckout(namespace, state.descriptor, descriptor)
+          state.descriptor && descriptor !== undefined && sharesManagedCheckout(state, descriptor)
         );
         const retained: Pick<PluginSourceState, 'checkout' | 'subtree' | 'sourceKind'> = {};
         if (retainsManagedCheckout && descriptor !== undefined && pathEntryExists(managedPath)) {
@@ -1362,7 +1381,8 @@ function reconcilePluginSourceState(
           expectedPath,
           retained
         );
-      })
+      }),
+    configPath
   );
 }
 
@@ -1393,20 +1413,97 @@ function sourceCacheOwnerIdentity(namespace: string, marketplacePath: string): s
   return JSON.stringify([namespace, canonicalSourcePath(marketplacePath)]);
 }
 
-function sourceManagedCheckoutOwnerIdentity(namespace: string, value: SourceValue): string | null {
+function managedRefOwnerIdentity(ref: string | undefined, resolvedRef?: string): string {
+  const normalized = normalizeMarketplaceGitRef(ref);
+  if (resolvedRef) {
+    const allowed =
+      !normalized || normalized === 'HEAD'
+        ? ['HEAD']
+        : normalized.startsWith('refs/')
+          ? [normalized]
+          : [`refs/heads/${normalized}`, `refs/tags/${normalized}`];
+    if (!allowed.includes(resolvedRef)) {
+      throw new Error(`Managed source resolved ref disagrees with configured ref "${ref}".`);
+    }
+    return resolvedRef;
+  }
+  if (!normalized || normalized === 'HEAD') return 'HEAD';
+  return normalized.startsWith('refs/') ? normalized : `refs/heads/${normalized}`;
+}
+
+function sourceManagedCheckoutOwnerIdentity(
+  namespace: string,
+  value: SourceValue,
+  persistedGitOwnerKey?: string,
+  resolvedRef?: string
+): string | null {
   if (typeof value === 'string' || !isCloneableSource(expandHome(value.url))) return null;
+  const gitOwner =
+    persistedGitOwnerKey ??
+    createHash('sha256')
+      .update(normalizeGitIdentity(expandHome(value.url), process.cwd()))
+      .digest('hex');
   return JSON.stringify([
     'managed',
     canonicalSourcePath(managedCheckoutPath(namespace)),
     value.type,
-    normalizeGitIdentity(credentialFreeGitUrl(expandHome(value.url)), process.cwd()),
-    normalizeMarketplaceGitRef(value.ref) ?? null,
+    gitOwner,
+    managedRefOwnerIdentity(value.ref, resolvedRef),
   ]);
 }
 
-function sharesManagedCheckout(namespace: string, left: SourceValue, right: SourceValue): boolean {
-  const leftOwner = sourceManagedCheckoutOwnerIdentity(namespace, left);
-  return leftOwner !== null && leftOwner === sourceManagedCheckoutOwnerIdentity(namespace, right);
+function stateManagedCheckoutOwnerIdentity(state: PluginSourceState): string | null {
+  if (!state.descriptor) return null;
+  const resolvedRef =
+    state.checkout && typeof state.descriptor !== 'string'
+      ? (state.checkout.managedRef ??
+        resolvedManagedRefOwnerIdentity(state.checkout.path, state.descriptor.ref))
+      : undefined;
+  return sourceManagedCheckoutOwnerIdentity(
+    state.namespace,
+    state.descriptor,
+    state.gitOwnerKey,
+    resolvedRef
+  );
+}
+
+function currentManagedCheckoutOwnerIdentity(
+  namespace: string,
+  value: SourceValue,
+  state?: PluginSourceState
+): string | null {
+  if (typeof value === 'string') return null;
+  const checkout = state?.checkout;
+  const resolvedRef =
+    value.type === 'clone'
+      ? (checkout?.managedRef ??
+        (pathEntryExists(managedCheckoutPath(namespace))
+          ? resolvedManagedRefOwnerIdentity(managedCheckoutPath(namespace), value.ref)
+          : undefined))
+      : undefined;
+  return sourceManagedCheckoutOwnerIdentity(namespace, value, state?.gitOwnerKey, resolvedRef);
+}
+
+function currentSourceOwnerManagedIdentity(
+  namespace: string,
+  owner: CurrentSourceOwner
+): string | null {
+  return owner.value === undefined
+    ? null
+    : currentManagedCheckoutOwnerIdentity(namespace, owner.value, owner.state);
+}
+
+function sharesManagedCheckout(state: PluginSourceState, right: SourceValue): boolean {
+  const leftOwner = stateManagedCheckoutOwnerIdentity(state);
+  const resolvedRef =
+    state.checkout && typeof right !== 'string'
+      ? (state.checkout.managedRef ??
+        resolvedManagedRefOwnerIdentity(state.checkout.path, right.ref))
+      : undefined;
+  return (
+    leftOwner !== null &&
+    leftOwner === sourceManagedCheckoutOwnerIdentity(state.namespace, right, undefined, resolvedRef)
+  );
 }
 
 function sourceDescriptorKey(namespace: string, value: SourceValue | undefined): string {
@@ -1440,19 +1537,45 @@ interface CurrentSourceOwner {
   state?: PluginSourceState;
   value?: SourceValue;
   marketplacePath: string;
+  recordedMarketplacePath?: string;
   direct: boolean;
 }
 
-function currentRecordedSourceOwner(state: PluginSourceState): CurrentSourceOwner | null {
+function currentRecordedSourceOwner(
+  state: PluginSourceState,
+  allowStateDriftConfigPath?: string
+): CurrentSourceOwner | null {
   if (!state.descriptor) return null;
   const value = loadConfigLayerFile(state.configPath).config.plugins?.sources?.[state.namespace];
-  if (value === undefined || sourceDescriptorKey(state.namespace, value) !== state.descriptorKey) {
-    return null;
+  if (value === undefined) return null;
+  const allowStateDrift =
+    allowStateDriftConfigPath !== undefined &&
+    resolveConfigWritePath(state.configPath) === resolveConfigWritePath(allowStateDriftConfigPath);
+  const descriptorMatches = sourceDescriptorKey(state.namespace, value) === state.descriptorKey;
+  const marketplacePath = canonicalSourcePath(resolveEffectivePath(state.namespace, value));
+  const recordedMarketplacePath = canonicalSourcePath(state.marketplacePath);
+  if (!descriptorMatches || marketplacePath !== recordedMarketplacePath) {
+    if (!allowStateDrift) {
+      const field = descriptorMatches ? 'path' : 'descriptor';
+      throw new Error(
+        `Plugin source "${state.namespace}" recorded source ${field} disagrees with its current config carrier.`
+      );
+    }
   }
-  return { state, value, marketplacePath: state.marketplacePath, direct: false };
+  return {
+    state,
+    value,
+    marketplacePath,
+    recordedMarketplacePath,
+    direct: false,
+  };
 }
 
-function currentSourceOwners(namespace: string, excludedConfigPath?: string): CurrentSourceOwner[] {
+function currentSourceOwners(
+  namespace: string,
+  excludedConfigPath?: string,
+  allowStateDriftConfigPath?: string
+): CurrentSourceOwner[] {
   const excluded = excludedConfigPath ? resolveConfigWritePath(excludedConfigPath) : undefined;
   const owners = listPluginSourceStates()
     .filter(
@@ -1460,11 +1583,37 @@ function currentSourceOwners(namespace: string, excludedConfigPath?: string): Cu
         state.namespace === namespace &&
         (!excluded || resolveConfigWritePath(state.configPath) !== excluded)
     )
-    .map(currentRecordedSourceOwner)
+    .map((state) => currentRecordedSourceOwner(state, allowStateDriftConfigPath))
     .filter((owner): owner is CurrentSourceOwner => Boolean(owner));
   const directPath = discoverLocalSources()[namespace];
   if (directPath) {
     owners.push({ marketplacePath: canonicalSourcePath(directPath), direct: true });
+  }
+  return owners;
+}
+
+function currentSourceOwnersForConfigPaths(
+  namespace: string,
+  configPaths: string[],
+  allowStateDriftConfigPath?: string
+): CurrentSourceOwner[] {
+  const owners = currentSourceOwners(namespace, undefined, allowStateDriftConfigPath);
+  const recordedConfigPaths = new Set(
+    owners
+      .map((owner) => owner.state?.configPath)
+      .filter((configPath): configPath is string => Boolean(configPath))
+      .map(resolveConfigWritePath)
+  );
+  for (const configPath of configPaths) {
+    const canonicalConfigPath = resolveConfigWritePath(configPath);
+    if (recordedConfigPaths.has(canonicalConfigPath)) continue;
+    const value = loadConfigLayerFile(canonicalConfigPath).config.plugins?.sources?.[namespace];
+    if (value === undefined) continue;
+    owners.push({
+      value,
+      marketplacePath: canonicalSourcePath(resolveEffectivePath(namespace, value)),
+      direct: false,
+    });
   }
   return owners;
 }
@@ -1483,26 +1632,47 @@ function sourceCacheHasOwner(
 function sourceManagedCheckoutHasOwner(
   namespace: string,
   value: SourceValue,
-  owners: CurrentSourceOwner[]
+  owners: CurrentSourceOwner[],
+  persistedGitOwnerKey?: string,
+  persistedManagedRef?: string
 ): boolean {
-  const identity = sourceManagedCheckoutOwnerIdentity(namespace, value);
+  const identity = persistedGitOwnerKey
+    ? sourceManagedCheckoutOwnerIdentity(
+        namespace,
+        value,
+        persistedGitOwnerKey,
+        persistedManagedRef
+      )
+    : currentManagedCheckoutOwnerIdentity(namespace, value);
   return (
     identity !== null &&
-    owners.some(
-      (owner) =>
-        owner.value !== undefined &&
-        sourceManagedCheckoutOwnerIdentity(namespace, owner.value) === identity
-    )
+    owners.some((owner) => currentSourceOwnerManagedIdentity(namespace, owner) === identity)
   );
 }
 
+function assertCompatibleManagedOwners(
+  namespace: string,
+  value: SourceValue,
+  owners: CurrentSourceOwner[]
+): void {
+  const expected = currentManagedCheckoutOwnerIdentity(namespace, value);
+  if (expected === null) return;
+  const conflict = owners.find((owner) => {
+    const identity = currentSourceOwnerManagedIdentity(namespace, owner);
+    return identity !== null && identity !== expected;
+  });
+  if (conflict) {
+    throw new Error(`Managed source physical owner conflicts for "${namespace}".`);
+  }
+}
+
 function sourceResourcePaths(namespace: string, extraPaths: string[]): string[] {
-  const paths = [
-    ...extraPaths,
-    ...listPluginSourceStates()
-      .filter((state) => state.namespace === namespace)
-      .map((state) => state.marketplacePath),
-  ];
+  const paths = [...extraPaths];
+  for (const state of listPluginSourceStates().filter((entry) => entry.namespace === namespace)) {
+    paths.push(state.marketplacePath);
+    const value = loadConfigLayerFile(state.configPath).config.plugins?.sources?.[namespace];
+    if (value !== undefined) paths.push(resolveEffectivePath(namespace, value));
+  }
   const directPath = discoverLocalSources()[namespace];
   if (directPath) paths.push(directPath);
   return [...new Set(paths.map(canonicalSourcePath))];
@@ -1535,26 +1705,54 @@ function withSourceResourceLocks<T>(
   action: () => T
 ): T {
   const physicalPath = canonicalSourcePath(managedCheckoutPath(namespace));
-  return withMarketplaceSourceLock(namespace, physicalPath, () => {
-    assertNoMalformedSourceOwnership(namespace);
-    const paths = sourceResourcePaths(namespace, resourcePaths)
-      .filter((candidate) => candidate !== physicalPath)
-      .sort();
-    const run = (index: number): T =>
-      index === paths.length
-        ? action()
-        : withMarketplaceSourceLock(namespace, paths[index], () => run(index + 1));
-    return run(0);
-  });
+  return withMarketplaceSourceLock('__asb_managed_checkout__', physicalPath, () =>
+    withMarketplaceSourceLock(namespace, physicalPath, () => {
+      assertNoMalformedSourceOwnership(namespace);
+      for (const state of listPluginSourceStates()) {
+        if (state.namespace === namespace || !state.descriptor) continue;
+        const value = loadConfigLayerFile(state.configPath).config.plugins?.sources?.[
+          state.namespace
+        ];
+        if (
+          value !== undefined &&
+          sourceDescriptorKey(state.namespace, value) === state.descriptorKey &&
+          currentManagedCheckoutOwnerIdentity(state.namespace, value, state) !== null &&
+          canonicalSourcePath(managedCheckoutPath(state.namespace)) === physicalPath
+        ) {
+          throw new Error(
+            `Managed source cross-namespace physical collision between "${namespace}" and "${state.namespace}".`
+          );
+        }
+      }
+      const paths = sourceResourcePaths(namespace, resourcePaths)
+        .filter((candidate) => candidate !== physicalPath)
+        .sort();
+      const run = (index: number): T =>
+        index === paths.length
+          ? action()
+          : withMarketplaceSourceLock(namespace, paths[index], () => run(index + 1));
+      return run(0);
+    })
+  );
 }
 
 function withStableSourceOwners<T>(
   namespace: string,
   resourcePaths: string[],
   configPaths: string[],
-  action: (owners: CurrentSourceOwner[], lockedConfigPaths: string[]) => T
+  action: (owners: CurrentSourceOwner[], lockedConfigPaths: string[]) => T,
+  allowStateDriftConfigPath?: string
 ): T {
-  return withSourceResourceLocks(namespace, resourcePaths, () => {
+  const configuredResourcePaths = (paths: string[]): string[] =>
+    paths.flatMap((configPath) => {
+      const value = loadConfigLayerFile(configPath).config.plugins?.sources?.[namespace];
+      return value === undefined ? [] : [resolveEffectivePath(namespace, value)];
+    });
+  const initialResourcePaths = sourceResourcePaths(namespace, [
+    ...resourcePaths,
+    ...configuredResourcePaths(configPaths),
+  ]).sort();
+  return withSourceResourceLocks(namespace, initialResourcePaths, () => {
     const lockedConfigPaths = [
       ...new Set(
         [
@@ -1565,7 +1763,19 @@ function withStableSourceOwners<T>(
         ].map(resolveConfigWritePath)
       ),
     ];
-    return action(currentSourceOwners(namespace), lockedConfigPaths);
+    return withSourceConfigTransaction(lockedConfigPaths, () => {
+      const currentResourcePaths = sourceResourcePaths(namespace, [
+        ...resourcePaths,
+        ...configuredResourcePaths(lockedConfigPaths),
+      ]).sort();
+      if (JSON.stringify(currentResourcePaths) !== JSON.stringify(initialResourcePaths)) {
+        throw new Error(`Source "${namespace}" carrier paths changed while acquiring locks.`);
+      }
+      return action(
+        currentSourceOwnersForConfigPaths(namespace, lockedConfigPaths, allowStateDriftConfigPath),
+        lockedConfigPaths
+      );
+    });
   });
 }
 
@@ -1638,21 +1848,25 @@ function recordedRemovalRetention(
           sourceCacheOwnerIdentity(state.namespace, state.marketplacePath)
     )
     .map((owner) => owner.state as PluginSourceState);
-  const managedCheckoutOwner = state.descriptor
-    ? sourceManagedCheckoutOwnerIdentity(state.namespace, state.descriptor)
-    : null;
+  const managedCheckoutOwner = stateManagedCheckoutOwnerIdentity(state);
   const managedCheckoutStates = owners
     .filter(
       (owner) =>
         owner.state &&
-        owner.value !== undefined &&
         managedCheckoutOwner !== null &&
-        sourceManagedCheckoutOwnerIdentity(state.namespace, owner.value) === managedCheckoutOwner
+        currentSourceOwnerManagedIdentity(state.namespace, owner) === managedCheckoutOwner
     )
     .map((owner) => owner.state as PluginSourceState);
   const cache = sourceCacheHasOwner(state.namespace, state.marketplacePath, owners);
   const managedCheckout = Boolean(
-    state.descriptor && sourceManagedCheckoutHasOwner(state.namespace, state.descriptor, owners)
+    state.descriptor &&
+      sourceManagedCheckoutHasOwner(
+        state.namespace,
+        state.descriptor,
+        owners,
+        state.gitOwnerKey,
+        state.checkout?.managedRef
+      )
   );
   if (!cache && !managedCheckout) return null;
   if (
@@ -1693,7 +1907,7 @@ function recoverPendingSourceTransactions(): void {
         observed.namespace,
         [observed.marketplacePath],
         observedTransaction.configPaths,
-        (_owners, lockedConfigPaths) => {
+        (owners, lockedConfigPaths) => {
           const state = readPluginSourceState(observed.namespace, observed.configPath);
           if (!state || state.incarnation !== observed.incarnation) return;
           const transaction = state.addition ?? state.removal;
@@ -1703,6 +1917,11 @@ function recoverPendingSourceTransactions(): void {
               if (state.addition) {
                 const sourceIsActive = transactionSourceIsActive(state, transaction.configPaths);
                 if (sourceIsActive && state.addition.phase === 'validated') {
+                  const active = effectiveConfiguredSource(state.namespace, lockedConfigPaths);
+                  if (!active) {
+                    throw new Error(`Source "${state.namespace}" changed before recovery.`);
+                  }
+                  assertCompatibleManagedOwners(state.namespace, active.value, owners);
                   commitInterruptedSourceAddition(state);
                 } else {
                   rollbackInterruptedSourceAddition(state);
@@ -2097,13 +2316,14 @@ function commitInterruptedSourceAddition(state: PluginSourceState): void {
     addition.transactionId,
     paths.identity as SourcePathIdentity
   );
-  completePluginSourceAddition(state, {
-    checkout: {
-      path: paths.activePath,
-      owner: addition.transactionId,
-      identity: addition.checkoutIdentity as SourcePathIdentity,
-    },
-  });
+  const checkout = {
+    path: paths.activePath,
+    owner: addition.transactionId,
+    identity: addition.checkoutIdentity as SourcePathIdentity,
+    managedRef: resolvedManagedRefOwnerIdentity(paths.activePath, cloneDescriptor(state).ref),
+  };
+  propagateCheckoutProvenance(state, checkout);
+  completePluginSourceAddition(state, { checkout });
 }
 
 function rollbackInterruptedSourceAddition(state: PluginSourceState): void {
@@ -2202,14 +2422,13 @@ function propagateSubtreeProvenance(
 ): void {
   const descriptor = state.descriptor;
   if (!descriptor || typeof descriptor === 'string') return;
-  const identity = sourceManagedCheckoutOwnerIdentity(state.namespace, descriptor);
+  const identity = stateManagedCheckoutOwnerIdentity(state);
   for (const owner of currentSourceOwners(state.namespace)) {
     const target = owner.state;
     if (
       !target ||
       target.incarnation === state.incarnation ||
-      owner.value === undefined ||
-      sourceManagedCheckoutOwnerIdentity(state.namespace, owner.value) !== identity
+      currentSourceOwnerManagedIdentity(state.namespace, owner) !== identity
     ) {
       continue;
     }
@@ -2217,6 +2436,27 @@ function propagateSubtreeProvenance(
       throw new Error(`Managed subtree owner changed for "${state.namespace}".`);
     }
     setPluginSourceSubtree(target, provenance);
+  }
+}
+
+function propagateCheckoutProvenance(
+  state: PluginSourceState,
+  checkout: SourceCheckoutState
+): void {
+  const identity = stateManagedCheckoutOwnerIdentity(state);
+  for (const owner of currentSourceOwners(state.namespace)) {
+    const target = owner.state;
+    if (
+      !target ||
+      target.incarnation === state.incarnation ||
+      currentSourceOwnerManagedIdentity(state.namespace, owner) !== identity
+    ) {
+      continue;
+    }
+    if (target.addition || target.removal || target.subtree) {
+      throw new Error(`Managed checkout owner changed for "${state.namespace}".`);
+    }
+    setPluginSourceCheckout(target, checkout);
   }
 }
 
@@ -2540,6 +2780,87 @@ export function addLocalSource(namespace: string, libraryPath: string, scope?: C
   );
 }
 
+function adoptCompatibleManagedSource(
+  namespace: string,
+  configPath: string,
+  value: RemoteSource,
+  effectivePath: string,
+  owners: CurrentSourceOwner[]
+): boolean {
+  const managedPath = managedCheckoutPath(namespace);
+  if (!pathEntryExists(managedPath)) return false;
+  assertCompatibleManagedOwners(namespace, value, owners);
+  const identity = currentManagedCheckoutOwnerIdentity(namespace, value);
+  const compatible = owners.filter(
+    (owner) => owner.state && currentSourceOwnerManagedIdentity(namespace, owner) === identity
+  );
+  if (compatible.length === 0) {
+    throw new Error(`Source "${namespace}" already exists without compatible ASB ownership.`);
+  }
+
+  const source = compatible[0];
+  let sourceState = source.state as PluginSourceState;
+  let ownership: { checkout: SourceCheckoutState } | { subtree: SourceSubtreeState };
+  if (value.type === 'subtree') {
+    sourceState = ensureSubtreeProvenance(sourceState);
+    ownership = { subtree: assertSubtreeProvenance(sourceState) };
+  } else {
+    const sourceValue = source.value as RemoteSource;
+    sourceState = ensureCheckoutProvenance(sourceState, sourceValue.url, sourceValue.ref);
+    ownership = { checkout: assertCheckoutProvenance(sourceState) };
+  }
+  for (const owner of compatible.slice(1)) {
+    const state = owner.state as PluginSourceState;
+    if (
+      ('checkout' in ownership &&
+        state.checkout &&
+        !sameCheckoutOwner(ownership.checkout, state.checkout)) ||
+      ('subtree' in ownership &&
+        state.subtree &&
+        !sameSubtreeOwner(ownership.subtree, state.subtree))
+    ) {
+      throw new Error(`Conflicting managed owner recovery state for "${namespace}".`);
+    }
+  }
+
+  let state: PluginSourceState | undefined;
+  try {
+    state = rotatePluginSourceState(
+      namespace,
+      configPath,
+      value,
+      sourceDescriptorKey(namespace, value),
+      canonicalSourcePath(effectivePath)
+    );
+    state =
+      'checkout' in ownership
+        ? setPluginSourceCheckout(state, ownership.checkout)
+        : setPluginSourceSubtree(state, ownership.subtree);
+    if (
+      sourceState.sourceKind &&
+      sourceCacheOwnerIdentity(namespace, sourceState.marketplacePath) ===
+        sourceCacheOwnerIdentity(namespace, effectivePath)
+    ) {
+      state = setPluginSourceKind(state, sourceState.sourceKind);
+    }
+    updateConfigLayerFile(configPath, (layer) => ({
+      ...layer,
+      plugins: {
+        ...layer.plugins,
+        sources: {
+          ...(layer.plugins?.sources ?? {}),
+          [namespace]: value,
+        },
+      },
+    }));
+    markSourcesChanged();
+    return true;
+  } catch (error) {
+    if (state) deletePluginSourceState(state);
+    throw error;
+  }
+}
+
 /**
  * Add a remote Git source under the first-class plugin source directory.
  */
@@ -2561,11 +2882,18 @@ export function addRemoteSource(
   const effectivePath = resolveEffectivePath(namespace, configValue);
   const configPaths = sourceConfigPaths(scope, configPath);
 
-  withSourceResourceLocks(namespace, [effectivePath], () => {
+  withStableSourceOwners(namespace, [effectivePath], configPaths, (owners, lockedConfigPaths) => {
     const add = () =>
-      withSourceConfigTransaction(configPaths, () => {
-        ensureNamespaceAvailableCurrent(namespace, configPath);
+      withSourceConfigTransaction(lockedConfigPaths, () => {
+        ensureNamespaceAvailableCurrent(namespace, configPath, false);
         assertManagedPluginsRoot();
+        assertCompatibleManagedOwners(namespace, configValue, owners);
+        if (
+          adoptCompatibleManagedSource(namespace, configPath, configValue, effectivePath, owners)
+        ) {
+          return;
+        }
+        ensureNamespaceAvailableCurrent(namespace, configPath);
 
         if (remote.type === 'subtree') {
           if (!isGitRepo(getConfigDir())) {
@@ -2762,11 +3090,20 @@ export function removeSource(namespace: string, scope?: ConfigScope): void {
         const retainManagedCheckout = sourceManagedCheckoutHasOwner(
           namespace,
           value,
-          survivingOwners
+          survivingOwners,
+          sourceState.gitOwnerKey,
+          sourceState.checkout?.managedRef
         );
+        const retainPhysicalCheckout =
+          retainManagedCheckout ||
+          survivingOwners.some(
+            (owner) =>
+              owner.value !== undefined &&
+              sourceManagedCheckoutOwnerIdentity(namespace, owner.value) !== null
+          );
         if (
           retainCache &&
-          (sourceManagedCheckoutOwnerIdentity(namespace, value) === null || retainManagedCheckout)
+          (sourceManagedCheckoutOwnerIdentity(namespace, value) === null || retainPhysicalCheckout)
         ) {
           deletePluginSourceState(sourceState);
           updateConfigLayerFile(configPath, (layer) => {
@@ -2785,7 +3122,7 @@ export function removeSource(namespace: string, scope?: ConfigScope): void {
         }
         const remote = typeof value !== 'string' && isCloneableSource(expandHome(value.url));
         const pluginDir = managedCheckoutPath(namespace);
-        if (remote && !retainManagedCheckout && value.type === 'subtree') {
+        if (remote && !retainPhysicalCheckout && value.type === 'subtree') {
           if (!isGitRepo(getConfigDir())) {
             throw new Error(
               `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
@@ -2797,14 +3134,14 @@ export function removeSource(namespace: string, scope?: ConfigScope): void {
             sourceState = ensureSubtreeProvenance(sourceState);
             assertSubtreeRemovalReady(sourceState);
           }
-        } else if (remote && !retainManagedCheckout && pathEntryExists(pluginDir)) {
+        } else if (remote && !retainPhysicalCheckout && pathEntryExists(pluginDir)) {
           sourceState = ensureCheckoutProvenance(sourceState, value.url, value.ref);
         }
 
         let preserveCheckout = false;
         if (
           remote &&
-          !retainManagedCheckout &&
+          !retainPhysicalCheckout &&
           value.type !== 'subtree' &&
           pathEntryExists(pluginDir)
         ) {
@@ -2832,7 +3169,7 @@ export function removeSource(namespace: string, scope?: ConfigScope): void {
           : preparedCachePaths;
         const checkoutPaths =
           remote &&
-          !retainManagedCheckout &&
+          !retainPhysicalCheckout &&
           value.type !== 'subtree' &&
           pathEntryExists(preparedCheckoutPaths.activePath)
             ? {
@@ -2845,13 +3182,13 @@ export function removeSource(namespace: string, scope?: ConfigScope): void {
           configPaths: lockedConfigPaths,
           ...(!retainCache && pathEntryExists(cachePaths.activePath) ? { cache: cachePaths } : {}),
           ...(remote &&
-          !retainManagedCheckout &&
+          !retainPhysicalCheckout &&
           value.type !== 'subtree' &&
           pathEntryExists(checkoutPaths.activePath)
             ? { checkout: checkoutPaths }
             : {}),
           ...(remote &&
-          !retainManagedCheckout &&
+          !retainPhysicalCheckout &&
           value.type === 'subtree' &&
           pathEntryExists(pluginDir)
             ? {
@@ -2989,6 +3326,63 @@ export function validateSourcePath(libraryPath: string): {
   return { valid: found.length > 0, found, missing, kind: 'plugin' };
 }
 
+function recordedOwnerIsCurrent(owner: CurrentSourceOwner): boolean {
+  const state = owner.state;
+  if (!state || owner.value === undefined || !pluginSourceStateIsCurrent(state)) return false;
+  const value = loadConfigLayerFile(state.configPath).config.plugins?.sources?.[state.namespace];
+  return (
+    value !== undefined &&
+    sourceDescriptorKey(state.namespace, value) === state.descriptorKey &&
+    canonicalSourcePath(resolveEffectivePath(state.namespace, value)) === owner.marketplacePath
+  );
+}
+
+function refreshManagedCarrierCaches(
+  namespace: string,
+  value: RemoteSource,
+  configPath: string,
+  owners: CurrentSourceOwner[]
+): void {
+  const identity = currentManagedCheckoutOwnerIdentity(namespace, value);
+  const currentConfigPath = resolveConfigWritePath(configPath);
+  const candidates = owners.filter(
+    (owner) =>
+      owner.state &&
+      currentSourceOwnerManagedIdentity(namespace, owner) === identity &&
+      (resolveConfigWritePath(owner.state.configPath) === currentConfigPath ||
+        marketplaceEntryCacheExists(namespace, owner.marketplacePath))
+  );
+  const currentState = readPluginSourceState(namespace, currentConfigPath);
+  if (
+    currentState &&
+    !candidates.some((owner) => owner.state?.incarnation === currentState.incarnation)
+  ) {
+    candidates.push({
+      state: currentState,
+      value,
+      marketplacePath: canonicalSourcePath(resolveEffectivePath(namespace, value)),
+      recordedMarketplacePath: canonicalSourcePath(currentState.marketplacePath),
+      direct: false,
+    });
+  }
+
+  const refreshed = new Set<string>();
+  for (const owner of candidates) {
+    const ownerPath = canonicalSourcePath(owner.marketplacePath);
+    const cacheIdentity = sourceCacheOwnerIdentity(namespace, ownerPath);
+    if (refreshed.has(cacheIdentity)) continue;
+    refreshed.add(cacheIdentity);
+    const state = owner.state as PluginSourceState;
+    if (getMarketplaceManifestInfo(ownerPath)) {
+      setPluginSourceKind(state, 'marketplace');
+      refreshMarketplacePluginCache(ownerPath, namespace, () => recordedOwnerIsCurrent(owner));
+    } else {
+      removeMarketplaceEntryCache(namespace, ownerPath);
+      setPluginSourceKind(state, 'plugin');
+    }
+  }
+}
+
 /**
  * Pull latest changes for all remote sources.
  * Publishes missing managed checkouts from a verified stage and rejects mismatched checkouts.
@@ -3010,182 +3404,180 @@ export function updateRemoteSources(
     attemptedUpdate = true;
     handledNamespaces.add(namespace);
     const effectivePath = resolveEffectivePath(namespace, value);
+    const configPath = sourceOwningConfigPath(namespace, scope);
+    const configPaths = sourceConfigPaths(scope, configPath);
 
     try {
-      withSourceResourceLocks(namespace, [effectivePath], () => {
-        if (
-          sourceDescriptorIdentity(getRawSources(scope)[namespace]) !==
-          sourceDescriptorIdentity(value)
-        ) {
-          throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
-        }
-        if (!gitChecked) {
-          ensureGitAvailable();
-          gitChecked = true;
-        }
-
-        if (value.type === 'subtree') {
-          withSubtreeRepoLock(getConfigDir(), () => {
-            if (!isGitRepo(getConfigDir())) {
-              throw new Error(
-                `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root.`
-              );
-            }
-            if (!value.ref) {
-              throw new Error(
-                `Subtree source "${namespace}" requires an explicit "ref" in config.toml.`
-              );
-            }
-            const repoRoot = getConfigDir();
-            const configPath = sourceOwningConfigPath(namespace, scope);
-            const configPaths = sourceConfigPaths(scope, configPath);
-            ensureCleanTree(repoRoot, configPaths);
-            const prefix = `plugins/${namespace}`;
-            const prefixDir = path.join(repoRoot, prefix);
-            let sourceState = reconcilePluginSourceState(
-              namespace,
-              value,
-              canonicalSourcePath(effectivePath),
-              scope
-            );
-            if (pathEntryExists(prefixDir)) sourceState = ensureSubtreeProvenance(sourceState);
-            const transactionId = randomUUID();
-            const stage = prepareSubtreeStage(namespace, transactionId);
-            let additionState: PluginSourceState | undefined;
-            try {
-              additionState = beginPluginSourceAddition(sourceState, {
-                kind: 'subtree',
-                purpose: 'update',
-                configPath,
-                configPaths,
-                repoRoot: path.resolve(repoRoot),
-                prefix,
-                hadPrefix: pathEntryExists(prefixDir),
-                ...stage,
-                headBefore: runGit(['rev-parse', 'HEAD'], { cwd: repoRoot }),
-                headRef: symbolicHead(repoRoot),
-                phase: 'constructing',
-                transactionId,
-              });
-              additionState = populateSubtreeStage(additionState, value.url, value.ref);
-              additionState = validateSubtreeStage(additionState, value.subdir);
-              withSourceConfigTransaction(configPaths, () => {
-                if (!transactionSourceIsActive(additionState as PluginSourceState, configPaths)) {
-                  throw new Error(`Source "${namespace}" changed before subtree publication.`);
-                }
-                publishSubtreeAddition(additionState as PluginSourceState);
-                commitInterruptedSourceAddition(additionState as PluginSourceState);
-              });
-            } catch (error) {
-              if (additionState?.addition) rollbackInterruptedSourceAddition(additionState);
-              throw error;
-            } finally {
-              if (!additionState && pathEntryExists(stage.stagePath)) {
-                removeOwnedStage(
-                  path.resolve(getPluginSourceStateDir()),
-                  stage.stagePath,
-                  transactionId,
-                  stage.stageIdentity
-                );
-              }
-            }
-          });
-        } else {
-          assertManagedPluginsRoot();
-          const cloneDir = managedCheckoutPath(namespace);
-          if (!pathEntryExists(cloneDir)) {
-            const sourceState = reconcilePluginSourceState(
-              namespace,
-              value,
-              canonicalSourcePath(effectivePath),
-              scope
-            );
-            const transactionId = randomUUID();
-            const preparedCheckout = ownedPathAdditionPaths(namespace, transactionId, 'update');
-            const checkout = {
-              ...preparedCheckout,
-              identity: prepareOwnedStage(
-                path.resolve(getPluginsDir()),
-                preparedCheckout.stagedPath,
-                transactionId
-              ),
-            };
-            const configPath = sourceOwningConfigPath(namespace, scope);
-            const configPaths = sourceConfigPaths(scope, configPath);
-            let additionState: PluginSourceState | undefined;
-            try {
-              additionState = beginPluginSourceAddition(sourceState, {
-                kind: 'clone',
-                purpose: 'update',
-                configPath,
-                configPaths,
-                checkout,
-                phase: 'constructing',
-                transactionId,
-              });
-              additionState = populateCloneStage(additionState, value.url, value.ref);
-              additionState = validateCloneStage(additionState);
-              withSourceConfigTransaction(configPaths, () => {
-                if (!transactionSourceIsActive(additionState as PluginSourceState, configPaths)) {
-                  throw new Error(`Source "${namespace}" changed before checkout publication.`);
-                }
-                if (!pluginSourceStateIsCurrent(additionState as PluginSourceState)) {
-                  throw new Error(`Source "${namespace}" changed before checkout publication.`);
-                }
-                assertManagedPluginsRoot();
-                if (pathEntryExists(cloneDir)) {
-                  throw new Error(`Source checkout appeared during publication: ${cloneDir}`);
-                }
-                publishCloneAddition(additionState as PluginSourceState);
-                commitInterruptedSourceAddition(additionState as PluginSourceState);
-              });
-            } catch (error) {
-              if (additionState?.addition) rollbackInterruptedSourceAddition(additionState);
-              throw error;
-            } finally {
-              if (!additionState && pathEntryExists(checkout.stagedPath)) {
-                removeOwnedStage(
-                  path.resolve(getPluginsDir()),
-                  checkout.stagedPath,
-                  transactionId,
-                  checkout.identity
-                );
-              }
-            }
-          } else {
-            let sourceState = reconcilePluginSourceState(
-              namespace,
-              value,
-              canonicalSourcePath(effectivePath),
-              scope
-            );
-            sourceState = ensureCheckoutProvenance(sourceState, value.url, value.ref);
-            const branch = assertManagedCheckoutIdentity(cloneDir, value.url, value.ref);
-            gitPull(cloneDir, branch, value.url, value.ref);
-            const currentBranch = assertManagedCheckoutIdentity(cloneDir, value.url, value.ref);
-            assertManagedCheckoutCurrent(cloneDir, currentBranch);
+      withStableSourceOwners(
+        namespace,
+        [effectivePath],
+        configPaths,
+        (owners, lockedConfigPaths) => {
+          if (
+            sourceDescriptorIdentity(getRawSources(scope)[namespace]) !==
+            sourceDescriptorIdentity(value)
+          ) {
+            throw new Error(`Source "${namespace}" changed while waiting for its lifecycle lock.`);
           }
+          if (!gitChecked) {
+            ensureGitAvailable();
+            gitChecked = true;
+          }
+
+          if (value.type === 'subtree') {
+            withSubtreeRepoLock(getConfigDir(), () => {
+              if (!isGitRepo(getConfigDir())) {
+                throw new Error(
+                  `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root.`
+                );
+              }
+              if (!value.ref) {
+                throw new Error(
+                  `Subtree source "${namespace}" requires an explicit "ref" in config.toml.`
+                );
+              }
+              const repoRoot = getConfigDir();
+              ensureCleanTree(repoRoot, lockedConfigPaths);
+              const prefix = `plugins/${namespace}`;
+              const prefixDir = path.join(repoRoot, prefix);
+              let sourceState = reconcilePluginSourceState(
+                namespace,
+                value,
+                canonicalSourcePath(effectivePath),
+                scope
+              );
+              assertCompatibleManagedOwners(namespace, value, owners);
+              if (pathEntryExists(prefixDir)) sourceState = ensureSubtreeProvenance(sourceState);
+              const transactionId = randomUUID();
+              const stage = prepareSubtreeStage(namespace, transactionId);
+              let additionState: PluginSourceState | undefined;
+              try {
+                additionState = beginPluginSourceAddition(sourceState, {
+                  kind: 'subtree',
+                  purpose: 'update',
+                  configPath,
+                  configPaths: lockedConfigPaths,
+                  repoRoot: path.resolve(repoRoot),
+                  prefix,
+                  hadPrefix: pathEntryExists(prefixDir),
+                  ...stage,
+                  headBefore: runGit(['rev-parse', 'HEAD'], { cwd: repoRoot }),
+                  headRef: symbolicHead(repoRoot),
+                  phase: 'constructing',
+                  transactionId,
+                });
+                additionState = populateSubtreeStage(additionState, value.url, value.ref);
+                additionState = validateSubtreeStage(additionState, value.subdir);
+                withSourceConfigTransaction(lockedConfigPaths, () => {
+                  if (
+                    !transactionSourceIsActive(
+                      additionState as PluginSourceState,
+                      lockedConfigPaths
+                    )
+                  ) {
+                    throw new Error(`Source "${namespace}" changed before subtree publication.`);
+                  }
+                  publishSubtreeAddition(additionState as PluginSourceState);
+                  commitInterruptedSourceAddition(additionState as PluginSourceState);
+                });
+              } catch (error) {
+                if (additionState?.addition) rollbackInterruptedSourceAddition(additionState);
+                throw error;
+              } finally {
+                if (!additionState && pathEntryExists(stage.stagePath)) {
+                  removeOwnedStage(
+                    path.resolve(getPluginSourceStateDir()),
+                    stage.stagePath,
+                    transactionId,
+                    stage.stageIdentity
+                  );
+                }
+              }
+            });
+          } else {
+            assertManagedPluginsRoot();
+            const cloneDir = managedCheckoutPath(namespace);
+            if (!pathEntryExists(cloneDir)) {
+              const sourceState = reconcilePluginSourceState(
+                namespace,
+                value,
+                canonicalSourcePath(effectivePath),
+                scope
+              );
+              assertCompatibleManagedOwners(namespace, value, owners);
+              const transactionId = randomUUID();
+              const preparedCheckout = ownedPathAdditionPaths(namespace, transactionId, 'update');
+              const checkout = {
+                ...preparedCheckout,
+                identity: prepareOwnedStage(
+                  path.resolve(getPluginsDir()),
+                  preparedCheckout.stagedPath,
+                  transactionId
+                ),
+              };
+              let additionState: PluginSourceState | undefined;
+              try {
+                additionState = beginPluginSourceAddition(sourceState, {
+                  kind: 'clone',
+                  purpose: 'update',
+                  configPath,
+                  configPaths: lockedConfigPaths,
+                  checkout,
+                  phase: 'constructing',
+                  transactionId,
+                });
+                additionState = populateCloneStage(additionState, value.url, value.ref);
+                additionState = validateCloneStage(additionState);
+                withSourceConfigTransaction(lockedConfigPaths, () => {
+                  if (
+                    !transactionSourceIsActive(
+                      additionState as PluginSourceState,
+                      lockedConfigPaths
+                    )
+                  ) {
+                    throw new Error(`Source "${namespace}" changed before checkout publication.`);
+                  }
+                  if (!pluginSourceStateIsCurrent(additionState as PluginSourceState)) {
+                    throw new Error(`Source "${namespace}" changed before checkout publication.`);
+                  }
+                  assertManagedPluginsRoot();
+                  if (pathEntryExists(cloneDir)) {
+                    throw new Error(`Source checkout appeared during publication: ${cloneDir}`);
+                  }
+                  publishCloneAddition(additionState as PluginSourceState);
+                  commitInterruptedSourceAddition(additionState as PluginSourceState);
+                });
+              } catch (error) {
+                if (additionState?.addition) rollbackInterruptedSourceAddition(additionState);
+                throw error;
+              } finally {
+                if (!additionState && pathEntryExists(checkout.stagedPath)) {
+                  removeOwnedStage(
+                    path.resolve(getPluginsDir()),
+                    checkout.stagedPath,
+                    transactionId,
+                    checkout.identity
+                  );
+                }
+              }
+            } else {
+              let sourceState = reconcilePluginSourceState(
+                namespace,
+                value,
+                canonicalSourcePath(effectivePath),
+                scope
+              );
+              assertCompatibleManagedOwners(namespace, value, owners);
+              sourceState = ensureCheckoutProvenance(sourceState, value.url, value.ref);
+              const branch = assertManagedCheckoutIdentity(cloneDir, value.url, value.ref);
+              gitPull(cloneDir, branch, value.url, value.ref);
+              const currentBranch = assertManagedCheckoutIdentity(cloneDir, value.url, value.ref);
+              assertManagedCheckoutCurrent(cloneDir, currentBranch);
+            }
+          }
+          refreshManagedCarrierCaches(namespace, value, configPath, owners);
         }
-        const currentEffectivePath = resolveEffectivePath(namespace, value);
-        if (getMarketplaceManifestInfo(currentEffectivePath)) {
-          recordSourceKind(namespace, currentEffectivePath, 'marketplace', scope);
-          const ownerValidator = captureSourceOwnerValidator(
-            namespace,
-            currentEffectivePath,
-            scope
-          );
-          refreshMarketplacePluginCache(currentEffectivePath, namespace, ownerValidator);
-        } else {
-          removeMarketplaceEntryCache(namespace, currentEffectivePath);
-          const state = reconcilePluginSourceState(
-            namespace,
-            value,
-            canonicalSourcePath(currentEffectivePath),
-            scope
-          );
-          setPluginSourceKind(state, 'plugin');
-        }
-      });
+      );
       results.push({ namespace, url: value.url, status: 'updated' });
     } catch (err) {
       results.push({

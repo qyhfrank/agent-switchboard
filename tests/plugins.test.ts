@@ -1318,6 +1318,58 @@ test('same-origin detection distinguishes repositories on different ports', () =
   });
 });
 
+test('same-origin reuse compares credential-free transport identities', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const checkoutRoot = path.join(asbHome, 'credential-free-checkout');
+    const bareRepo = path.join(asbHome, 'credential-free.git');
+    const marketplaceDir = path.join(checkoutRoot, 'catalog');
+    const pluginRoot = path.join(checkoutRoot, 'packages', 'plugin');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], {
+      stdio: 'ignore',
+    });
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'reused.md'), '# Reused');
+    const persistedUrl = `file://localhost${bareRepo}`;
+    const authenticatedUrl = `file://alice:secret@localhost${bareRepo}`;
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'credential-free-catalog',
+        plugins: [
+          {
+            name: 'credential-free-plugin',
+            source: {
+              source: 'git-subdir',
+              url: authenticatedUrl,
+              path: 'packages/plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    initGitRepo(checkoutRoot);
+    commitAll(checkoutRoot);
+    execFileSync('git', ['remote', 'add', 'origin', persistedUrl], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    execFileSync('git', ['push', '-u', 'origin', 'main'], {
+      cwd: checkoutRoot,
+      stdio: 'ignore',
+    });
+    writeConfigToml(asbHome, `[plugins.sources]\ncredential-free = "${marketplaceDir}"\n`);
+
+    const plugin = buildPluginIndex().get('credential-free-plugin@credential-free');
+
+    assert.ok(plugin);
+    assert.deepEqual(plugin.components.commands, ['credential-free-plugin@credential-free:reused']);
+    assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
+  });
+});
+
 test('same-origin detection distinguishes SSH principals', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
