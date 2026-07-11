@@ -414,6 +414,40 @@ test('failed refresh preserves the last verified generation and removes temporar
   });
 });
 
+test('generation ignores dot-prefixed interrupted stage residue', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const current = materializeMarketplaceEntry(request);
+    const currentMetadataPath = path.join(current.entryPath, 'entry.json');
+    const currentMetadata = JSON.parse(fs.readFileSync(currentMetadataPath, 'utf-8'));
+    const interruptedStage = path.join(path.dirname(current.entryPath), '.tmp-interrupted');
+    fs.mkdirSync(interruptedStage);
+    fs.writeFileSync(
+      path.join(interruptedStage, 'entry.json'),
+      `${JSON.stringify({ ...currentMetadata, generation: Number.MAX_SAFE_INTEGER })}\n`
+    );
+    writePluginVersion(remote, 'v2');
+
+    const refreshed = materializeMarketplaceEntry(request, { refresh: true });
+    const refreshedMetadata = JSON.parse(
+      fs.readFileSync(path.join(refreshed.entryPath, 'entry.json'), 'utf-8')
+    );
+
+    assert.equal(fs.readFileSync(path.join(refreshed.pluginPath, 'VERSION'), 'utf-8'), 'v2\n');
+    assert.equal(refreshedMetadata.generation, currentMetadata.generation + 1);
+    assert.equal(fs.existsSync(interruptedStage), true);
+  });
+});
+
 test('retry preserves a pre-claim empty stage replacement', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
@@ -697,6 +731,142 @@ test('retry preserves a stage replacement when ready payloads are rewritten in p
     assert.equal(fs.existsSync(bindingPath), true);
     assert.equal(fs.existsSync(interrupted.intentPath), true);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
+  });
+});
+
+test('stage containment is revalidated before checkout writes', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const outside = path.join(asbHome, 'outside-stage');
+    fs.mkdirSync(outside);
+    const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
+    const source =
+      `import fs from 'node:fs';import path from 'node:path';` +
+      `import { materializeMarketplaceEntry } from ${JSON.stringify(cacheModule)};` +
+      `const lstatSync = fs.lstatSync.bind(fs);let stageChecks = 0;` +
+      `fs.lstatSync = (target, options) => {` +
+      `  const stat = lstatSync(target, options);` +
+      `  if (path.basename(String(target)).startsWith('.tmp-') && ++stageChecks === 2) {` +
+      `    fs.renameSync(target, path.join(${JSON.stringify(asbHome)}, 'captured-stage'));` +
+      `    fs.symlinkSync(${JSON.stringify(outside)}, target, 'dir');` +
+      `  }` +
+      `  return stat;` +
+      `};` +
+      `materializeMarketplaceEntry(JSON.parse(process.argv[1]));`;
+
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          ['--import', 'tsx', '--input-type=module', '--eval', source, JSON.stringify(request)],
+          {
+            cwd: process.cwd(),
+            env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+            stdio: 'pipe',
+          }
+        ),
+      /Marketplace cache path contains a symbolic link/
+    );
+    assert.equal(fs.existsSync(path.join(outside, 'repo')), false);
+  });
+});
+
+test('checkout requires a freshly created owned repository directory', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const cacheModule = pathToFileURL(path.resolve('src/marketplace/cache.ts')).href;
+    const source =
+      `import fs from 'node:fs';import path from 'node:path';` +
+      `import { materializeMarketplaceEntry } from ${JSON.stringify(cacheModule)};` +
+      `const lstatSync = fs.lstatSync.bind(fs);let stageChecks = 0;` +
+      `fs.lstatSync = (target, options) => {` +
+      `  const stat = lstatSync(target, options);` +
+      `  if (path.basename(String(target)).startsWith('.tmp-') && ++stageChecks === 2) {` +
+      `    const repoPath = path.join(String(target), 'repo');` +
+      `    fs.mkdirSync(repoPath);` +
+      `    fs.writeFileSync(path.join(repoPath, 'sentinel'), 'keep');` +
+      `  }` +
+      `  return stat;` +
+      `};` +
+      `materializeMarketplaceEntry(JSON.parse(process.argv[1]));`;
+
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          ['--import', 'tsx', '--input-type=module', '--eval', source, JSON.stringify(request)],
+          {
+            cwd: process.cwd(),
+            env: { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome },
+            stdio: 'pipe',
+          }
+        ),
+      /EEXIST/
+    );
+  });
+});
+
+test('publication rejects a replacement of the captured stage identity', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    let ownerChecks = 0;
+    let replacementStage = '';
+    const ownerIsCurrent = () => {
+      ownerChecks++;
+      if (ownerChecks === 2) {
+        const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+        const sourceName = fs.readdirSync(cacheRoot).find((name) => !name.startsWith('.'));
+        assert.ok(sourceName);
+        const sourcePath = path.join(cacheRoot, sourceName);
+        const stageName = fs.readdirSync(sourcePath).find((name) => name.startsWith('.tmp-'));
+        assert.ok(stageName);
+        replacementStage = path.join(sourcePath, stageName);
+        const capturedStage = path.join(asbHome, 'captured-publish-stage');
+        fs.renameSync(replacementStage, capturedStage);
+        fs.cpSync(capturedStage, replacementStage, { recursive: true });
+        fs.writeFileSync(path.join(replacementStage, 'sentinel'), 'keep');
+      }
+      return true;
+    };
+
+    assert.throws(
+      () => materializeMarketplaceEntry(request, { ownerIsCurrent }),
+      /Marketplace cache stage changed/
+    );
+
+    assert.equal(ownerChecks, 2);
+    assert.equal(fs.readFileSync(path.join(replacementStage, 'sentinel'), 'utf-8'), 'keep');
+    assert.deepEqual(
+      fs.readdirSync(path.dirname(replacementStage)).filter((name) => !name.startsWith('.')),
+      []
+    );
   });
 });
 

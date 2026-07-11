@@ -508,6 +508,33 @@ function prepareMaterializationStage(
   }
 }
 
+function assertCurrentMaterializationStage(
+  cacheRoot: string,
+  sourcePath: string,
+  stage: MarketplaceMaterializationStage
+): void {
+  const resolvedSourcePath = path.resolve(sourcePath);
+  const resolvedStagePath = path.resolve(stage.stagePath);
+  if (!stage.stageIdentity || path.dirname(resolvedStagePath) !== resolvedSourcePath) {
+    throw new Error(`Marketplace cache stage changed: ${stage.stagePath}`);
+  }
+  assertNoCacheSymlinks(cacheRoot, resolvedStagePath);
+  try {
+    const stat = fs.lstatSync(resolvedStagePath, { bigint: true });
+    const identity = { device: stat.dev.toString(), inode: stat.ino.toString() };
+    if (
+      !stat.isDirectory() ||
+      stat.isSymbolicLink() ||
+      !samePathIdentity(identity, stage.stageIdentity)
+    ) {
+      throw new Error(`Marketplace cache stage changed: ${stage.stagePath}`);
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    throw new Error(`Marketplace cache stage changed: ${stage.stagePath}`);
+  }
+}
+
 function safeCacheRoot(create: boolean): string {
   const override = temporaryCacheRoot.getStore();
   const trustedRoot = path.resolve(override ? path.dirname(override) : getConfigDir());
@@ -763,7 +790,6 @@ function checkoutRequest(
   request: MarketplaceEntryCacheRequest,
   repoPath: string
 ): { commit: string; pluginPath: string } {
-  fs.mkdirSync(repoPath, { recursive: true });
   runGit(['init'], repoPath);
   const persistedUrl = credentialFreeGitUrl(request.url);
   const transportEnv = authenticatedGitEnv(request.url, persistedUrl);
@@ -828,7 +854,7 @@ function nextCacheGeneration(sourcePath: string, identity: string): number {
   let current = 0;
   if (!fs.existsSync(sourcePath)) return 1;
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() || entry.name.startsWith('.tmp-')) continue;
     const metadata = readMetadata(path.join(sourcePath, entry.name));
     if (metadata?.identity !== identity) continue;
     current = Math.max(current, metadata.generation);
@@ -1064,7 +1090,11 @@ export function materializeMarketplaceEntry(
 
       const stage = prepareMaterializationStage(cacheRoot, sourcePath, ownerIdentity);
       try {
+        assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
         const repoPath = path.join(stage.stagePath, 'repo');
+        fs.mkdirSync(repoPath);
+        assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
+        assertNoCacheSymlinks(cacheRoot, repoPath);
         const checkout = checkoutRequest(request, repoPath);
         const metadata: MarketplaceEntryCacheMetadata = {
           version: 2,
@@ -1078,6 +1108,7 @@ export function materializeMarketplaceEntry(
           subdir: request.subdir,
           commit: checkout.commit,
         };
+        assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
         fs.writeFileSync(
           path.join(stage.stagePath, METADATA_FILE),
           `${JSON.stringify(metadata, null, 2)}\n`
@@ -1088,6 +1119,7 @@ export function materializeMarketplaceEntry(
         if (ownerIsCurrent && !ownerIsCurrent()) {
           throw new Error(`Marketplace source "${request.sourceName}" is no longer active.`);
         }
+        assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
         const materialized = replaceEntry(stage.stagePath, entryPath, () =>
           cachedMaterialization(request, identity, entryPath)
         );
