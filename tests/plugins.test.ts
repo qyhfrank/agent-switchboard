@@ -440,9 +440,15 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
     commitAll(marketplaceDir);
     writeConfigToml(asbHome, `[plugins.sources]\nself-catalog = "${marketplaceDir}"\n`);
 
-    const plugin = buildPluginIndex().get('ppt-master@self-catalog');
+    const index = buildPluginIndex();
+    const plugin = index.get('ppt-master@self-catalog');
 
     assert.ok(plugin);
+    assert.equal(plugin.meta.materialized, false);
+    assert.equal(plugin.meta.sourcePath, marketplaceDir);
+    assert.deepEqual(plugin.components.skills, []);
+
+    assert.deepEqual(index.expand([plugin.id]).skills, ['ppt-master@self-catalog:ppt-master']);
     assert.equal(plugin.meta.sourcePath, pluginRoot);
     assert.deepEqual(plugin.components.skills, ['ppt-master@self-catalog:ppt-master']);
     assert.equal(
