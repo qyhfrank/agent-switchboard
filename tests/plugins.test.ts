@@ -1318,7 +1318,7 @@ test('same-origin detection distinguishes repositories on different ports', () =
   });
 });
 
-test('same-origin reuse compares credential-free transport identities', () => {
+test('same-origin reuse does not cross configured Git principals', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const checkoutRoot = path.join(asbHome, 'credential-free-checkout');
@@ -1365,8 +1365,8 @@ test('same-origin reuse compares credential-free transport identities', () => {
     const plugin = buildPluginIndex().get('credential-free-plugin@credential-free');
 
     assert.ok(plugin);
-    assert.deepEqual(plugin.components.commands, ['credential-free-plugin@credential-free:reused']);
-    assert.equal(plugin.meta.sourcePath, fs.realpathSync.native(pluginRoot));
+    assert.deepEqual(plugin.components.commands, []);
+    assert.equal(plugin.meta.materialized, false);
   });
 });
 

@@ -28,7 +28,7 @@ import {
   validateSourcePath,
 } from '../src/library/sources.js';
 import { withTemporaryMarketplaceEntryCache } from '../src/marketplace/cache.js';
-import { credentialFreeGitUrl } from '../src/marketplace/git-identity.js';
+import { credentialFreeGitUrl, normalizeGitIdentity } from '../src/marketplace/git-identity.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -3333,7 +3333,11 @@ function writeSourceStateForTest(
   return filePath;
 }
 
-async function stopCloneUpdateAfterValidation(asbHome: string, namespace: string): Promise<void> {
+async function stopCloneUpdateAfterValidation(
+  asbHome: string,
+  namespace: string,
+  scope?: { profile?: string; project?: string }
+): Promise<void> {
   const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
   const childSource =
     'import fs from "node:fs";' +
@@ -3351,7 +3355,7 @@ async function stopCloneUpdateAfterValidation(asbHome: string, namespace: string
     '}' +
     'return result;' +
     '};' +
-    `updateRemoteSources(undefined, ${JSON.stringify(namespace)});`;
+    `updateRemoteSources(${JSON.stringify(scope)}, ${JSON.stringify(namespace)});`;
   const child = spawn(
     process.execPath,
     ['--import', 'tsx', '--input-type=module', '--eval', childSource],
@@ -4260,7 +4264,7 @@ test('subtree fallback persists type as requested when subtree succeeds', () => 
   });
 });
 
-test('scoped managed sources stay out of unrelated discovery views', () => {
+test('scoped managed source directories remain direct in unrelated discovery views', () => {
   withTempAsbHome((asbHome) => {
     const namespace = 'profile-managed';
     const profile = { profile: 'team' };
@@ -4270,14 +4274,14 @@ test('scoped managed sources stay out of unrelated discovery views', () => {
 
     addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }, profile);
 
-    assert.equal(namespace in getSourcesRecord(), false);
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
     assert.equal(getSourcesRecord()['direct-unowned'], direct);
     assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
     const checkout = path.join(getPluginsDir(), namespace);
     fs.rmSync(checkout, { recursive: true, force: true });
     fs.mkdirSync(path.join(checkout, 'rules'), { recursive: true });
     fs.writeFileSync(path.join(checkout, 'rules', 'foreign.md'), '# Foreign');
-    assert.equal(namespace in getSourcesRecord(), false);
+    assert.equal(getSourcesRecord()[namespace], checkout);
   });
 });
 
@@ -4627,7 +4631,7 @@ test('removal recovery transfers staged checkout and cache to a recorded matchin
     assert.equal(getSourcesRecord(profile)[namespace], checkoutPath);
     assert.equal(fs.existsSync(path.join(checkoutPath, 'rules', 'v1.md')), true);
     assert.equal(fs.existsSync(materializedPath), true);
-    assert.equal(namespace in getSourcesRecord(), false);
+    assert.equal(getSourcesRecord()[namespace], checkoutPath);
     const states = fs
       .readdirSync(getPluginSourceStateDir())
       .filter((name) => name.endsWith('.json'))
@@ -4701,7 +4705,7 @@ test('removal recovery transfers a staged subtree to a recorded matching carrier
     assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
     assert.equal(fs.existsSync(tracked), true);
     assert.equal(fs.readFileSync(tracked, 'utf-8'), '# V1');
-    assert.equal(namespace in getSourcesRecord(), false);
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
     const states = fs
       .readdirSync(getPluginSourceStateDir())
       .filter((name) => name.endsWith('.json'))
@@ -5408,7 +5412,7 @@ test('managed checkout ownership distinguishes configured SSH principals', () =>
 
     assert.throws(
       () => addRemoteSource(namespace, { url: bobUrl, type: 'clone', ref: 'main' }, profile),
-      /physical owner conflicts/i
+      /owner key|physical owner conflicts/i
     );
     assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace, 'rules', 'v1.md')), true);
   });
@@ -5774,5 +5778,511 @@ test('updates derive one locked snapshot across every current carrier', () => {
     assert.equal(updated[0]?.status, 'error');
     assert.match(updated[0]?.error ?? '', /recorded source.*disagrees/i);
     assert.match(fs.readFileSync(getProfileConfigPath('team'), 'utf-8'), /subdir = "retargeted"/);
+  });
+});
+
+test('managed non-dot checkout directories remain directly discoverable', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'managed-direct-discovery';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'managed-direct-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), '[plugins]\nenabled = []\n');
+
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
+  });
+});
+
+test('managed clone creation accepts exact full refs', () => {
+  for (const kind of ['branch', 'tag', 'other'] as const) {
+    withTempAsbHome((asbHome) => {
+      const namespace = `full-${kind}-clone`;
+      const { bareRepo, workDir } = createBareRemote(path.join(asbHome, `${kind}-remote`));
+      if (kind === 'tag') {
+        execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+        execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+          cwd: workDir,
+          stdio: 'pipe',
+        });
+      } else if (kind === 'other') {
+        execFileSync('git', ['push', 'origin', 'HEAD:refs/pull/1/head'], {
+          cwd: workDir,
+          stdio: 'pipe',
+        });
+      }
+      const ref =
+        kind === 'branch'
+          ? 'refs/heads/main'
+          : kind === 'tag'
+            ? 'refs/tags/release'
+            : 'refs/pull/1/head';
+
+      addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref });
+
+      const checkout = path.join(getPluginsDir(), namespace);
+      assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
+      assert.equal(
+        execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+          cwd: checkout,
+          encoding: 'utf-8',
+        }).trim(),
+        kind === 'branch' ? 'main' : 'HEAD'
+      );
+    });
+  }
+});
+
+test('compatible scoped add adopts a valid state-less checkout carrier', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'stateless-compatible-add';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'stateless-add-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    for (const name of fs.readdirSync(getPluginSourceStateDir())) {
+      if (!name.endsWith('.json')) continue;
+      const filePath = path.join(getPluginSourceStateDir(), name);
+      if (JSON.parse(fs.readFileSync(filePath, 'utf-8')).namespace === namespace) {
+        fs.rmSync(filePath);
+      }
+    }
+
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'refs/heads/main' }, profile);
+
+    assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
+    assert.equal(
+      fs
+        .readdirSync(getPluginSourceStateDir())
+        .filter((name) => name.endsWith('.json'))
+        .map((name) =>
+          JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+        )
+        .filter((state) => state.namespace === namespace).length,
+      2
+    );
+  });
+});
+
+test('legacy adoption rejects a checkout persisted under a different principal', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'legacy-principal-mismatch';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'legacy-principal-mismatch-remote'));
+    const bobUrl = `file://bob@localhost${bareRepo}`;
+    const aliceUrl = `file://alice@localhost${bareRepo}`;
+    addRemoteSource(namespace, { url: bobUrl, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+    execFileSync('git', ['remote', 'set-url', 'origin', aliceUrl], {
+      cwd: checkout,
+      stdio: 'pipe',
+    });
+    const statePath = fs
+      .readdirSync(getPluginSourceStateDir())
+      .map((name) => path.join(getPluginSourceStateDir(), name))
+      .find((filePath) => JSON.parse(fs.readFileSync(filePath, 'utf-8')).namespace === namespace);
+    assert.ok(statePath);
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    delete state.checkout;
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    assert.throws(
+      () => addRemoteSource(namespace, { url: bobUrl, type: 'clone', ref: 'main' }, profile),
+      /principal|origin|provenance/i
+    );
+    assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
+  });
+});
+
+test('locked live config rejects a forged persisted Git owner key', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'forged-owner-key';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'forged-owner-key-remote'));
+    const aliceUrl = `file://alice@localhost${bareRepo}`;
+    const bobUrl = `file://bob@localhost${bareRepo}`;
+    addRemoteSource(namespace, { url: aliceUrl, type: 'clone', ref: 'main' });
+    const statePath = fs
+      .readdirSync(getPluginSourceStateDir())
+      .map((name) => path.join(getPluginSourceStateDir(), name))
+      .find((filePath) => JSON.parse(fs.readFileSync(filePath, 'utf-8')).namespace === namespace);
+    assert.ok(statePath);
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    state.gitOwnerKey = createHash('sha256')
+      .update(normalizeGitIdentity(bobUrl, process.cwd()))
+      .digest('hex');
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    assert.throws(
+      () => addRemoteSource(namespace, { url: bobUrl, type: 'clone', ref: 'main' }, profile),
+      /owner key|physical owner conflicts|provenance/i
+    );
+  });
+});
+
+test('compatible checkout adoption revalidates live Git provenance', () => {
+  for (const variant of ['dirty', 'origin', 'managed-ref'] as const) {
+    withTempAsbHome((asbHome) => {
+      const namespace = `strict-adoption-${variant}`;
+      const profile = { profile: 'team' };
+      const primary = createBareRemote(path.join(asbHome, `${variant}-primary`));
+      addRemoteSource(namespace, { url: primary.bareRepo, type: 'clone', ref: 'main' });
+      const checkout = path.join(getPluginsDir(), namespace);
+      let requestedRef = 'main';
+      if (variant === 'dirty') {
+        fs.writeFileSync(path.join(checkout, 'rules', 'v1.md'), '# Dirty');
+      } else if (variant === 'origin') {
+        const other = createBareRemote(path.join(asbHome, 'other-origin'));
+        execFileSync('git', ['remote', 'set-url', 'origin', other.bareRepo], {
+          cwd: checkout,
+          stdio: 'pipe',
+        });
+      } else {
+        requestedRef = 'refs/tags/main';
+        const statePath = fs
+          .readdirSync(getPluginSourceStateDir())
+          .map((name) => path.join(getPluginSourceStateDir(), name))
+          .find(
+            (filePath) => JSON.parse(fs.readFileSync(filePath, 'utf-8')).namespace === namespace
+          );
+        assert.ok(statePath);
+        const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+        state.checkout.managedRef = requestedRef;
+        fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+      }
+
+      assert.throws(
+        () =>
+          addRemoteSource(
+            namespace,
+            { url: primary.bareRepo, type: 'clone', ref: requestedRef },
+            profile
+          ),
+        /local changes|origin|configured ref|resolved ref|provenance/i,
+        variant
+      );
+      assert.equal(fs.existsSync(getProfileConfigPath('team')), false, variant);
+    });
+  }
+});
+
+test('missing checkout recreation keeps its persisted short-tag identity', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'recreate-short-tag';
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'recreate-tag-remote'));
+    execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    const tagCommit = execFileSync('git', ['rev-parse', 'refs/tags/release^{commit}'], {
+      cwd: workDir,
+      encoding: 'utf-8',
+    }).trim();
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'release' });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['branch', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/heads/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+
+    const result = updateRemoteSources(undefined, namespace);
+
+    assert.equal(result[0]?.status, 'updated', result[0]?.error);
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: path.join(getPluginsDir(), namespace),
+        encoding: 'utf-8',
+      }).trim(),
+      tagCommit
+    );
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      )
+      .filter((state) => state.namespace === namespace);
+    assert.deepEqual(
+      new Set(states.map((state) => state.checkout?.managedRef)),
+      new Set(['refs/tags/release'])
+    );
+  });
+});
+
+test('subtree provenance persists the resolved ref and separates later branch aliases', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'resolved-subtree-ref';
+    const profile = { profile: 'team' };
+    const { bareRepo, workDir } = createBareRemote(
+      path.join(path.dirname(asbHome), 'subtree-ref-remote')
+    );
+    execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'release' });
+    execFileSync('git', ['add', '.'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record subtree'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['branch', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/heads/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    const state = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      )
+      .find((candidate) => candidate.namespace === namespace);
+    assert.equal(state?.subtree?.managedRef, 'refs/tags/release');
+
+    assert.throws(
+      () =>
+        addRemoteSource(
+          namespace,
+          { url: bareRepo, type: 'subtree', ref: 'refs/heads/release' },
+          profile
+        ),
+      /physical owner conflicts|owner conflicts/i
+    );
+  });
+});
+
+test('shared checkout refresh updates a materialized state-less carrier cache', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'stateless-cache-refresh';
+    const profile = { profile: 'team' };
+    const { entryWorkDir, lowerMaterialized } = createLayeredSubdirMarketplaceSource(
+      asbHome,
+      namespace
+    );
+    for (const name of fs.readdirSync(getPluginSourceStateDir())) {
+      if (!name.endsWith('.json')) continue;
+      const filePath = path.join(getPluginSourceStateDir(), name);
+      const state = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (state.namespace === namespace && state.configPath.endsWith('config.toml')) {
+        fs.rmSync(filePath);
+      }
+    }
+    fs.writeFileSync(path.join(entryWorkDir, 'rules', 'v1.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: entryWorkDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: entryWorkDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: entryWorkDir, stdio: 'pipe' });
+
+    const updated = updateRemoteSources(profile, namespace);
+
+    assert.equal(updated[0]?.status, 'updated', updated[0]?.error);
+    assert.equal(fs.readFileSync(path.join(lowerMaterialized, 'rules', 'v1.md'), 'utf-8'), '# V2');
+  });
+});
+
+test('recovery rejects forged config paths without cleaning their temp files', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-recovery-config-forgery-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'forged-recovery-carrier';
+    const { bareRepo } = createBareRemote(path.join(root, 'remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+    await stopCloneUpdateAfterValidation(asbHome, namespace);
+    const statePath = fs
+      .readdirSync(getPluginSourceStateDir())
+      .map((name) => path.join(getPluginSourceStateDir(), name))
+      .find((filePath) => JSON.parse(fs.readFileSync(filePath, 'utf-8')).namespace === namespace);
+    assert.ok(statePath);
+    const forgedConfig = path.join(root, 'foreign.txt');
+    const forgedTemp = path.join(root, '.foreign.txt.asb-write.tmp');
+    fs.writeFileSync(forgedConfig, '[plugins]\nenabled = []\n');
+    fs.writeFileSync(forgedTemp, 'preserve');
+    const state = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
+    state.addition.configPaths.push(forgedConfig);
+    fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`);
+
+    assert.throws(() => getSourcesRecord(), /invalid.*config|config.*carrier|recovery.*path/i);
+    assert.equal(fs.readFileSync(forgedTemp, 'utf-8'), 'preserve');
+  } finally {
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('recovery includes a new state-less profile carrier in physical owner checks', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-recovery-new-carrier-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'recovery-new-carrier';
+    const first = createBareRemote(path.join(root, 'first'));
+    const second = createBareRemote(path.join(root, 'second'));
+    addRemoteSource(namespace, { url: first.bareRepo, type: 'clone', ref: 'main' });
+    fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+    await stopCloneUpdateAfterValidation(asbHome, namespace);
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(second.bareRepo)}, type = "clone", ref = "main" }\n`
+    );
+
+    assert.throws(() => getSourcesRecord(), /physical owner conflicts/i);
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace)), false);
+  } finally {
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('recovery derives empty profile and project carriers from the invoking scope', async () => {
+  for (const kind of ['profile', 'project'] as const) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `asb-recovery-${kind}-scope-`));
+    const asbHome = path.join(root, 'asb-home');
+    fs.mkdirSync(asbHome, { recursive: true });
+    const previousAsbHome = process.env.ASB_HOME;
+    const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+    process.env.ASB_HOME = asbHome;
+    process.env.ASB_AGENTS_HOME = asbHome;
+    try {
+      const namespace = `${kind}-scope-recovery`;
+      const { bareRepo } = createBareRemote(path.join(root, 'remote'));
+      addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+      const projectRoot = path.join(root, 'project');
+      const scope = kind === 'profile' ? { profile: 'team' } : { project: projectRoot };
+      if (kind === 'profile') {
+        fs.writeFileSync(getProfileConfigPath('team'), '[plugins]\nenabled = []\n');
+      } else {
+        fs.mkdirSync(projectRoot, { recursive: true });
+        fs.writeFileSync(getProjectConfigPath(projectRoot), '[plugins]\nenabled = []\n');
+      }
+      fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+      await stopCloneUpdateAfterValidation(asbHome, namespace, scope);
+
+      assert.throws(() => getSourcesRecord(), /invalid source recovery config carrier/i);
+      assert.equal(getSourcesRecord(scope)[namespace], path.join(getPluginsDir(), namespace), kind);
+    } finally {
+      if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+      else process.env.ASB_HOME = previousAsbHome;
+      if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+      else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test('removal retains a compatible state-less lower carrier checkout', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'stateless-removal-owner';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'stateless-removal-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }, profile);
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(bareRepo)}, type = "clone", ref = "refs/heads/main" }\n`
+    );
+
+    removeSource(namespace, profile);
+
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace, 'rules', 'v1.md')), true);
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
+  });
+});
+
+test('cross-namespace collision checks include state-less config carriers', (t) => {
+  withTempAsbHome((asbHome) => {
+    const upper = 'StateLessCase';
+    const lower = 'statelesscase';
+    const first = createBareRemote(path.join(asbHome, 'stateless-case-first'));
+    const second = createBareRemote(path.join(asbHome, 'stateless-case-second'));
+    addRemoteSource(upper, { url: first.bareRepo, type: 'clone', ref: 'main' });
+    for (const name of fs.readdirSync(getPluginSourceStateDir())) {
+      if (name.endsWith('.json')) fs.rmSync(path.join(getPluginSourceStateDir(), name));
+    }
+    const upperPath = path.join(getPluginsDir(), upper);
+    const lowerPath = path.join(getPluginsDir(), lower);
+    fs.mkdirSync(lowerPath, { recursive: true });
+    const originalNative = fs.realpathSync.native.bind(fs.realpathSync);
+    Object.defineProperty(fs.realpathSync, 'native', {
+      configurable: true,
+      value: (candidate: fs.PathLike) =>
+        path.resolve(String(candidate)) === path.resolve(lowerPath)
+          ? originalNative(upperPath)
+          : originalNative(candidate),
+    });
+    t.after(() => {
+      Object.defineProperty(fs.realpathSync, 'native', {
+        configurable: true,
+        value: originalNative,
+      });
+    });
+
+    assert.throws(
+      () =>
+        addRemoteSource(
+          lower,
+          { url: second.bareRepo, type: 'clone', ref: 'main' },
+          { profile: 'team' }
+        ),
+      /cross-namespace physical collision/i
+    );
+  });
+});
+
+test('lifecycle releases retained source readers before physical locks', (t) => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const namespace = 'lease-ordering';
+    const sourceDir = path.join(asbHome, 'external', namespace);
+    fs.mkdirSync(path.join(sourceDir, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, 'rules', 'rule.md'), '# Rule');
+    addLocalSource(namespace, sourceDir);
+    assert.ok(buildPluginIndex().get(namespace));
+    assert.ok(fs.readdirSync(getPluginSourceLocksDir()).some((name) => name.endsWith('.lock')));
+    const originalLink = fs.linkSync.bind(fs);
+    let checked = false;
+    t.mock.method(fs, 'linkSync', (from, to) => {
+      if (
+        !checked &&
+        path.dirname(String(to)) === getPluginSourceLocksDir() &&
+        path.basename(String(to)).endsWith('.lock')
+      ) {
+        checked = true;
+        assert.deepEqual(
+          fs.readdirSync(getPluginSourceLocksDir()).filter((name) => name.endsWith('.lock')),
+          []
+        );
+      }
+      return originalLink(from, to);
+    });
+
+    removeSource(namespace);
+
+    assert.equal(hasSource(namespace), false);
+    assert.equal(checked, true);
+    clearPluginIndexCache();
   });
 });

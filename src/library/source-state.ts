@@ -26,6 +26,7 @@ export interface SourceCloneAdditionState {
   checkout: SourceRemovalPathState;
   phase: 'constructing' | 'validated';
   checkoutIdentity?: SourcePathIdentity;
+  managedRef?: string;
   transactionId: string;
 }
 
@@ -43,6 +44,7 @@ export interface SourceSubtreeAdditionState {
   headRef: string | null;
   headAfter?: string;
   treeAfter?: string;
+  managedRef?: string;
   phase: 'constructing' | 'validated';
   transactionId: string;
 }
@@ -68,6 +70,7 @@ export interface SourceSubtreeState {
   repoRoot: string;
   relativePath: string;
   tree: string;
+  managedRef?: string;
 }
 
 export interface PluginSourceState {
@@ -248,7 +251,7 @@ function validCheckoutState(value: unknown): value is SourceCheckoutState {
 function validManagedRef(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   if (value === 'HEAD') return true;
-  if (!value.startsWith('refs/heads/') && !value.startsWith('refs/tags/')) return false;
+  if (!value.startsWith('refs/')) return false;
   try {
     return normalizeMarketplaceGitRef(value) === value;
   } catch {
@@ -264,7 +267,8 @@ function validSubtreeState(value: unknown): value is SourceSubtreeState {
     path.isAbsolute(subtree.repoRoot) &&
     typeof subtree.relativePath === 'string' &&
     typeof subtree.tree === 'string' &&
-    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.tree)
+    /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.tree) &&
+    (subtree.managedRef === undefined || validManagedRef(subtree.managedRef))
   );
 }
 
@@ -287,6 +291,7 @@ function validAdditionState(value: unknown): value is SourceAdditionState {
       validRemovalPathState(clone.checkout) &&
       (clone.phase === 'constructing' || clone.phase === 'validated') &&
       (clone.checkoutIdentity === undefined || validPathIdentity(clone.checkoutIdentity)) &&
+      (clone.managedRef === undefined || validManagedRef(clone.managedRef)) &&
       (clone.phase !== 'validated' || clone.checkoutIdentity !== undefined)
     );
   }
@@ -307,6 +312,7 @@ function validAdditionState(value: unknown): value is SourceAdditionState {
       /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.headAfter)) &&
     (subtree.treeAfter === undefined ||
       /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(subtree.treeAfter)) &&
+    (subtree.managedRef === undefined || validManagedRef(subtree.managedRef)) &&
     (subtree.headAfter === undefined) === (subtree.treeAfter === undefined) &&
     (subtree.phase === 'constructing' || subtree.phase === 'validated') &&
     (subtree.phase !== 'validated' || subtree.headAfter !== undefined)
@@ -318,6 +324,9 @@ function readStateFile(filePath: string): PluginSourceState | null {
   assertNoStateSymlinks(stateRoot, filePath);
   try {
     const state = parseState(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
+    if (state && path.resolve(filePath) !== statePath(state.namespace, state.configPath)) {
+      throw new Error(`Plugin source state carrier does not match its config owner: ${filePath}`);
+    }
     if (state) fs.chmodSync(filePath, 0o600);
     return state;
   } catch (error) {
