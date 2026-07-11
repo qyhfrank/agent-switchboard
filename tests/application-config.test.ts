@@ -9,6 +9,7 @@ import {
   resolveApplicationSectionConfig,
 } from '../src/config/application-config.js';
 import { loadMergedSwitchboardConfig } from '../src/config/layered-config.js';
+import { resolveEffectiveSelection } from '../src/config/plugin-selection.js';
 import { clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -46,6 +47,21 @@ test('mergeIncrementalSelection does not add duplicates', () => {
   const base = ['a', 'b'];
   const result = mergeIncrementalSelection(base, { add: ['b', 'c'] });
   assert.deepEqual(result, ['a', 'b', 'c']);
+});
+
+test('resolveEffectiveSelection deduplicates normalized aliases in order', () => {
+  const config = {
+    plugins: { enabled: ['plugin-a', 'plugin-a@catalog'] },
+    applications: {},
+  };
+  const result = resolveEffectiveSelection(
+    config.plugins.enabled,
+    config,
+    'codex',
+    'plugins',
+    (ref) => (ref === 'plugin-a' ? 'plugin-a@catalog' : ref)
+  );
+  assert.deepEqual(result, ['plugin-a@catalog']);
 });
 
 test('resolveApplicationSectionConfig applies per-agent override', () => {

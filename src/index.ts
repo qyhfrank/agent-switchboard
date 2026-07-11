@@ -42,6 +42,7 @@ import {
   getSkillsDir,
 } from './config/paths.js';
 import { loadConfiguredPortableSelections } from './config/plugin-selection.js';
+import type { ApplicationConfigOverride, IncrementalSelection } from './config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
 import {
   loadSwitchboardConfig,
@@ -1630,17 +1631,83 @@ function canonicalPluginRefs(refs: string[], index: PluginIndex): string[] {
   return [...new Set(refs.map((ref) => index.get(ref)?.id ?? ref))];
 }
 
-function updatePluginSelection(enabled: string[], options?: UpdateConfigLayerOptions): void {
-  updateConfigLayer(
-    (layer) => ({
+function canonicalIncrementalSelection(
+  selection: IncrementalSelection,
+  index: PluginIndex
+): IncrementalSelection {
+  return {
+    ...selection,
+    enabled: selection.enabled ? canonicalPluginRefs(selection.enabled, index) : undefined,
+    add: selection.add ? canonicalPluginRefs(selection.add, index) : undefined,
+    remove: selection.remove ? canonicalPluginRefs(selection.remove, index) : undefined,
+  };
+}
+
+function updatePluginSelection(
+  enabled: string[],
+  pluginId: string,
+  action: 'enable' | 'disable',
+  index: PluginIndex,
+  options?: UpdateConfigLayerOptions
+): void {
+  updateConfigLayer((layer) => {
+    const applications = layer.applications ? { ...layer.applications } : undefined;
+    if (applications) {
+      for (const [appId, rawOverride] of Object.entries(applications)) {
+        if (!rawOverride || typeof rawOverride !== 'object' || Array.isArray(rawOverride)) {
+          continue;
+        }
+        const appOverride = rawOverride as ApplicationConfigOverride;
+        if (!appOverride.plugins) continue;
+        const plugins = canonicalIncrementalSelection(appOverride.plugins, index);
+        if (action === 'enable') {
+          if (plugins.enabled && !plugins.enabled.includes(pluginId)) {
+            plugins.enabled = [...plugins.enabled, pluginId];
+          }
+          if (plugins.remove) {
+            plugins.remove = plugins.remove.filter((ref) => ref !== pluginId);
+          }
+        } else {
+          if (plugins.enabled) {
+            plugins.enabled = plugins.enabled.filter((ref) => ref !== pluginId);
+          }
+          if (plugins.add) {
+            plugins.add = plugins.add.filter((ref) => ref !== pluginId);
+          }
+        }
+        applications[appId] = { ...appOverride, plugins };
+      }
+    }
+    return {
       ...layer,
+      applications,
       plugins: {
         ...(layer.plugins ?? {}),
         enabled,
       },
-    }),
-    options
-  );
+    };
+  }, options);
+}
+
+function hasPluginSelection(
+  layer: { plugins?: { enabled?: string[] }; applications?: Record<string, unknown> },
+  pluginId: string,
+  index: PluginIndex
+): boolean {
+  if (canonicalPluginRefs(layer.plugins?.enabled ?? [], index).includes(pluginId)) return true;
+  for (const rawOverride of Object.values(layer.applications ?? {})) {
+    if (!rawOverride || typeof rawOverride !== 'object' || Array.isArray(rawOverride)) continue;
+    const plugins = (rawOverride as ApplicationConfigOverride).plugins;
+    if (!plugins) continue;
+    if (
+      canonicalPluginRefs([...(plugins.enabled ?? []), ...(plugins.add ?? [])], index).includes(
+        pluginId
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 pluginRoot
@@ -1680,15 +1747,14 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
       process.exit(1);
     }
     const existing = canonicalPluginRefs(layer.config.plugins?.enabled ?? [], index);
-    if (existing.includes(plugin.id)) {
-      if (JSON.stringify(existing) !== JSON.stringify(layer.config.plugins?.enabled ?? [])) {
-        updatePluginSelection(existing, layerOpts);
-      }
-      console.log(chalk.yellow(`⚠ Plugin "${plugin.id}" is already enabled in this config layer.`));
-      return;
-    }
     index.materialize([plugin.id]);
-    updatePluginSelection([...existing, plugin.id], layerOpts);
+    updatePluginSelection(
+      existing.includes(plugin.id) ? existing : [...existing, plugin.id],
+      plugin.id,
+      'enable',
+      index,
+      layerOpts
+    );
     console.log(chalk.green(`✓ Plugin "${plugin.id}" enabled.`));
   } catch (error) {
     if (error instanceof Error) {
@@ -1706,12 +1772,15 @@ function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string)
     const index = buildPluginIndex(scope);
     const pluginId = index.get(id)?.id ?? id;
     const existing = canonicalPluginRefs(layer.config.plugins?.enabled ?? [], index);
-    if (!existing.includes(pluginId)) {
+    if (!hasPluginSelection(layer.config, pluginId, index)) {
       console.log(chalk.yellow(`⚠ Plugin "${id}" is not enabled in this config layer.`));
       return;
     }
     updatePluginSelection(
       existing.filter((candidate) => candidate !== pluginId),
+      pluginId,
+      'disable',
+      index,
       layerOpts
     );
     console.log(chalk.green(`✓ Plugin "${pluginId}" ${verb}.`));

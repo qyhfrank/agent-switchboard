@@ -497,6 +497,44 @@ test('same-origin reuse distinguishes explicit network ports', () => {
   });
 });
 
+test('same-origin reuse distinguishes SSH usernames', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = path.join(asbHome, 'marketplaces', 'ssh-user-catalog');
+    const pluginRoot = path.join(marketplaceDir, 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'wrong.md'), 'Wrong source\n');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'ssh-user-catalog',
+        plugins: [
+          {
+            name: 'ssh-user-plugin',
+            source: {
+              source: 'git-subdir',
+              url: 'ssh://bob@127.0.0.1:2/repo.git',
+              path: 'plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
+    );
+    initGitRepo(marketplaceDir);
+    execFileSync('git', ['remote', 'add', 'origin', 'ssh://alice@127.0.0.1:2/repo.git'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    commitAll(marketplaceDir);
+    writeConfigToml(asbHome, `[plugins.sources]\nssh-user-catalog = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    assert.throws(() => index.expand(['ssh-user-plugin@ssh-user-catalog']), /git fetch failed/);
+  });
+});
+
 test('buildPluginIndex discovers standalone plugin sources', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -811,6 +849,10 @@ test('plugin list reports effective application and scoped enabled state', () =>
       enabled: boolean;
     }>;
     assert.equal(plugins[0]?.enabled, true);
+
+    runCli(['plugin', 'disable', 'plugin-a@catalog']);
+    plugins = JSON.parse(runCli(['plugin', 'list', '--json']).stdout);
+    assert.equal(plugins[0]?.enabled, false);
 
     fs.writeFileSync(path.join(asbHome, 'team.toml'), '[plugins]\nenabled = []\n');
     plugins = JSON.parse(runCli(['plugin', 'list', '--profile', 'team', '--json']).stdout);

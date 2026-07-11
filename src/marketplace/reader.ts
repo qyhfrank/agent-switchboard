@@ -478,12 +478,13 @@ function normalizeGitIdentity(value: string, cwd: string): string {
     return normalizeLocalGitPath(path.resolve(cwd, trimmed));
   }
 
-  const scp = trimmed.match(/^git@([^:]+):(.+)$/);
-  if (scp) return `${scp[1].toLowerCase()}/${stripGitSuffix(scp[2])}`;
+  const scp = trimmed.match(/^([^@/:]+)@([^:]+):(.+)$/);
+  if (scp) return `${scp[1]}@${scp[2].toLowerCase()}/${stripGitSuffix(scp[3])}`;
 
   try {
     const url = new URL(trimmed);
-    return `${url.host.toLowerCase()}/${stripGitSuffix(url.pathname)}`;
+    const sshUser = url.protocol === 'ssh:' && url.username ? `${url.username}@` : '';
+    return `${sshUser}${url.host.toLowerCase()}/${stripGitSuffix(url.pathname)}`;
   } catch {
     return stripGitSuffix(trimmed);
   }

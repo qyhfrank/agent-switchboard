@@ -501,7 +501,7 @@ test('updateRemoteSources pulls latest changes', () => {
   });
 });
 
-test('updateRemoteSources aborts a conflicting clone merge before returning', () => {
+test('updateRemoteSources aborts its conflicting clone merge despite rebase config', () => {
   withTempAsbHome((asbHome) => {
     const parent = path.join(asbHome, 'conflict-fixture');
     fs.mkdirSync(parent, { recursive: true });
@@ -513,7 +513,7 @@ test('updateRemoteSources aborts a conflicting clone merge before returning', ()
       cwd: cloneDir,
       stdio: 'pipe',
     });
-    execFileSync('git', ['config', 'pull.rebase', 'false'], { cwd: cloneDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'pull.rebase', 'true'], { cwd: cloneDir, stdio: 'pipe' });
     fs.writeFileSync(path.join(cloneDir, 'rules', 'v1.md'), '# Local\n');
     execFileSync('git', ['add', '.'], { cwd: cloneDir, stdio: 'pipe' });
     execFileSync('git', ['commit', '-m', 'local'], { cwd: cloneDir, stdio: 'pipe' });
@@ -535,6 +535,51 @@ test('updateRemoteSources aborts a conflicting clone merge before returning', ()
     }).trim();
     assert.equal(fs.existsSync(path.resolve(cloneDir, mergeHead)), false);
     assert.equal(fs.readFileSync(path.join(cloneDir, 'rules', 'v1.md'), 'utf-8'), '# Local\n');
+  });
+});
+
+test('updateRemoteSources preserves a merge that existed before the pull', () => {
+  withTempAsbHome((asbHome) => {
+    const parent = path.join(asbHome, 'existing-merge-fixture');
+    fs.mkdirSync(parent, { recursive: true });
+    const { bareRepo, workDir } = createBareRemote(parent);
+    addRemoteSource('existing-merge-source', { url: bareRepo, type: 'clone' });
+    const cloneDir = path.join(getPluginsDir(), 'existing-merge-source');
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: cloneDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], {
+      cwd: cloneDir,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(path.join(cloneDir, 'rules', 'v1.md'), '# Local\n');
+    execFileSync('git', ['add', '.'], { cwd: cloneDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'local'], { cwd: cloneDir, stdio: 'pipe' });
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v1.md'), '# Remote\n');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'remote'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['fetch', 'origin'], { cwd: cloneDir, stdio: 'pipe' });
+    assert.throws(() =>
+      execFileSync('git', ['merge', 'origin/main'], { cwd: cloneDir, stdio: 'pipe' })
+    );
+    fs.writeFileSync(path.join(cloneDir, 'rules', 'v1.md'), 'draft resolution\n');
+    const mergeHead = execFileSync('git', ['rev-parse', '--git-path', 'MERGE_HEAD'], {
+      cwd: cloneDir,
+      encoding: 'utf-8',
+    }).trim();
+
+    const results = updateRemoteSources();
+
+    assert.equal(results[0]?.status, 'error');
+    assert.equal(fs.existsSync(path.resolve(cloneDir, mergeHead)), true);
+    assert.equal(
+      fs.readFileSync(path.join(cloneDir, 'rules', 'v1.md'), 'utf-8'),
+      'draft resolution\n'
+    );
   });
 });
 
@@ -765,6 +810,75 @@ test('updateRemoteSources removes derived cache when a source stops being a mark
       fs.existsSync(path.join(getPluginsDir(), 'catalog-source', 'rules', 'ordinary.md')),
       true
     );
+  });
+});
+
+test('updateRemoteSources removes cache owned by a deleted symlinked marketplace subdir', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'update-symlink-entry');
+    const catalogParent = path.join(asbHome, 'update-symlink-catalog');
+    fs.mkdirSync(entryParent, { recursive: true });
+    fs.mkdirSync(catalogParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const catalogRemote = createBareRemote(catalogParent);
+
+    fs.mkdirSync(path.join(entryRemote.workDir, 'plugin', 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(entryRemote.workDir, 'plugin', 'commands', 'remote.md'), 'Remote\n');
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin'],
+      { cwd: entryRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    const catalogDir = path.join(catalogRemote.workDir, 'catalog');
+    fs.mkdirSync(path.join(catalogDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(catalogDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'update-symlink-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'git-subdir', url: entryRemote.bareRepo, path: 'plugin' },
+          },
+        ],
+      })
+    );
+    fs.symlinkSync('catalog', path.join(catalogRemote.workDir, 'catalog-link'));
+    execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'catalog'],
+      { cwd: catalogRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+
+    addRemoteSource('update-symlink-source', {
+      url: catalogRemote.bareRepo,
+      subdir: 'catalog-link',
+      type: 'clone',
+    });
+    const index = buildPluginIndex();
+    index.expand(['remote-plugin@update-symlink-source']);
+    const derivedRoot = getMarketplacePluginCacheDir();
+    assert.equal(fs.readdirSync(derivedRoot).length, 1);
+
+    fs.rmSync(path.join(catalogRemote.workDir, 'catalog-link'));
+    execFileSync('git', ['add', '-A'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'remove-link'],
+      { cwd: catalogRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+
+    const results = updateRemoteSources();
+
+    assert.equal(results[0]?.status, 'updated');
+    assert.deepEqual(fs.existsSync(derivedRoot) ? fs.readdirSync(derivedRoot) : [], []);
   });
 });
 
