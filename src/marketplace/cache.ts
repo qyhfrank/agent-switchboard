@@ -5,6 +5,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { getConfigDir, getMarketplacePluginCacheDir } from '../config/paths.js';
+import {
+  authenticatedGitEnv,
+  credentialFreeGitUrl,
+  redactGitCredentials,
+} from './git-transport.js';
 
 export interface MarketplaceEntryCacheRequest {
   sourceName: string;
@@ -48,10 +53,11 @@ function configuredCacheRoot(): string {
   return temporaryCacheRoot.getStore() ?? getMarketplacePluginCacheDir();
 }
 
-function runGit(args: string[], cwd?: string): string {
+function runGit(args: string[], cwd?: string, env?: NodeJS.ProcessEnv): string {
   try {
     return execFileSync('git', args, {
       cwd,
+      env,
       stdio: 'pipe',
       encoding: 'utf-8',
       timeout: 120_000,
@@ -63,7 +69,9 @@ function runGit(args: string[], cwd?: string): string {
         ? execError.stderr.trim()
         : (execError.stderr?.toString().trim() ?? '');
     throw new Error(
-      `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
+      redactGitCredentials(
+        `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
+      )
     );
   }
 }
@@ -113,8 +121,11 @@ function normalizeRequest(request: MarketplaceEntryCacheRequest): MarketplaceEnt
   const sha = optionalTrimmed(request.sha)?.toLowerCase();
   if (ref) {
     if (ref.startsWith('-')) throw new Error(`Invalid marketplace plugin ref: ${ref}`);
+    if (ref.startsWith('refs/remotes/')) {
+      throw new Error(`Invalid marketplace plugin ref: ${ref}`);
+    }
     try {
-      runGit(['check-ref-format', '--allow-onelevel', ref]);
+      runGit(['check-ref-format', ref.startsWith('refs/') ? ref : `refs/heads/${ref}`]);
     } catch {
       throw new Error(`Invalid marketplace plugin ref: ${ref}`);
     }
@@ -139,7 +150,7 @@ function requestIdentity(request: MarketplaceEntryCacheRequest): string {
       sourceName: request.sourceName,
       marketplacePath: request.marketplacePath,
       pluginName: request.pluginName,
-      url: request.url,
+      url: credentialFreeGitUrl(request.url),
       ref: request.ref ?? null,
       sha: request.sha ?? null,
       subdir: request.subdir ?? null,
@@ -222,16 +233,10 @@ function resolveInside(root: string, subdir: string | undefined): string {
   return resolved;
 }
 
-function credentialFreeUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    if (!url.username && !url.password) return value;
-    url.username = '';
-    url.password = '';
-    return url.toString();
-  } catch {
-    return value;
-  }
+function fetchTargets(ref: string | undefined, sha: string | undefined): string[] {
+  if (!ref) return [sha ?? 'HEAD'];
+  if (ref === 'HEAD' || ref.startsWith('refs/')) return [ref];
+  return [`refs/heads/${ref}`, `refs/tags/${ref}`];
 }
 
 function checkoutRequest(
@@ -240,14 +245,26 @@ function checkoutRequest(
 ): { commit: string; pluginPath: string } {
   fs.mkdirSync(repoPath, { recursive: true });
   runGit(['init'], repoPath);
-  runGit(['remote', 'add', 'origin', request.url], repoPath);
+  const persistedUrl = credentialFreeGitUrl(request.url);
+  const env = authenticatedGitEnv(request.url, persistedUrl);
+  runGit(['remote', 'add', 'origin', persistedUrl], repoPath);
 
-  const target = request.ref ?? request.sha ?? 'HEAD';
-  const fetchArgs = ['fetch', '--depth', '1'];
-  if (request.subdir) fetchArgs.push('--filter=blob:none');
-  fetchArgs.push('origin', target);
-  runGit(fetchArgs, repoPath);
+  let fetchError: unknown;
+  for (const target of fetchTargets(request.ref, request.sha)) {
+    const fetchArgs = ['fetch', '--depth', '1'];
+    if (request.subdir) fetchArgs.push('--filter=blob:none');
+    fetchArgs.push('origin', target);
+    try {
+      runGit(fetchArgs, repoPath, env);
+      fetchError = undefined;
+      break;
+    } catch (error) {
+      fetchError = error;
+    }
+  }
+  if (fetchError) throw fetchError;
   const commit = runGit(['rev-parse', 'FETCH_HEAD^{commit}'], repoPath);
+  fs.rmSync(path.join(repoPath, '.git', 'FETCH_HEAD'), { force: true });
   if (request.sha && commit !== request.sha) {
     throw new Error(
       `Marketplace plugin pin mismatch: ${request.ref ?? 'fetched commit'} resolved to ${commit}, expected ${request.sha}.`
@@ -259,7 +276,6 @@ function checkoutRequest(
     runGit(['sparse-checkout', 'set', '--', request.subdir], repoPath);
   }
   runGit(['checkout', '--detach', commit], repoPath);
-  runGit(['remote', 'set-url', 'origin', credentialFreeUrl(request.url)], repoPath);
 
   return { commit, pluginPath: resolveInside(repoPath, request.subdir) };
 }
@@ -302,7 +318,7 @@ function cachedMaterialization(
   try {
     assertNoCacheSymlinks(configuredCacheRoot(), path.join(repoPath, '.git'));
     if (runGit(['rev-parse', 'HEAD'], repoPath) !== metadata.commit) return null;
-    if (runGit(['remote', 'get-url', 'origin'], repoPath) !== credentialFreeUrl(request.url)) {
+    if (runGit(['remote', 'get-url', 'origin'], repoPath) !== credentialFreeGitUrl(request.url)) {
       return null;
     }
     return {
