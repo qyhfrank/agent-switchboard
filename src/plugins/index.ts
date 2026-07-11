@@ -585,8 +585,14 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
 
   const index: PluginIndex = {
     plugins,
-    mcpServers,
-    ruleSnippets,
+    get mcpServers() {
+      materializeConfigured();
+      return mcpServers;
+    },
+    get ruleSnippets() {
+      materializeConfigured();
+      return ruleSnippets;
+    },
 
     get(pluginId: string) {
       return byId.get(pluginId);
