@@ -9,6 +9,7 @@ import {
   refreshMarketplaceEntryCache,
   removeMarketplaceEntryCache,
 } from '../src/marketplace/cache.js';
+import { credentialFreeGitUrl, redactGitCredentials } from '../src/marketplace/git-transport.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -226,6 +227,26 @@ test('short refs prefer a same-named branch and fall back to a tag', () => {
     assert.equal(branch.commit, branchSha);
     assert.equal(fs.readFileSync(path.join(branch.pluginPath, 'VERSION'), 'utf-8'), 'branch\n');
 
+    const exactBranch = materializeMarketplaceEntry({
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'exact-branch-plugin',
+      url: remote.bareRepo,
+      ref: 'refs/heads/main',
+      subdir: 'packages/plugin',
+    });
+    assert.equal(exactBranch.commit, branchSha);
+
+    const exactTag = materializeMarketplaceEntry({
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'exact-tag-plugin',
+      url: remote.bareRepo,
+      ref: 'refs/tags/main',
+      subdir: 'packages/plugin',
+    });
+    assert.equal(exactTag.commit, tagSha);
+
     execFileSync('git', ['tag', 'release-only', branchSha], {
       cwd: remote.workDir,
       stdio: 'pipe',
@@ -281,6 +302,20 @@ test('git errors redact URL credentials and successful fetches do not persist th
   });
 });
 
+test('Git URL sanitization preserves SSH identity and redacts echoed credential values', () => {
+  assert.equal(
+    credentialFreeGitUrl('ssh://git:password@example.com/repo.git?token=query#fragment'),
+    'ssh://git@example.com/repo.git'
+  );
+  const authenticated =
+    'https://test-user:test-password@example.com/repo.git?token=query-secret#fragment-secret';
+  const redacted = redactGitCredentials(
+    'remote rejected test-user test-password query-secret fragment-secret',
+    [authenticated]
+  );
+  assert.doesNotMatch(redacted, /test-user|test-password|query-secret|fragment-secret/);
+});
+
 test('failed refresh preserves the last verified generation and removes temporary state', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
@@ -295,17 +330,27 @@ test('failed refresh preserves the last verified generation and removes temporar
     };
     const materialized = materializeMarketplaceEntry(request);
 
-    assert.throws(
-      () =>
-        refreshMarketplaceEntryCache(request.sourceName, request.marketplacePath, [
-          { ...request, url: path.join(asbHome, 'missing.git') },
-        ]),
-      /git fetch failed/
-    );
+    const unavailableRemote = `${remote.bareRepo}.unavailable`;
+    fs.renameSync(remote.bareRepo, unavailableRemote);
+    try {
+      assert.throws(
+        () => refreshMarketplaceEntryCache(request.sourceName, request.marketplacePath, [request]),
+        /git fetch failed/
+      );
+    } finally {
+      fs.renameSync(unavailableRemote, remote.bareRepo);
+    }
 
     assert.equal(
       fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8').trim(),
       'v1'
+    );
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: materialized.repoPath,
+        encoding: 'utf-8',
+      }).trim(),
+      materialized.commit
     );
     assert.deepEqual(
       fs.readdirSync(path.dirname(materialized.entryPath)).filter((name) => name.startsWith('.')),

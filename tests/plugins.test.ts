@@ -405,8 +405,9 @@ test('configured external plugin rules materialize before rule loading', () => {
 test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
-    const marketplaceDir = path.join(asbHome, 'marketplaces', 'self-catalog');
-    const pluginRoot = path.join(marketplaceDir, 'skills');
+    const repoRoot = path.join(asbHome, 'marketplaces', 'self-catalog');
+    const marketplaceDir = path.join(repoRoot, 'catalog');
+    const pluginRoot = path.join(repoRoot, 'skills');
     const skillDir = path.join(pluginRoot, 'ppt-master');
     fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
     fs.mkdirSync(path.join(pluginRoot, '.claude-plugin'), { recursive: true });
@@ -419,7 +420,7 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
         plugins: [
           {
             name: 'ppt-master',
-            source: { source: 'git-subdir', url: marketplaceDir, path: 'skills', ref: 'main' },
+            source: { source: 'git-subdir', url: repoRoot, path: 'skills', ref: 'main' },
           },
         ],
       })
@@ -432,12 +433,15 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
       path.join(skillDir, 'SKILL.md'),
       '---\nname: ppt-master\ndescription: Build slides\n---\nBody'
     );
-    initGitRepo(marketplaceDir);
-    execFileSync('git', ['remote', 'add', 'origin', marketplaceDir], {
-      cwd: marketplaceDir,
+    initGitRepo(repoRoot);
+    execFileSync('git', ['remote', 'add', 'origin', repoRoot], {
+      cwd: repoRoot,
       stdio: 'ignore',
     });
-    commitAll(marketplaceDir);
+    commitAll(repoRoot);
+    execFileSync('git', ['tag', 'main'], { cwd: repoRoot, stdio: 'ignore' });
+    fs.writeFileSync(path.join(repoRoot, 'branch-marker'), 'branch\n');
+    commitAll(repoRoot);
     writeConfigToml(asbHome, `[plugins.sources]\nself-catalog = "${marketplaceDir}"\n`);
 
     const index = buildPluginIndex();
@@ -449,12 +453,47 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
     assert.deepEqual(plugin.components.skills, []);
 
     assert.deepEqual(index.expand([plugin.id]).skills, ['ppt-master@self-catalog:ppt-master']);
-    assert.equal(plugin.meta.sourcePath, pluginRoot);
+    assert.equal(fs.realpathSync(plugin.meta.sourcePath), fs.realpathSync(pluginRoot));
     assert.deepEqual(plugin.components.skills, ['ppt-master@self-catalog:ppt-master']);
-    assert.equal(
-      fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache', 'self-catalog')),
-      false
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+  });
+});
+
+test('same-origin reuse distinguishes explicit network ports', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const marketplaceDir = path.join(asbHome, 'marketplaces', 'port-catalog');
+    const pluginRoot = path.join(marketplaceDir, 'plugin');
+    fs.mkdirSync(path.join(marketplaceDir, '.claude-plugin'), { recursive: true });
+    fs.mkdirSync(path.join(pluginRoot, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(pluginRoot, 'commands', 'wrong.md'), 'Wrong source\n');
+    fs.writeFileSync(
+      path.join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'port-catalog',
+        plugins: [
+          {
+            name: 'port-plugin',
+            source: {
+              source: 'git-subdir',
+              url: 'http://127.0.0.1:2/repo.git',
+              path: 'plugin',
+              ref: 'main',
+            },
+          },
+        ],
+      })
     );
+    initGitRepo(marketplaceDir);
+    execFileSync('git', ['remote', 'add', 'origin', 'http://127.0.0.1:1/repo.git'], {
+      cwd: marketplaceDir,
+      stdio: 'ignore',
+    });
+    commitAll(marketplaceDir);
+    writeConfigToml(asbHome, `[plugins.sources]\nport-catalog = "${marketplaceDir}"\n`);
+
+    const index = buildPluginIndex();
+    assert.throws(() => index.expand(['port-plugin@port-catalog']), /git fetch failed/);
   });
 });
 
@@ -731,6 +770,51 @@ test('plugin list JSON emits one canonical ref and recognizes bare enabled alias
     assert.equal(plugins[0].enabled, true);
     assert.equal('materialized' in plugins[0], false);
     assert.equal(plugins[0].componentsResolved, true);
+
+    runCli(['plugin', 'enable', plugins[0].ref]);
+    assert.match(
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'),
+      /enabled = \[\s*"plugin-a@catalog"\s*\]/
+    );
+    runCli(['plugin', 'disable', plugins[0].ref]);
+    assert.doesNotMatch(
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'),
+      /plugin-a(?:@catalog)?/
+    );
+  });
+});
+
+test('plugin list reports effective application and scoped enabled state', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const mktDir = createMarketplaceFixture(asbHome, 'state-catalog', [
+      { name: 'plugin-a', commands: ['command-a'] },
+    ]);
+    writeConfigToml(
+      asbHome,
+      [
+        '[applications]',
+        'enabled = ["codex"]',
+        '',
+        '[plugins]',
+        'enabled = []',
+        '',
+        '[applications.codex.plugins]',
+        'add = ["plugin-a"]',
+        '',
+        '[plugins.sources]',
+        `catalog = "${mktDir}"`,
+      ].join('\n')
+    );
+    let plugins = JSON.parse(runCli(['plugin', 'list', '--json']).stdout) as Array<{
+      id: string;
+      enabled: boolean;
+    }>;
+    assert.equal(plugins[0]?.enabled, true);
+
+    fs.writeFileSync(path.join(asbHome, 'team.toml'), '[plugins]\nenabled = []\n');
+    plugins = JSON.parse(runCli(['plugin', 'list', '--profile', 'team', '--json']).stdout);
+    assert.equal(plugins[0]?.enabled, false);
   });
 });
 

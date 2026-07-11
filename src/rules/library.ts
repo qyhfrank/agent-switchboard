@@ -104,6 +104,7 @@ export function loadRuleLibrary(scope?: ConfigScope): RuleSnippet[] {
 
   // Append rules discovered from marketplace plugins (via PluginIndex)
   const pluginIndex = buildPluginIndex(scope);
+  pluginIndex.materializeConfigured();
   for (const snippet of pluginIndex.ruleSnippets) {
     if (!seenIds.has(snippet.id)) {
       rules.push(snippet);
