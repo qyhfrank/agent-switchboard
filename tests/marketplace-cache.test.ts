@@ -308,12 +308,13 @@ test('Git URL sanitization preserves SSH identity and redacts echoed credential 
     'ssh://git@example.com/repo.git'
   );
   const authenticated =
-    'https://test-user:test-password@example.com/repo.git?token=query-secret#fragment-secret';
+    'https://test-user:test-password@example.com/repo.git?token=query%2Dsecret#fragment-secret';
   const redacted = redactGitCredentials(
-    'remote rejected test-user test-password query-secret fragment-secret',
+    'remote rejected test-user test-password query-secret query%2Dsecret fragment-secret',
     [authenticated]
   );
   assert.doesNotMatch(redacted, /test-user|test-password|query-secret|fragment-secret/);
+  assert.doesNotMatch(redacted, /query%2Dsecret/);
 });
 
 test('failed refresh preserves the last verified generation and removes temporary state', () => {

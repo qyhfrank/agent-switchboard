@@ -71,7 +71,7 @@ export function resolveEffectiveSelection(
         remove: configuredOverride.remove ? normalizeRefs(configuredOverride.remove) : undefined,
       }
     : undefined;
-  return mergeIncrementalSelection(normalizeRefs(base), override);
+  return [...new Set(mergeIncrementalSelection(normalizeRefs(base), override))];
 }
 
 function unionEffectiveSelections(

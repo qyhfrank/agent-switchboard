@@ -70,14 +70,15 @@ function gitClone(url: string, targetDir: string, ref?: string): void {
 
 function gitPull(repoDir: string, url: string): void {
   const persistedUrl = credentialFreeGitUrl(url);
+  const mergeAlreadyActive = isMergeInProgress(repoDir);
   try {
-    runGit(['pull'], {
+    runGit(['pull', '--no-rebase'], {
       cwd: repoDir,
       env: authenticatedGitEnv(url, persistedUrl),
       sensitiveUrls: [url],
     });
   } catch (error) {
-    abortMerge(repoDir);
+    if (!mergeAlreadyActive) abortMerge(repoDir);
     throw error;
   }
 }
@@ -109,6 +110,19 @@ function abortMerge(repoDir: string): void {
   } catch {
     // Preserve the original Git failure when no merge can be aborted.
   }
+}
+
+function isMergeInProgress(repoDir: string): boolean {
+  try {
+    const mergeHeadPath = runGit(['rev-parse', '--git-path', 'MERGE_HEAD'], { cwd: repoDir });
+    return fs.existsSync(path.resolve(repoDir, mergeHeadPath));
+  } catch {
+    return false;
+  }
+}
+
+function canonicalCacheOwnerPath(value: string): string {
+  return fs.existsSync(value) ? fs.realpathSync.native(value) : path.resolve(value);
 }
 
 function isGitRepo(dir: string): boolean {
@@ -443,9 +457,7 @@ export function removeSource(namespace: string): void {
 
   const value = raw[namespace];
   const effectivePath = resolveEffectivePath(namespace, value);
-  const cacheOwnerPath = fs.existsSync(effectivePath)
-    ? fs.realpathSync.native(effectivePath)
-    : path.resolve(effectivePath);
+  const cacheOwnerPath = canonicalCacheOwnerPath(effectivePath);
 
   // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
@@ -557,6 +569,7 @@ export function updateRemoteSources(
     if (typeof value === 'string') continue;
     if (!isCloneableSource(expandHome(value.url))) continue;
     attemptedUpdate = true;
+    const previousCacheOwnerPath = canonicalCacheOwnerPath(resolveEffectivePath(namespace, value));
 
     try {
       if (!gitChecked) {
@@ -599,6 +612,10 @@ export function updateRemoteSources(
         }
       }
       const effectivePath = resolveEffectivePath(namespace, value);
+      const cacheOwnerPath = canonicalCacheOwnerPath(effectivePath);
+      if (previousCacheOwnerPath !== cacheOwnerPath) {
+        removeMarketplaceEntryCache(namespace, previousCacheOwnerPath);
+      }
       if (getMarketplaceManifestInfo(effectivePath)) {
         refreshMarketplacePluginCache(effectivePath, namespace);
       } else {
