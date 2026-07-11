@@ -409,6 +409,26 @@ export function rotatePluginSourceState(
   return state;
 }
 
+export function replacePluginSourceState(
+  state: PluginSourceState,
+  descriptor: SourceValue | null,
+  descriptorKey: string,
+  marketplacePath: string,
+  retained: Pick<PluginSourceState, 'checkout' | 'subtree' | 'sourceKind'> = {}
+): PluginSourceState {
+  const filePath = statePath(state.namespace, state.configPath);
+  const current = readStateFile(filePath);
+  if (current?.incarnation !== state.incarnation || current.addition || current.removal) {
+    throw new Error(`Plugin source "${state.namespace}" changed before owner rotation.`);
+  }
+  const next = {
+    ...newState(state.namespace, state.configPath, descriptor, descriptorKey, marketplacePath),
+    ...retained,
+  };
+  writeStateFile(filePath, next);
+  return next;
+}
+
 export function pluginSourceStateIsCurrent(state: PluginSourceState): boolean {
   const current = readStateFile(statePath(state.namespace, state.configPath));
   return (
@@ -561,6 +581,78 @@ export function listPluginSourceStates(): PluginSourceState[] {
     if (state) records.push(state);
   }
   return records;
+}
+
+function sourceStateNamespaceHint(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null;
+  const hint = value as Record<string, unknown>;
+  const namespace = hint.namespace;
+  if (
+    typeof namespace !== 'string' ||
+    !namespace ||
+    namespace === '.' ||
+    namespace === '..' ||
+    namespace.includes('/') ||
+    namespace.includes('\\')
+  ) {
+    return null;
+  }
+  return namespace;
+}
+
+function managedNamespaceHint(value: unknown): string | null {
+  const namespace = sourceStateNamespaceHint(value);
+  if (!namespace) return null;
+  const hint = value as Record<string, unknown>;
+  const descriptor = hint.descriptor as Record<string, unknown> | null;
+  const addition = hint.addition as Record<string, unknown> | null;
+  const removal = hint.removal as Record<string, unknown> | null;
+  return hint.checkout !== undefined ||
+    hint.subtree !== undefined ||
+    addition?.kind === 'clone' ||
+    addition?.kind === 'subtree' ||
+    removal?.checkout !== undefined ||
+    removal?.subtree !== undefined ||
+    descriptor?.type === 'clone' ||
+    descriptor?.type === 'subtree'
+    ? namespace
+    : null;
+}
+
+export function listManagedPluginSourceNamespaceHints(): Set<string> {
+  const stateRoot = safeStateRoot(false);
+  const namespaces = new Set<string>();
+  if (!fs.existsSync(stateRoot)) return namespaces;
+  for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const filePath = path.join(stateRoot, entry.name);
+    assertNoStateSymlinks(stateRoot, filePath);
+    let value: unknown;
+    try {
+      value = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    const namespace = managedNamespaceHint(value);
+    if (namespace) namespaces.add(namespace);
+  }
+  return namespaces;
+}
+
+export function listMalformedPluginSourceNamespaceHints(): Set<string> {
+  const stateRoot = safeStateRoot(false);
+  const namespaces = new Set<string>();
+  if (!fs.existsSync(stateRoot)) return namespaces;
+  for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const filePath = path.join(stateRoot, entry.name);
+    assertNoStateSymlinks(stateRoot, filePath);
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const namespace = sourceStateNamespaceHint(value);
+    if (namespace && !parseState(value)) namespaces.add(namespace);
+  }
+  return namespaces;
 }
 
 export function listPendingPluginSourceTransactions(): PluginSourceState[] {

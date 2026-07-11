@@ -42,7 +42,9 @@ export function credentialFreeGitUrl(value: string): string {
     }
   }
 
-  return isScpGitUrl(trimmed) ? trimmed.replace(/[?#].*$/, '') : trimmed;
+  if (!isScpGitUrl(trimmed)) return trimmed;
+  const scp = trimmed.match(/^(?:[^@/:\\\s]+@)?([^:]+):(.+)$/);
+  return scp ? `${scp[1]}:${scp[2].replace(/[?#].*$/, '')}` : trimmed.replace(/[?#].*$/, '');
 }
 
 export function authenticatedGitEnv(

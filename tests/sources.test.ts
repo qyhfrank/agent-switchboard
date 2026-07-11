@@ -11,6 +11,7 @@ import {
   getPluginSourceStateDir,
   getPluginsDir,
   getProfileConfigPath,
+  getProjectConfigPath,
 } from '../src/config/paths.js';
 import {
   addLocalSource,
@@ -1959,7 +1960,12 @@ function createManagedMarketplaceSource(
 function createLayeredSubdirMarketplaceSource(
   asbHome: string,
   namespace: string
-): { checkoutPath: string; lowerMaterialized: string; higherMaterialized: string } {
+): {
+  catalogUrl: string;
+  checkoutPath: string;
+  lowerMaterialized: string;
+  higherMaterialized: string;
+} {
   clearPluginIndexCache();
   const profile = { profile: 'team' };
   const entryRemote = createBareRemote(path.join(asbHome, `${namespace}-entry`));
@@ -2016,7 +2022,12 @@ function createLayeredSubdirMarketplaceSource(
   higherIndex.expand([higherPlugin.id]);
   const higherMaterialized = higherPlugin.meta.sourcePath;
   clearPluginIndexCache();
-  return { checkoutPath, lowerMaterialized, higherMaterialized };
+  return {
+    catalogUrl: catalogRemote.bareRepo,
+    checkoutPath,
+    lowerMaterialized,
+    higherMaterialized,
+  };
 }
 
 async function stopRemovalAtCrashPoint(
@@ -3099,6 +3110,88 @@ test('dry-run relative source readers block checkout removal until consumption e
   }
 });
 
+test('shared checkout updates wait for reader leases on every carrier path', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-shared-source-reader-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  const children: Array<ReturnType<typeof spawn>> = [];
+  try {
+    const namespace = 'shared-reader-owner';
+    createLayeredSubdirMarketplaceSource(asbHome, namespace);
+    const indexModule = pathToFileURL(path.resolve('src/plugins/index.ts')).href;
+    const sourcesModule = pathToFileURL(path.resolve('src/library/sources.ts')).href;
+    const env = { ...process.env, ASB_HOME: asbHome, ASB_AGENTS_HOME: asbHome };
+    const reader = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { buildPluginIndex } from ${JSON.stringify(indexModule)};const index=buildPluginIndex();if(!index.get(${JSON.stringify(`lower-plugin@${namespace}`)}))throw new Error("plugin missing");process.stdout.write("ready\\n");process.stdin.resume();await new Promise(resolve=>process.stdin.on("end",resolve));`,
+      ],
+      { cwd: process.cwd(), env, stdio: ['pipe', 'pipe', 'pipe'] }
+    );
+    children.push(reader);
+    reader.stdout.setEncoding('utf-8');
+    await new Promise<void>((resolve, reject) => {
+      let output = '';
+      reader.stdout.on('data', (chunk) => {
+        output += chunk;
+        if (output.includes('ready\n')) resolve();
+      });
+      reader.on('error', reject);
+      reader.on('close', (code) => {
+        if (!output.includes('ready\n')) reject(new Error(`reader exited before ready: ${code}`));
+      });
+    });
+
+    const updater = spawn(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        '--input-type=module',
+        '--eval',
+        `import { updateRemoteSources } from ${JSON.stringify(sourcesModule)};const result=updateRemoteSources({profile:"team"},${JSON.stringify(namespace)});if(result[0]?.status!=="updated")throw new Error(result[0]?.error??"update failed");`,
+      ],
+      { cwd: process.cwd(), env, stdio: ['ignore', 'ignore', 'pipe'] }
+    );
+    children.push(updater);
+    let updateFinished = false;
+    let updateStderr = '';
+    updater.stderr.setEncoding('utf-8');
+    updater.stderr.on('data', (chunk) => {
+      updateStderr += chunk;
+    });
+    const updateClosed = new Promise<number | null>((resolve, reject) => {
+      updater.on('error', reject);
+      updater.on('close', (code) => {
+        updateFinished = true;
+        resolve(code);
+      });
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    assert.equal(updateFinished, false, updateStderr);
+
+    const readerClosed = new Promise<number | null>((resolve) => reader.once('close', resolve));
+    reader.stdin.end();
+    assert.equal(await readerClosed, 0);
+    assert.equal(await updateClosed, 0, updateStderr);
+  } finally {
+    for (const child of children) child.kill('SIGKILL');
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('addRemoteSource with subdir resolves effective path correctly', () => {
   withTempAsbHome((asbHome) => {
     const bareRepo = path.join(asbHome, 'bare-repo.git');
@@ -4089,6 +4182,27 @@ test('scoped managed sources stay out of unrelated discovery views', () => {
   });
 });
 
+test('malformed lifecycle state still suppresses scoped checkout discovery', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'malformed-scoped-owner';
+    const scope = { profile: 'scoped' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'malformed-state-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }, scope);
+    const stateFile = fs
+      .readdirSync(getPluginSourceStateDir())
+      .map((name) => path.join(getPluginSourceStateDir(), name))
+      .find((filePath) => JSON.parse(fs.readFileSync(filePath, 'utf-8')).namespace === namespace);
+    assert.ok(stateFile);
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
+    fs.writeFileSync(stateFile, `${JSON.stringify({ ...state, version: 999 }, null, 2)}\n`);
+
+    assert.equal(getSourcesRecord()[namespace], undefined);
+    assert.equal(getSourcesRecord(scope)[namespace], path.join(getPluginsDir(), namespace));
+    assert.throws(() => removeSource(namespace, scope), /malformed ownership state/);
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace)), true);
+  });
+});
+
 test('clone publication revalidates the active checkout and preserves late tampering', (t) => {
   withTempAsbHome((asbHome) => {
     const namespace = 'late-clone-tamper';
@@ -4507,6 +4621,262 @@ test('removal recovery transfers a staged subtree to a recorded matching carrier
   }
 });
 
+test('shared subtree updates propagate provenance to every recorded carrier', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'shared-subtree-provenance';
+    const remote = createBareRemote(path.join(path.dirname(asbHome), 'shared-subtree-remote'));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: remote.bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record user carrier'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(remote.bareRepo)}, type = "subtree", ref = "main" }\n`
+    );
+    execFileSync('git', ['add', 'team.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record profile carrier'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const adopted = updateRemoteSources({ profile: 'team' }, namespace);
+    assert.equal(adopted[0]?.status, 'updated', adopted[0]?.error);
+    fs.writeFileSync(path.join(remote.workDir, 'rules', 'v1.md'), '# V2\n');
+    execFileSync('git', ['add', '.'], { cwd: remote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: remote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: remote.workDir, stdio: 'pipe' });
+
+    const profileUpdate = updateRemoteSources({ profile: 'team' }, namespace);
+    const userUpdate = updateRemoteSources(undefined, namespace);
+
+    assert.equal(profileUpdate[0]?.status, 'updated', profileUpdate[0]?.error);
+    assert.equal(userUpdate[0]?.status, 'updated', userUpdate[0]?.error);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), namespace, 'rules', 'v1.md'), 'utf-8'),
+      '# V2\n'
+    );
+    const trees = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      )
+      .filter((state) => state.namespace === namespace)
+      .map((state) => state.subtree?.tree);
+    assert.equal(trees.length, 2);
+    assert.equal(new Set(trees).size, 1);
+  });
+});
+
+test('subtree adoption rejects a conflicting recorded physical owner', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'conflicting-subtree-owner';
+    const remoteA = createBareRemote(path.join(path.dirname(asbHome), 'subtree-remote-a'));
+    const remoteB = createBareRemote(path.join(path.dirname(asbHome), 'subtree-remote-b'));
+    fs.writeFileSync(path.join(remoteB.workDir, 'rules', 'v1.md'), '# Remote B\n');
+    execFileSync('git', ['add', '.'], { cwd: remoteB.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'remote b'],
+      { cwd: remoteB.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: remoteB.workDir, stdio: 'pipe' });
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: remoteA.bareRepo, type: 'subtree', ref: 'main' });
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record user carrier'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(remoteB.bareRepo)}, type = "subtree", ref = "main" }\n`
+    );
+    execFileSync('git', ['add', 'team.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record conflicting carrier'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    const before = fs.readFileSync(
+      path.join(getPluginsDir(), namespace, 'rules', 'v1.md'),
+      'utf-8'
+    );
+
+    const conflicting = updateRemoteSources({ profile: 'team' }, namespace);
+    const original = updateRemoteSources(undefined, namespace);
+
+    assert.equal(conflicting[0]?.status, 'error');
+    assert.match(conflicting[0]?.error ?? '', /owner conflicts/);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), namespace, 'rules', 'v1.md'), 'utf-8'),
+      before
+    );
+    assert.equal(original[0]?.status, 'error');
+    assert.match(original[0]?.error ?? '', /owner conflicts/);
+  });
+});
+
+test('subtree adoption rejects a recorded clone physical owner', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'clone-subtree-owner-conflict';
+    const remote = createBareRemote(path.join(path.dirname(asbHome), 'clone-subtree-remote'));
+    addRemoteSource(namespace, { url: remote.bareRepo, type: 'clone', ref: 'main' });
+    execFileSync('git', ['init', '--initial-branch=main'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['add', '.'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record clone carrier'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(remote.bareRepo)}, type = "subtree", ref = "main" }\n`
+    );
+    execFileSync('git', ['add', 'team.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record subtree carrier'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+
+    const result = updateRemoteSources({ profile: 'team' }, namespace);
+
+    assert.equal(result[0]?.status, 'error');
+    assert.match(result[0]?.error ?? '', /owner conflicts/);
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace, 'rules', 'v1.md')), true);
+  });
+});
+
+test('removing a lower carrier retains an out-of-chain profile checkout and cache', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'out-of-chain-owner';
+    const profile = { profile: 'team' };
+    const { checkoutPath, materializedPath } = createManagedMarketplaceSource(asbHome, namespace);
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8')
+    );
+    const adopted = updateRemoteSources(profile, namespace);
+    assert.equal(adopted[0]?.status, 'updated', adopted[0]?.error);
+
+    removeSource(namespace);
+
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(materializedPath), true);
+    assert.equal(getSourcesRecord(profile)[namespace], checkoutPath);
+    assert.equal(fs.existsSync(getSourcesRecord(profile)[namespace]), true);
+  });
+});
+
+test('removing one profile retains a sibling profile physical owner', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'sibling-profile-owner';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'sibling-profile-remote'));
+    const first = { profile: 'one' };
+    const second = { profile: 'two' };
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' }, first);
+    fs.writeFileSync(
+      getProfileConfigPath('two'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(bareRepo)}, type = "clone", ref = "main" }\n`
+    );
+    const adopted = updateRemoteSources(second, namespace);
+    assert.equal(adopted[0]?.status, 'updated', adopted[0]?.error);
+    const checkout = path.join(getPluginsDir(), namespace);
+
+    removeSource(namespace, first);
+
+    assert.equal(fs.existsSync(checkout), true);
+    assert.equal(getSourcesRecord(second)[namespace], checkout);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      )
+      .filter((state) => state.namespace === namespace);
+    assert.equal(states.length, 1);
+    assert.equal(states[0].configPath, fs.realpathSync.native(getProfileConfigPath('two')));
+  });
+});
+
+test('removing an A-B-A project carrier retains every deeper cache owner', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'three-layer-cache-owner';
+    const projectRoot = path.join(asbHome, 'project');
+    fs.mkdirSync(projectRoot);
+    const { catalogUrl, checkoutPath, lowerMaterialized, higherMaterialized } =
+      createLayeredSubdirMarketplaceSource(asbHome, namespace);
+    fs.writeFileSync(
+      getProjectConfigPath(projectRoot),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(catalogUrl)}, type = "clone", ref = "main", subdir = "lower" }\n`
+    );
+    const scope = { profile: 'team', project: projectRoot };
+    const projectIndex = buildPluginIndex(scope);
+    const projectPlugin = projectIndex.get(`lower-plugin@${namespace}`);
+    assert.ok(projectPlugin);
+    projectIndex.expand([projectPlugin.id]);
+    clearPluginIndexCache();
+
+    removeSource(namespace, scope);
+
+    assert.equal(fs.existsSync(checkoutPath), true);
+    assert.equal(fs.existsSync(lowerMaterialized), true);
+    assert.equal(fs.existsSync(higherMaterialized), true);
+    assert.equal(getSourcesRecord()[namespace], path.join(checkoutPath, 'lower'));
+    assert.equal(
+      getSourcesRecord({ profile: 'team' })[namespace],
+      path.join(checkoutPath, 'higher')
+    );
+  });
+});
+
+test('removing a configured carrier retains a matching direct source cache', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'direct-cache-owner';
+    const sourceRoot = path.join(getPluginsDir(), namespace);
+    const entry = createBareRemote(path.join(asbHome, 'direct-cache-entry'));
+    fs.mkdirSync(path.join(sourceRoot, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(sourceRoot, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: namespace,
+        plugins: [{ name: 'external', source: { source: 'url', url: entry.bareRepo } }],
+      })
+    );
+    let index = buildPluginIndex();
+    let plugin = index.get(`external@${namespace}`);
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    const materialized = plugin.meta.sourcePath;
+    clearPluginIndexCache();
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = ${JSON.stringify(sourceRoot)}\n`
+    );
+    index = buildPluginIndex({ profile: 'team' });
+    plugin = index.get(`external@${namespace}`);
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    clearPluginIndexCache();
+
+    removeSource(namespace, { profile: 'team' });
+
+    assert.equal(getSourcesRecord()[namespace], sourceRoot);
+    assert.equal(fs.existsSync(materialized), true);
+    index = buildPluginIndex();
+    assert.doesNotThrow(() => index.expand([`external@${namespace}`]));
+  });
+});
+
 test('removing an identical higher-layer descriptor retains shared physical state', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
@@ -4580,6 +4950,116 @@ test('inactive higher subdir retirement retains the shared checkout and lower ca
   });
 });
 
+test('same-checkout subdir rotation preserves checkout provenance', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'subdir-rotation';
+    const catalog = createBareRemote(path.join(asbHome, 'subdir-rotation-catalog'));
+    for (const [subdir, pluginName] of [
+      ['lower', 'lower-plugin'],
+      ['higher', 'higher-plugin'],
+    ] as const) {
+      const manifestDir = path.join(catalog.workDir, subdir, '.claude-plugin');
+      const rulesDir = path.join(catalog.workDir, subdir, 'plugins', pluginName, 'rules');
+      fs.mkdirSync(manifestDir, { recursive: true });
+      fs.mkdirSync(rulesDir, { recursive: true });
+      fs.writeFileSync(path.join(rulesDir, 'rule.md'), '# Rule\n');
+      fs.writeFileSync(
+        path.join(manifestDir, 'marketplace.json'),
+        JSON.stringify({
+          name: `${subdir}-catalog`,
+          plugins: [{ name: pluginName, source: `./plugins/${pluginName}` }],
+        })
+      );
+    }
+    execFileSync('git', ['add', '.'], { cwd: catalog.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'subdirs'],
+      { cwd: catalog.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: catalog.workDir, stdio: 'pipe' });
+    addRemoteSource(namespace, {
+      url: catalog.bareRepo,
+      type: 'clone',
+      ref: 'main',
+      subdir: 'lower',
+    });
+    assert.ok(buildPluginIndex().get(`lower-plugin@${namespace}`));
+    clearPluginIndexCache();
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(catalog.bareRepo)}, type = "clone", ref = "main", subdir = "higher" }\n`
+    );
+
+    const rotated = buildPluginIndex();
+
+    assert.ok(rotated.get(`higher-plugin@${namespace}`));
+    assert.equal(rotated.get(`lower-plugin@${namespace}`), undefined);
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace)), true);
+    const states = fs
+      .readdirSync(getPluginSourceStateDir())
+      .filter((name) => name.endsWith('.json'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8'))
+      )
+      .filter((state) => state.namespace === namespace);
+    assert.equal(states.length, 1);
+    assert.ok(states[0].checkout);
+    assert.equal(
+      states[0].marketplacePath,
+      fs.realpathSync.native(path.join(getPluginsDir(), namespace, 'higher'))
+    );
+  });
+});
+
+test('carrier path rotation retains another carrier cache with the same physical key', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'shared-cache-rotation';
+    const entry = createBareRemote(path.join(asbHome, 'shared-cache-entry'));
+    const catalog = path.join(asbHome, 'catalog-a');
+    fs.mkdirSync(path.join(catalog, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(catalog, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: namespace,
+        plugins: [{ name: 'remote-plugin', source: { source: 'url', url: entry.bareRepo } }],
+      })
+    );
+    addLocalSource(namespace, catalog);
+    let index = buildPluginIndex();
+    let plugin = index.get(`remote-plugin@${namespace}`);
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    const materialized = plugin.meta.sourcePath;
+    clearPluginIndexCache();
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = ${JSON.stringify(catalog)}\n`
+    );
+    index = buildPluginIndex({ profile: 'team' });
+    plugin = index.get(`remote-plugin@${namespace}`);
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    clearPluginIndexCache();
+    const replacement = path.join(asbHome, 'catalog-b');
+    fs.mkdirSync(path.join(replacement, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(replacement, 'rules', 'local.md'), '# Local\n');
+    fs.renameSync(entry.bareRepo, `${entry.bareRepo}.offline`);
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = ${JSON.stringify(replacement)}\n`
+    );
+
+    buildPluginIndex({ profile: 'team' });
+
+    assert.equal(fs.existsSync(materialized), true);
+    index = buildPluginIndex();
+    plugin = index.get(`remote-plugin@${namespace}`);
+    assert.ok(plugin);
+    assert.doesNotThrow(() => index.expand([plugin.id]));
+  });
+});
+
 test('removal recovery retains a shared checkout but retires a different subdir cache', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-subdir-owner-recovery-'));
   const asbHome = path.join(root, 'asb-home');
@@ -4626,13 +5106,16 @@ test('removal recovery retains a shared checkout but retires a different subdir 
   }
 });
 
-test('credential-free Git transport keeps authenticated URLs out of arguments and state', (t) => {
+test('credential-free Git transport keeps HTTP and SCP credentials out of Git and state', (t) => {
   withTempAsbHome((asbHome) => {
     const namespace = 'authenticated-transport';
+    const scpNamespace = 'scp-authenticated-transport';
     const { bareRepo } = createBareRemote(path.join(asbHome, 'authenticated-remote'));
     const authenticatedUrl =
       'https://audit-user:audit-password@example.invalid/repo.git?access_token=query-secret#fragment-secret';
     const persistedUrl = 'https://example.invalid/repo.git';
+    const scpAuthenticatedUrl = 'oauth2-secret@example.invalid:team/private.git';
+    const scpPersistedUrl = 'example.invalid:team/private.git';
     assert.equal(credentialFreeGitUrl(authenticatedUrl), persistedUrl);
     assert.equal(
       credentialFreeGitUrl('file://audit-user:audit-password@localhost/tmp/repo.git'),
@@ -4640,8 +5123,9 @@ test('credential-free Git transport keeps authenticated URLs out of arguments an
     );
     assert.equal(
       credentialFreeGitUrl('git@example.com:team/repo.git?token=secret#fragment'),
-      'git@example.com:team/repo.git'
+      'example.com:team/repo.git'
     );
+    assert.equal(credentialFreeGitUrl(scpAuthenticatedUrl), scpPersistedUrl);
 
     const realGit = execFileSync('which', ['git'], { encoding: 'utf-8' }).trim();
     const binDir = path.join(asbHome, 'git-bin');
@@ -4699,6 +5183,11 @@ test('credential-free Git transport keeps authenticated URLs out of arguments an
         type: 'clone',
         ref: 'main',
       });
+      addRemoteSource(scpNamespace, {
+        url: scpAuthenticatedUrl,
+        type: 'clone',
+        ref: 'main',
+      });
     } finally {
       if (previousPath === undefined) delete process.env.PATH;
       else process.env.PATH = previousPath;
@@ -4710,13 +5199,21 @@ test('credential-free Git transport keeps authenticated URLs out of arguments an
       else process.env.ASB_TEST_REAL_GIT = previousRealGit;
     }
 
-    const checkout = path.join(getPluginsDir(), namespace);
-    const gitConfig = fs.readFileSync(path.join(checkout, '.git', 'config'), 'utf-8');
+    const checkouts = [namespace, scpNamespace].map((name) => path.join(getPluginsDir(), name));
+    const secretPattern = /audit-user|audit-password|query-secret|fragment-secret|oauth2-secret/;
+    const config = fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8');
+    assert.match(config, /audit-user:audit-password/);
+    assert.match(config, /oauth2-secret@example\.invalid/);
+    const gitConfig = checkouts
+      .map((checkout) => fs.readFileSync(path.join(checkout, '.git', 'config'), 'utf-8'))
+      .join('\n');
     assert.match(gitConfig, new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.doesNotMatch(gitConfig, /audit-user|audit-password|query-secret|fragment-secret/);
+    assert.match(gitConfig, new RegExp(scpPersistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(gitConfig, secretPattern);
     const argumentsLog = fs.readFileSync(gitLog, 'utf-8');
     assert.match(argumentsLog, new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.doesNotMatch(argumentsLog, /audit-user|audit-password|query-secret|fragment-secret/);
+    assert.match(argumentsLog, new RegExp(scpPersistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.doesNotMatch(argumentsLog, secretPattern);
     const stateFiles = fs
       .readdirSync(getPluginSourceStateDir())
       .filter((name) => name.endsWith('.json'))
@@ -4724,11 +5221,20 @@ test('credential-free Git transport keeps authenticated URLs out of arguments an
     assert.ok(stateFiles.length > 0);
     assert.ok(stateTempModes.length > 0);
     assert.deepEqual(new Set(stateTempModes), new Set([0o600]));
+    const persistedStates: string[] = [];
     for (const stateFile of stateFiles) {
       assert.equal(fs.statSync(stateFile).mode & 0o777, 0o600);
       const persisted = fs.readFileSync(stateFile, 'utf-8');
-      assert.match(persisted, new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-      assert.doesNotMatch(persisted, /audit-user|audit-password|query-secret|fragment-secret/);
+      persistedStates.push(persisted);
+      assert.doesNotMatch(persisted, secretPattern);
     }
+    assert.match(
+      persistedStates.join('\n'),
+      new RegExp(persistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    );
+    assert.match(
+      persistedStates.join('\n'),
+      new RegExp(scpPersistedUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    );
   });
 });
