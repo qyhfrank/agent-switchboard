@@ -451,7 +451,7 @@ A relative marketplace entry resolves inside its source checkout. A `git-subdir`
 
 `asb plugin list` reads catalog metadata without fetching external entries. ASB materializes an external entry when portable plugin expansion or a directly selected component requires its files. A short `ref` selects a same-named branch before a tag; a fully qualified ref is used exactly. Full commit SHA pins are reused as immutable entries, and subdirectory sources use sparse checkout. Refresh replaces a verified entry atomically so a failed fetch leaves the previous materialization usable.
 
-Git credentials supplied in a source URL are used for transport only. ASB removes URL user info, query parameters, and fragments from persisted source and cache metadata and from Git errors.
+Git credentials supplied in a source URL are used for transport only. ASB preserves SSH usernames, but removes passwords, non-SSH user info, query parameters, and fragments from persisted source and cache metadata and from Git errors.
 
 In `asb plugin list --json`, `componentsResolved: false` means an external entry remains metadata-only for that inventory command; its zero component counts are not a declaration that the plugin contains no components.
 

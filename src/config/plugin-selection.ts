@@ -55,6 +55,25 @@ function getApplicationSelection(
   return (app as Record<string, unknown>)[section] as IncrementalSelection | undefined;
 }
 
+export function resolveEffectiveSelection(
+  base: string[],
+  config: SelectionConfig,
+  appId: string,
+  section: PortableComponentSection | 'plugins',
+  normalize?: (ref: string) => string
+): string[] {
+  const normalizeRefs = (refs: string[]) => (normalize ? refs.map(normalize) : [...refs]);
+  const configuredOverride = getApplicationSelection(config, appId, section);
+  const override = configuredOverride
+    ? {
+        enabled: configuredOverride.enabled ? normalizeRefs(configuredOverride.enabled) : undefined,
+        add: configuredOverride.add ? normalizeRefs(configuredOverride.add) : undefined,
+        remove: configuredOverride.remove ? normalizeRefs(configuredOverride.remove) : undefined,
+      }
+    : undefined;
+  return mergeIncrementalSelection(normalizeRefs(base), override);
+}
+
 function unionEffectiveSelections(
   base: string[],
   config: SelectionConfig,
@@ -62,24 +81,12 @@ function unionEffectiveSelections(
   section: PortableComponentSection | 'plugins',
   normalize?: (ref: string) => string
 ): string[] {
-  const normalizeRefs = (refs: string[]) => (normalize ? refs.map(normalize) : [...refs]);
-  const normalizedBase = normalizeRefs(base);
-  if (activeAppIds.length === 0) return normalizedBase;
+  if (activeAppIds.length === 0) return normalize ? base.map(normalize) : [...base];
 
   const result: string[] = [];
   const seen = new Set<string>();
   for (const appId of activeAppIds) {
-    const configuredOverride = getApplicationSelection(config, appId, section);
-    const override = configuredOverride
-      ? {
-          enabled: configuredOverride.enabled
-            ? normalizeRefs(configuredOverride.enabled)
-            : undefined,
-          add: configuredOverride.add ? normalizeRefs(configuredOverride.add) : undefined,
-          remove: configuredOverride.remove ? normalizeRefs(configuredOverride.remove) : undefined,
-        }
-      : undefined;
-    const effective = mergeIncrementalSelection(normalizedBase, override);
+    const effective = resolveEffectiveSelection(base, config, appId, section, normalize);
     for (const id of effective) {
       if (seen.has(id)) continue;
       seen.add(id);

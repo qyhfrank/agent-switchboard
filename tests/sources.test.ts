@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { getPluginsDir } from '../src/config/paths.js';
+import { getMarketplacePluginCacheDir, getPluginsDir } from '../src/config/paths.js';
 import {
   addLocalSource,
   addRemoteSource,
@@ -378,6 +378,33 @@ test('source Git errors redact URL query and fragment credentials', () => {
   });
 });
 
+test('marketplace add CLI does not display credential-bearing Git URLs', () => {
+  withTempAsbHome(() => {
+    const secrets = ['cli-user', 'cli-password', 'query-secret', 'fragment-secret'];
+    const url =
+      'http://cli-user:cli-password@127.0.0.1:1/repo.git?token=query-secret#fragment-secret';
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        path.join(process.cwd(), 'src', 'index.ts'),
+        'plugin',
+        'marketplace',
+        'add',
+        url,
+      ],
+      {
+        env: { ...process.env, FORCE_COLOR: '0' },
+        encoding: 'utf-8',
+      }
+    );
+    assert.notEqual(result.status, 0);
+    const output = `${result.stdout}${result.stderr}`;
+    for (const secret of secrets) assert.equal(output.includes(secret), false);
+  });
+});
+
 test('addRemoteSource preserves an existing auto-discovered plugin on name collision', () => {
   withTempAsbHome((asbHome) => {
     const existingPlugin = path.join(getPluginsDir(), 'existing');
@@ -471,6 +498,43 @@ test('updateRemoteSources pulls latest changes', () => {
     assert.equal(results[0].status, 'updated');
     assert.equal(results[0].namespace, 'update-test');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')));
+  });
+});
+
+test('updateRemoteSources aborts a conflicting clone merge before returning', () => {
+  withTempAsbHome((asbHome) => {
+    const parent = path.join(asbHome, 'conflict-fixture');
+    fs.mkdirSync(parent, { recursive: true });
+    const { bareRepo, workDir } = createBareRemote(parent);
+    addRemoteSource('conflict-source', { url: bareRepo, type: 'clone' });
+    const cloneDir = path.join(getPluginsDir(), 'conflict-source');
+    execFileSync('git', ['config', 'user.name', 'test'], { cwd: cloneDir, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'test@test.com'], {
+      cwd: cloneDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['config', 'pull.rebase', 'false'], { cwd: cloneDir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(cloneDir, 'rules', 'v1.md'), '# Local\n');
+    execFileSync('git', ['add', '.'], { cwd: cloneDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'local'], { cwd: cloneDir, stdio: 'pipe' });
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v1.md'), '# Remote\n');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'remote'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+
+    const results = updateRemoteSources();
+    assert.equal(results[0]?.status, 'error');
+    const mergeHead = execFileSync('git', ['rev-parse', '--git-path', 'MERGE_HEAD'], {
+      cwd: cloneDir,
+      encoding: 'utf-8',
+    }).trim();
+    assert.equal(fs.existsSync(path.resolve(cloneDir, mergeHead)), false);
+    assert.equal(fs.readFileSync(path.join(cloneDir, 'rules', 'v1.md'), 'utf-8'), '# Local\n');
   });
 });
 
@@ -758,6 +822,65 @@ test('removeSource cleans only its marketplace entry cache', () => {
     assert.equal(fs.existsSync(materializedPath), false);
     assert.equal(fs.existsSync(path.join(userPlugin, 'keep.txt')), true);
     assert.equal(fs.existsSync(unrelatedState), true);
+  });
+});
+
+test('removeSource preserves canonical cache ownership for a symlinked remote subdir', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryParent = path.join(asbHome, 'symlink-entry');
+    const catalogParent = path.join(asbHome, 'symlink-catalog');
+    fs.mkdirSync(entryParent, { recursive: true });
+    fs.mkdirSync(catalogParent, { recursive: true });
+    const entryRemote = createBareRemote(entryParent);
+    const catalogRemote = createBareRemote(catalogParent);
+
+    fs.mkdirSync(path.join(entryRemote.workDir, 'plugin', 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(entryRemote.workDir, 'plugin', 'commands', 'remote.md'), 'Remote\n');
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin'],
+      { cwd: entryRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    const catalogDir = path.join(catalogRemote.workDir, 'catalog');
+    fs.mkdirSync(path.join(catalogDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(catalogDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'symlink-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'git-subdir', url: entryRemote.bareRepo, path: 'plugin' },
+          },
+        ],
+      })
+    );
+    fs.symlinkSync('catalog', path.join(catalogRemote.workDir, 'catalog-link'));
+    execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'catalog'],
+      { cwd: catalogRemote.workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+
+    addRemoteSource('symlink-source', {
+      url: catalogRemote.bareRepo,
+      subdir: 'catalog-link',
+      type: 'clone',
+    });
+    const index = buildPluginIndex();
+    index.expand(['remote-plugin@symlink-source']);
+    const derivedRoot = getMarketplacePluginCacheDir();
+    assert.equal(fs.readdirSync(derivedRoot).length, 1);
+
+    removeSource('symlink-source');
+
+    assert.deepEqual(fs.existsSync(derivedRoot) ? fs.readdirSync(derivedRoot) : [], []);
   });
 });
 
