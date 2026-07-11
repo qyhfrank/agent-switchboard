@@ -10,6 +10,7 @@ import {
   getMarketplacePluginCacheDir,
   getPluginSourceLocksDir,
 } from '../config/paths.js';
+import { authenticatedGitEnv, credentialFreeGitUrl } from './git-identity.js';
 import { marketplaceGitFetchTargets, normalizeMarketplaceGitRef } from './git-ref.js';
 
 export interface MarketplaceEntryCacheRequest {
@@ -65,10 +66,11 @@ interface MarketplacePathIdentity {
 }
 
 interface MarketplaceMaterializationStageClaim {
-  version: 1;
+  version: 1 | 2;
   token: string;
   ownerIdentity: string;
   stageName: string;
+  binding?: MarketplacePathIdentity;
 }
 
 interface MarketplaceMaterializationStageBinding {
@@ -301,6 +303,30 @@ function writeDurableRecord(filePath: string, value: unknown): void {
   syncDirectory(path.dirname(filePath));
 }
 
+function rewriteDurableBinding(
+  filePath: string,
+  value: unknown,
+  expectedIdentity: MarketplacePathIdentity
+): void {
+  const descriptor = fs.openSync(filePath, 'r+');
+  try {
+    const stat = fs.fstatSync(descriptor, { bigint: true });
+    const identity = { device: stat.dev.toString(), inode: stat.ino.toString() };
+    if (!samePathIdentity(identity, expectedIdentity)) {
+      throw new Error(`Marketplace cache stage binding changed: ${filePath}`);
+    }
+    fs.ftruncateSync(descriptor, 0);
+    fs.writeFileSync(descriptor, `${JSON.stringify(value)}\n`);
+    fs.fsyncSync(descriptor);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  if (!samePathIdentity(pathIdentity(filePath), expectedIdentity)) {
+    throw new Error(`Marketplace cache stage binding changed: ${filePath}`);
+  }
+  syncDirectory(path.dirname(filePath));
+}
+
 function stagePaths(sourcePath: string, token: string): MarketplaceMaterializationStage {
   const claimPath = path.join(sourcePath, `${MATERIALIZATION_STAGE_CLAIM_PREFIX}${token}.json`);
   return {
@@ -326,10 +352,12 @@ function readStageClaim(
       fs.readFileSync(resolvedClaimPath, 'utf-8')
     ) as MarketplaceMaterializationStageClaim;
     if (
-      claim.version !== 1 ||
+      (claim.version !== 1 && claim.version !== 2) ||
       !UUID_PATTERN.test(claim.token) ||
       claim.ownerIdentity !== ownerIdentity ||
       claim.stageName !== `.tmp-${claim.token}` ||
+      (claim.version === 1 && claim.binding !== undefined) ||
+      (claim.version === 2 && !validPathIdentity(claim.binding)) ||
       path.basename(resolvedClaimPath) !==
         `${MATERIALIZATION_STAGE_CLAIM_PREFIX}${claim.token}.json`
     ) {
@@ -385,12 +413,29 @@ function recoverMaterializationStage(
   if (!claim) return;
   const paths = stagePaths(sourcePath, claim.value.token);
   if (path.resolve(paths.claimPath) !== path.resolve(claimPath)) return;
-  const binding = readStageBinding(paths.bindingPath, claim.value.token, claim.identity);
+  const expectedBinding = claim.value.version === 2 ? claim.value.binding : undefined;
+  let sealedBindingIdentity: MarketplacePathIdentity | undefined;
+  try {
+    if (expectedBinding && samePathIdentity(pathIdentity(paths.bindingPath), expectedBinding)) {
+      sealedBindingIdentity = expectedBinding;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  const observedBinding = readStageBinding(paths.bindingPath, claim.value.token, claim.identity);
+  const binding =
+    sealedBindingIdentity &&
+    observedBinding &&
+    samePathIdentity(observedBinding.identity, sealedBindingIdentity)
+      ? observedBinding
+      : null;
+  let bindingToRemove: MarketplacePathIdentity | undefined;
   let discardClaim = false;
   try {
     const stageStat = fs.lstatSync(paths.stagePath);
     if (!stageStat.isDirectory() || stageStat.isSymbolicLink()) {
       discardClaim = true;
+      bindingToRemove = sealedBindingIdentity;
     } else if (binding && samePathIdentity(pathIdentity(paths.stagePath), binding.value.stage)) {
       assertNoCacheSymlinks(cacheRoot, paths.stagePath);
       const currentClaim = readStageClaim(sourcePath, claimPath, ownerIdentity);
@@ -401,30 +446,52 @@ function recoverMaterializationStage(
         currentClaim &&
         currentBinding &&
         samePathIdentity(currentClaim.identity, claim.identity) &&
+        currentClaim.value.version === 2 &&
+        currentClaim.value.binding &&
+        samePathIdentity(currentClaim.value.binding, binding.identity) &&
         samePathIdentity(currentBinding.identity, binding.identity) &&
+        samePathIdentity(currentBinding.value.stage, binding.value.stage) &&
         samePathIdentity(pathIdentity(paths.stagePath), binding.value.stage)
       ) {
         fs.rmSync(paths.stagePath, { recursive: true, force: true });
         discardClaim = true;
+        bindingToRemove = binding.identity;
       }
-    } else if (!binding) {
+    } else {
+      let removedEmptyStage = false;
       try {
         fs.rmdirSync(paths.stagePath);
-        discardClaim = true;
+        removedEmptyStage = true;
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
         if (code !== 'ENOTEMPTY' && code !== 'EEXIST') throw error;
-        discardClaim = true;
       }
-    } else {
       discardClaim = true;
+      bindingToRemove = sealedBindingIdentity;
+      if (removedEmptyStage && !sealedBindingIdentity && observedBinding) {
+        const currentClaim = readStageClaim(sourcePath, claimPath, ownerIdentity);
+        const currentBinding = currentClaim
+          ? readStageBinding(paths.bindingPath, currentClaim.value.token, currentClaim.identity)
+          : null;
+        if (
+          currentClaim &&
+          currentBinding &&
+          samePathIdentity(currentClaim.identity, claim.identity) &&
+          samePathIdentity(currentBinding.identity, observedBinding.identity) &&
+          samePathIdentity(currentBinding.value.stage, observedBinding.value.stage)
+        ) {
+          bindingToRemove = observedBinding.identity;
+        }
+      }
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') discardClaim = true;
-    else throw error;
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      discardClaim = true;
+      bindingToRemove = sealedBindingIdentity;
+    } else throw error;
   }
   if (!discardClaim) return;
-  if (binding) unlinkIfIdentity(paths.bindingPath, binding.identity);
+  if (bindingToRemove) unlinkIfIdentity(paths.bindingPath, bindingToRemove);
   unlinkIfIdentity(claimPath, claim.identity);
   syncDirectory(sourcePath);
 }
@@ -460,40 +527,51 @@ function prepareMaterializationStage(
   assertNoCacheSymlinks(cacheRoot, paths.claimPath);
   assertNoCacheSymlinks(cacheRoot, paths.bindingPath);
   assertNoCacheSymlinks(cacheRoot, paths.stagePath);
+  writeDurableRecord(paths.bindingPath, { version: 0, token });
+  const bindingIdentity = pathIdentity(paths.bindingPath);
   const claim: MarketplaceMaterializationStageClaim = {
-    version: 1,
+    version: 2,
     token,
     ownerIdentity,
     stageName: path.basename(paths.stagePath),
+    binding: bindingIdentity,
   };
-  writeDurableRecord(paths.claimPath, claim);
-  const claimIdentity = pathIdentity(paths.claimPath);
-  let stageCreated = false;
+  let claimIdentity: MarketplacePathIdentity | undefined;
   try {
+    writeDurableRecord(paths.claimPath, claim);
+    claimIdentity = pathIdentity(paths.claimPath);
     fs.mkdirSync(paths.stagePath);
-    stageCreated = true;
     const binding: MarketplaceMaterializationStageBinding = {
       version: 1,
       token,
       claim: claimIdentity,
       stage: pathIdentity(paths.stagePath),
     };
-    writeDurableRecord(paths.bindingPath, binding);
+    rewriteDurableBinding(paths.bindingPath, binding, bindingIdentity);
     const observedClaim = readStageClaim(sourcePath, paths.claimPath, ownerIdentity);
+    const observedBinding = observedClaim
+      ? readStageBinding(paths.bindingPath, token, observedClaim.identity)
+      : null;
     if (
       !observedClaim ||
       !samePathIdentity(observedClaim.identity, claimIdentity) ||
-      !readStageBinding(paths.bindingPath, token, claimIdentity) ||
+      observedClaim.value.version !== 2 ||
+      !observedClaim.value.binding ||
+      !samePathIdentity(observedClaim.value.binding, bindingIdentity) ||
+      !observedBinding ||
+      !samePathIdentity(observedBinding.identity, bindingIdentity) ||
+      !samePathIdentity(observedBinding.value.claim, claimIdentity) ||
+      !samePathIdentity(observedBinding.value.stage, binding.stage) ||
       !samePathIdentity(pathIdentity(paths.stagePath), binding.stage)
     ) {
       throw new Error(`Marketplace cache stage claim changed: ${paths.stagePath}`);
     }
     return paths;
   } catch (error) {
-    if (stageCreated) {
+    if (claimIdentity) {
       recoverMaterializationStage(cacheRoot, sourcePath, paths.claimPath, ownerIdentity);
     } else {
-      unlinkIfIdentity(paths.claimPath, claimIdentity);
+      unlinkIfIdentity(paths.bindingPath, bindingIdentity);
       syncDirectory(sourcePath);
     }
     throw error;
@@ -751,41 +829,13 @@ function resolveInside(root: string, subdir: string | undefined): string {
   return resolved;
 }
 
-function credentialFreeUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    url.username = '';
-    url.password = '';
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return value.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/i, '$1').replace(/[?#].*$/, '');
-  }
-}
-
-function authenticatedGitEnv(
-  authenticatedUrl: string,
-  persistedUrl: string
-): NodeJS.ProcessEnv | undefined {
-  if (authenticatedUrl === persistedUrl) return undefined;
-  const configuredCount = Number.parseInt(process.env.GIT_CONFIG_COUNT ?? '0', 10);
-  const index = Number.isSafeInteger(configuredCount) && configuredCount >= 0 ? configuredCount : 0;
-  return {
-    ...process.env,
-    GIT_CONFIG_COUNT: String(index + 1),
-    [`GIT_CONFIG_KEY_${index}`]: `url.${authenticatedUrl}.insteadOf`,
-    [`GIT_CONFIG_VALUE_${index}`]: persistedUrl,
-  };
-}
-
 function checkoutRequest(
   request: MarketplaceEntryCacheRequest,
   repoPath: string
 ): { commit: string; pluginPath: string } {
   fs.mkdirSync(repoPath, { recursive: true });
   runGit(['init'], repoPath);
-  const persistedUrl = credentialFreeUrl(request.url);
+  const persistedUrl = credentialFreeGitUrl(request.url);
   const transportEnv = authenticatedGitEnv(request.url, persistedUrl);
   runGit(['remote', 'add', 'origin', persistedUrl], repoPath);
 
@@ -886,14 +936,33 @@ function cachedMaterialization(
     metadata.sourceName !== request.sourceName ||
     metadata.marketplacePath !== request.marketplacePath ||
     metadata.pluginName !== request.pluginName ||
-    !fs.existsSync(path.join(repoPath, '.git'))
+    metadata.ref !== request.ref ||
+    metadata.sha !== request.sha ||
+    metadata.subdir !== request.subdir
   ) {
     return null;
   }
   try {
-    assertNoCacheSymlinks(configuredCacheRoot(), path.join(repoPath, '.git'));
-    if (runGit(['rev-parse', 'HEAD'], repoPath) !== metadata.commit) return null;
-    if (runGit(['remote', 'get-url', 'origin'], repoPath) !== credentialFreeUrl(request.url)) {
+    const gitPath = path.join(repoPath, '.git');
+    if (!fs.lstatSync(gitPath).isDirectory()) return null;
+    assertNoCacheSymlinks(configuredCacheRoot(), gitPath);
+    const expectedRepoPath = fs.realpathSync.native(repoPath);
+    const expectedGitPath = fs.realpathSync.native(gitPath);
+    if (
+      fs.realpathSync.native(runGit(['rev-parse', '--show-toplevel'], repoPath)) !==
+      expectedRepoPath
+    ) {
+      return null;
+    }
+    if (
+      fs.realpathSync.native(runGit(['rev-parse', '--absolute-git-dir'], repoPath)) !==
+      expectedGitPath
+    ) {
+      return null;
+    }
+    const head = runGit(['rev-parse', 'HEAD'], repoPath);
+    if (head !== metadata.commit || (request.sha && head !== request.sha)) return null;
+    if (runGit(['remote', 'get-url', 'origin'], repoPath) !== credentialFreeGitUrl(request.url)) {
       return null;
     }
     if (!selectedCheckoutIsClean(repoPath, request.subdir)) return null;
@@ -1166,6 +1235,7 @@ export function refreshMarketplaceEntryCache(
 
 export async function withTemporaryMarketplaceEntryCache<T>(action: () => Promise<T>): Promise<T> {
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-marketplace-cache-'));
+  const leaseSnapshot = captureMarketplaceCacheLeaseSnapshot();
   const sourceLockRoot = getPluginSourceLocksDir();
   const stateRoot = path.dirname(sourceLockRoot);
   const sourceLockRootExisted = fs.existsSync(sourceLockRoot);
@@ -1173,7 +1243,7 @@ export async function withTemporaryMarketplaceEntryCache<T>(action: () => Promis
   try {
     return await temporaryCacheRoot.run(path.join(tempRoot, 'marketplace-plugins'), action);
   } finally {
-    releaseMarketplaceCacheLeases();
+    releaseMarketplaceCacheLeasesAfter(leaseSnapshot);
     fs.rmSync(tempRoot, { recursive: true, force: true });
     if (!sourceLockRootExisted) {
       try {
