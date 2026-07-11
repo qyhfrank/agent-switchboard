@@ -36,7 +36,12 @@ function credentialValues(value: string): string[] {
         const separator = part.indexOf('=');
         return separator >= 0 ? part.slice(separator + 1) : part;
       });
-    const values = [url.password, ...rawQueryValues, url.hash.slice(1)];
+    const values = [
+      url.password,
+      ...rawQueryValues,
+      ...url.searchParams.values(),
+      url.hash.slice(1),
+    ];
     if (url.protocol !== 'ssh:') values.push(url.username);
     return [...new Set(values.flatMap((item) => [item, decoded(item)]).filter(Boolean))];
   } catch {
