@@ -414,7 +414,7 @@ test('failed refresh preserves the last verified generation and removes temporar
   });
 });
 
-test('retry reclaims an empty stage before its binding is completed', () => {
+test('retry reclaims a pre-claim binding and empty stage', () => {
   withTempAsbHome((asbHome) => {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
@@ -456,22 +456,23 @@ test('retry reclaims an empty stage before its binding is completed', () => {
 
     const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
     const sourcePath = path.join(cacheRoot, fs.readdirSync(cacheRoot)[0]);
-    const intentPath = path.join(
-      sourcePath,
-      fs
-        .readdirSync(sourcePath)
-        .find((name) => name.startsWith('.stage-claim-') && name.endsWith('.json')) ?? ''
-    );
-    const intent = JSON.parse(fs.readFileSync(intentPath, 'utf-8'));
-    const ownedStage = path.join(sourcePath, intent.stageName);
+    const bindingName = fs
+      .readdirSync(sourcePath)
+      .find((name) => name.startsWith('.stage-claim-') && name.endsWith('.json.ready'));
+    assert.ok(bindingName);
+    const bindingPath = path.join(sourcePath, bindingName);
+    const binding = JSON.parse(fs.readFileSync(bindingPath, 'utf-8'));
+    const claimPath = bindingPath.slice(0, -'.ready'.length);
+    const ownedStage = path.join(sourcePath, `.tmp-${binding.token}`);
+    assert.equal(binding.version, 0);
+    assert.equal(fs.existsSync(claimPath), false);
     assert.deepEqual(fs.readdirSync(ownedStage), []);
-    assert.deepEqual(intent.binding, fileIdentity(`${intentPath}.ready`));
 
     const materialized = materializeMarketplaceEntry(request);
 
     assert.equal(fs.existsSync(ownedStage), false);
-    assert.equal(fs.existsSync(intentPath), false);
-    assert.equal(fs.existsSync(`${intentPath}.ready`), false);
+    assert.equal(fs.existsSync(claimPath), false);
+    assert.equal(fs.existsSync(bindingPath), false);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
 });
@@ -641,6 +642,47 @@ test('retry preserves a forged ready-stage pair not sealed by the original claim
 
     assert.equal(fs.readFileSync(path.join(interrupted.stagePath, 'sentinel'), 'utf-8'), 'keep');
     assert.equal(fs.existsSync(bindingPath), true);
+    assert.equal(fs.existsSync(interrupted.intentPath), false);
+    assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
+  });
+});
+
+test('retry preserves a stage replacement when its binding is rewritten in place', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const interrupted = interruptReadyMaterialization(asbHome, request);
+    const bindingPath = `${interrupted.intentPath}.ready`;
+    const claim = JSON.parse(fs.readFileSync(interrupted.intentPath, 'utf-8'));
+    const bindingIdentity = fileIdentity(bindingPath);
+    assert.deepEqual(claim.stage, fileIdentity(interrupted.stagePath));
+
+    fs.renameSync(interrupted.stagePath, path.join(asbHome, 'original-ready-stage'));
+    fs.mkdirSync(interrupted.stagePath);
+    fs.writeFileSync(path.join(interrupted.stagePath, 'sentinel'), 'keep');
+    fs.writeFileSync(
+      bindingPath,
+      `${JSON.stringify({
+        version: 1,
+        token: claim.token,
+        claim: fileIdentity(interrupted.intentPath),
+        stage: fileIdentity(interrupted.stagePath),
+      })}\n`
+    );
+    assert.deepEqual(fileIdentity(bindingPath), bindingIdentity);
+
+    const materialized = materializeMarketplaceEntry(request);
+
+    assert.equal(fs.readFileSync(path.join(interrupted.stagePath, 'sentinel'), 'utf-8'), 'keep');
+    assert.equal(fs.existsSync(bindingPath), false);
     assert.equal(fs.existsSync(interrupted.intentPath), false);
     assert.equal(fs.readFileSync(path.join(materialized.pluginPath, 'VERSION'), 'utf-8'), 'v1\n');
   });
@@ -828,6 +870,68 @@ test('sha-pinned cache hits require HEAD itself to equal the full pin', () => {
       JSON.parse(fs.readFileSync(metadataPath, 'utf-8')).generation,
       metadata.generation + 1
     );
+  });
+});
+
+test('ref-only and default-ref cache hits bind HEAD to the fetched commit', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    const mainSha = writePluginVersion(remote, 'main');
+    execFileSync('git', ['checkout', '-b', 'side'], { cwd: remote.workDir, stdio: 'pipe' });
+    const sideSha = writePluginVersion(remote, 'side-only');
+    execFileSync('git', ['push', 'origin', 'side'], { cwd: remote.workDir, stdio: 'pipe' });
+    execFileSync('git', ['checkout', 'main'], { cwd: remote.workDir, stdio: 'pipe' });
+
+    for (const selector of [
+      { name: 'ref-only', ref: 'main' },
+      { name: 'default-ref', ref: undefined },
+    ]) {
+      const request: MarketplaceEntryCacheRequest = {
+        sourceName: 'catalog',
+        marketplacePath: path.join(asbHome, 'catalog'),
+        pluginName: `remote-plugin-${selector.name}`,
+        url: remote.bareRepo,
+        ref: selector.ref,
+        subdir: 'packages/plugin',
+      };
+      const first = materializeMarketplaceEntry(request);
+      const metadataPath = path.join(first.entryPath, 'entry.json');
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf-8'));
+      execFileSync('git', ['fetch', '--depth', '1', 'origin', sideSha], {
+        cwd: first.repoPath,
+        stdio: 'pipe',
+      });
+      execFileSync('git', ['checkout', '--detach', sideSha], {
+        cwd: first.repoPath,
+        stdio: 'pipe',
+      });
+      fs.writeFileSync(
+        metadataPath,
+        `${JSON.stringify({ ...metadata, commit: sideSha }, null, 2)}\n`
+      );
+
+      const rebuilt = materializeMarketplaceEntry(request);
+
+      assert.equal(rebuilt.commit, mainSha, selector.name);
+      assert.equal(
+        fs.readFileSync(path.join(rebuilt.pluginPath, 'VERSION'), 'utf-8'),
+        'main\n',
+        selector.name
+      );
+      assert.equal(
+        JSON.parse(fs.readFileSync(metadataPath, 'utf-8')).generation,
+        metadata.generation + 1,
+        selector.name
+      );
+
+      const offlineRepo = `${remote.bareRepo}.${selector.name}.offline`;
+      fs.renameSync(remote.bareRepo, offlineRepo);
+      try {
+        assert.equal(materializeMarketplaceEntry(request).commit, mainSha, selector.name);
+      } finally {
+        fs.renameSync(offlineRepo, remote.bareRepo);
+      }
+    }
   });
 });
 
@@ -1187,7 +1291,33 @@ test('lease rollback releases only locks acquired after its snapshot', () => {
   });
 });
 
-test('temporary cache cleanup preserves leases held before its context', async () => {
+test('lease rollback releases a replacement lease at the same lock path', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    writePluginVersion(remote, 'v1');
+    const request: MarketplaceEntryCacheRequest = {
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    };
+    const first = materializeMarketplaceEntry(request);
+    const lockPath = sourceLockPathForEntry(first.entryPath);
+    const firstOwner = JSON.parse(fs.readFileSync(lockPath, 'utf-8')).token;
+    const snapshot = captureMarketplaceCacheLeaseSnapshot();
+    withMarketplaceSourceLock(request.sourceName, request.marketplacePath, () => {});
+    materializeMarketplaceEntry(request);
+    assert.notEqual(JSON.parse(fs.readFileSync(lockPath, 'utf-8')).token, firstOwner);
+
+    releaseMarketplaceCacheLeasesAfter(snapshot);
+
+    assert.equal(fs.existsSync(lockPath), false);
+  });
+});
+
+test('temporary cache cleanup preserves untouched leases and releases replacements', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-cache-temporary-lease-'));
   const asbHome = path.join(root, 'asb-home');
   fs.mkdirSync(asbHome, { recursive: true });
@@ -1198,20 +1328,28 @@ test('temporary cache cleanup preserves leases held before its context', async (
   try {
     const remote = createGitFixture(asbHome, 'plugin-remote');
     writePluginVersion(remote, 'v1');
-    const materialized = materializeMarketplaceEntry({
+    const request: MarketplaceEntryCacheRequest = {
       sourceName: 'catalog',
       marketplacePath: path.join(asbHome, 'catalog'),
       pluginName: 'remote-plugin',
       url: remote.bareRepo,
       ref: 'main',
       subdir: 'packages/plugin',
-    });
+    };
+    const materialized = materializeMarketplaceEntry(request);
     const lockPath = sourceLockPathForEntry(materialized.entryPath);
     assert.equal(fs.existsSync(lockPath), true);
 
     await withTemporaryMarketplaceEntryCache(async () => {});
 
     assert.equal(fs.existsSync(lockPath), true);
+
+    await withTemporaryMarketplaceEntryCache(async () => {
+      withMarketplaceSourceLock(request.sourceName, request.marketplacePath, () => {});
+      materializeMarketplaceEntry(request);
+    });
+
+    assert.equal(fs.existsSync(lockPath), false);
   } finally {
     releaseMarketplaceCacheLeases();
     if (previousAsbHome === undefined) delete process.env.ASB_HOME;
