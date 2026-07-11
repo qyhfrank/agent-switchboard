@@ -33,7 +33,10 @@ function createGitFixture(asbHome: string, name: string): GitFixture {
 function commitAndPush(fixture: GitFixture, message: string): string {
   execFileSync('git', ['add', '.'], { cwd: fixture.workDir, stdio: 'pipe' });
   execFileSync('git', ['commit', '-m', message], { cwd: fixture.workDir, stdio: 'pipe' });
-  execFileSync('git', ['push', 'origin', 'main'], { cwd: fixture.workDir, stdio: 'pipe' });
+  execFileSync('git', ['push', 'origin', 'refs/heads/main'], {
+    cwd: fixture.workDir,
+    stdio: 'pipe',
+  });
   return execFileSync('git', ['rev-parse', 'HEAD'], {
     cwd: fixture.workDir,
     encoding: 'utf-8',
@@ -195,6 +198,86 @@ test('sha pins require full object IDs', () => {
       /full 40- or 64-character object ID/
     );
     assert.equal(fs.existsSync(path.join(asbHome, 'state')), false);
+  });
+});
+
+test('short refs prefer a same-named branch and fall back to a tag', () => {
+  withTempAsbHome((asbHome) => {
+    const remote = createGitFixture(asbHome, 'plugin-remote');
+    const tagSha = writePluginVersion(remote, 'tag');
+    execFileSync('git', ['tag', 'main', tagSha], {
+      cwd: remote.workDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['push', 'origin', 'refs/tags/main'], {
+      cwd: remote.workDir,
+      stdio: 'pipe',
+    });
+    const branchSha = writePluginVersion(remote, 'branch');
+
+    const branch = materializeMarketplaceEntry({
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'branch-plugin',
+      url: remote.bareRepo,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    });
+    assert.equal(branch.commit, branchSha);
+    assert.equal(fs.readFileSync(path.join(branch.pluginPath, 'VERSION'), 'utf-8'), 'branch\n');
+
+    execFileSync('git', ['tag', 'release-only', branchSha], {
+      cwd: remote.workDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release-only'], {
+      cwd: remote.workDir,
+      stdio: 'pipe',
+    });
+    const tag = materializeMarketplaceEntry({
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'tag-plugin',
+      url: remote.bareRepo,
+      ref: 'release-only',
+      subdir: 'packages/plugin',
+    });
+    assert.equal(tag.commit, branchSha);
+  });
+});
+
+test('git errors redact URL credentials and successful fetches do not persist them', () => {
+  withTempAsbHome((asbHome) => {
+    const errorSecret = 'test-query-secret';
+    assert.throws(
+      () =>
+        materializeMarketplaceEntry({
+          sourceName: 'catalog',
+          marketplacePath: path.join(asbHome, 'catalog'),
+          pluginName: 'broken-plugin',
+          url: `http://127.0.0.1:1/repo.git?access_token=${errorSecret}`,
+          ref: 'main',
+        }),
+      (error: unknown) => error instanceof Error && !error.message.includes(errorSecret)
+    );
+
+    const remote = createGitFixture(asbHome, 'credential-remote');
+    writePluginVersion(remote, 'v1');
+    const persistedSecret = 'test-password';
+    const materialized = materializeMarketplaceEntry({
+      sourceName: 'catalog',
+      marketplacePath: path.join(asbHome, 'catalog'),
+      pluginName: 'remote-plugin',
+      url: `file://test-user:${persistedSecret}@localhost${remote.bareRepo}`,
+      ref: 'main',
+      subdir: 'packages/plugin',
+    });
+    const gitDir = path.join(materialized.repoPath, '.git');
+    for (const relative of fs.readdirSync(gitDir, { recursive: true })) {
+      const candidate = path.join(gitDir, String(relative));
+      if (!fs.lstatSync(candidate).isFile()) continue;
+      assert.equal(fs.readFileSync(candidate).includes(persistedSecret), false);
+    }
   });
 });
 

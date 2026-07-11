@@ -323,10 +323,10 @@ function resolvePluginDir(
 
   const gitSource = getGitSource(resolution);
   if (gitSource) {
+    if (!materializeRemote) return undefined;
     if (canReuseMarketplaceCheckout(resolution, gitSource.url)) {
       return gitSource.subdir ? resolveInside(marketplaceRoot, gitSource.subdir) : marketplaceRoot;
     }
-    if (!materializeRemote) return undefined;
     return materializeMarketplaceEntry(toCacheRequest(resolution, gitSource)).pluginPath;
   }
 

@@ -14,6 +14,11 @@ import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
 import {
+  authenticatedGitEnv,
+  credentialFreeGitUrl,
+  redactGitCredentials,
+} from '../marketplace/git-transport.js';
+import {
   getMarketplaceManifestInfo,
   getPluginManifestInfo,
   refreshMarketplacePluginCache,
@@ -44,7 +49,7 @@ function markSourcesChanged(): void {
 
 // ── Git utilities ──────────────────────────────────────────────────
 
-function runGit(args: string[], options?: { cwd?: string }): string {
+function runGit(args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv }): string {
   try {
     return execFileSync('git', args, {
       ...options,
@@ -59,7 +64,9 @@ function runGit(args: string[], options?: { cwd?: string }): string {
         ? execError.stderr.trim()
         : (execError.stderr?.toString().trim() ?? '');
     throw new Error(
-      `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
+      redactGitCredentials(
+        `git ${args[0]} failed: ${stderr || (error instanceof Error ? error.message : String(error))}`
+      )
     );
   }
 }
@@ -80,20 +87,30 @@ function gitClone(url: string, targetDir: string, ref?: string): void {
 
   const args = ['clone', '--depth', '1'];
   if (ref) args.push('--branch', ref);
-  args.push(url, targetDir);
-  runGit(args);
+  const persistedUrl = credentialFreeGitUrl(url);
+  args.push(persistedUrl, targetDir);
+  runGit(args, { env: authenticatedGitEnv(url, persistedUrl) });
 }
 
-function gitPull(repoDir: string): void {
-  runGit(['pull'], { cwd: repoDir });
+function gitPull(repoDir: string, url: string): void {
+  const persistedUrl = credentialFreeGitUrl(url);
+  runGit(['pull'], { cwd: repoDir, env: authenticatedGitEnv(url, persistedUrl) });
 }
 
 function gitSubtreeAdd(repoRoot: string, prefix: string, url: string, ref: string): void {
-  runGit(['subtree', 'add', '--prefix', prefix, url, ref], { cwd: repoRoot });
+  const persistedUrl = credentialFreeGitUrl(url);
+  runGit(['subtree', 'add', '--prefix', prefix, persistedUrl, ref], {
+    cwd: repoRoot,
+    env: authenticatedGitEnv(url, persistedUrl),
+  });
 }
 
 function gitSubtreePull(repoRoot: string, prefix: string, url: string, ref: string): void {
-  runGit(['subtree', 'pull', '--prefix', prefix, url, ref], { cwd: repoRoot });
+  const persistedUrl = credentialFreeGitUrl(url);
+  runGit(['subtree', 'pull', '--prefix', prefix, persistedUrl, ref], {
+    cwd: repoRoot,
+    env: authenticatedGitEnv(url, persistedUrl),
+  });
 }
 
 function isGitRepo(dir: string): boolean {
@@ -376,7 +393,10 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
     gitClone(expandHome(remote.url), cloneDir, remote.ref);
   }
 
-  const configValue: RemoteSource = { url: remote.url, type: remote.type };
+  const configValue: RemoteSource = {
+    url: credentialFreeGitUrl(remote.url),
+    type: remote.type,
+  };
   if (remote.ref) configValue.ref = remote.ref;
   if (remote.subdir) configValue.subdir = remote.subdir;
 
@@ -580,7 +600,7 @@ export function updateRemoteSources(
         if (!fs.existsSync(gitDir)) {
           gitClone(expandHome(value.url), cloneDir, value.ref);
         } else {
-          gitPull(cloneDir);
+          gitPull(cloneDir, value.url);
         }
       }
       const effectivePath = resolveEffectivePath(namespace, value);

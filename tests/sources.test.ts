@@ -120,6 +120,24 @@ test('addLocalSource creates local source and getSourcesRecord returns it', () =
   });
 });
 
+test('source config updates preserve a symlinked config carrier', () => {
+  withTempAsbHome((asbHome) => {
+    const configPath = path.join(asbHome, 'config.toml');
+    const targetPath = path.join(asbHome, 'shared', 'config.toml');
+    const libDir = path.join(asbHome, 'symlinked-config-lib');
+    fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+    fs.mkdirSync(path.join(libDir, 'rules'), { recursive: true });
+    fs.writeFileSync(targetPath, '[plugins]\nenabled = []\n');
+    fs.rmSync(configPath, { force: true });
+    fs.symlinkSync(targetPath, configPath);
+
+    addLocalSource('symlinked-config', libDir);
+
+    assert.equal(fs.lstatSync(configPath).isSymbolicLink(), true);
+    assert.match(fs.readFileSync(targetPath, 'utf-8'), /symlinked-config/);
+  });
+});
+
 test('addLocalSource rejects duplicate namespace', () => {
   withTempAsbHome((asbHome) => {
     const libDir = path.join(asbHome, 'test-lib');
@@ -340,6 +358,23 @@ test('addRemoteSource clones a local git repo and saves config', () => {
     const src = sources.find((s) => s.namespace === 'test-remote');
     assert.ok(src?.remote);
     assert.equal(src.remote.url, bareRepo);
+  });
+});
+
+test('source Git errors redact URL query and fragment credentials', () => {
+  withTempAsbHome(() => {
+    assert.throws(
+      () =>
+        addRemoteSource('secret-source', {
+          url: 'http://127.0.0.1:1/repo.git?access_token=query-secret#fragment-secret',
+          type: 'clone',
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.doesNotMatch(error.message, /query-secret|fragment-secret/);
+        return true;
+      }
+    );
   });
 });
 
