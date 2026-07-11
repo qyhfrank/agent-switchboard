@@ -551,24 +551,18 @@ Other scripts: `pnpm dev` (tsx), `pnpm test`, `pnpm lint`, `pnpm typecheck`.
 
 ### Releasing
 
-Use the release script instead of manually tagging:
+Publish patch releases through the Release workflow:
 
 ```bash
-pnpm release           # patch bump (default): 0.1.27 → 0.1.28
-pnpm release minor     # minor bump: 0.1.27 → 0.2.0
-pnpm release major     # major bump: 0.1.27 → 1.0.0
-pnpm release 0.2.0     # explicit version
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm run build
+npm version patch -m "chore(release): v%s"
+git push origin main --follow-tags
 ```
 
-The script performs these steps in order:
-
-1. Verify working tree is clean and main is in sync with origin
-2. Run the full validation suite: lint, typecheck, test, build
-3. Bump `version` in `package.json`
-4. Commit and tag (`v<version>`)
-5. Push commit and tag to origin
-
-This guarantees the CI Release workflow will pass, since the exact same checks run locally first.
+Do not run `npm publish` locally; pushing the `v<version>` tag triggers `.github/workflows/publish.yml`. After the workflow publishes, update the local install with `npm install -g agent-switchboard@<version>` and verify `asb --version`.
 
 ## License
 
