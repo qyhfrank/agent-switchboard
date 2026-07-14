@@ -4,7 +4,7 @@
  *
  * Claude Code distribution:
  *  1. **Bundle copy** (bundle hooks only): copy script files to
- *     `~/.claude/hooks/asb/<hook-id>/` using the existing bundle distributor.
+ *     `~/.claude/hooks/managed/<namespace-key>/<deployment-key>/`.
  *  2. **Config merge**: deep-merge all active hooks' event maps into
  *     `~/.claude/settings.json` under the `hooks` key. For bundle hooks,
  *     `${HOOK_DIR}` placeholders are resolved to the distributed path.
@@ -14,6 +14,7 @@
  * Codex-specific feature flag, project trust, and review prerequisites.
  */
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -27,13 +28,47 @@ import {
   distributeBundle,
   resolvedHomeDir,
 } from '../library/distribute-bundle.js';
-import { ensureParentDir } from '../library/fs.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { getTargetById } from '../targets/registry.js';
+import {
+  type BundleCleanupDeleteGuard,
+  captureBundleCleanupEntries,
+  cleanBundleDirectories,
+  removeBundleTree,
+} from './bundle-cleanup.js';
+import {
+  type CapturedHookBundle,
+  captureHookBundle,
+  hookBundleDeploymentKey,
+  materializeHookBundleSnapshots,
+  requireHookBundleHash,
+} from './bundle-snapshot.js';
 import { distributeCodexHooks } from './codex-distribute.js';
+import { commandContainsPathToken } from './legacy-command.js';
 import type { HookEntry } from './library.js';
-import { listHookBundleFiles, loadHookLibrary } from './library.js';
-import { HOOK_DIR_PLACEHOLDER, type MatcherGroup } from './schema.js';
+import { loadHookLibrary } from './library.js';
+import {
+  assertManagedHookConfigSnapshot,
+  clearLegacyHookBundleCleanup,
+  commitManagedHookUpdate,
+  getManagedHookPrefixLengths,
+  hasManagedHookGroups,
+  type LegacyHookBundleCleanupEntry,
+  loadManagedHookGroups,
+  type ManagedHookGroups,
+  type ManagedHookPrefixLengths,
+  type ManagedHookRemovalResult,
+  type ManagedHookTransactionAddress,
+  managedHookConfigHash,
+  markLegacyHookBundleCleanup,
+  readPendingLegacyHookBundleCleanup,
+  refreshLegacyHookBundleCleanup,
+  removeManagedHookGroups,
+  resolveManagedHookTransactionAddress,
+  saveManagedHookGroups,
+  withManagedHookLock,
+} from './managed-state.js';
+import { HOOK_DIR_PLACEHOLDER, hookFileSchema, type MatcherGroup } from './schema.js';
 
 export type HookPlatform = 'claude-code' | 'codex';
 
@@ -41,12 +76,18 @@ export interface HookDistributionOutcome {
   results: Array<DistributionResult<HookPlatform> | BundleDistributionResult<HookPlatform>>;
 }
 
-const ASB_MANAGED_KEY = '_asb_managed_hooks';
-const ASB_HOOKS_SUBDIR = 'asb';
+const LEGACY_ASB_MANAGED_KEY = '_asb_managed_hooks';
+const MANAGED_HOOKS_SUBDIR = 'managed';
+const LEGACY_ASB_HOOKS_SUBDIR = 'asb';
+const MANAGED_BUNDLE_NAMESPACE_SEED = 'agent-switchboard\0claude-code\0hooks';
+const LEGACY_ASB_COMMAND_MARKER = '# asb-managed-by=agent-switchboard';
+const LEGACY_ASB_HOOK_ID_MARKER_PREFIX = '# asb-hook-id=';
+const LEGACY_ASB_BUNDLE_HASH_MARKER_PREFIX = '# asb-bundle-sha256=';
 // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
 const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX = '${CLAUDE_PLUGIN_ROOT}/hooks';
 // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
 const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS = '${CLAUDE_PLUGIN_ROOT}\\hooks';
+const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_POWERSHELL = '$env:CLAUDE_PLUGIN_ROOT\\hooks';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -60,16 +101,38 @@ function resolveSettingsPath(scope?: ConfigScope): string {
   return path.join(getClaudeDir(), 'settings.json');
 }
 
-function resolveHooksBundleParentDir(scope?: ConfigScope): string {
-  const projectRoot = scope?.project?.trim();
-  if (projectRoot && projectRoot.length > 0) {
-    return path.join(getProjectClaudeDir(projectRoot), 'hooks', ASB_HOOKS_SUBDIR);
+function resolveHooksBundleParentDir(
+  scope?: ConfigScope,
+  subdir = MANAGED_HOOKS_SUBDIR,
+  address?: ManagedHookTransactionAddress
+): string {
+  const projectRoot = address ? address.projectRoot : scope?.project?.trim();
+  if (subdir === MANAGED_HOOKS_SUBDIR && !address) {
+    throw new Error('managed hook bundle path requires a transaction address');
   }
-  return path.join(getClaudeDir(), 'hooks', ASB_HOOKS_SUBDIR);
+  const parts =
+    subdir === MANAGED_HOOKS_SUBDIR && address
+      ? ['hooks', subdir, managedBundleNamespace(address)]
+      : ['hooks', subdir];
+  if (projectRoot && projectRoot.length > 0) {
+    return path.join(getProjectClaudeDir(projectRoot), ...parts);
+  }
+  return path.join(getClaudeDir(), ...parts);
 }
 
-function resolveHooksBundleSafetyRoot(scope?: ConfigScope): string {
-  const projectRoot = scope?.project?.trim();
+function managedBundleNamespace(address: ManagedHookTransactionAddress): string {
+  return createHash('sha256')
+    .update(MANAGED_BUNDLE_NAMESPACE_SEED)
+    .update('\0')
+    .update(path.basename(address.statePath))
+    .digest('hex');
+}
+
+function resolveHooksBundleSafetyRoot(
+  scope?: ConfigScope,
+  address?: ManagedHookTransactionAddress
+): string {
+  const projectRoot = address ? address.projectRoot : scope?.project?.trim();
   if (projectRoot && projectRoot.length > 0) {
     return getProjectClaudeDir(projectRoot);
   }
@@ -79,34 +142,60 @@ function resolveHooksBundleSafetyRoot(scope?: ConfigScope): string {
 function resolveHookBundleTargetDir(
   _platform: HookPlatform,
   entry: HookEntry,
-  scope?: ConfigScope
+  bundleHash: string,
+  scope: ConfigScope | undefined,
+  address: ManagedHookTransactionAddress
 ): string {
-  return path.join(resolveHooksBundleParentDir(scope), entry.id);
+  return path.join(
+    resolveHooksBundleParentDir(scope, MANAGED_HOOKS_SUBDIR, address),
+    hookBundleDeploymentKey(entry, bundleHash)
+  );
 }
 
 // ---------------------------------------------------------------------------
 // Settings.json I/O
 // ---------------------------------------------------------------------------
 
-function readSettingsJson(
-  filePath: string
-): { ok: true; data: Record<string, unknown> } | { ok: false; error: string } {
-  try {
-    if (fs.existsSync(filePath)) {
-      return {
-        ok: true,
-        data: JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>,
-      };
+function readSettingsJson(filePath: string):
+  | {
+      ok: true;
+      data: Record<string, unknown>;
+      raw: string | undefined;
+      mode: number | undefined;
+      identity: string | undefined;
     }
+  | { ok: false; error: string } {
+  let fd: number | undefined;
+  try {
+    const pathStat = fs.lstatSync(filePath);
+    if (pathStat.isSymbolicLink() || !pathStat.isFile()) {
+      throw new Error(`settings.json is not a regular file: ${filePath}`);
+    }
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.dev !== pathStat.dev || stat.ino !== pathStat.ino) {
+      throw new Error('settings.json changed while it was being read');
+    }
+    const raw = fs.readFileSync(fd, 'utf-8');
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return { ok: false, error: 'settings.json root must be an object' };
+    }
+    return {
+      ok: true,
+      data: parsed as Record<string, unknown>,
+      raw,
+      mode: stat.mode & 0o777,
+      identity: `${stat.dev}:${stat.ino}`,
+    };
   } catch (err) {
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT') {
+      return { ok: true, data: {}, raw: undefined, mode: undefined, identity: undefined };
+    }
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
-  return { ok: true, data: {} };
-}
-
-function writeSettingsJson(filePath: string, data: Record<string, unknown>): void {
-  ensureParentDir(filePath);
-  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
 }
 
 // ---------------------------------------------------------------------------
@@ -127,16 +216,45 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): Matcher
   return groups.map((group) => ({
     ...group,
     hooks: group.hooks.map((handler) => {
-      if (typeof handler.command !== 'string') return handler;
-      return {
-        ...handler,
-        command: preferHomeVar(
-          handler.command
+      const rewritten = { ...handler };
+      for (const field of ['command', 'commandWindows', 'command_windows'] as const) {
+        const command = handler[field];
+        if (typeof command !== 'string') continue;
+        rewritten[field] = preferHomeVar(
+          command
             .replaceAll(HOOK_DIR_PLACEHOLDER, distributedDir)
             .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX, distributedDir)
             .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
-        ),
-      };
+            .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_POWERSHELL, distributedDir)
+        );
+      }
+      return rewritten;
+    }),
+  }));
+}
+
+function stripLegacyAsbCommandMetadata(groups: MatcherGroup[]): MatcherGroup[] {
+  return groups.map((group) => ({
+    ...group,
+    hooks: group.hooks.map((handler) => {
+      const cleaned = { ...handler };
+      for (const field of ['command', 'commandWindows', 'command_windows'] as const) {
+        const command = handler[field];
+        if (typeof command !== 'string') continue;
+        cleaned[field] = command
+          .split(/\r?\n/)
+          .filter((line) => {
+            const trimmed = line.trim();
+            return (
+              trimmed !== LEGACY_ASB_COMMAND_MARKER &&
+              !trimmed.startsWith(LEGACY_ASB_HOOK_ID_MARKER_PREFIX) &&
+              !trimmed.startsWith(LEGACY_ASB_BUNDLE_HASH_MARKER_PREFIX)
+            );
+          })
+          .join('\n')
+          .trimEnd();
+      }
+      return cleaned;
     }),
   }));
 }
@@ -145,61 +263,184 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir: string): Matcher
 // Config merge
 // ---------------------------------------------------------------------------
 
-/**
- * Return true if a matcher group looks like it was distributed by ASB,
- * even when `_asb_source` is missing (legacy entries).
- * Detected by command paths that reference the ASB hooks subdirectory.
- */
-function isLegacyAsbGroup(group: Record<string, unknown>, scope?: ConfigScope): boolean {
+function isLegacyAsbHandler(
+  hook: Record<string, unknown>,
+  scope?: ConfigScope,
+  address?: ManagedHookTransactionAddress
+): boolean {
+  const legacyParents = resolveLegacyBundleParents(scope, address);
+  return ['command', 'commandWindows', 'command_windows'].some((field) => {
+    const command = hook[field];
+    const normalized = typeof command === 'string' ? command.replaceAll('\\', '/') : '';
+    return (
+      typeof command === 'string' &&
+      legacyParents.some((parent) => commandContainsPathToken(normalized, parent))
+    );
+  });
+}
+
+function isLegacyAsbGroup(
+  group: Record<string, unknown>,
+  scope?: ConfigScope,
+  address?: ManagedHookTransactionAddress
+): boolean {
+  if (group._asb_source === true) return true;
   const hooks = group.hooks;
-  if (!Array.isArray(hooks)) return false;
-  const asbDir = `${resolveHooksBundleParentDir(scope)}/`;
-  const portableAsbDir = preferHomeVar(asbDir);
-  return hooks.some(
-    (h: Record<string, unknown>) =>
-      typeof h.command === 'string' &&
-      (h.command.includes(asbDir) || h.command.includes(portableAsbDir))
+  return (
+    Array.isArray(hooks) &&
+    hooks.some((hook) => isLegacyAsbHandler(hook as Record<string, unknown>, scope, address))
   );
 }
 
-/**
- * Merge active hook entries into the settings.json `hooks` key.
- * Tags each injected matcher group with `_asb_source` for future cleanup.
- */
-function mergeHooksIntoSettings(
-  settings: Record<string, unknown>,
-  selected: HookEntry[],
-  scope?: ConfigScope
-): void {
-  const existingHooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
-
-  // Remove previously ASB-managed matcher groups (tagged or legacy)
-  const cleanedHooks: Record<string, unknown[]> = {};
-  for (const [event, groups] of Object.entries(existingHooks)) {
-    const kept = (groups as Array<Record<string, unknown>>).filter(
-      (g) => g._asb_source === undefined && !isLegacyAsbGroup(g, scope)
-    );
-    if (kept.length > 0) cleanedHooks[event] = kept;
+function cleanLegacyAsbGroup(
+  group: Record<string, unknown>,
+  scope?: ConfigScope,
+  address?: ManagedHookTransactionAddress
+): Record<string, unknown> | undefined {
+  const hooks = Array.isArray(group.hooks) ? group.hooks : [];
+  const keptHooks = hooks.filter(
+    (hook) => !isLegacyAsbHandler(hook as Record<string, unknown>, scope, address)
+  );
+  if (keptHooks.length !== hooks.length) {
+    if (keptHooks.length === 0) return undefined;
+    const cleaned: Record<string, unknown> = { ...group, hooks: keptHooks };
+    delete cleaned._asb_source;
+    return cleaned;
   }
+  if (group._asb_source === true) return undefined;
+  return group;
+}
 
-  // Merge active entries
+export function removeManagedClaudeHookGroups(
+  existing: ManagedHookGroups,
+  managed: ManagedHookGroups,
+  prefixLengths: ManagedHookPrefixLengths,
+  scope?: ConfigScope,
+  address?: ManagedHookTransactionAddress
+): ManagedHookRemovalResult {
+  return removeManagedHookGroups(existing, managed, prefixLengths, (group) =>
+    cleanLegacyAsbGroup(group, scope, address)
+  );
+}
+
+function buildManagedClaudeHooks(
+  selected: readonly HookEntry[],
+  bundleHashes: ReadonlyMap<string, string>,
+  scope: ConfigScope | undefined,
+  address: ManagedHookTransactionAddress
+): ManagedHookGroups {
+  const managed: ManagedHookGroups = {};
   for (const entry of selected) {
     for (const [event, groups] of Object.entries(entry.hooks)) {
-      if (!cleanedHooks[event]) cleanedHooks[event] = [];
-
-      // Resolve ${HOOK_DIR} for bundle hooks
-      const resolvedGroups = entry.isBundle
-        ? rewriteHookDir(groups, resolveHookBundleTargetDir('claude-code', entry, scope))
-        : groups;
-
+      const resolvedGroups = stripLegacyAsbCommandMetadata(
+        entry.isBundle
+          ? rewriteHookDir(
+              groups,
+              resolveHookBundleTargetDir(
+                'claude-code',
+                entry,
+                requireHookBundleHash(bundleHashes, entry),
+                scope,
+                address
+              )
+            )
+          : groups
+      );
       for (const group of resolvedGroups) {
-        cleanedHooks[event].push({ ...group, _asb_source: true });
+        const cleanGroup = { ...group } as Record<string, unknown>;
+        delete cleanGroup._asb_source;
+        if (!managed[event]) managed[event] = [];
+        managed[event].push(cleanGroup);
       }
     }
   }
+  return managed;
+}
+
+function mergeHooksIntoSettings(
+  settings: Record<string, unknown>,
+  managed: ManagedHookGroups,
+  cleanedHooks: ManagedHookGroups
+): void {
+  for (const [event, groups] of Object.entries(managed)) {
+    cleanedHooks[event] = [...(cleanedHooks[event] ?? []), ...groups];
+  }
 
   settings.hooks = cleanedHooks;
-  settings[ASB_MANAGED_KEY] = selected.map((e) => e.id);
+  delete settings[LEGACY_ASB_MANAGED_KEY];
+}
+
+function collectLegacyBundleIds(
+  settings: Record<string, unknown>,
+  hooks: ManagedHookGroups,
+  scope: ConfigScope | undefined,
+  address: ManagedHookTransactionAddress
+): string[] {
+  const configuredIds = getLegacyManagedIds(settings);
+  const ids = new Set<string>();
+  const legacyParents = resolveLegacyBundleParents(scope, address);
+  for (const groups of Object.values(hooks)) {
+    for (const group of groups as Array<Record<string, unknown>>) {
+      const handlers = Array.isArray(group.hooks) ? group.hooks : [];
+      for (const handlerValue of handlers) {
+        const handler = handlerValue as Record<string, unknown>;
+        for (const field of ['command', 'commandWindows', 'command_windows']) {
+          const command = handler[field];
+          if (typeof command !== 'string') continue;
+          const normalized = command.replaceAll('\\', '/');
+          const bundleId = extractLegacyBundleId(normalized, '.claude');
+          if (
+            bundleId &&
+            (legacyParents.some((parent) => commandContainsPathToken(normalized, parent)) ||
+              (group._asb_source === true && configuredIds.has(bundleId)))
+          ) {
+            ids.add(bundleId);
+          }
+        }
+      }
+    }
+  }
+  return [...ids].sort();
+}
+
+function getLegacyManagedIds(config: Record<string, unknown>): Set<string> {
+  const ids = new Set<string>();
+  const configured = config[LEGACY_ASB_MANAGED_KEY];
+  if (Array.isArray(configured)) {
+    for (const value of configured) {
+      if (typeof value === 'string' && isSafeBundleId(value)) ids.add(value);
+    }
+  }
+  return ids;
+}
+
+function resolveLegacyBundleParents(
+  scope: ConfigScope | undefined,
+  address?: ManagedHookTransactionAddress
+): string[] {
+  const canonical = resolveHooksBundleParentDir(scope, LEGACY_ASB_HOOKS_SUBDIR, address);
+  const aliases = address?.projectRootAlias
+    ? [path.join(getProjectClaudeDir(address.projectRootAlias), 'hooks', LEGACY_ASB_HOOKS_SUBDIR)]
+    : [];
+  return [...new Set([canonical, preferHomeVar(canonical), ...aliases])].map((value) =>
+    value.replaceAll('\\', '/')
+  );
+}
+
+function isSafeBundleId(value: string): boolean {
+  return (
+    value.length > 0 &&
+    value !== '.' &&
+    value !== '..' &&
+    !value.includes('/') &&
+    !value.includes('\\')
+  );
+}
+
+function extractLegacyBundleId(normalizedCommand: string, appDir: string): string | undefined {
+  const escaped = appDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = normalizedCommand.match(new RegExp(`${escaped}/hooks/asb/([^/\\s"';&|]+)`));
+  return match?.[1] && isSafeBundleId(match[1]) ? match[1] : undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -209,67 +450,46 @@ function mergeHooksIntoSettings(
 function cleanOrphanBundleDirs(
   activeIds: Set<string>,
   scope?: ConfigScope,
-  dryRun?: boolean
+  dryRun?: boolean,
+  subdir = MANAGED_HOOKS_SUBDIR,
+  address?: ManagedHookTransactionAddress,
+  deleteOnlyBundles?: ReadonlyMap<string, string>,
+  verifyCurrent?: () => void,
+  updateRetryFingerprint?: (id: string, fingerprint: string) => void,
+  deleteGuard?: BundleCleanupDeleteGuard
 ): Array<BundleDistributionResult<HookPlatform>> {
-  const parentDir = resolveHooksBundleParentDir(scope);
+  const parentDir = resolveHooksBundleParentDir(scope, subdir, address);
   const results: Array<BundleDistributionResult<HookPlatform>> = [];
-  const parentError = getOrphanBundleParentError(scope);
+  const parentError = getOrphanBundleParentError(scope, subdir, address);
 
   if (parentError) {
     results.push(parentError);
     return results;
   }
-  if (!lstatIfExists(parentDir)) return results;
-
-  try {
-    const entries = fs.readdirSync(parentDir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
-      if (activeIds.has(entry.name)) continue;
-
-      const dirPath = path.join(parentDir, entry.name);
-      try {
-        if (!dryRun) removeHookBundlePath(dirPath);
-        results.push({
-          platform: 'claude-code',
-          targetDir: dirPath,
-          status: 'deleted',
-          reason: 'orphan',
-          entryId: entry.name,
-        });
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        results.push({
-          platform: 'claude-code',
-          targetDir: dirPath,
-          status: 'error',
-          error: `Failed to delete orphan: ${msg}`,
-          entryId: entry.name,
-        });
-      }
-    }
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    results.push({
-      platform: 'claude-code',
-      targetDir: parentDir,
-      status: 'error',
-      error: `Failed to scan orphan parent: ${msg}`,
-    });
-  }
-
-  return results;
+  return cleanBundleDirectories({
+    platform: 'claude-code',
+    parentDir,
+    activeIds,
+    deleteOnlyBundles,
+    dryRun,
+    verifyCurrent,
+    updateRetryFingerprint,
+    deleteGuard,
+  });
 }
 
 function getOrphanBundleParentError(
-  scope?: ConfigScope
+  scope?: ConfigScope,
+  subdir = MANAGED_HOOKS_SUBDIR,
+  address?: ManagedHookTransactionAddress
 ): BundleDistributionResult<HookPlatform> | undefined {
-  const parentDir = resolveHooksBundleParentDir(scope);
+  const parentDir = resolveHooksBundleParentDir(scope, subdir, address);
   try {
-    const safetyRoot = resolveHooksBundleSafetyRoot(scope);
+    const safetyRoot = resolveHooksBundleSafetyRoot(scope, address);
+    const projectRoot = address ? address.projectRoot : scope?.project?.trim();
     assertUsableBundleRoot(safetyRoot);
     assertNoSymlinkAncestor(safetyRoot, parentDir, {
-      trustedRoots: scope?.project ? undefined : [resolvedHomeDir()],
+      trustedRoots: projectRoot ? undefined : [resolvedHomeDir()],
     });
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
@@ -306,19 +526,7 @@ function lstatIfExists(filePath: string): fs.Stats | undefined {
 }
 
 function removeHookBundlePath(targetPath: string): void {
-  const stat = lstatIfExists(targetPath);
-  if (!stat) return;
-
-  if (stat.isDirectory() && !stat.isSymbolicLink()) {
-    const entries = fs.readdirSync(targetPath, { withFileTypes: true });
-    for (const entry of entries) {
-      removeHookBundlePath(path.join(targetPath, entry.name));
-    }
-    fs.rmdirSync(targetPath);
-    return;
-  }
-
-  fs.unlinkSync(targetPath);
+  removeBundleTree(targetPath);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,13 +626,41 @@ interface TargetDistributeContext {
 
 function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome['results'] {
   const platform: HookPlatform = 'claude-code';
-  const results: HookDistributionOutcome['results'] = [];
-
-  // Skip if claude-code is not installed (unless assumed installed)
   const target = getTargetById(platform);
   if (target?.isInstalled?.() === false && !ctx.assumeInstalled?.has(platform)) {
-    return results;
+    return [];
   }
+
+  const settingsPath = resolveSettingsPath(ctx.scope);
+
+  try {
+    if (ctx.dryRun) {
+      const address = resolveManagedHookTransactionAddress(
+        platform,
+        settingsPath,
+        ctx.scope?.project ?? undefined
+      );
+      return distributeClaudeLocked(ctx, settingsPath, address);
+    }
+    return withManagedHookLock(
+      platform,
+      settingsPath,
+      (address) => distributeClaudeLocked(ctx, settingsPath, address),
+      ctx.scope?.project ?? undefined
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return [{ platform, filePath: settingsPath, status: 'error', error: msg }];
+  }
+}
+
+function distributeClaudeLocked(
+  ctx: TargetDistributeContext,
+  settingsPath: string,
+  address: ManagedHookTransactionAddress
+): HookDistributionOutcome['results'] {
+  const platform: HookPlatform = 'claude-code';
+  const results: HookDistributionOutcome['results'] = [];
 
   // When activeAppIds is set and doesn't include claude-code, treat as inactive
   const isActive = !ctx.activeAppIds || ctx.activeAppIds.includes(platform);
@@ -438,41 +674,23 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     }
   }
 
-  // Phase 1: Copy bundle files for bundle-type hooks
-  const bundleEntries = selected.filter((e) => e.isBundle);
-  if (bundleEntries.length > 0) {
-    const bundleOutcome = distributeBundle<HookEntry, HookPlatform>({
-      section: 'hooks',
-      selected: bundleEntries,
-      platforms: [platform],
-      resolveTargetDir: (_p, entry) => resolveHookBundleTargetDir(_p, entry, ctx.scope),
-      resolveBundleRootDir: (_p) => resolveHooksBundleSafetyRoot(ctx.scope),
-      listFiles: listHookBundleFiles,
-      getId: (entry) => entry.id,
-      scope: ctx.scope,
-      dryRun: ctx.dryRun,
+  const managedState = loadManagedHookGroups(
+    platform,
+    settingsPath,
+    ctx.scope?.project ?? undefined,
+    address,
+    !ctx.dryRun
+  );
+  if (!managedState.ok) {
+    results.push({
+      platform,
+      filePath: managedState.filePath,
+      status: 'error',
+      error: `Cannot read managed hook state, aborting hooks merge: ${managedState.error}`,
     });
-    results.push(...bundleOutcome.results);
-    if (
-      bundleOutcome.results.some(
-        (result) => result.status === 'error' || result.status === 'conflict'
-      )
-    ) {
-      return results;
-    }
-  }
-
-  const activeBundleIds = new Set(bundleEntries.map((e) => e.id));
-  const cleanupParentError = getOrphanBundleParentError(ctx.scope);
-  if (cleanupParentError) {
-    results.push(cleanupParentError);
     return results;
   }
-
-  // Phase 2: Merge hook configs into settings.json
-  const settingsPath = resolveSettingsPath(ctx.scope);
-  const settingsResult = readSettingsJson(settingsPath);
-
+  const settingsResult = readSettingsJson(address.writePath);
   if (!settingsResult.ok) {
     results.push({
       platform,
@@ -482,41 +700,363 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     });
     return results;
   }
+  const existingHookFile = hookFileSchema.safeParse({
+    hooks: settingsResult.data.hooks === undefined ? {} : settingsResult.data.hooks,
+  });
+  if (!existingHookFile.success) {
+    results.push({
+      platform,
+      filePath: settingsPath,
+      status: 'error',
+      error: 'settings.json has invalid hook configuration',
+    });
+    return results;
+  }
+
+  if (managedState.pending && !ctx.dryRun) {
+    try {
+      assertManagedHookConfigSnapshot(
+        address,
+        settingsResult.raw,
+        settingsResult.mode,
+        settingsResult.identity
+      );
+      saveManagedHookGroups(
+        platform,
+        settingsPath,
+        managedState.hooks,
+        managedState.prefixLengths,
+        ctx.scope?.project ?? undefined,
+        address
+      );
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      results.push({ platform, filePath: managedState.filePath, status: 'error', error: msg });
+      return results;
+    }
+  }
+
+  const bundleEntries = selected.filter((e) => e.isBundle);
+  const bundleHashes = new Map<string, string>();
+  const bundleSnapshots = new Map<string, CapturedHookBundle>();
+  for (const entry of bundleEntries) {
+    try {
+      const snapshot = captureHookBundle(entry);
+      bundleSnapshots.set(entry.id, snapshot);
+      bundleHashes.set(entry.id, snapshot.hash);
+    } catch (error) {
+      results.push({
+        platform,
+        filePath: settingsPath,
+        status: 'error',
+        error: `Failed to capture bundle ${entry.id}: ${error instanceof Error ? error.message : String(error)}`,
+        entryId: entry.id,
+      });
+      return results;
+    }
+  }
+  const effectiveSelected = selected.map((entry) => {
+    const snapshot = bundleSnapshots.get(entry.id);
+    return snapshot ? { ...entry, hooks: snapshot.hooks } : entry;
+  });
+  const activeBundleIds = new Set(
+    bundleEntries.map((entry) =>
+      hookBundleDeploymentKey(entry, requireHookBundleHash(bundleHashes, entry))
+    )
+  );
+  const cleanupParentError = getOrphanBundleParentError(ctx.scope, MANAGED_HOOKS_SUBDIR, address);
+  if (cleanupParentError) {
+    results.push(cleanupParentError);
+    return results;
+  }
 
   const settings = settingsResult.data;
-  const previouslyManaged = (settings[ASB_MANAGED_KEY] ?? []) as string[];
-
-  const existingHooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
-  const hasLegacyAsb = Object.values(existingHooks).some((groups) =>
-    (groups as Array<Record<string, unknown>>).some((g) => isLegacyAsbGroup(g, ctx.scope))
+  const hadLegacyManagedKey =
+    Object.getOwnPropertyDescriptor(settings, LEGACY_ASB_MANAGED_KEY) !== undefined;
+  const previouslyManaged = managedState.hooks;
+  const managed = buildManagedClaudeHooks(effectiveSelected, bundleHashes, ctx.scope, address);
+  const existingHooks = existingHookFile.data.hooks;
+  const removal = removeManagedClaudeHookGroups(
+    existingHooks,
+    previouslyManaged,
+    managedState.prefixLengths,
+    ctx.scope,
+    address
   );
+  if (hasManagedHookGroups(removal.unmatched)) {
+    results.push({
+      platform,
+      filePath: managedState.filePath,
+      status: 'conflict',
+      reason: 'managed hook state does not match the application config; resolve hook drift',
+    });
+    return results;
+  }
+  const hasLegacyAsb = Object.values(existingHooks).some((groups) =>
+    (groups as Array<Record<string, unknown>>).some((g) => isLegacyAsbGroup(g, ctx.scope, address))
+  );
+  const activeLegacyBundleIds = new Set(collectLegacyBundleIds({}, managed, ctx.scope, address));
+  const legacyBundleIds = collectLegacyBundleIds(
+    settings,
+    existingHooks,
+    ctx.scope,
+    address
+  ).filter((id) => !activeLegacyBundleIds.has(id));
+  let pendingLegacyBundles: LegacyHookBundleCleanupEntry[];
+  let capturedLegacyBundles: Array<{ id: string; fingerprint: string }> = [];
+  try {
+    pendingLegacyBundles = readPendingLegacyHookBundleCleanup(address);
+    if ((hadLegacyManagedKey || hasLegacyAsb) && legacyBundleIds.length > 0) {
+      const parentError = getOrphanBundleParentError(ctx.scope, LEGACY_ASB_HOOKS_SUBDIR, address);
+      if (parentError) {
+        results.push(parentError);
+        return results;
+      }
+      capturedLegacyBundles = captureBundleCleanupEntries(
+        resolveHooksBundleParentDir(ctx.scope, LEGACY_ASB_HOOKS_SUBDIR, address),
+        legacyBundleIds
+      );
+    }
+  } catch (error) {
+    results.push({
+      platform,
+      filePath: managedState.filePath,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return results;
+  }
+  const initialConfigHash = managedHookConfigHash(settingsResult.raw);
+  if (bundleEntries.length > 0) {
+    let snapshotRoot: string | undefined;
+    try {
+      const materialized = materializeHookBundleSnapshots(bundleEntries, bundleSnapshots);
+      snapshotRoot = materialized.root;
+      const bundleOutcome = distributeBundle<HookEntry, HookPlatform>({
+        section: 'hooks',
+        selected: bundleEntries,
+        platforms: [platform],
+        resolveTargetDir: (_p, entry) =>
+          resolveHookBundleTargetDir(
+            _p,
+            entry,
+            requireHookBundleHash(bundleHashes, entry),
+            ctx.scope,
+            address
+          ),
+        resolveBundleRootDir: (_p) => resolveHooksBundleSafetyRoot(ctx.scope, address),
+        listFiles: (entry) => {
+          const files = materialized.files.get(entry.id);
+          if (!files) throw new Error(`Missing bundle snapshot files for ${entry.id}`);
+          return files;
+        },
+        getId: (entry) => entry.id,
+        scope: address.projectRoot ? { project: address.projectRoot } : undefined,
+        dryRun: ctx.dryRun,
+        validateTarget: ctx.dryRun
+          ? undefined
+          : () =>
+              assertManagedHookConfigSnapshot(
+                address,
+                settingsResult.raw,
+                settingsResult.mode,
+                settingsResult.identity
+              ),
+      });
+      results.push(...bundleOutcome.results);
+      if (
+        bundleOutcome.results.some(
+          (result) => result.status === 'error' || result.status === 'conflict'
+        )
+      ) {
+        return results;
+      }
+    } catch (error) {
+      results.push({
+        platform,
+        filePath: settingsPath,
+        status: 'error',
+        error: `Failed to materialize bundle snapshot: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      return results;
+    } finally {
+      if (snapshotRoot) removeHookBundlePath(snapshotRoot);
+    }
+  }
 
-  const appendCleanupResults = (): void => {
-    results.push(...cleanOrphanBundleDirs(activeBundleIds, ctx.scope, ctx.dryRun));
+  const appendCleanupResults = (
+    expectedConfig: string | undefined,
+    expectedMode?: number,
+    expectedIdentity?: string
+  ): void => {
+    const verifyCurrent = ctx.dryRun
+      ? undefined
+      : () =>
+          assertManagedHookConfigSnapshot(address, expectedConfig, expectedMode, expectedIdentity);
+    try {
+      verifyCurrent?.();
+    } catch (error) {
+      results.push({
+        platform,
+        filePath: settingsPath,
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    const deleteGuard: BundleCleanupDeleteGuard | undefined = ctx.dryRun
+      ? undefined
+      : {
+          configAliasPath: address.configPath,
+          configPath: address.writePath,
+          configHash: managedHookConfigHash(expectedConfig),
+          ...(expectedMode !== undefined ? { configMode: expectedMode } : {}),
+          ...(expectedIdentity !== undefined ? { configIdentity: expectedIdentity } : {}),
+        };
+    results.push(
+      ...cleanOrphanBundleDirs(
+        activeBundleIds,
+        ctx.scope,
+        ctx.dryRun,
+        MANAGED_HOOKS_SUBDIR,
+        address,
+        undefined,
+        verifyCurrent,
+        undefined,
+        deleteGuard
+      )
+    );
+    try {
+      verifyCurrent?.();
+      const configHash = managedHookConfigHash(expectedConfig);
+      const candidates = new Map<string, { id: string; fingerprint: string }>();
+      for (const value of pendingLegacyBundles) {
+        if (value.configHash === initialConfigHash) {
+          candidates.set(value.id, { id: value.id, fingerprint: value.fingerprint });
+        }
+      }
+      for (const value of capturedLegacyBundles) {
+        if (!candidates.has(value.id)) candidates.set(value.id, value);
+      }
+      if (ctx.dryRun) {
+        pendingLegacyBundles = [...candidates.values()].map((value) => ({
+          ...value,
+          configHash,
+        }));
+      } else {
+        const existing = readPendingLegacyHookBundleCleanup(address);
+        if (existing.some((value) => value.configHash !== configHash)) {
+          clearLegacyHookBundleCleanup(address);
+        }
+        if (candidates.size > 0) {
+          markLegacyHookBundleCleanup(address, [...candidates.values()], expectedConfig);
+        }
+        pendingLegacyBundles = readPendingLegacyHookBundleCleanup(address).filter(
+          (value) => value.configHash === configHash
+        );
+      }
+    } catch (error) {
+      results.push({
+        platform,
+        filePath: managedState.filePath,
+        status: 'error',
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return;
+    }
+    if (pendingLegacyBundles.length === 0) return;
+    const pendingLegacyBundleMap = new Map(
+      pendingLegacyBundles.map((value) => [value.id, value.fingerprint])
+    );
+    const legacyResults = cleanOrphanBundleDirs(
+      new Set(),
+      ctx.scope,
+      ctx.dryRun,
+      LEGACY_ASB_HOOKS_SUBDIR,
+      address,
+      pendingLegacyBundleMap,
+      verifyCurrent,
+      (id, fingerprint) => refreshLegacyHookBundleCleanup(address, id, fingerprint),
+      deleteGuard
+    );
+    results.push(...legacyResults);
+    if (!ctx.dryRun && !legacyResults.some((result) => result.status === 'error')) {
+      try {
+        clearLegacyHookBundleCleanup(address);
+      } catch (error) {
+        results.push({
+          platform,
+          filePath: managedState.filePath,
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
   };
 
-  if (selected.length === 0 && previouslyManaged.length === 0 && !hasLegacyAsb) {
-    appendCleanupResults();
+  if (
+    selected.length === 0 &&
+    !hadLegacyManagedKey &&
+    !hasManagedHookGroups(previouslyManaged) &&
+    !hasLegacyAsb
+  ) {
+    appendCleanupResults(settingsResult.raw, settingsResult.mode, settingsResult.identity);
     return results;
   }
 
   const before = JSON.stringify(settings);
-  mergeHooksIntoSettings(settings, selected, ctx.scope);
+  const managedPrefixLengths = getManagedHookPrefixLengths(removal.hooks, managed);
+  mergeHooksIntoSettings(settings, managed, removal.hooks);
   const after = JSON.stringify(settings);
 
   if (before === after) {
-    results.push({ platform, filePath: settingsPath, status: 'skipped', reason: 'up-to-date' });
-    appendCleanupResults();
+    try {
+      if (!ctx.dryRun) {
+        assertManagedHookConfigSnapshot(
+          address,
+          settingsResult.raw,
+          settingsResult.mode,
+          settingsResult.identity
+        );
+        saveManagedHookGroups(
+          platform,
+          settingsPath,
+          managed,
+          managedPrefixLengths,
+          ctx.scope?.project ?? undefined,
+          address
+        );
+      }
+      results.push({ platform, filePath: settingsPath, status: 'skipped', reason: 'up-to-date' });
+      appendCleanupResults(settingsResult.raw, settingsResult.mode, settingsResult.identity);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      results.push({ platform, filePath: managedState.filePath, status: 'error', error: msg });
+    }
   } else if (ctx.dryRun) {
     const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
     results.push({ platform, filePath: settingsPath, status: 'written', reason });
-    appendCleanupResults();
+    appendCleanupResults(settingsResult.raw, settingsResult.mode, settingsResult.identity);
   } else {
     try {
-      writeSettingsJson(settingsPath, settings);
+      const desiredConfig = `${JSON.stringify(settings, null, 2)}\n`;
+      const committedIdentity = commitManagedHookUpdate(
+        platform,
+        settingsPath,
+        previouslyManaged,
+        managedState.prefixLengths,
+        managed,
+        managedPrefixLengths,
+        desiredConfig,
+        settingsResult.raw,
+        ctx.scope?.project ?? undefined,
+        address,
+        settingsResult.mode,
+        settingsResult.identity
+      );
       const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
       results.push({ platform, filePath: settingsPath, status: 'written', reason });
-      appendCleanupResults();
+      appendCleanupResults(desiredConfig, settingsResult.mode, committedIdentity);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform, filePath: settingsPath, status: 'error', error: msg });

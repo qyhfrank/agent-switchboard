@@ -208,7 +208,7 @@ Use `strict: false` when the marketplace operator wants full control over which 
 
 Hook types: `command` (shell script), `prompt` (LLM evaluation), `agent` (agentic verifier with tools).
 
-ASB distributes this Claude Code hook schema to each target within that target's current support boundary. Codex output is command-only and uses `~/.codex/hooks.json` or `<project>/.codex/hooks.json`. Codex-supported events are `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`; unsupported events and non-`command` hook types are filtered from Codex output and reported in sync results.
+ASB distributes this Claude Code hook schema to each target within that target's current support boundary. Codex output is synchronous command-only and uses `~/.codex/hooks.json` or `<project>/.codex/hooks.json`. Codex-supported events are `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, and `Stop`; unsupported events, asynchronous handlers, and non-`command` hook types are filtered from Codex output and reported in sync results.
 
 ## MCP Server Declaration
 
@@ -333,7 +333,7 @@ ASB reads and adapts the Claude Code plugin format for cross-agent distribution.
 | Hook runtime | Full Claude Code hook schema | Claude Code receives full hook config; Codex receives the command-only subset and requires `/hooks` review |
 | `strict` authority | `plugin.json` when `true`; marketplace when `false` | Marketplace entry when `true`; `plugin.json` when `false`, with field-level fallback |
 
-Hook bundle scripts are copied to each target's ASB-owned hook directory: `~/.claude/hooks/asb/<id>/` for Claude Code and `~/.codex/hooks/asb/<id>/` or `<project>/.codex/hooks/asb/<id>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
+Hook bundle scripts are copied under each target's neutral managed hook root with opaque namespace and deployment keys: `~/.claude/hooks/managed/<namespace-key>/<deployment-key>/` or `<project>/.claude/hooks/managed/<namespace-key>/<deployment-key>/` for Claude Code, and `~/.codex/hooks/managed/<namespace-key>/<deployment-key>/` or `<project>/.codex/hooks/managed/<namespace-key>/<deployment-key>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
 
 ### ASB Source and Materialization Lifecycle
 
