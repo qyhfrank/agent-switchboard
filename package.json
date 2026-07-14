@@ -1,6 +1,6 @@
 {
   "name": "agent-switchboard",
-  "version": "0.4.27",
+  "version": "0.4.28",
   "description": "Unified MCP server manager for AI coding agents",
   "type": "module",
   "bin": {
