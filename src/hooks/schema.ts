@@ -16,6 +16,8 @@ const hookHandlerSchema = z
   .object({
     type: z.enum(['command', 'http', 'prompt', 'agent']),
     command: z.string().optional(),
+    commandWindows: z.string().optional(),
+    command_windows: z.string().optional(),
     url: z.string().optional(),
     prompt: z.string().optional(),
     model: z.string().optional(),
@@ -26,7 +28,35 @@ const hookHandlerSchema = z
     headers: z.record(z.string()).optional(),
     allowedEnvVars: z.array(z.string()).optional(),
   })
-  .passthrough();
+  .passthrough()
+  .superRefine((handler, ctx) => {
+    if (
+      handler.commandWindows !== undefined &&
+      handler.command_windows !== undefined &&
+      handler.commandWindows !== handler.command_windows
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['command_windows'],
+        message: 'Windows command aliases must match',
+      });
+    }
+    const requiredField =
+      handler.type === 'command'
+        ? 'command'
+        : handler.type === 'http'
+          ? 'url'
+          : handler.type === 'prompt' || handler.type === 'agent'
+            ? 'prompt'
+            : undefined;
+    if (requiredField && typeof handler[requiredField] !== 'string') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [requiredField],
+        message: `${handler.type} hook requires ${requiredField}`,
+      });
+    }
+  });
 
 const matcherGroupSchema = z
   .object({

@@ -48,8 +48,13 @@ import {
   loadSwitchboardConfig,
   loadSwitchboardConfigWithLayers,
 } from './config/switchboard-config.js';
-import { distributeHooks } from './hooks/distribution.js';
+import { distributeHooks, removeManagedClaudeHookGroups } from './hooks/distribution.js';
 import { loadHookLibrary } from './hooks/library.js';
+import {
+  assertManagedHookConfigSnapshot,
+  loadManagedHookGroups,
+  withManagedHookLock,
+} from './hooks/managed-state.js';
 import {
   copyDirRecursive,
   ensureLibraryDirectories,
@@ -294,26 +299,56 @@ async function confirmOverwrite(filePath: string, force?: boolean): Promise<bool
  */
 async function importHooksFromClaudeCode(opts: { force?: boolean }): Promise<void> {
   const settingsPath = path.join(getClaudeDir(), 'settings.json');
-  if (!isFile(settingsPath)) {
+  const snapshot = withManagedHookLock('claude-code', settingsPath, (address) => {
+    const managedState = loadManagedHookGroups('claude-code', settingsPath, undefined, address);
+    if (!managedState.ok) {
+      return { kind: 'state-error', error: managedState.error } as const;
+    }
+    if (!isFile(address.writePath)) return { kind: 'missing' } as const;
+
+    const fd = fs.openSync(address.writePath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let stat: fs.Stats;
+    let raw: string;
+    try {
+      stat = fs.fstatSync(fd);
+      raw = fs.readFileSync(fd, 'utf-8');
+    } finally {
+      fs.closeSync(fd);
+    }
+    const settings = JSON.parse(raw) as Record<string, unknown>;
+    const hooks = settings.hooks as Record<string, unknown[]> | undefined;
+    if (!hooks || Object.keys(hooks).length === 0) return { kind: 'empty' } as const;
+    const removal = removeManagedClaudeHookGroups(
+      hooks,
+      managedState.hooks,
+      managedState.prefixLengths,
+      undefined,
+      address
+    );
+    if (Object.values(removal.unmatched).some((groups) => groups.length > 0)) {
+      return { kind: 'drift' } as const;
+    }
+    assertManagedHookConfigSnapshot(address, raw, stat.mode & 0o777, `${stat.dev}:${stat.ino}`);
+    return { kind: 'ok', userHooks: removal.hooks } as const;
+  });
+
+  if (snapshot.kind === 'missing') {
     console.error(chalk.red(`\n✗ Claude Code settings not found: ${settingsPath}`));
     process.exit(1);
   }
-
-  const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')) as Record<string, unknown>;
-  const hooks = settings.hooks as Record<string, unknown[]> | undefined;
-  if (!hooks || Object.keys(hooks).length === 0) {
+  if (snapshot.kind === 'empty') {
     console.log(chalk.yellow('\n⚠ No hooks found in Claude Code settings.'));
     return;
   }
-
-  // Filter out ASB-managed hooks (avoid re-importing our own output)
-  const userHooks: Record<string, unknown[]> = {};
-  for (const [event, groups] of Object.entries(hooks)) {
-    const userGroups = (groups as Array<Record<string, unknown>>).filter(
-      (g) => g._asb_source === undefined
-    );
-    if (userGroups.length > 0) userHooks[event] = userGroups;
+  if (snapshot.kind === 'state-error') {
+    console.error(chalk.red(`\n✗ Cannot read managed hook state: ${snapshot.error}`));
+    process.exit(1);
   }
+  if (snapshot.kind === 'drift') {
+    console.error(chalk.red('\n✗ Managed hook state does not match Claude Code settings.'));
+    process.exit(1);
+  }
+  const userHooks = snapshot.userHooks;
 
   if (Object.keys(userHooks).length === 0) {
     console.log(chalk.yellow('\n⚠ No user-defined hooks found (all are ASB-managed).'));

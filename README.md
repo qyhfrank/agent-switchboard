@@ -378,12 +378,14 @@ asb hook load /path/to/hook.json       # import a JSON file
 asb hook load /path/to/hook-dir/       # import a bundle directory
 ```
 
-Bundle scripts are copied to the target agent's ASB hook bundle directory and the `${HOOK_DIR}` placeholder in commands is resolved to the absolute path at distribution time:
+Bundle scripts are copied under the target agent's neutral managed hook root, using opaque directory keys. The `${HOOK_DIR}` placeholder in commands is resolved to the absolute path at distribution time:
 
-- Claude Code: `~/.claude/hooks/asb/<id>/`
-- Codex: `~/.codex/hooks/asb/<id>/` or `<project>/.codex/hooks/asb/<id>/`
+- Claude Code: `~/.claude/hooks/managed/<namespace-key>/<deployment-key>/` or `<project>/.claude/hooks/managed/<namespace-key>/<deployment-key>/`
+- Codex: `~/.codex/hooks/managed/<namespace-key>/<deployment-key>/` or `<project>/.codex/hooks/managed/<namespace-key>/<deployment-key>/`
 
-Codex hook sync writes `~/.codex/hooks.json` for global scope or `<project>/.codex/hooks.json` for project scope. ASB emits command handlers for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `UserPromptSubmit`, and `Stop`; unsupported events and non-command handler types are filtered from Codex output and reported in sync results. Codex uses `[features].hooks` in `~/.codex/config.toml` (enabled by default when absent; legacy `[features].codex_hooks` is accepted for compatibility). Project-scoped hooks require the project to be trusted, and new or changed Codex hooks must be reviewed from `/hooks` in Codex before they run.
+Hook ownership and migration state stays in ASB state directories rather than target application configs.
+
+Codex hook sync writes `~/.codex/hooks.json` for global scope or `<project>/.codex/hooks.json` for project scope. ASB emits synchronous command handlers for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, and `Stop`; unsupported events, asynchronous handlers, and non-command handler types are filtered from Codex output and reported in sync results. Codex uses `[features].hooks` in `~/.codex/config.toml` (enabled by default when absent; legacy `[features].codex_hooks` is accepted for compatibility). Project-scoped hooks require the project to be trusted, and new or changed Codex hooks must be reviewed from `/hooks` in Codex before they run.
 
 ## Plugins
 
