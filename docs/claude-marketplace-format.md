@@ -333,7 +333,7 @@ ASB reads and adapts the Claude Code plugin format for cross-agent distribution.
 | Hook runtime | Full Claude Code hook schema | Claude Code receives full hook config; Codex receives the command-only subset and requires `/hooks` review |
 | `strict` authority | `plugin.json` when `true`; marketplace when `false` | Marketplace entry when `true`; `plugin.json` when `false`, with field-level fallback |
 
-Hook bundle scripts are copied under each target's neutral managed hook root with opaque namespace and deployment keys: `~/.claude/hooks/managed/<namespace-key>/<deployment-key>/` or `<project>/.claude/hooks/managed/<namespace-key>/<deployment-key>/` for Claude Code, and `~/.codex/hooks/managed/<namespace-key>/<deployment-key>/` or `<project>/.codex/hooks/managed/<namespace-key>/<deployment-key>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
+Hook bundle scripts are copied under each target's managed hook root, one directory per hook id: `~/.claude/hooks/managed/<hook-id>/` or `<project>/.claude/hooks/managed/<hook-id>/` for Claude Code, and `~/.codex/hooks/managed/<hook-id>/` or `<project>/.codex/hooks/managed/<hook-id>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
 
 ### ASB Source and Materialization Lifecycle
 
