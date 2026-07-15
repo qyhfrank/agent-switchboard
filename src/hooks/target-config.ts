@@ -30,29 +30,55 @@ export function readJsonConfig(
   return { ok: true, data: {} };
 }
 
+/**
+ * Follow the symlink chain by readlink so a dangling link still resolves to
+ * its intended target (publishing there keeps the link alive), instead of
+ * silently replacing the link with a regular file.
+ */
 function resolvePublishTarget(filePath: string): string {
-  try {
-    if (fs.lstatSync(filePath).isSymbolicLink()) return fs.realpathSync(filePath);
-  } catch {
-    // New file: publish at the logical path.
+  let current = filePath;
+  for (let depth = 0; depth < 8; depth++) {
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(current);
+    } catch {
+      return current;
+    }
+    if (!stat.isSymbolicLink()) return current;
+    current = path.resolve(path.dirname(current), fs.readlinkSync(current));
   }
-  return filePath;
+  throw new Error(`too many levels of symbolic links: ${filePath}`);
 }
 
 export function publishJsonConfig(filePath: string, data: Record<string, unknown>): void {
   ensureParentDir(filePath);
   const target = resolvePublishTarget(filePath);
+  let mode: number | undefined;
+  try {
+    mode = fs.statSync(target).mode & 0o777;
+  } catch {
+    // New file: default mode.
+  }
+  ensureParentDir(target);
   // Per-process temp name: concurrent syncs must not interleave writes into a
   // shared temp file before the atomic rename.
   const tmpPath = `${target}.asb-write.${process.pid}.tmp`;
-  fs.writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, 'utf-8');
+  fs.writeFileSync(tmpPath, `${JSON.stringify(data, null, 2)}\n`, {
+    encoding: 'utf-8',
+    ...(mode !== undefined ? { mode } : {}),
+  });
   fs.renameSync(tmpPath, target);
   removeStaleWriteTmps(target);
 }
 
-/** Best-effort removal of temp files a crashed publish left behind. */
+/**
+ * Best-effort removal of temp files a crashed publish left behind. Only
+ * entries older than the freshness window are touched, so a concurrent
+ * publish keeps its in-flight temp file.
+ */
 function removeStaleWriteTmps(target: string): void {
   const prefix = `${path.basename(target)}.asb-write.`;
+  const cutoff = Date.now() - 10 * 60_000;
   let names: string[];
   try {
     names = fs.readdirSync(path.dirname(target));
@@ -60,8 +86,12 @@ function removeStaleWriteTmps(target: string): void {
     return;
   }
   for (const name of names) {
-    if (name.startsWith(prefix) && name.endsWith('.tmp')) {
-      fs.rmSync(path.join(path.dirname(target), name), { force: true });
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue;
+    const stalePath = path.join(path.dirname(target), name);
+    try {
+      if (fs.lstatSync(stalePath).mtimeMs < cutoff) fs.rmSync(stalePath, { force: true });
+    } catch {
+      // Already gone or unreadable: nothing to clean.
     }
   }
 }
@@ -84,22 +114,35 @@ export function deleteJsonConfig(filePath: string): void {
 /**
  * v0.4.28 transactional writes left `<config>.previous.*` / `<config>.tmp.*` /
  * `<config>.failed.*` siblings behind, possibly holding the only copy of the
- * user's config. Distribution refuses to touch such a target; the user
- * restores or deletes the artifacts once.
+ * user's config. They sit beside the logical path or, for symlinked configs,
+ * beside the resolved write target; both locations are checked. Distribution
+ * refuses to touch such a target; the user restores or deletes the artifacts
+ * once.
  */
 export function findTransactionArtifacts(filePath: string): string[] {
-  const base = path.basename(filePath);
-  const prefixes = [`${base}.previous.`, `${base}.tmp.`, `${base}.failed.`];
-  let entries: string[];
+  const candidates = new Set([filePath]);
   try {
-    entries = fs.readdirSync(path.dirname(filePath));
+    candidates.add(resolvePublishTarget(filePath));
   } catch {
-    return [];
+    // A broken symlink chain surfaces at publish time.
   }
-  return entries
-    .filter((name) => prefixes.some((prefix) => name.startsWith(prefix)))
-    .map((name) => path.join(path.dirname(filePath), name))
-    .sort();
+  const found = new Set<string>();
+  for (const candidate of candidates) {
+    const base = path.basename(candidate);
+    const prefixes = [`${base}.previous.`, `${base}.tmp.`, `${base}.failed.`];
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(path.dirname(candidate));
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      if (prefixes.some((prefix) => name.startsWith(prefix))) {
+        found.add(path.join(path.dirname(candidate), name));
+      }
+    }
+  }
+  return [...found].sort();
 }
 
 /**

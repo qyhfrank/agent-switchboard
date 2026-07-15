@@ -17,25 +17,30 @@
  * reports Codex-specific feature flag, project trust, and review prerequisites.
  */
 
+import fs from 'node:fs';
 import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 import { getClaudeDir, getProjectClaudeDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
-import { distributeBundle } from '../library/distribute-bundle.js';
+import { distributeBundle, resolvedHomeDir } from '../library/distribute-bundle.js';
 import { loadLibraryStateSectionForApplication } from '../library/state.js';
 import { getTargetById } from '../targets/registry.js';
 import {
   type BundleCleanupOptions,
   cleanLegacyAsbDir,
   cleanManagedBundleDirs,
+  isSafeBundleDirName,
   removeV0428BundleDirs,
 } from './bundle-dirs.js';
 import { distributeCodexHooks } from './codex-distribute.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles, loadHookLibrary } from './library.js';
-import { collectV0428BundleDirs, removeOwnedHookGroups } from './ownership.js';
+import {
+  collectV0428BundleDirs,
+  removeOwnedHookGroups,
+  stripLegacyMarkerLines,
+} from './ownership.js';
 import { HOOK_DIR_PLACEHOLDER, type MatcherGroup } from './schema.js';
 import { consumeLegacyManagedState, loadHookState, saveHookState } from './state.js';
 import {
@@ -98,7 +103,9 @@ function resolveHookBundleTargetDir(entry: HookEntry, scope?: ConfigScope): stri
 /**
  * Resolve `${HOOK_DIR}` and plugin-root placeholders to the distributed
  * bundle directory (when given) and make every command `$HOME`-portable.
- * Also folds the `command_windows` alias into `commandWindows`.
+ * Folds the `command_windows` alias into `commandWindows`, strips legacy
+ * marker lines an older import may have left in the definition, and drops
+ * `_asb*` metadata keys so distributed configs stay free of ASB metadata.
  */
 function rewriteHookDir(groups: MatcherGroup[], distributedDir?: string): unknown[] {
   return groups.map((group) => ({
@@ -110,6 +117,9 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir?: string): unknow
         commandWindows: handler.commandWindows ?? handler.command_windows,
       };
       delete rewritten.command_windows;
+      for (const key of Object.keys(rewritten)) {
+        if (key.startsWith('_asb')) delete rewritten[key];
+      }
       for (const field of ['command', 'commandWindows'] as const) {
         const original = commands[field];
         if (typeof original !== 'string') continue;
@@ -120,7 +130,7 @@ function rewriteHookDir(groups: MatcherGroup[], distributedDir?: string): unknow
               .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
               .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_POWERSHELL, distributedDir)
           : original;
-        rewritten[field] = preferHomeVar(resolved);
+        rewritten[field] = preferHomeVar(stripLegacyMarkerLines(resolved));
       }
       return rewritten;
     }),
@@ -136,7 +146,9 @@ function resolveEntryGroups(entry: HookEntry, scope?: ConfigScope): Record<strin
     );
     resolved[event] = rewritten.map((group) => {
       const clean = { ...(group as Record<string, unknown>) };
-      delete clean._asb_source;
+      for (const key of Object.keys(clean)) {
+        if (key.startsWith('_asb')) delete clean[key];
+      }
       return clean;
     });
   }
@@ -226,7 +238,7 @@ export function stripAsbOwnedClaudeGroups(
   scope?: ConfigScope
 ): Record<string, unknown[]> {
   const ownState = loadHookState('claude-code', scope);
-  const legacyStates = consumeLegacyManagedState('claude-code', scope, true);
+  const legacy = consumeLegacyManagedState('claude-code', scope, true);
   const allEntries = loadHookLibrary(scope);
   const managedParent = managedBundleParentDir(scope);
   const legacyParent = legacyAsbParentDir(scope);
@@ -234,7 +246,7 @@ export function stripAsbOwnedClaudeGroups(
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
     knownManagedIds: new Set([...allEntries.map((e) => e.id), ...ownState.bundles]),
-    stateGroups: [ownState.events, ...legacyStates],
+    stateGroups: [ownState.events, ...legacy.groups],
   });
   return { ...removal.hooks };
 }
@@ -277,10 +289,24 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
   }
 
   const ownState = loadHookState('claude-code', ctx.scope);
-  const legacyStates = consumeLegacyManagedState('claude-code', ctx.scope, ctx.dryRun);
+  const legacy = consumeLegacyManagedState('claude-code', ctx.scope, ctx.dryRun);
 
   // Phase 1: Copy bundle files for bundle-type hooks
-  const bundleEntries = selected.filter((e) => e.isBundle);
+  const bundleEntries: HookEntry[] = [];
+  for (const entry of selected.filter((e) => e.isBundle)) {
+    if (isSafeBundleDirName(entry.id)) {
+      bundleEntries.push(entry);
+    } else {
+      results.push({
+        platform,
+        filePath: settingsPath,
+        status: 'error',
+        error: `hook id is not usable as a bundle directory name: ${JSON.stringify(entry.id)}`,
+        entryId: entry.id,
+      });
+      return results;
+    }
+  }
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, HookPlatform>({
       section: 'hooks',
@@ -328,6 +354,17 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     });
     return results;
   }
+  for (const [event, groups] of Object.entries((settings.hooks ?? {}) as Record<string, unknown>)) {
+    if (!Array.isArray(groups)) {
+      results.push({
+        platform,
+        filePath: settingsPath,
+        status: 'error',
+        error: `settings.json has invalid shape: "hooks.${event}" must be an array`,
+      });
+      return results;
+    }
+  }
 
   const before = JSON.stringify(settings);
   const existingHooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
@@ -338,7 +375,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
     knownManagedIds: new Set([...ctx.allEntries.map((e) => e.id), ...ownState.bundles]),
-    stateGroups: [ownState.events, ...legacyStates],
+    stateGroups: [ownState.events, ...legacy.groups],
   });
 
   const hadLegacyManagedKey = Object.hasOwn(settings, LEGACY_ASB_MANAGED_KEY);
@@ -346,7 +383,11 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
 
   const stateHasContent = Object.keys(ownState.events).length > 0 || ownState.bundles.length > 0;
   const nothingToDo =
-    selected.length === 0 && !removal.removed && !hadLegacyManagedKey && !stateHasContent;
+    selected.length === 0 &&
+    !removal.removed &&
+    !hadLegacyManagedKey &&
+    !stateHasContent &&
+    !legacy.found;
 
   const appendCleanupResults = (): void => {
     const cleanupOpts: BundleCleanupOptions<HookPlatform> = {
@@ -371,11 +412,21 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
         new Set([...ctx.allEntries.map((e) => e.id), ...removal.removedLegacyAsbIds])
       )
     );
+    const containRoots = [resolvedHomeDir()];
+    for (const root of [claudeRoot(ctx.scope), ctx.scope?.project?.trim()]) {
+      if (!root) continue;
+      try {
+        containRoots.push(fs.realpathSync(root));
+      } catch {
+        // Missing root cannot contain deletable candidates.
+      }
+    }
     results.push(
       ...removeV0428BundleDirs(
         platform,
         new Set([...collectV0428BundleDirs(removal.v0428Commands)].map(expandPortablePath)),
-        ctx.dryRun
+        ctx.dryRun,
+        containRoots
       )
     );
   };
@@ -393,15 +444,9 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
   for (const entry of selected) {
     for (const [event, groups] of Object.entries(resolveEntryGroups(entry, ctx.scope))) {
       if (!mergedHooks[event]) mergedHooks[event] = [];
+      mergedHooks[event].push(...groups);
       if (!Object.hasOwn(managedEvents, event)) managedEvents[event] = [];
-      for (const group of groups) {
-        // A deep-equal group already in the config (e.g. left behind by lost
-        // ownership state) is adopted instead of duplicated.
-        if (!mergedHooks[event].some((existing) => isDeepStrictEqual(existing, group))) {
-          mergedHooks[event].push(group);
-        }
-        managedEvents[event].push(group);
-      }
+      managedEvents[event].push(...groups);
     }
   }
   if (Object.keys(mergedHooks).length === 0) {
@@ -419,12 +464,13 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       { version: 1, events: managedEvents, bundles: bundleEntries.map((e) => e.id) },
       ctx.scope
     );
+    legacy.cleanup();
   };
 
   if (before === after) {
     results.push({ platform, filePath: settingsPath, status: 'skipped', reason: 'up-to-date' });
-    persistState();
     appendCleanupResults();
+    persistState();
   } else if (ctx.dryRun) {
     const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
     results.push({ platform, filePath: settingsPath, status: 'written', reason });
@@ -434,8 +480,8 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       publishJsonConfig(settingsPath, settings);
       const reason = selected.length === 0 ? 'hooks cleared' : `${selected.length} hook(s) merged`;
       results.push({ platform, filePath: settingsPath, status: 'written', reason });
-      persistState();
       appendCleanupResults();
+      persistState();
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       results.push({ platform, filePath: settingsPath, status: 'error', error: msg });

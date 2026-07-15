@@ -17,7 +17,7 @@ import {
 } from '../src/config/paths.js';
 import { distributeHooks } from '../src/hooks/distribution.js';
 import { ensureHooksDirectory } from '../src/hooks/library.js';
-import { resolveHookStatePath } from '../src/hooks/state.js';
+import { consumeLegacyManagedState, resolveHookStatePath } from '../src/hooks/state.js';
 import { updateLibraryStateSection } from '../src/library/state.js';
 import { getTargetById } from '../src/targets/registry.js';
 import { simulateAppsInstalled, withTempHomes } from './helpers/tmp.js';
@@ -343,7 +343,7 @@ test('distributeHooks: bundle hook survives ownership state loss', () => {
   });
 });
 
-test('distributeHooks: definition-only hook is adopted, not duplicated, after state loss', () => {
+test('distributeHooks: definition-only hook duplicates once after state loss, then stays stable', () => {
   withTempHomes(() => {
     simulateAppsInstalled('claude-code');
     createHookEntry('test-hook');
@@ -352,15 +352,35 @@ test('distributeHooks: definition-only hook is adopted, not duplicated, after st
 
     fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
 
+    // Without state or path evidence the surviving copy reads as user-owned;
+    // duplication is the safe failure mode (never claim what we cannot prove).
     distributeHooks(undefined, ['claude-code']);
-
-    const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(
-      settings.hooks.PreToolUse.length,
-      1,
-      'identical group is adopted instead of appended'
-    );
+    let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.PreToolUse.length, 2, 'state loss duplicates once');
     assert.ok(fs.existsSync(resolveHookStatePath('claude-code')), 'ownership is re-recorded');
+
+    distributeHooks(undefined, ['claude-code']);
+    settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.PreToolUse.length, 2, 'stable after state is re-recorded');
+  });
+});
+
+test('distributeHooks: user group identical to a managed hook is never claimed', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('claude-code');
+    createHookEntry('test-hook');
+    enableHooks(['test-hook']);
+    const userGroup = { matcher: '*', hooks: [{ type: 'command', command: 'echo test' }] };
+    fs.writeFileSync(claudeSettingsPath(), JSON.stringify({ hooks: { PreToolUse: [userGroup] } }));
+
+    distributeHooks(undefined, ['claude-code']);
+    let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.PreToolUse.length, 2, 'managed copy is appended, not adopted');
+
+    enableHooks([]);
+    distributeHooks(undefined, ['claude-code']);
+    settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.PreToolUse.length, 1, 'only the managed copy is removed');
   });
 });
 
@@ -562,6 +582,71 @@ test('distributeHooks: removes v0.4.28 hash groups and bundle dirs, keeps foreig
   });
 });
 
+test('distributeHooks: URL containing hooks/managed/<hex> is not v0.4.28 evidence', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('claude-code');
+    enableHooks([]);
+
+    fs.writeFileSync(
+      claudeSettingsPath(),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'url',
+              hooks: [
+                {
+                  type: 'command',
+                  command: `curl https://example.com/hooks/managed/${HEX64_A}/run.sh`,
+                },
+              ],
+            },
+          ],
+        },
+      })
+    );
+
+    distributeHooks(undefined, ['claude-code']);
+
+    const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.PreToolUse.length, 1, 'URL-only group is kept');
+  });
+});
+
+test('distributeHooks: v0.4.28 dir outside managed roots is reported, not deleted', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    enableHooks([]);
+
+    const outside = path.join(agentsHome, 'elsewhere', 'hooks', 'managed', HEX64_A);
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'run.sh'), '#!/bin/sh\n');
+    fs.writeFileSync(
+      claudeSettingsPath(),
+      JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            { matcher: 'v0428', hooks: [{ type: 'command', command: `${outside}/run.sh` }] },
+          ],
+        },
+      })
+    );
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+
+    assert.ok(fs.existsSync(path.join(outside, 'run.sh')), 'dir outside managed roots untouched');
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'claude-code' &&
+          r.status === 'skipped' &&
+          r.reason === 'outside managed roots'
+      ),
+      'skip is reported'
+    );
+  });
+});
+
 test('distributeHooks: refuses to distribute over v0.4.28 transaction artifacts', () => {
   withTempHomes(() => {
     simulateAppsInstalled('claude-code');
@@ -588,6 +673,34 @@ test('distributeHooks: refuses to distribute over v0.4.28 transaction artifacts'
   });
 });
 
+test('distributeHooks: detects transaction artifacts beside a symlinked settings target', () => {
+  withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    createHookEntry('test-hook');
+    enableHooks(['test-hook']);
+
+    const mackupDir = path.join(asbHome, 'mackup');
+    fs.mkdirSync(mackupDir, { recursive: true });
+    const realSettings = path.join(mackupDir, 'settings.json');
+    fs.writeFileSync(realSettings, JSON.stringify({ theme: 'dark' }));
+    fs.symlinkSync(realSettings, claudeSettingsPath());
+    fs.writeFileSync(`${realSettings}.previous.123`, '{}');
+
+    const outcome = distributeHooks(undefined, ['claude-code']);
+
+    assert.ok(
+      outcome.results.some(
+        (r) =>
+          r.platform === 'claude-code' &&
+          r.status === 'error' &&
+          r.error?.includes('transaction artifacts')
+      ),
+      'artifacts beside the resolved target block distribution'
+    );
+    assert.deepEqual(readJson(realSettings), { theme: 'dark' }, 'config untouched');
+  });
+});
+
 test('distributeHooks: publishes through a symlinked settings.json without breaking the link', () => {
   withTempHomes(({ asbHome }) => {
     simulateAppsInstalled('claude-code');
@@ -607,6 +720,76 @@ test('distributeHooks: publishes through a symlinked settings.json without break
     assert.equal(real.hooks.PreToolUse.length, 1);
     const leftovers = fs.readdirSync(mackupDir).filter((name) => name.includes('.asb-write.'));
     assert.deepEqual(leftovers, [], 'no temp files left next to the real config');
+  });
+});
+
+test('distributeHooks: dangling settings symlink publishes at its target, keeping the link', () => {
+  withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled('claude-code');
+    const mackupDir = path.join(asbHome, 'mackup');
+    fs.mkdirSync(mackupDir, { recursive: true });
+    const realSettings = path.join(mackupDir, 'settings.json');
+    fs.symlinkSync(realSettings, claudeSettingsPath());
+
+    createHookEntry('test-hook');
+    enableHooks(['test-hook']);
+    distributeHooks(undefined, ['claude-code']);
+
+    assert.ok(fs.lstatSync(claudeSettingsPath()).isSymbolicLink(), 'link survives publish');
+    const real = readJson(realSettings) as { hooks: Record<string, unknown[]> };
+    assert.equal(real.hooks.PreToolUse.length, 1, 'content lands at the link target');
+  });
+});
+
+test('distributeHooks: marker lines in library hook definitions are stripped on distribute', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('claude-code');
+    createHookEntry('marked-hook', 'echo run\n# asb-managed-by=agent-switchboard');
+    enableHooks(['marked-hook']);
+
+    distributeHooks(undefined, ['claude-code']);
+
+    const raw = fs.readFileSync(claudeSettingsPath(), 'utf-8');
+    assert.ok(!raw.includes('asb-managed'), 'marker line never reaches the app config');
+    const settings = readJson(claudeSettingsPath()) as {
+      hooks: Record<string, Array<Record<string, unknown>>>;
+    };
+    assert.deepEqual(groupCommands(settings.hooks.PreToolUse), ['echo run']);
+
+    const second = distributeHooks(undefined, ['claude-code']);
+    assert.ok(
+      second.results.some(
+        (r) => r.platform === 'claude-code' && r.status === 'skipped' && r.reason === 'up-to-date'
+      ),
+      'stripped form is stable across syncs'
+    );
+  });
+});
+
+test('consumeLegacyManagedState: project scope never consumes global legacy state', () => {
+  withTempHomes(({ asbHome }) => {
+    const stateDir = path.join(asbHome, 'state', 'hooks');
+    fs.mkdirSync(stateDir, { recursive: true });
+    const globalLegacy = path.join(stateDir, `claude-code-${HEX64_A}.json`);
+    fs.writeFileSync(
+      globalLegacy,
+      JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'x', hooks: [] }] } })
+    );
+
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-proj-'));
+    try {
+      const legacy = consumeLegacyManagedState('claude-code', { project: projectRoot }, false);
+      assert.equal(legacy.found, false, 'project scope sees no global legacy state');
+      assert.deepEqual(legacy.groups, []);
+      legacy.cleanup();
+      assert.ok(fs.existsSync(globalLegacy), 'global legacy state untouched by project scope');
+
+      const globalScope = consumeLegacyManagedState('claude-code', undefined, false);
+      assert.equal(globalScope.found, true, 'global scope still consumes it');
+      assert.equal(globalScope.groups.length, 1);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 });
 

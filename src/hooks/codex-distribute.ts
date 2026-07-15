@@ -14,7 +14,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 import { parse as parseToml } from '@iarna/toml';
 import {
   getCodexConfigPath,
@@ -26,16 +25,21 @@ import {
 import type { ConfigScope } from '../config/scope.js';
 import type { DistributionResult } from '../library/distribute.js';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
-import { distributeBundle } from '../library/distribute-bundle.js';
+import { distributeBundle, resolvedHomeDir } from '../library/distribute-bundle.js';
 import {
   type BundleCleanupOptions,
   cleanLegacyAsbDir,
   cleanManagedBundleDirs,
+  isSafeBundleDirName,
   removeV0428BundleDirs,
 } from './bundle-dirs.js';
 import type { HookEntry } from './library.js';
 import { listHookBundleFiles } from './library.js';
-import { collectV0428BundleDirs, removeOwnedHookGroups } from './ownership.js';
+import {
+  collectV0428BundleDirs,
+  removeOwnedHookGroups,
+  stripLegacyMarkerLines,
+} from './ownership.js';
 import { HOOK_DIR_PLACEHOLDER } from './schema.js';
 import { consumeLegacyManagedState, loadHookState, saveHookState } from './state.js';
 import {
@@ -279,7 +283,7 @@ function rewriteHookCommands(
                 .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS, distributedDir)
                 .replaceAll(CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_POWERSHELL, distributedDir)
             : original;
-          rewritten[field] = preferHomeVar(command);
+          rewritten[field] = preferHomeVar(stripLegacyMarkerLines(command));
         }
         return rewritten;
       }),
@@ -486,11 +490,23 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   const ownState = loadHookState('codex', scope);
-  const legacyStates = consumeLegacyManagedState('codex', scope, dryRun);
+  const legacy = consumeLegacyManagedState('codex', scope, dryRun);
 
   // Phase 1: copy bundle files
   let bundleChanged = false;
   const bundleEntries = filteredEntries.filter((f) => f.entry.isBundle).map((f) => f.entry);
+  for (const entry of bundleEntries) {
+    if (!isSafeBundleDirName(entry.id)) {
+      results.push({
+        platform: 'codex',
+        filePath: hooksJsonPath,
+        status: 'error',
+        error: `hook id is not usable as a directory name: ${JSON.stringify(entry.id)}`,
+        entryId: entry.id,
+      });
+      return { results };
+    }
+  }
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, CodexPlatform>({
       section: 'hooks',
@@ -524,7 +540,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
     knownManagedIds: new Set([...allEntries.map((entry) => entry.id), ...ownState.bundles]),
-    stateGroups: [ownState.events, ...legacyStates],
+    stateGroups: [ownState.events, ...legacy.groups],
   });
 
   const hadLegacyManagedKey = Object.hasOwn(fileData, LEGACY_ASB_MANAGED_KEY);
@@ -553,18 +569,38 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         new Set([...allEntries.map((entry) => entry.id), ...removal.removedLegacyAsbIds])
       )
     );
+    let realCodexRoot: string;
+    try {
+      realCodexRoot = fs.realpathSync(codexRoot(scope));
+    } catch {
+      realCodexRoot = codexRoot(scope);
+    }
+    const containRoots = [resolvedHomeDir(), realCodexRoot];
+    const projectRoot = scope?.project?.trim();
+    if (projectRoot) {
+      try {
+        containRoots.push(fs.realpathSync(path.resolve(projectRoot)));
+      } catch {
+        containRoots.push(path.resolve(projectRoot));
+      }
+    }
     results.push(
       ...removeV0428BundleDirs(
         'codex',
         new Set([...collectV0428BundleDirs(removal.v0428Commands)].map(expandPortablePath)),
-        dryRun
+        dryRun,
+        containRoots
       )
     );
   };
 
   const stateHasContent = Object.keys(ownState.events).length > 0 || ownState.bundles.length > 0;
   const nothingToDo =
-    filteredEntries.length === 0 && !removal.removed && !hadLegacyManagedKey && !stateHasContent;
+    filteredEntries.length === 0 &&
+    !removal.removed &&
+    !hadLegacyManagedKey &&
+    !stateHasContent &&
+    !legacy.found;
   if (nothingToDo) {
     appendCleanupResults();
     return { results };
@@ -579,14 +615,8 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     for (const [event, groups] of Object.entries(rewriteHookCommands(hooks, entry, scope))) {
       if (!mergedHooks[event]) mergedHooks[event] = [];
       if (!Object.hasOwn(managedEvents, event)) managedEvents[event] = [];
-      for (const group of groups) {
-        // A deep-equal group already in the config (e.g. left behind by lost
-        // ownership state) is adopted instead of duplicated.
-        if (!mergedHooks[event].some((existing) => isDeepStrictEqual(existing, group))) {
-          mergedHooks[event].push(group);
-        }
-        managedEvents[event].push(group);
-      }
+      mergedHooks[event].push(...groups);
+      managedEvents[event].push(...groups);
     }
   }
   if (Object.keys(mergedHooks).length === 0) {
@@ -602,6 +632,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       { version: 1, events: managedEvents, bundles: bundleEntries.map((entry) => entry.id) },
       scope
     );
+    legacy.cleanup();
   };
 
   // No hooks remain and the file holds nothing else: remove it entirely.
@@ -612,7 +643,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       if (!dryRun) {
         try {
           deleteJsonConfig(hooksJsonPath);
-          persistState();
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });
@@ -626,6 +656,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
         reason: 'no hooks remain',
       });
       appendCleanupResults();
+      persistState();
       return { results };
     }
   }
@@ -641,8 +672,8 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     });
     // Changed bundle scripts need re-review even when hooks.json is unchanged.
     if (bundleChanged) addReviewResult(hooksJsonPath, results);
-    persistState();
     appendCleanupResults();
+    persistState();
     return { results };
   }
 
@@ -659,8 +690,8 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     publishJsonConfig(hooksJsonPath, fileData);
     results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'written', reason });
     if (filteredEntries.length > 0) addReviewResult(hooksJsonPath, results);
-    persistState();
     appendCleanupResults();
+    persistState();
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     results.push({ platform: 'codex', filePath: hooksJsonPath, status: 'error', error: msg });

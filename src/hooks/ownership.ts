@@ -18,10 +18,16 @@ const LEGACY_MARKER_LINES = [
   '# asb-bundle-sha256=',
 ];
 
-/** v0.4.28 wrote bundles to <root>/hooks/managed/<sha256-ns>/<sha256-key>/. */
-const V0428_MANAGED_RE = /\/hooks\/managed\/[0-9a-f]{64}\//;
+/**
+ * v0.4.28 wrote bundles to <root>/hooks/managed/<sha256-ns>/<sha256-key>/.
+ * Recognition is bound to path tokens: the match must start a filesystem path
+ * (`/`, `~`, or `$HOME` after a token boundary; `//` is excluded so URL
+ * authorities such as `https://host/hooks/managed/...` never match).
+ */
+const V0428_MANAGED_RE =
+  /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64}\//;
 const V0428_MANAGED_DIR_RE =
-  /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/)[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
+  /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
 
 const COMMAND_FIELDS = ['command', 'commandWindows', 'command_windows'] as const;
 
@@ -62,14 +68,23 @@ function groupCommands(group: unknown): string[] {
   return commands;
 }
 
+function isLegacyMarkerLine(line: string): boolean {
+  return LEGACY_MARKER_LINES.some((marker) =>
+    marker.endsWith('=') ? line.trim().startsWith(marker) : line.trim() === marker
+  );
+}
+
 function hasLegacyMarker(command: string): boolean {
+  return command.split(/\r?\n/).some(isLegacyMarkerLine);
+}
+
+/** Strip legacy ASB marker lines from a command imported by an older version. */
+export function stripLegacyMarkerLines(command: string): string {
+  if (!hasLegacyMarker(command)) return command;
   return command
     .split(/\r?\n/)
-    .some((line) =>
-      LEGACY_MARKER_LINES.some((marker) =>
-        marker.endsWith('=') ? line.trim().startsWith(marker) : line.trim() === marker
-      )
-    );
+    .filter((line) => !isLegacyMarkerLine(line))
+    .join('\n');
 }
 
 function normalizeRoot(root: string): string {
@@ -78,7 +93,11 @@ function normalizeRoot(root: string): string {
 
 /** Owned by legacy or v0.4.28 evidence: markers, `_asb_source`, asb/ paths, hash dirs. */
 function isLegacyOwnedGroup(group: unknown, legacyAsbRoots: readonly string[]): boolean {
-  if (group && typeof group === 'object' && '_asb_source' in (group as Record<string, unknown>)) {
+  if (
+    group &&
+    typeof group === 'object' &&
+    (group as Record<string, unknown>)._asb_source === true
+  ) {
     return true;
   }
   const commands = groupCommands(group);

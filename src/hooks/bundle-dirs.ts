@@ -20,6 +20,22 @@ import {
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
+/**
+ * A hook id is usable as a bundle directory name only when it stays a single
+ * path segment; ids from third-party manifests must not escape the managed
+ * parent.
+ */
+export function isSafeBundleDirName(id: string): boolean {
+  return (
+    id.length > 0 &&
+    id !== '.' &&
+    id !== '..' &&
+    !id.includes('/') &&
+    !id.includes('\\') &&
+    !id.includes('\0')
+  );
+}
+
 export function lstatIfExists(filePath: string): fs.Stats | undefined {
   try {
     return fs.lstatSync(filePath);
@@ -135,10 +151,19 @@ export function cleanManagedBundleDirs<Platform extends string>(
 
   try {
     for (const entry of fs.readdirSync(opts.parentDir, { withFileTypes: true })) {
-      if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
+      const dirPath = path.join(opts.parentDir, entry.name);
+      if (!entry.isDirectory() && !entry.isSymbolicLink()) {
+        results.push({
+          platform: opts.platform,
+          targetDir: dirPath,
+          status: 'skipped',
+          reason: 'unmanaged entry',
+          entryId: entry.name,
+        });
+        continue;
+      }
       if (activeIds.has(entry.name)) continue;
 
-      const dirPath = path.join(opts.parentDir, entry.name);
       if (stateBundles.has(entry.name)) {
         results.push(deletionResult(opts, dirPath, entry.name, 'orphan'));
       } else if (isV0428NamespaceDir(dirPath)) {
@@ -214,12 +239,15 @@ export function cleanLegacyAsbDir<Platform extends string>(
  * Delete v0.4.28 hash directories referenced by removed config groups. Paths
  * arrive from the config evidence (already `$HOME`-expanded); only the exact
  * `<...>/hooks/managed/<64-hex>` shape is deleted, plus the emptied
- * `managed/` parent.
+ * `managed/` parent. Each candidate's real parent must resolve inside one of
+ * `containRoots` (the real home and the app or project root), so evidence
+ * pointing elsewhere is never followed.
  */
 export function removeV0428BundleDirs<Platform extends string>(
   platform: Platform,
   dirs: ReadonlySet<string>,
-  dryRun: boolean
+  dryRun: boolean,
+  containRoots: readonly string[]
 ): Array<BundleDistributionResult<Platform>> {
   const results: Array<BundleDistributionResult<Platform>> = [];
   for (const dir of dirs) {
@@ -233,6 +261,25 @@ export function removeV0428BundleDirs<Platform extends string>(
     }
     const stat = lstatIfExists(dir);
     if (!stat?.isDirectory() || stat.isSymbolicLink()) continue;
+    let realParent: string;
+    try {
+      realParent = fs.realpathSync(parent);
+    } catch {
+      continue;
+    }
+    const contained = containRoots.some(
+      (root) => realParent === root || realParent.startsWith(root + path.sep)
+    );
+    if (!contained) {
+      results.push({
+        platform,
+        targetDir: dir,
+        status: 'skipped',
+        reason: 'outside managed roots',
+        entryId: path.basename(dir),
+      });
+      continue;
+    }
     try {
       if (!dryRun) {
         removeHookBundlePath(dir);
