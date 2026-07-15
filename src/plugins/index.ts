@@ -15,9 +15,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { getConfigDir } from '../config/paths.js';
 import { loadConfiguredPortableSelections } from '../config/plugin-selection.js';
-import type { McpServer } from '../config/schemas.js';
+import type { McpServer, RemoteSource } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
-import { getSourceRevision, getSourcesRecord } from '../library/sources.js';
+import { getSourceRevision, getSources, type Source } from '../library/sources.js';
 import { loadPluginComponents, loadPluginHookEntries } from '../marketplace/plugin-loader.js';
 import {
   isMarketplace,
@@ -60,6 +60,7 @@ export interface NativePluginMeta {
   target: NativePluginTarget;
   marketplaceName: string;
   marketplacePath: string;
+  remoteSource?: RemoteSource;
   pluginName: string;
   installRef: string;
   version?: string;
@@ -295,13 +296,13 @@ function loadMarketplacePluginData(
 }
 
 function buildFromMarketplace(
-  sourceName: string,
-  basePath: string,
+  source: Source,
   allPlugins: PluginDescriptor[],
   allMcpServers: PluginMcpServer[],
   allRuleSnippets: PluginRuleSnippet[],
   deferredLoaders: Map<string, () => void>
 ): void {
+  const { namespace: sourceName, path: basePath, remote } = source;
   const result = readMarketplace(basePath, sourceName);
 
   for (const plugin of result.plugins) {
@@ -325,6 +326,7 @@ function buildFromMarketplace(
           target: result.nativeTarget,
           marketplaceName: result.name,
           marketplacePath: basePath,
+          remoteSource: remote,
           pluginName: plugin.name,
           installRef: `${plugin.name}@${result.name}`,
           version: plugin.version,
@@ -453,13 +455,13 @@ export function buildPluginIndex(scope?: ConfigScope): PluginIndex {
   const mcpServers: PluginMcpServer[] = [];
   const ruleSnippets: PluginRuleSnippet[] = [];
   const deferredLoaders = new Map<string, () => void>();
-  const sources = getSourcesRecord(scope);
+  const sources = getSources(scope);
 
-  for (const [namespace, basePath] of Object.entries(sources)) {
-    if (isMarketplace(basePath)) {
-      buildFromMarketplace(namespace, basePath, plugins, mcpServers, ruleSnippets, deferredLoaders);
+  for (const source of sources) {
+    if (isMarketplace(source.path)) {
+      buildFromMarketplace(source, plugins, mcpServers, ruleSnippets, deferredLoaders);
     } else {
-      buildFromPlugin(namespace, basePath, plugins, mcpServers, ruleSnippets);
+      buildFromPlugin(source.namespace, source.path, plugins, mcpServers, ruleSnippets);
     }
   }
 
