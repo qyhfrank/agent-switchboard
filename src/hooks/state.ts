@@ -56,6 +56,8 @@ export function loadHookState(target: HookStateTarget, scope?: ConfigScope): Hoo
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const record = parsed as Record<string, unknown>;
+      // Only the schema this code writes may serve as deletion evidence.
+      if (record.version !== 1) return emptyHookState();
       const events: Record<string, unknown[]> = {};
       if (record.events && typeof record.events === 'object' && !Array.isArray(record.events)) {
         for (const [event, groups] of Object.entries(record.events as Record<string, unknown>)) {
@@ -86,35 +88,59 @@ export function saveHookState(
     return;
   }
   ensureParentDir(filePath);
-  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  fs.renameSync(tmpPath, filePath);
 }
 
 const LEGACY_STATE_FILE_RE = /^(claude-code|codex)-[0-9a-f]{64}\.json$/;
 
+export interface LegacyStateConsumption {
+  /** Event maps recovered from v0.4.28 state files, as removal candidates. */
+  groups: Record<string, unknown[]>[];
+  /** Whether any legacy state file or litter entry was found. */
+  found: boolean;
+  /** Delete the consumed files and litter; call only after the config and new state committed. */
+  cleanup: () => void;
+}
+
 /**
  * Read the hook groups recorded by v0.4.28 state files so they can join the
- * removal candidates, and (outside dry-run) delete the v0.4.28 state litter:
- * hash-named state files, `.legacy-bundles` markers, `.lock*` entries and the
- * `locks/` directory. The state directory is ASB-owned by construction.
+ * removal candidates, and plan deletion of the v0.4.28 state litter:
+ * hash-named state files, their `.lock`/`.legacy-bundles` variants, and the
+ * `locks/` directory. The scan stays inside the current scope's own state
+ * directory (global sync never consumes project evidence and vice versa;
+ * the file names carry no config identity to match across scopes), and a
+ * symlinked state directory is left alone. Deletion is deferred to
+ * `cleanup()` so a failed sync keeps its migration evidence.
  */
 export function consumeLegacyManagedState(
   target: HookStateTarget,
   scope: ConfigScope | undefined,
   dryRun: boolean
-): Record<string, unknown[]>[] {
-  const dirs = [hooksStateDir()];
+): LegacyStateConsumption {
   const projectRoot = scope?.project?.trim();
-  if (projectRoot && projectRoot.length > 0) {
-    dirs.push(path.join(path.resolve(projectRoot), '.asb', 'state', 'hooks'));
-  }
+  const dir =
+    projectRoot && projectRoot.length > 0
+      ? path.join(path.resolve(projectRoot), '.asb', 'state', 'hooks')
+      : hooksStateDir();
 
-  const recovered: Record<string, unknown[]>[] = [];
-  for (const dir of dirs) {
-    let entries: fs.Dirent[];
+  const groups: Record<string, unknown[]>[] = [];
+  const doomed: string[] = [];
+
+  const dirStat = (() => {
+    try {
+      return fs.lstatSync(dir);
+    } catch {
+      return undefined;
+    }
+  })();
+  if (dirStat?.isDirectory() && !dirStat.isSymbolicLink()) {
+    let entries: fs.Dirent[] = [];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
-      continue;
+      // Unreadable state dir: nothing to consume.
     }
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name);
@@ -126,21 +152,29 @@ export function consumeLegacyManagedState(
               hooks?: Record<string, unknown[]>;
             };
             if (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) {
-              recovered.push(parsed.hooks);
+              groups.push(parsed.hooks);
             }
           } catch {
             // Unreadable legacy state carries nothing to remove.
           }
-          if (!dryRun) fs.rmSync(entryPath, { force: true });
+          doomed.push(entryPath);
         }
         continue;
       }
       const isLitter =
         entry.name === 'locks' || /^(claude-code|codex)-[0-9a-f]{64}\./.test(entry.name);
-      if (isLitter && !dryRun) {
-        fs.rmSync(entryPath, { recursive: true, force: true });
-      }
+      if (isLitter) doomed.push(entryPath);
     }
   }
-  return recovered;
+
+  return {
+    groups,
+    found: doomed.length > 0,
+    cleanup: () => {
+      if (dryRun) return;
+      for (const entryPath of doomed) {
+        fs.rmSync(entryPath, { recursive: true, force: true });
+      }
+    },
+  };
 }
