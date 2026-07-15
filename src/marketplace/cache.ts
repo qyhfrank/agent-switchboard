@@ -788,11 +788,14 @@ function resolveInside(root: string, subdir: string | undefined): string {
 
 function checkoutRequest(
   request: MarketplaceEntryCacheRequest,
-  repoPath: string
+  repoPath: string,
+  assertCurrentStage: () => void
 ): { commit: string; pluginPath: string } {
+  assertCurrentStage();
   runGit(['init'], repoPath);
   const persistedUrl = credentialFreeGitUrl(request.url);
   const transportEnv = authenticatedGitEnv(request.url, persistedUrl);
+  assertCurrentStage();
   runGit(['remote', 'add', 'origin', persistedUrl], repoPath);
 
   const targets = request.ref ? marketplaceGitFetchTargets(request.ref) : [request.sha ?? 'HEAD'];
@@ -802,6 +805,7 @@ function checkoutRequest(
     if (request.subdir) fetchArgs.push('--filter=blob:none');
     fetchArgs.push('origin', target);
     try {
+      assertCurrentStage();
       runGit(fetchArgs, repoPath, transportEnv);
       fetchError = undefined;
       break;
@@ -811,18 +815,23 @@ function checkoutRequest(
   }
   if (fetchError) throw fetchError;
   const commit = runGit(['rev-parse', 'FETCH_HEAD^{commit}'], repoPath);
+  assertCurrentStage();
   fs.rmSync(path.join(repoPath, '.git', 'FETCH_HEAD'), { force: true });
   if (request.sha && commit !== request.sha) {
     throw new Error(
       `Marketplace plugin pin mismatch: ${request.ref ?? 'fetched commit'} resolved to ${commit}, expected ${request.sha}.`
     );
   }
+  assertCurrentStage();
   runGit(['update-ref', FETCHED_COMMIT_REF, commit], repoPath);
 
   if (request.subdir) {
+    assertCurrentStage();
     runGit(['sparse-checkout', 'init', '--cone'], repoPath);
+    assertCurrentStage();
     runGit(['sparse-checkout', 'set', '--', request.subdir], repoPath);
   }
+  assertCurrentStage();
   runGit(['checkout', '--detach', commit], repoPath, transportEnv);
 
   return { commit, pluginPath: resolveInside(repoPath, request.subdir) };
@@ -854,7 +863,7 @@ function nextCacheGeneration(sourcePath: string, identity: string): number {
   let current = 0;
   if (!fs.existsSync(sourcePath)) return 1;
   for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.startsWith('.tmp-')) continue;
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
     const metadata = readMetadata(path.join(sourcePath, entry.name));
     if (metadata?.identity !== identity) continue;
     current = Math.max(current, metadata.generation);
@@ -1001,6 +1010,7 @@ function recoverEntryBackup(
 
 function replaceEntry(
   tempPath: string,
+  tempIdentity: MarketplacePathIdentity,
   entryPath: string,
   verify: () => MarketplaceEntryMaterialization | null
 ): MarketplaceEntryMaterialization {
@@ -1010,6 +1020,9 @@ function replaceEntry(
   let materialized: MarketplaceEntryMaterialization;
   try {
     fs.renameSync(tempPath, entryPath);
+    if (!samePathIdentity(pathIdentity(entryPath), tempIdentity)) {
+      throw new Error(`Marketplace cache stage changed: ${tempPath}`);
+    }
     const verified = verify();
     if (!verified) throw new Error(`Marketplace cache verification failed: ${entryPath}`);
     materialized = verified;
@@ -1084,6 +1097,7 @@ export function materializeMarketplaceEntry(
       assertNoCacheSymlinks(cacheRoot, entryPath);
       const cached = recoverEntryBackup(request, identity, entryPath);
       if (cached && (!options.refresh || request.sha)) {
+        removeSupersededPluginEntries(request, identity);
         removeSupersededPluginBackups(request);
         return cached;
       }
@@ -1091,11 +1105,16 @@ export function materializeMarketplaceEntry(
       const stage = prepareMaterializationStage(cacheRoot, sourcePath, ownerIdentity);
       try {
         assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
+        if (!stage.stageIdentity) {
+          throw new Error(`Marketplace cache stage changed: ${stage.stagePath}`);
+        }
         const repoPath = path.join(stage.stagePath, 'repo');
         fs.mkdirSync(repoPath);
         assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
         assertNoCacheSymlinks(cacheRoot, repoPath);
-        const checkout = checkoutRequest(request, repoPath);
+        const checkout = checkoutRequest(request, repoPath, () =>
+          assertCurrentMaterializationStage(cacheRoot, sourcePath, stage)
+        );
         const metadata: MarketplaceEntryCacheMetadata = {
           version: 2,
           generation: nextCacheGeneration(sourcePath, identity),
@@ -1120,7 +1139,7 @@ export function materializeMarketplaceEntry(
           throw new Error(`Marketplace source "${request.sourceName}" is no longer active.`);
         }
         assertCurrentMaterializationStage(cacheRoot, sourcePath, stage);
-        const materialized = replaceEntry(stage.stagePath, entryPath, () =>
+        const materialized = replaceEntry(stage.stagePath, stage.stageIdentity, entryPath, () =>
           cachedMaterialization(request, identity, entryPath)
         );
         removeSupersededPluginEntries(request, identity);

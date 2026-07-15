@@ -401,17 +401,24 @@ export function ensurePluginSourceState(
   const state = newState(namespace, configPath, descriptor, descriptorKey, expectedPath);
   const stateRoot = safeStateRoot(true);
   assertNoStateSymlinks(stateRoot, filePath);
+  const tempPath = path.join(stateRoot, `.${path.basename(filePath)}.${randomUUID()}.tmp`);
+  assertNoStateSymlinks(stateRoot, tempPath);
   try {
-    fs.writeFileSync(filePath, `${JSON.stringify(sanitizeState(state), null, 2)}\n`, {
+    fs.writeFileSync(tempPath, `${JSON.stringify(sanitizeState(state), null, 2)}\n`, {
       flag: 'wx',
       mode: 0o600,
     });
-    return state;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-    const winner = readStateFile(filePath);
-    if (!winner) throw new Error(`Plugin source state is unreadable: ${filePath}`);
-    return winner;
+    try {
+      fs.linkSync(tempPath, filePath);
+      return state;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const winner = readStateFile(filePath);
+      if (!winner) throw new Error(`Plugin source state is unreadable: ${filePath}`);
+      return winner;
+    }
+  } finally {
+    fs.rmSync(tempPath, { force: true });
   }
 }
 

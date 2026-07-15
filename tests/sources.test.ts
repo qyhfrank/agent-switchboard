@@ -17,6 +17,7 @@ import {
 import {
   addLocalSource,
   addRemoteSource,
+  captureSourceOwnerValidator,
   getSources,
   getSourcesRecord,
   hasSource,
@@ -1139,7 +1140,7 @@ test('clone recovery rolls back a populated stage that was not validated', async
   }
 });
 
-test('clone recovery refuses publication after a higher-layer effective override', async () => {
+test('clone recovery follows its own carrier after a higher-layer effective override', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-source-effective-recovery-'));
   const asbHome = path.join(root, 'asb-home');
   fs.mkdirSync(asbHome, { recursive: true });
@@ -1211,7 +1212,7 @@ test('clone recovery refuses publication after a higher-layer effective override
     );
 
     assert.equal(getSourcesRecord(profile)[namespace], local);
-    assert.equal(fs.existsSync(checkout), false);
+    assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
     const states = fs
       .readdirSync(getPluginSourceStateDir())
       .filter((name) => name.endsWith('.json'))
@@ -3333,6 +3334,28 @@ function writeSourceStateForTest(
   return filePath;
 }
 
+interface SourceStateForTest {
+  namespace: string;
+  configPath: string;
+  gitOwnerKey?: string;
+  checkout?: { managedRef?: string };
+  subtree?: { managedRef?: string };
+}
+
+function readSourceStatesForTest(namespace: string): SourceStateForTest[] {
+  if (!fs.existsSync(getPluginSourceStateDir())) return [];
+  return fs
+    .readdirSync(getPluginSourceStateDir())
+    .filter((name) => name.endsWith('.json'))
+    .map(
+      (name) =>
+        JSON.parse(
+          fs.readFileSync(path.join(getPluginSourceStateDir(), name), 'utf-8')
+        ) as SourceStateForTest
+    )
+    .filter((state) => state.namespace === namespace);
+}
+
 async function stopCloneUpdateAfterValidation(
   asbHome: string,
   namespace: string,
@@ -4285,7 +4308,7 @@ test('scoped managed source directories remain direct in unrelated discovery vie
   });
 });
 
-test('malformed lifecycle state still suppresses scoped checkout discovery', () => {
+test('malformed lifecycle state does not suppress scoped checkout discovery', () => {
   withTempAsbHome((asbHome) => {
     const namespace = 'malformed-scoped-owner';
     const scope = { profile: 'scoped' };
@@ -4299,7 +4322,7 @@ test('malformed lifecycle state still suppresses scoped checkout discovery', () 
     const state = JSON.parse(fs.readFileSync(stateFile, 'utf-8'));
     fs.writeFileSync(stateFile, `${JSON.stringify({ ...state, version: 999 }, null, 2)}\n`);
 
-    assert.equal(getSourcesRecord()[namespace], undefined);
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
     assert.equal(getSourcesRecord(scope)[namespace], path.join(getPluginsDir(), namespace));
     assert.throws(() => removeSource(namespace, scope), /malformed ownership state/);
     assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace)), true);
@@ -5691,7 +5714,7 @@ test('validated clone recovery rechecks incompatible physical owners before publ
   }
 });
 
-test('every identifiable malformed state namespace stays out of direct discovery', () => {
+test('every identifiable malformed state namespace remains directly discoverable', () => {
   withTempAsbHome((asbHome) => {
     const namespace = 'malformed-namespace-only';
     const profile = { profile: 'team' };
@@ -5704,7 +5727,7 @@ test('every identifiable malformed state namespace stays out of direct discovery
     assert.ok(statePath);
     fs.writeFileSync(statePath, `${JSON.stringify({ version: 999, namespace }, null, 2)}\n`);
 
-    assert.equal(getSourcesRecord()[namespace], undefined);
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
     assert.equal(getSourcesRecord(profile)[namespace], path.join(getPluginsDir(), namespace));
   });
 });
@@ -6284,5 +6307,398 @@ test('lifecycle releases retained source readers before physical locks', (t) => 
     assert.equal(hasSource(namespace), false);
     assert.equal(checked, true);
     clearPluginIndexCache();
+  });
+});
+
+test('initial source state publication never exposes a partial final carrier', (t) => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'atomic-initial-state';
+    const sourceDir = path.join(asbHome, 'external', namespace);
+    fs.mkdirSync(path.join(sourceDir, 'rules'), { recursive: true });
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\n${namespace} = ${JSON.stringify(sourceDir)}\n`
+    );
+    const originalWrite = fs.writeFileSync.bind(fs);
+    let interrupted = false;
+    t.mock.method(fs, 'writeFileSync', (filePath, data, options) => {
+      const target = String(filePath);
+      if (
+        !interrupted &&
+        path.dirname(target) === getPluginSourceStateDir() &&
+        (target.endsWith('.json') || target.endsWith('.tmp'))
+      ) {
+        interrupted = true;
+        originalWrite(filePath, String(data).slice(0, 8), options);
+        throw new Error('simulated state write interruption');
+      }
+      return originalWrite(filePath, data, options);
+    });
+
+    assert.throws(
+      () => captureSourceOwnerValidator(namespace, sourceDir),
+      /simulated state write interruption/
+    );
+    assert.equal(interrupted, true);
+    assert.deepEqual(
+      fs.existsSync(getPluginSourceStateDir())
+        ? fs.readdirSync(getPluginSourceStateDir()).filter((name) => name.endsWith('.json'))
+        : [],
+      []
+    );
+  });
+});
+
+test('addition recovery follows its own live config carrier', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-addition-own-carrier-'));
+  const asbHome = path.join(root, 'asb-home');
+  fs.mkdirSync(asbHome, { recursive: true });
+  const previousAsbHome = process.env.ASB_HOME;
+  const previousAgentsHome = process.env.ASB_AGENTS_HOME;
+  process.env.ASB_HOME = asbHome;
+  process.env.ASB_AGENTS_HOME = asbHome;
+  try {
+    const namespace = 'own-carrier-recovery';
+    const { bareRepo } = createBareRemote(path.join(root, 'remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+    await stopCloneUpdateAfterValidation(asbHome, namespace);
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(bareRepo)}, type = "clone", ref = "refs/heads/main" }\n`
+    );
+
+    getSourcesRecord({ profile: 'team' });
+
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace, 'rules', 'v1.md')), true);
+    assert.equal(
+      readSourceStatesForTest(namespace).some(
+        (state) => state.checkout?.managedRef === 'refs/heads/main'
+      ),
+      true
+    );
+  } finally {
+    if (previousAsbHome === undefined) delete process.env.ASB_HOME;
+    else process.env.ASB_HOME = previousAsbHome;
+    if (previousAgentsHome === undefined) delete process.env.ASB_AGENTS_HOME;
+    else process.env.ASB_AGENTS_HOME = previousAgentsHome;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('missing shared checkout inherits persisted short-tag identity for state-less carriers', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'missing-shared-short-tag';
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'shared-tag-remote'));
+    execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    const tagCommit = execFileSync('git', ['rev-parse', 'refs/tags/release^{commit}'], {
+      cwd: workDir,
+      encoding: 'utf-8',
+    }).trim();
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'release' });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(bareRepo)}, type = "clone", ref = "release" }\n`
+    );
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'HEAD:refs/heads/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+
+    const updated = updateRemoteSources(undefined, namespace);
+
+    assert.equal(updated[0]?.status, 'updated', updated[0]?.error);
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: path.join(getPluginsDir(), namespace),
+        encoding: 'utf-8',
+      }).trim(),
+      tagCommit
+    );
+    assert.deepEqual(
+      new Set(readSourceStatesForTest(namespace).map((state) => state.checkout?.managedRef)),
+      new Set(['refs/tags/release'])
+    );
+  });
+});
+
+test('compatible add recreates a missing checkout from its persisted exact ref', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'compatible-add-persisted-tag';
+    const profile = { profile: 'team' };
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'compatible-tag-remote'));
+    execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    const tagCommit = execFileSync('git', ['rev-parse', 'refs/tags/release^{commit}'], {
+      cwd: workDir,
+      encoding: 'utf-8',
+    }).trim();
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'release' });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'HEAD:refs/heads/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    fs.rmSync(path.join(getPluginsDir(), namespace), { recursive: true, force: true });
+
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'release' }, profile);
+
+    assert.equal(
+      execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: path.join(getPluginsDir(), namespace),
+        encoding: 'utf-8',
+      }).trim(),
+      tagCommit
+    );
+    assert.deepEqual(
+      new Set(readSourceStatesForTest(namespace).map((state) => state.checkout?.managedRef)),
+      new Set(['refs/tags/release'])
+    );
+  });
+});
+
+test('subtree add imports the resolved branch when a tag has the same name', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'subtree-add-ref-collision';
+    const { bareRepo, workDir } = createBareRemote(
+      path.join(path.dirname(asbHome), 'subtree-add-collision-remote')
+    );
+    execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'HEAD:refs/heads/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    initAsbAsGitRepo(asbHome);
+
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'release' });
+
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), namespace, 'rules', 'v2.md'), 'utf-8'),
+      '# V2'
+    );
+    assert.equal(readSourceStatesForTest(namespace)[0]?.subtree?.managedRef, 'refs/heads/release');
+  });
+});
+
+test('subtree update keeps a persisted short-tag identity across a later branch collision', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'subtree-update-ref-collision';
+    const { bareRepo, workDir } = createBareRemote(
+      path.join(path.dirname(asbHome), 'subtree-update-collision-remote')
+    );
+    execFileSync('git', ['tag', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource(namespace, { url: bareRepo, type: 'subtree', ref: 'release' });
+    execFileSync('git', ['add', '.'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'record subtree'], { cwd: asbHome, stdio: 'pipe' });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['tag', '-f', 'release'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', '--force', 'origin', 'refs/tags/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v3.md'), '# V3');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v3'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'HEAD:refs/heads/release'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+
+    const updated = updateRemoteSources(undefined, namespace);
+
+    assert.equal(updated[0]?.status, 'updated', updated[0]?.error);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), namespace, 'rules', 'v2.md'), 'utf-8'),
+      '# V2'
+    );
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), namespace, 'rules', 'v3.md')), false);
+    assert.equal(readSourceStatesForTest(namespace)[0]?.subtree?.managedRef, 'refs/tags/release');
+  });
+});
+
+test('removal propagates verified checkout provenance to a state-less survivor', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'removal-provenance-survivor';
+    const profile = { profile: 'team' };
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'removal-provenance-remote'));
+    const authenticatedUrl = `file://alice@localhost${bareRepo}`;
+    addRemoteSource(namespace, { url: authenticatedUrl, type: 'clone', ref: 'main' }, profile);
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(authenticatedUrl)}, type = "clone", ref = "main" }\n`
+    );
+
+    removeSource(namespace, profile);
+
+    const states = readSourceStatesForTest(namespace);
+    assert.equal(states.length, 1);
+    assert.equal(states[0]?.configPath, fs.realpathSync.native(path.join(asbHome, 'config.toml')));
+    assert.equal(states[0]?.checkout?.managedRef, 'refs/heads/main');
+    assert.equal(
+      states[0]?.gitOwnerKey,
+      createHash('sha256')
+        .update(normalizeGitIdentity(authenticatedUrl, process.cwd()))
+        .digest('hex')
+    );
+  });
+});
+
+test('shared-cache refresh propagates checkout provenance before path deduplication', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'same-path-refresh-provenance';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'same-path-refresh-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    fs.writeFileSync(
+      getProfileConfigPath('team'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(bareRepo)}, type = "clone", ref = "main" }\n`
+    );
+
+    const updated = updateRemoteSources(undefined, namespace);
+
+    assert.equal(updated[0]?.status, 'updated', updated[0]?.error);
+    const states = readSourceStatesForTest(namespace);
+    assert.equal(states.length, 2);
+    assert.deepEqual(
+      new Set(states.map((state) => state.checkout?.managedRef)),
+      new Set(['refs/heads/main'])
+    );
+  });
+});
+
+test('inactive retirement preserves a checkout for any live managed carrier', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'inactive-physical-survivor';
+    const profile = { profile: 'team' };
+    const first = createBareRemote(path.join(asbHome, 'inactive-first-remote'));
+    const second = createBareRemote(path.join(asbHome, 'inactive-second-remote'));
+    addRemoteSource(namespace, { url: first.bareRepo, type: 'clone', ref: 'main' }, profile);
+    const checkout = path.join(getPluginsDir(), namespace);
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      `[plugins.sources]\n${namespace} = { url = ${JSON.stringify(second.bareRepo)}, type = "clone", ref = "main" }\n`
+    );
+    fs.writeFileSync(getProfileConfigPath('team'), '[plugins]\nenabled = []\n');
+    const local = path.join(asbHome, 'local-replacement');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+
+    addLocalSource(namespace, local, profile);
+
+    assert.equal(fs.existsSync(path.join(checkout, 'rules', 'v1.md')), true);
+  });
+});
+
+test('managed branch update fetches an exact ref across a same-named tag', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'clone-update-ref-collision';
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'clone-update-remote'));
+    execFileSync('git', ['tag', 'main'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'refs/tags/main'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'refs/heads/main' });
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v2'],
+      { cwd: workDir, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'refs/heads/main'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+
+    const updated = updateRemoteSources(undefined, namespace);
+
+    assert.equal(updated[0]?.status, 'updated', updated[0]?.error);
+    assert.equal(
+      fs.readFileSync(path.join(getPluginsDir(), namespace, 'rules', 'v2.md'), 'utf-8'),
+      '# V2'
+    );
+  });
+});
+
+test('direct discovery builds an index despite stale managed lifecycle state', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const namespace = 'stale-managed-direct-index';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'stale-index-remote'));
+    addRemoteSource(namespace, { url: bareRepo, type: 'clone', ref: 'main' });
+    fs.writeFileSync(path.join(asbHome, 'config.toml'), '[plugins]\nenabled = []\n');
+
+    assert.equal(getSourcesRecord()[namespace], path.join(getPluginsDir(), namespace));
+    assert.doesNotThrow(() => buildPluginIndex());
+    clearPluginIndexCache();
+  });
+});
+
+test('source owner validators expose only live configured Git principals', () => {
+  withTempAsbHome((asbHome) => {
+    const namespace = 'validator-live-principal';
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'validator-principal-remote'));
+    const authenticatedUrl = `file://alice@localhost${bareRepo}`;
+    addRemoteSource(namespace, { url: authenticatedUrl, type: 'clone', ref: 'main' });
+    const checkout = path.join(getPluginsDir(), namespace);
+
+    const configured = captureSourceOwnerValidator(namespace, checkout);
+
+    assert.equal(
+      configured.gitOwnerKey,
+      createHash('sha256')
+        .update(normalizeGitIdentity(authenticatedUrl, process.cwd()))
+        .digest('hex')
+    );
+    const directNamespace = 'validator-direct-source';
+    const direct = path.join(getPluginsDir(), directNamespace);
+    fs.mkdirSync(path.join(direct, 'rules'), { recursive: true });
+    assert.equal(captureSourceOwnerValidator(directNamespace, direct).gitOwnerKey, undefined);
   });
 });
