@@ -16,7 +16,7 @@
     "format": "biome format --write .",
     "test": "tsx --test tests/*.test.ts",
     "prepublishOnly": "pnpm run build",
-    "postinstall": "git config core.hooksPath .githooks || true"
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "keywords": [
     "mcp",
