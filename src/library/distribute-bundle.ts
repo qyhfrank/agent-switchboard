@@ -76,8 +76,6 @@ export interface DistributeBundleOptions<TEntry, Platform extends string> {
   collision?: BundleCollisionPolicy;
   /** When true, compute results without writing files or updating state */
   dryRun?: boolean;
-  /** Revalidate an owning transaction immediately before target mutations. */
-  validateTarget?: () => void;
 }
 
 export interface DistributeBundleOutcome<Platform extends string> {
@@ -229,11 +227,10 @@ function desiredTargetMode(srcMode: number, currentMode: number): number {
 
 function ensureDirectoryWithoutFollowingSymlink(
   dirPath: string,
-  options?: { recursive?: boolean; validateTarget?: () => void }
+  options?: { recursive?: boolean }
 ): void {
   const stat = lstatIfExists(dirPath);
   if (!stat) {
-    options?.validateTarget?.();
     fs.mkdirSync(dirPath, { recursive: options?.recursive === true });
     return;
   }
@@ -244,18 +241,12 @@ function ensureDirectoryWithoutFollowingSymlink(
     throw new Error(`path exists and is not a directory: ${dirPath}`);
   }
 
-  options?.validateTarget?.();
   fs.unlinkSync(dirPath);
-  options?.validateTarget?.();
   fs.mkdirSync(dirPath);
 }
 
-function ensureBundleParentDir(
-  targetDir: string,
-  relativePath: string,
-  validateTarget?: () => void
-): void {
-  ensureDirectoryWithoutFollowingSymlink(targetDir, { recursive: true, validateTarget });
+function ensureBundleParentDir(targetDir: string, relativePath: string): void {
+  ensureDirectoryWithoutFollowingSymlink(targetDir, { recursive: true });
   const parentRel = path.dirname(relativePath);
   if (parentRel === '.') return;
 
@@ -263,7 +254,7 @@ function ensureBundleParentDir(
   for (const segment of parentRel.split(path.sep)) {
     if (!segment || segment === '.') continue;
     current = path.join(current, segment);
-    ensureDirectoryWithoutFollowingSymlink(current, { validateTarget });
+    ensureDirectoryWithoutFollowingSymlink(current);
   }
 }
 
@@ -325,7 +316,6 @@ export function distributeBundle<TEntry, Platform extends string>(
       : opts.selected;
 
     for (const entry of platformSelected) {
-      opts.validateTarget?.();
       const targetDir = opts.resolveTargetDir(platform, entry);
       const files = opts.listFiles(entry);
       const entryId = opts.getId(entry);
@@ -400,7 +390,6 @@ export function distributeBundle<TEntry, Platform extends string>(
       const replaceTargetDir = targetDirIsSymlink;
       if (replaceTargetDir && !dryRun) {
         try {
-          opts.validateTarget?.();
           fs.unlinkSync(targetDir);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
@@ -425,10 +414,7 @@ export function distributeBundle<TEntry, Platform extends string>(
         const targetPath = path.join(targetDir, file.relativePath);
 
         try {
-          if (!dryRun) {
-            opts.validateTarget?.();
-            ensureBundleParentDir(targetDir, file.relativePath, opts.validateTarget);
-          }
+          if (!dryRun) ensureBundleParentDir(targetDir, file.relativePath);
 
           const srcContent = fs.readFileSync(file.sourcePath);
           const srcMode = fs.statSync(file.sourcePath).mode & 0o777;
@@ -454,19 +440,11 @@ export function distributeBundle<TEntry, Platform extends string>(
 
           if (!same || !modeSame) {
             if (!dryRun) {
-              opts.validateTarget?.();
-              if (replaceExistingTarget) {
-                opts.validateTarget?.();
-                fs.unlinkSync(targetPath);
-              }
-              if (!same) {
-                opts.validateTarget?.();
-                fs.writeFileSync(targetPath, srcContent);
-              }
+              if (replaceExistingTarget) fs.unlinkSync(targetPath);
+              if (!same) fs.writeFileSync(targetPath, srcContent);
 
               const currentMode = fs.statSync(targetPath).mode & 0o777;
               if (!targetModeMatchesSourceExecutableBits(srcMode, currentMode)) {
-                opts.validateTarget?.();
                 fs.chmodSync(targetPath, desiredTargetMode(srcMode, currentMode));
               }
             }
@@ -489,8 +467,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       if (!dryRun && !hadError && lstatIfExists(targetDir)?.isDirectory()) {
         const expectedFiles = new Set(files.map((f) => f.relativePath));
         try {
-          opts.validateTarget?.();
-          cleanStaleFiles(targetDir, '', expectedFiles, opts.validateTarget);
+          cleanStaleFiles(targetDir, '', expectedFiles);
         } catch (error) {
           hadError = true;
           const msg = error instanceof Error ? error.message : String(error);
@@ -689,25 +666,16 @@ export function distributeBundle<TEntry, Platform extends string>(
 }
 
 /** Recursively remove files in targetDir not present in expectedFiles (relative paths). */
-function cleanStaleFiles(
-  dir: string,
-  prefix: string,
-  expectedFiles: Set<string>,
-  validateTarget?: () => void
-): void {
+function cleanStaleFiles(dir: string, prefix: string, expectedFiles: Set<string>): void {
   const entries = fs.readdirSync(dir, { withFileTypes: true });
   for (const entry of entries) {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
     const abs = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      cleanStaleFiles(abs, rel, expectedFiles, validateTarget);
+      cleanStaleFiles(abs, rel, expectedFiles);
       const remaining = fs.readdirSync(abs);
-      if (remaining.length === 0) {
-        validateTarget?.();
-        fs.rmdirSync(abs);
-      }
+      if (remaining.length === 0) fs.rmdirSync(abs);
     } else if (!expectedFiles.has(rel)) {
-      validateTarget?.();
       fs.unlinkSync(abs);
     }
   }
