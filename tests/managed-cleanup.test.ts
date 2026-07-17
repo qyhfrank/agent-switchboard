@@ -244,7 +244,7 @@ test('bootstrap sync repairs executable mode drift while adopting skill director
   });
 });
 
-test('bootstrap sync rejects symlinked skill parent without following it', () => {
+test('bootstrap sync writes skills through a symlinked skill parent', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('claude-code');
     createSkill('skill-parent-symlink');
@@ -277,10 +277,10 @@ test('bootstrap sync rejects symlinked skill parent without following it', () =>
       (entry) => entry.platform === 'claude-code' && entry.targetDir === targetDir
     );
 
-    assert.equal(fs.existsSync(path.join(outsideDir, 'skill-parent-symlink')), false);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
-    assert.ok(!manifest.sections.skills?.['skill-parent-symlink::claude-code']);
+    assert.equal(result?.status, 'written');
+    assert.equal(fs.existsSync(path.join(outsideDir, 'skill-parent-symlink', 'SKILL.md')), true);
+    assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
+    assert.ok(manifest.sections.skills?.['skill-parent-symlink::claude-code']);
   });
 });
 
@@ -327,7 +327,7 @@ test('managed mode drift cleanup unlinks symlinked skill directory without follo
   });
 });
 
-test('managed mode drift cleanup rejects symlinked ancestors without following them', () => {
+test('managed mode drift cleanup deletes owned entries through a symlinked ancestor', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('claude-code');
 
@@ -363,11 +363,10 @@ test('managed mode drift cleanup rejects symlinked ancestors without following t
     const result = outcome.results.find(
       (entry) => entry.platform === 'claude-code' && entry.entryId === 'stale-skill'
     );
-    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
+    assert.equal(result?.status, 'deleted');
+    assert.equal(fs.existsSync(outsideStaleDir), false);
     assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
-    assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
+    assert.ok(!manifest.sections.skills?.['stale-skill::claude-code']);
   });
 });
 
@@ -377,14 +376,9 @@ test('managed mode drift cleanup keeps new manifest entries on cleanup error', (
     createSkill('active-skill');
 
     const projectRoot = path.join(agentsHome, 'managed-cleanup-rollback-project');
-    const staleParentLink = path.join(projectRoot, '.claude', 'stale-parent');
-    const outsideDir = path.join(agentsHome, 'outside-cleanup-rollback');
-    const outsideStaleDir = path.join(outsideDir, 'stale-skill');
-    const outsideFile = path.join(outsideStaleDir, 'protected.txt');
-    fs.mkdirSync(path.dirname(staleParentLink), { recursive: true });
-    fs.mkdirSync(outsideStaleDir, { recursive: true });
-    fs.writeFileSync(outsideFile, 'keep me\n');
-    fs.symlinkSync(outsideDir, staleParentLink);
+    const staleParentFile = path.join(projectRoot, '.claude', 'stale-parent');
+    fs.mkdirSync(path.dirname(staleParentFile), { recursive: true });
+    fs.writeFileSync(staleParentFile, 'not a directory\n');
 
     updateLibraryStateSection('skills', (state) => ({ ...state, enabled: ['active-skill'] }), {
       project: projectRoot,
@@ -413,9 +407,8 @@ test('managed mode drift cleanup keeps new manifest entries on cleanup error', (
       fs.existsSync(path.join(projectRoot, '.claude', 'skills', 'active-skill', 'SKILL.md')),
       true
     );
-    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
     assert.equal(cleanupResult?.status, 'error');
-    assert.match(cleanupResult?.error ?? '', /refusing to follow symlinked path/);
+    assert.match(cleanupResult?.error ?? '', /Failed to delete orphan/);
     assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
     assert.ok(manifest.sections.skills?.['active-skill::claude-code']);
   });
@@ -459,7 +452,7 @@ test('exclusive bundle cleanup reports parent scan failure without recording syn
   });
 });
 
-test('exclusive bundle cleanup rejects symlinked agents root without deleting outside', () => {
+test('exclusive bundle cleanup deletes orphans through a symlinked agents root', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('codex');
 
@@ -478,12 +471,14 @@ test('exclusive bundle cleanup rejects symlinked agents root without deleting ou
       activeAppIds: ['codex'],
     });
     const result = outcome.results.find(
-      (entry) => entry.platform === 'agents' && entry.targetDir === path.join(agentsRoot, 'skills')
+      (entry) =>
+        entry.platform === 'agents' &&
+        entry.targetDir === path.join(agentsRoot, 'skills', 'stale-skill')
     );
 
-    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.equal(result?.status, 'deleted');
+    assert.equal(fs.existsSync(outsideStaleDir), false);
+    assert.equal(fs.lstatSync(agentsRoot).isSymbolicLink(), true);
   });
 });
 

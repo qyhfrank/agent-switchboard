@@ -394,7 +394,6 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       platform,
       parentDir: managedParent,
       safetyRoot: claudeRoot(ctx.scope),
-      projectScoped: Boolean(ctx.scope?.project?.trim()),
       dryRun: ctx.dryRun,
     };
     results.push(
