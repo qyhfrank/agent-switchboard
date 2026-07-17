@@ -12,11 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import type { BundleDistributionResult } from '../library/distribute-bundle.js';
-import {
-  assertNoSymlinkAncestor,
-  assertUsableBundleRoot,
-  resolvedHomeDir,
-} from '../library/distribute-bundle.js';
+import { assertTargetWithinRoot, assertUsableBundleRoot } from '../library/distribute-bundle.js';
 
 const HEX64_RE = /^[0-9a-f]{64}$/;
 
@@ -66,7 +62,6 @@ export interface BundleCleanupOptions<Platform extends string> {
   platform: Platform;
   parentDir: string;
   safetyRoot: string;
-  projectScoped: boolean;
   dryRun: boolean;
 }
 
@@ -75,9 +70,8 @@ export function bundleParentError<Platform extends string>(
 ): BundleDistributionResult<Platform> | undefined {
   try {
     assertUsableBundleRoot(opts.safetyRoot);
-    assertNoSymlinkAncestor(opts.safetyRoot, opts.parentDir, {
-      trustedRoots: opts.projectScoped ? undefined : [resolvedHomeDir()],
-    });
+    assertTargetWithinRoot(opts.safetyRoot, opts.parentDir);
+    assertUsableBundleRoot(opts.parentDir);
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return {
@@ -85,17 +79,6 @@ export function bundleParentError<Platform extends string>(
       targetDir: opts.parentDir,
       status: 'error',
       error: `Failed to scan bundle parent: ${msg}`,
-    };
-  }
-
-  const stat = lstatIfExists(opts.parentDir);
-  if (!stat) return undefined;
-  if (!stat.isDirectory()) {
-    return {
-      platform: opts.platform,
-      targetDir: opts.parentDir,
-      status: 'error',
-      error: `Failed to scan bundle parent: bundle root exists and is not a directory: ${opts.parentDir}`,
     };
   }
   return undefined;

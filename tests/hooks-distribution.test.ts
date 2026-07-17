@@ -818,10 +818,10 @@ test('distributeHooks: claude-code waits for readable settings before touching a
 });
 
 // ---------------------------------------------------------------------------
-// Claude Code: symlink guards
+// Claude Code: symlinked layouts (dotfile-managed directories)
 // ---------------------------------------------------------------------------
 
-test('distributeHooks: claude-code rejects symlinked bundle parent before settings merge', () => {
+test('distributeHooks: claude-code writes bundles through a symlinked bundle parent', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');
     const { hookId } = createPluginHookSource(asbHome);
@@ -839,14 +839,14 @@ test('distributeHooks: claude-code rejects symlinked bundle parent before settin
       (r) => r.platform === 'claude-code' && r.targetDir === targetDir
     );
 
-    assert.equal(fs.existsSync(path.join(outsideDir, hookId)), false);
-    assert.equal(fs.existsSync(claudeSettingsPath()), false);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlink/);
+    assert.equal(result?.status, 'written');
+    assert.equal(fs.existsSync(path.join(outsideDir, hookId)), true);
+    assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
+    assert.equal(fs.existsSync(claudeSettingsPath()), true);
   });
 });
 
-test('distributeHooks: claude-code rejects symlinked hook ancestor before settings merge', () => {
+test('distributeHooks: claude-code writes bundles through a symlinked hooks ancestor', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');
     const { hookId } = createPluginHookSource(asbHome);
@@ -863,14 +863,14 @@ test('distributeHooks: claude-code rejects symlinked hook ancestor before settin
       (r) => r.platform === 'claude-code' && r.targetDir === targetDir
     );
 
-    assert.equal(fs.existsSync(path.join(outsideHooksDir, 'managed', hookId)), false);
-    assert.equal(fs.existsSync(claudeSettingsPath()), false);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /refusing to follow symlinked path/);
+    assert.equal(result?.status, 'written');
+    assert.equal(fs.existsSync(path.join(outsideHooksDir, 'managed', hookId)), true);
+    assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
+    assert.equal(fs.existsSync(claudeSettingsPath()), true);
   });
 });
 
-test('distributeHooks: claude-code cleanup rejects symlinked bundle parent without deleting outside', () => {
+test('distributeHooks: claude-code cleanup scans a symlinked bundle parent, keeping unmanaged dirs', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('claude-code');
     enableHooks([]);
@@ -886,17 +886,18 @@ test('distributeHooks: claude-code cleanup rejects symlinked bundle parent witho
 
     const outcome = distributeHooks(undefined, ['claude-code']);
     const result = outcome.results.find(
-      (r) => r.platform === 'claude-code' && r.targetDir === hooksLink
+      (r) => r.platform === 'claude-code' && r.entryId === 'stale-hook'
     );
 
+    assert.equal(result?.status, 'skipped');
+    assert.equal(result?.reason, 'unmanaged directory');
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
     assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlink/);
+    assert.ok(!outcome.results.some((r) => r.platform === 'claude-code' && r.status === 'error'));
   });
 });
 
-test('distributeHooks: claude-code cleanup rejects symlinked app root without deleting outside', () => {
+test('distributeHooks: claude-code cleanup scans a symlinked app root, keeping unmanaged dirs', () => {
   withTempHomes(({ agentsHome }) => {
     const claudeRoot = getClaudeDir();
     const outsideRoot = path.join(agentsHome, 'outside-claude-root');
@@ -910,13 +911,13 @@ test('distributeHooks: claude-code cleanup rejects symlinked app root without de
 
     const outcome = distributeHooks(undefined, ['claude-code']);
     const result = outcome.results.find(
-      (r) =>
-        r.platform === 'claude-code' && r.targetDir === path.join(claudeRoot, 'hooks', 'managed')
+      (r) => r.platform === 'claude-code' && r.entryId === 'stale-hook'
     );
 
+    assert.equal(result?.status, 'skipped');
+    assert.equal(result?.reason, 'unmanaged directory');
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.ok(!outcome.results.some((r) => r.platform === 'claude-code' && r.status === 'error'));
   });
 });
 
@@ -1495,7 +1496,7 @@ test('distributeHooks: codex bundle copy failure aborts hooks.json merge', () =>
   });
 });
 
-test('distributeHooks: codex rejects symlinked bundle parent before hooks.json merge', () => {
+test('distributeHooks: codex writes bundles through a symlinked bundle parent', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('codex');
     createBundleHook('bundle-parent-symlink');
@@ -1511,14 +1512,14 @@ test('distributeHooks: codex rejects symlinked bundle parent before hooks.json m
     const targetDir = path.join(hooksLink, 'bundle-parent-symlink');
     const result = outcome.results.find((r) => r.platform === 'codex' && r.targetDir === targetDir);
 
-    assert.equal(fs.existsSync(path.join(outsideDir, 'bundle-parent-symlink')), false);
-    assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlink/);
+    assert.equal(result?.status, 'written');
+    assert.equal(fs.existsSync(path.join(outsideDir, 'bundle-parent-symlink')), true);
+    assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
+    assert.equal(fs.existsSync(getCodexHooksJsonPath()), true);
   });
 });
 
-test('distributeHooks: codex cleanup error still cleans config but not outside dirs', () => {
+test('distributeHooks: codex cleanup scans a symlinked bundle parent, keeping unmanaged dirs', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('codex');
 
@@ -1548,18 +1549,21 @@ test('distributeHooks: codex cleanup error still cleans config but not outside d
     fs.symlinkSync(outsideDir, hooksLink);
 
     const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
-    const result = outcome.results.find((r) => r.platform === 'codex' && r.targetDir === hooksLink);
+    const result = outcome.results.find(
+      (r) => r.platform === 'codex' && r.entryId === 'stale-hook'
+    );
 
+    assert.equal(result?.status, 'skipped');
+    assert.equal(result?.reason, 'unmanaged directory');
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
     const content = readJson(hooksJsonPath);
-    assert.ok(!JSON.stringify(content).includes('_asb'), 'config is still cleaned');
+    assert.ok(!JSON.stringify(content).includes('_asb'), 'config is cleaned');
     assert.equal(content.preferredNotifChannel, 'notifications_disabled');
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlink/);
+    assert.ok(!outcome.results.some((r) => r.platform === 'codex' && r.status === 'error'));
   });
 });
 
-test('distributeHooks: codex cleanup rejects symlinked app root without deleting outside', () => {
+test('distributeHooks: codex cleanup scans a symlinked app root, keeping unmanaged dirs', () => {
   withTempHomes(({ agentsHome }) => {
     const codexRoot = getCodexDir();
     const outsideRoot = path.join(agentsHome, 'outside-codex-root');
@@ -1573,12 +1577,13 @@ test('distributeHooks: codex cleanup rejects symlinked app root without deleting
 
     const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
     const result = outcome.results.find(
-      (r) => r.platform === 'codex' && r.targetDir === path.join(codexRoot, 'hooks', 'managed')
+      (r) => r.platform === 'codex' && r.entryId === 'stale-hook'
     );
 
+    assert.equal(result?.status, 'skipped');
+    assert.equal(result?.reason, 'unmanaged directory');
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked bundle root/);
+    assert.ok(!outcome.results.some((r) => r.platform === 'codex' && r.status === 'error'));
   });
 });
 

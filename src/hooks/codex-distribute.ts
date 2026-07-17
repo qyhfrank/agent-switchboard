@@ -551,7 +551,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       platform: 'codex',
       parentDir: managedParent,
       safetyRoot: codexRoot(scope),
-      projectScoped: Boolean(scope?.project?.trim()),
       dryRun,
     };
     results.push(

@@ -114,62 +114,35 @@ export function resolvedHomeDir(): string {
   return fs.realpathSync(os.homedir());
 }
 
-function isUnderTrustedRoot(resolved: string, trustedRoots?: readonly string[]): boolean {
-  if (!trustedRoots || trustedRoots.length === 0) return false;
-  return trustedRoots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+function statIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.statSync(filePath);
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
-export function assertNoSymlinkAncestor(
-  rootPath: string,
-  targetPath: string,
-  options?: { allowFinalSymlink?: boolean; trustedRoots?: readonly string[] }
-): void {
-  const root = path.resolve(rootPath);
-  const target = path.resolve(targetPath);
-  const relativePath = path.relative(root, target);
-  if (relativePath === '') return;
+export function assertTargetWithinRoot(rootPath: string, targetPath: string): void {
+  const relativePath = path.relative(path.resolve(rootPath), path.resolve(targetPath));
   if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     throw new Error(`target path escapes root: ${targetPath}`);
-  }
-
-  let current = root;
-  const parts = relativePath.split(path.sep).filter(Boolean);
-  for (let i = 0; i < parts.length; i++) {
-    current = path.join(current, parts[i]);
-    const stat = lstatIfExists(current);
-    if (!stat) return;
-    if (stat.isSymbolicLink() && !(options?.allowFinalSymlink === true && i === parts.length - 1)) {
-      let resolved: string;
-      try {
-        resolved = fs.realpathSync(current);
-      } catch {
-        throw new Error(`refusing to follow symlinked path: ${current}`);
-      }
-      if (!isUnderTrustedRoot(resolved, options?.trustedRoots)) {
-        throw new Error(`refusing to follow symlinked path: ${current}`);
-      }
-    }
   }
 }
 
 export function assertUsableBundleRoot(rootPath: string): void {
-  const stat = lstatIfExists(rootPath);
+  const stat = statIfExists(rootPath);
   if (!stat) return;
-  if (stat.isSymbolicLink()) {
-    throw new Error(`refusing to use symlinked bundle root: ${rootPath}`);
-  }
   if (!stat.isDirectory()) {
     throw new Error(`bundle root exists and is not a directory: ${rootPath}`);
   }
 }
 
-function assertSafeBundleTarget(
-  rootPath: string,
-  targetPath: string,
-  options?: { allowFinalSymlink?: boolean; trustedRoots?: readonly string[] }
-): void {
+function assertSafeBundleTarget(rootPath: string, targetPath: string): void {
   assertUsableBundleRoot(rootPath);
-  assertNoSymlinkAncestor(rootPath, targetPath, options);
+  assertTargetWithinRoot(rootPath, targetPath);
 }
 
 function resolveBundleRootDir<TEntry, Platform extends string>(
@@ -321,7 +294,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       const entryId = opts.getId(entry);
       if (managedProjectRoot) {
         try {
-          assertNoSymlinkAncestor(managedProjectRoot, targetDir, { allowFinalSymlink: true });
+          assertTargetWithinRoot(managedProjectRoot, targetDir);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -336,13 +309,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       }
       if (bundleRootDir) {
         try {
-          const bundleOpts: { allowFinalSymlink: boolean; trustedRoots?: readonly string[] } = {
-            allowFinalSymlink: true,
-          };
-          if (!managedProjectRoot) {
-            bundleOpts.trustedRoots = [resolvedHomeDir()];
-          }
-          assertSafeBundleTarget(bundleRootDir, targetDir, bundleOpts);
+          assertSafeBundleTarget(bundleRootDir, targetDir);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -538,7 +505,7 @@ export function distributeBundle<TEntry, Platform extends string>(
         for (const item of toRemove) {
           const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
           try {
-            assertNoSymlinkAncestor(managedProjectRoot, entryPath, { allowFinalSymlink: true });
+            assertTargetWithinRoot(managedProjectRoot, entryPath);
             const sharedPathStillOwned = hasOtherLibraryEntryAtPath(
               manifest,
               manifestSection,
@@ -590,9 +557,7 @@ export function distributeBundle<TEntry, Platform extends string>(
 
         try {
           if (bundleRootDir) {
-            assertSafeBundleTarget(bundleRootDir, parentDir, {
-              trustedRoots: [resolvedHomeDir()],
-            });
+            assertSafeBundleTarget(bundleRootDir, parentDir);
           } else {
             assertUsableBundleRoot(parentDir);
           }

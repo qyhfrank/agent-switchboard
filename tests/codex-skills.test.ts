@@ -469,7 +469,7 @@ test('distributeSkills: executable mode repair reports target directory file blo
   });
 });
 
-test('distributeSkills: executable mode repair rejects symlinked global skill parent', () => {
+test('distributeSkills: executable mode writes through a symlinked global skill parent', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled();
     const skillId = 'mode-global-parent-symlink-skill';
@@ -492,14 +492,13 @@ test('distributeSkills: executable mode repair rejects symlinked global skill pa
       (r) => r.platform === 'agents' && r.targetDir === targetDir
     );
 
-    assert.equal(fs.existsSync(path.join(outsideDir, skillId)), false);
+    assert.equal(result?.status, 'written');
+    assert.equal(fs.existsSync(path.join(outsideDir, skillId, 'SKILL.md')), true);
     assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked/);
   });
 });
 
-test('distributeSkills: orphan cleanup rejects symlinked global skill parent', () => {
+test('distributeSkills: orphan cleanup deletes orphans through a symlinked global skill parent', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled();
 
@@ -518,13 +517,12 @@ test('distributeSkills: orphan cleanup rejects symlinked global skill parent', (
 
     const outcome = distributeSkills(undefined, { useAgentsDir: true });
     const result = outcome.results.find(
-      (r) => r.platform === 'agents' && r.targetDir === skillsLink
+      (r) => r.platform === 'agents' && r.targetDir === path.join(skillsLink, 'stale-skill')
     );
 
-    assert.equal(fs.existsSync(path.join(outsideSkill, 'SKILL.md')), true);
+    assert.equal(result?.status, 'deleted');
+    assert.equal(fs.existsSync(outsideSkill), false);
     assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
-    assert.equal(result?.status, 'error');
-    assert.match(result?.error ?? '', /symlinked/);
   });
 });
 
