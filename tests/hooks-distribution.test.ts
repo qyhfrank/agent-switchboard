@@ -1344,6 +1344,89 @@ test('distributeHooks: codex bundle hook copies files and rewrites HOOK_DIR port
   });
 });
 
+test('distributeHooks: foreign-home absolute managed paths are reclaimed as $HOME', () => {
+  withTempHomes(({ asbHome }) => {
+    const fakeHome = path.dirname(asbHome);
+    withHome(fakeHome, () => {
+      simulateAppsInstalled('claude-code', 'codex');
+      createBundleHook('bundle-test');
+      enableHooks(['bundle-test'], ['claude-code', 'codex']);
+
+      // Simulate mackup/dotfile sync that left another machine's absolute home
+      // plus the correct portable form and a real user-owned hook.
+      const foreignClaude = '/home/ubuntu/.claude/hooks/managed/bundle-test/run.sh';
+      const foreignCodex = '/home/ubuntu/.codex/hooks/managed/bundle-test/run.sh';
+      const foreignUnknown = '/home/ubuntu/.codex/hooks/managed/not-an-asb-hook/run.sh';
+
+      fs.mkdirSync(path.dirname(claudeSettingsPath()), { recursive: true });
+      fs.writeFileSync(
+        claudeSettingsPath(),
+        JSON.stringify({
+          hooks: {
+            UserPromptSubmit: [
+              { hooks: [{ type: 'command', command: foreignClaude }] },
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
+                  },
+                ],
+              },
+              { hooks: [{ type: 'command', command: 'echo mine' }] },
+            ],
+          },
+        })
+      );
+
+      fs.mkdirSync(path.dirname(getCodexHooksJsonPath()), { recursive: true });
+      fs.writeFileSync(
+        getCodexHooksJsonPath(),
+        JSON.stringify({
+          hooks: {
+            UserPromptSubmit: [
+              { hooks: [{ type: 'command', command: foreignCodex }] },
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
+                  },
+                ],
+              },
+              { hooks: [{ type: 'command', command: foreignUnknown }] },
+              { hooks: [{ type: 'command', command: 'echo mine' }] },
+            ],
+          },
+        })
+      );
+
+      distributeHooks(undefined, ['claude-code', 'codex'], new Set(['claude-code', 'codex']));
+
+      const claudeRaw = fs.readFileSync(claudeSettingsPath(), 'utf-8');
+      assert.ok(!claudeRaw.includes('/home/ubuntu'), 'claude foreign absolute home is gone');
+      const claudeSettings = readJson(claudeSettingsPath()) as {
+        hooks: Record<string, Array<Record<string, unknown>>>;
+      };
+      assert.deepEqual(groupCommands(claudeSettings.hooks.UserPromptSubmit).sort(), [
+        '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
+        'echo mine',
+      ]);
+
+      const codexRaw = fs.readFileSync(getCodexHooksJsonPath(), 'utf-8');
+      assert.ok(!codexRaw.includes('/home/ubuntu/.codex/hooks/managed/bundle-test'));
+      const codexContent = readJson(getCodexHooksJsonPath()) as {
+        hooks: Record<string, Array<Record<string, unknown>>>;
+      };
+      assert.deepEqual(groupCommands(codexContent.hooks.UserPromptSubmit).sort(), [
+        '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
+        foreignUnknown,
+        'echo mine',
+      ]);
+    });
+  });
+});
+
 test('distributeHooks: codex bundle content change reports review even when config is stable', () => {
   withTempHomes(() => {
     simulateAppsInstalled('codex');
