@@ -4,9 +4,10 @@
  * Application configs carry no ASB metadata, so ownership is established from
  * the ASB side: the state file records exactly what was written, and path
  * heuristics recognize ASB bundle references (including legacy `hooks/asb/`
- * layouts, legacy Codex command markers, and v0.4.28 `hooks/managed/<sha256>`
- * output) without ever treating the neutral `hooks/managed/` root alone as
- * proof of ownership.
+ * layouts, legacy Codex command markers, v0.4.28 `hooks/managed/<sha256>`
+ * output, and known managed ids under any home prefix left by cross-machine
+ * dotfile sync) without ever treating the neutral `hooks/managed/` root alone
+ * as proof of ownership.
  */
 
 import { isDeepStrictEqual } from 'node:util';
@@ -28,6 +29,21 @@ const V0428_MANAGED_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64}\//;
 const V0428_MANAGED_DIR_RE =
   /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
+
+/**
+ * Named managed bundles under any home prefix (current machine, `$HOME`, `~`,
+ * or a foreign absolute home left by dotfile sync). The known bundle id is the
+ * ownership proof; the home prefix is not.
+ */
+const MANAGED_ID_ANY_HOME_RE =
+  /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/([^/\s"'`;|&<>]+)/g;
+
+/**
+ * Legacy ASB-branded `hooks/asb/<id>/` under any home prefix (same cross-machine
+ * case as managed ids).
+ */
+const LEGACY_ASB_ID_ANY_HOME_RE =
+  /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/asb\/([^/\s"'`;|&<>]+)/g;
 
 const COMMAND_FIELDS = ['command', 'commandWindows', 'command_windows'] as const;
 
@@ -91,8 +107,21 @@ function normalizeRoot(root: string): string {
   return root.split('\\').join('/').replace(/\/+$/, '');
 }
 
+function extractIdsByPattern(command: string, pattern: RegExp): string[] {
+  const ids: string[] = [];
+  for (const match of command.matchAll(pattern)) {
+    const id = match[1];
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
 /** Owned by legacy or v0.4.28 evidence: markers, `_asb_source`, asb/ paths, hash dirs. */
-function isLegacyOwnedGroup(group: unknown, legacyAsbRoots: readonly string[]): boolean {
+function isLegacyOwnedGroup(
+  group: unknown,
+  legacyAsbRoots: readonly string[],
+  knownManagedIds: ReadonlySet<string>
+): boolean {
   if (
     group &&
     typeof group === 'object' &&
@@ -105,13 +134,18 @@ function isLegacyOwnedGroup(group: unknown, legacyAsbRoots: readonly string[]): 
     (command) =>
       hasLegacyMarker(command) ||
       V0428_MANAGED_RE.test(command) ||
-      legacyAsbRoots.some((root) => commandContainsPathToken(command, root))
+      legacyAsbRoots.some((root) => commandContainsPathToken(command, root)) ||
+      // Foreign-home legacy asb paths only when the id is still a known ASB hook.
+      extractIdsByPattern(command, LEGACY_ASB_ID_ANY_HOME_RE).some((id) => knownManagedIds.has(id))
   );
 }
 
 /**
  * Owned via the neutral managed root only when every command-bearing handler
  * references a known bundle id under a managed root (and at least one does).
+ * Foreign absolute homes from cross-machine dotfile sync count when the
+ * trailing managed id is known; an unknown id under `hooks/managed/` stays
+ * user-owned.
  */
 function isManagedPathOwnedGroup(
   group: unknown,
@@ -120,10 +154,12 @@ function isManagedPathOwnedGroup(
 ): boolean {
   const commands = groupCommands(group);
   if (commands.length === 0) return false;
-  return commands.every((command) =>
-    managedRoots.some((root) =>
-      extractPathTokenSegments(command, root).some((segment) => knownManagedIds.has(segment))
-    )
+  return commands.every(
+    (command) =>
+      managedRoots.some((root) =>
+        extractPathTokenSegments(command, root).some((segment) => knownManagedIds.has(segment))
+      ) ||
+      extractIdsByPattern(command, MANAGED_ID_ANY_HOME_RE).some((id) => knownManagedIds.has(id))
   );
 }
 
@@ -153,7 +189,7 @@ export function removeOwnedHookGroups(
     // (b)-(e) marker and path heuristics
     remaining = remaining.filter((group) => {
       const owned =
-        isLegacyOwnedGroup(group, legacyAsbRoots) ||
+        isLegacyOwnedGroup(group, legacyAsbRoots, ctx.knownManagedIds) ||
         isManagedPathOwnedGroup(group, managedRoots, ctx.knownManagedIds);
       if (owned) removedGroups.push(group);
       return !owned;
