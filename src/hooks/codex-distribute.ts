@@ -9,7 +9,7 @@
  * ${HOOK_DIR} runtime expansion, so unsupported entries are filtered and
  * bundle paths are resolved (in `$HOME`-portable form) before writing.
  * The written file carries no ASB metadata; ownership lives in
- * `~/.asb/state/hooks/` (see `state.ts` and `ownership.ts`).
+ * `<ASB_HOME>/state/hooks/<device>/` (see `state.ts`).
  */
 
 import fs from 'node:fs';
