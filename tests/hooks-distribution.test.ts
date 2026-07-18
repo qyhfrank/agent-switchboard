@@ -139,39 +139,18 @@ function createPluginHookSource(asbHome: string): { pluginDir: string; hookId: s
   return { pluginDir, hookId: 'superpowers@superpowers:hooks' };
 }
 
-test('distributeHooks: skips when claude-code not installed and not in assumeInstalled', () => {
-  withTempHomes(() => {
-    createHookEntry('test-hook');
-    enableHooks(['test-hook']);
-
-    const outcome = distributeHooks(undefined, ['claude-code']);
-
-    assert.equal(outcome.results.length, 0, 'should produce no results when not installed');
-  });
-});
-
-test('distributeHooks: distributes when claude-code is in assumeInstalled', () => {
-  withTempHomes(() => {
-    createHookEntry('test-hook');
-    enableHooks(['test-hook']);
-
-    const outcome = distributeHooks(undefined, ['claude-code'], new Set(['claude-code']));
-
-    assert.ok(outcome.results.length > 0, 'should produce results when assumed installed');
-  });
-});
-
-test('distributeHooks: distributes when claude-code is actually installed', () => {
-  withTempHomes(() => {
-    simulateAppsInstalled('claude-code');
-    createHookEntry('test-hook');
-    enableHooks(['test-hook']);
-
-    const outcome = distributeHooks(undefined, ['claude-code']);
-
-    assert.ok(outcome.results.length > 0, 'should produce results when installed');
-    assert.ok(fs.existsSync(claudeSettingsPath()), 'settings.json should be written');
-  });
+test('distributeHooks: claude-code install gating', () => {
+  for (const mode of ['missing', 'assumed', 'installed'] as const) {
+    withTempHomes(() => {
+      if (mode === 'installed') simulateAppsInstalled('claude-code');
+      createHookEntry('test-hook');
+      enableHooks(['test-hook']);
+      const assumed = mode === 'assumed' ? new Set(['claude-code']) : undefined;
+      const outcome = distributeHooks(undefined, ['claude-code'], assumed);
+      assert.equal(outcome.results.length > 0, mode !== 'missing');
+      if (mode === 'installed') assert.ok(fs.existsSync(claudeSettingsPath()));
+    });
+  }
 });
 
 test('distributeHooks: rewrites plugin hook CLAUDE_PLUGIN_ROOT references to distributed hook paths', () => {
@@ -306,26 +285,6 @@ test('distributeHooks: user reordering does not duplicate or remove groups', () 
   });
 });
 
-test('distributeHooks: bundle state loss duplicates once then converges', () => {
-  withTempHomes(() => {
-    simulateAppsInstalled('claude-code');
-    createBundleHook('bundle-test');
-    enableHooks(['bundle-test']);
-    distributeHooks(undefined, ['claude-code']);
-
-    fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
-
-    distributeHooks(undefined, ['claude-code']);
-    let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.UserPromptSubmit.length, 2, 'state loss duplicates safely');
-    assert.ok(fs.existsSync(resolveHookStatePath('claude-code')), 'state file is re-created');
-
-    distributeHooks(undefined, ['claude-code']);
-    settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.UserPromptSubmit.length, 1, 're-created state converges safely');
-  });
-});
-
 test('distributeHooks: one device cannot clean another device ownership', () => {
   withTempHomes(() => {
     const previous = process.env.ASB_DEVICE_ID;
@@ -354,30 +313,32 @@ test('distributeHooks: one device cannot clean another device ownership', () => 
   });
 });
 
-test('distributeHooks: definition-only hook duplicates once after state loss, then stays stable', () => {
-  withTempHomes(() => {
-    simulateAppsInstalled('claude-code');
-    createHookEntry('test-hook');
-    enableHooks(['test-hook']);
-    distributeHooks(undefined, ['claude-code']);
-
-    fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
-
-    distributeHooks(undefined, ['claude-code']);
-    let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.PreToolUse.length, 2, 'state loss duplicates once');
-    assert.ok(fs.existsSync(resolveHookStatePath('claude-code')), 'ownership is re-recorded');
-
-    distributeHooks(undefined, ['claude-code']);
-    settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.PreToolUse.length, 2, 'stable after state is re-recorded');
-  });
+test('distributeHooks: state loss duplicates safely and stabilizes', () => {
+  for (const kind of ['bundle', 'definition'] as const) {
+    withTempHomes(() => {
+      simulateAppsInstalled('claude-code');
+      const id = kind === 'bundle' ? 'bundle-test' : 'test-hook';
+      const event = kind === 'bundle' ? 'UserPromptSubmit' : 'PreToolUse';
+      if (kind === 'bundle') createBundleHook(id);
+      else createHookEntry(id);
+      enableHooks([id]);
+      distributeHooks(undefined, ['claude-code']);
+      fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
+      distributeHooks(undefined, ['claude-code']);
+      let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+      assert.equal(settings.hooks[event].length, 2);
+      assert.ok(fs.existsSync(resolveHookStatePath('claude-code')));
+      distributeHooks(undefined, ['claude-code']);
+      settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+      assert.equal(settings.hooks[event].length, kind === 'bundle' ? 1 : 2);
+    });
+  }
 });
 
 test('distributeHooks: shared predecessor state never becomes device ownership', () => {
   withTempHomes(({ asbHome }) => {
     simulateAppsInstalled('claude-code', 'codex');
-    createHookEntry('upgrade-hook');
+    createBundleHook('upgrade-hook');
     enableHooks(['upgrade-hook'], ['claude-code', 'codex']);
     distributeHooks(undefined, ['claude-code', 'codex']);
 
@@ -400,9 +361,13 @@ test('distributeHooks: shared predecessor state never becomes device ownership',
       }
       enableHooks([], ['claude-code', 'codex']);
       distributeHooks(undefined, ['claude-code', 'codex']);
-      for (const file of [claudeSettingsPath(), getCodexHooksJsonPath()]) {
+      for (const [file, root] of [
+        [claudeSettingsPath(), getClaudeDir()],
+        [getCodexHooksJsonPath(), getCodexDir()],
+      ] as const) {
         const preserved = readJson(file) as { hooks: Record<string, unknown[]> };
-        assert.equal(preserved.hooks.PreToolUse.length, 1);
+        assert.equal(preserved.hooks.UserPromptSubmit.length, 1);
+        assert.ok(fs.existsSync(path.join(root, 'hooks', 'managed', 'upgrade-hook')));
       }
     } finally {
       if (previous === undefined) delete process.env.ASB_DEVICE_ID;
@@ -469,8 +434,38 @@ test('distributeHooks: cleanup failure retains bundle ownership for retry', () =
       fs.rmdirSync = originalRmdirSync;
       const legacyState = readJson(resolveHookStatePath(target)) as { legacyBundles: string[] };
       assert.deepEqual(legacyState.legacyBundles, [legacyId]);
+
+      fs.rmSync(legacyDir, { recursive: true });
+      const removedLegacyId = `${target}-legacy-removed`;
+      const removedLegacyDir = path.join(root, 'hooks', 'asb', removedLegacyId);
+      const removedScript = path.join(removedLegacyDir, 'run.sh');
+      fs.mkdirSync(removedLegacyDir, { recursive: true });
+      fs.writeFileSync(removedScript, '#!/bin/sh\n');
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: removedScript }] }] },
+        })
+      );
+      const originalReaddirSync = fs.readdirSync;
+      try {
+        fs.readdirSync = ((
+          candidate: fs.PathLike,
+          options?: Parameters<typeof fs.readdirSync>[1]
+        ) => {
+          if (path.resolve(String(candidate)) === path.dirname(removedLegacyDir) && !options)
+            throw new Error('mock parent cleanup failure');
+          return originalReaddirSync(candidate, options);
+        }) as typeof fs.readdirSync;
+        distributeHooks(undefined, [target], new Set([target]));
+      } finally {
+        fs.readdirSync = originalReaddirSync;
+      }
+
+      const retained = readJson(resolveHookStatePath(target)) as { legacyBundles: string[] };
+      assert.deepEqual(retained.legacyBundles, [legacyId]);
+      assert.equal(fs.existsSync(removedLegacyDir), false);
       distributeHooks(undefined, [target], new Set([target]));
-      assert.equal(fs.existsSync(legacyDir), false);
       assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
     });
   }
@@ -727,49 +722,48 @@ test('distributeHooks: URL containing hooks/managed/<hex> is not v0.4.28 evidenc
 });
 
 test('distributeHooks: project migration cannot delete global v0.4.28 bundles', () => {
-  withTempHomes(({ agentsHome }) => {
-    withHome(agentsHome, () => {
-      const projectRoot = path.join(agentsHome, 'project');
-      simulateAppsInstalled('claude-code');
-      updateLibraryStateSection('hooks', () => ({ enabled: [], agentSync: {} }), {
-        project: projectRoot,
-      });
-
-      const outside = path.join(getClaudeDir(), 'hooks', 'managed', HEX64_A);
-      fs.mkdirSync(outside, { recursive: true });
-      fs.writeFileSync(path.join(outside, 'run.sh'), '#!/bin/sh\n');
-      const projectSettings = path.join(projectRoot, '.claude', 'settings.local.json');
-      fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
-      fs.writeFileSync(
-        projectSettings,
-        JSON.stringify({
-          hooks: {
-            PreToolUse: [
-              { matcher: 'v0428', hooks: [{ type: 'command', command: `${outside}/run.sh` }] },
-            ],
-          },
-        })
-      );
-
-      const outcome = distributeHooks(
-        { project: projectRoot },
-        ['claude-code'],
-        new Set(['claude-code']),
-        { projectMode: 'managed' }
-      );
-
-      assert.ok(fs.existsSync(path.join(outside, 'run.sh')), 'dir outside managed roots untouched');
-      assert.ok(
-        outcome.results.some(
-          (r) =>
-            r.platform === 'claude-code' &&
-            r.status === 'skipped' &&
-            r.reason === 'outside managed roots'
-        ),
-        'skip is reported'
-      );
-    });
-  });
+  for (const target of ['claude-code', 'codex'] as const) {
+    withTempHomes(({ agentsHome }) =>
+      withHome(agentsHome, () => {
+        const projectRoot = path.join(agentsHome, `${target}-project`);
+        simulateAppsInstalled(target);
+        updateLibraryStateSection('hooks', () => ({ enabled: [], agentSync: {} }), {
+          project: projectRoot,
+        });
+        const root = target === 'claude-code' ? getClaudeDir() : getCodexDir();
+        const outside = path.join(root, 'hooks', 'managed', HEX64_A);
+        const projectConfig =
+          target === 'claude-code'
+            ? path.join(projectRoot, '.claude', 'settings.local.json')
+            : getProjectCodexHooksJsonPath(projectRoot);
+        fs.mkdirSync(outside, { recursive: true });
+        fs.writeFileSync(path.join(outside, 'run.sh'), '#!/bin/sh\n');
+        fs.mkdirSync(path.dirname(projectConfig), { recursive: true });
+        fs.writeFileSync(
+          projectConfig,
+          JSON.stringify({
+            hooks: {
+              PreToolUse: [
+                { matcher: 'v0428', hooks: [{ type: 'command', command: `${outside}/run.sh` }] },
+              ],
+            },
+          })
+        );
+        const outcome = distributeHooks({ project: projectRoot }, [target], new Set([target]), {
+          projectMode: 'managed',
+        });
+        assert.ok(fs.existsSync(path.join(outside, 'run.sh')));
+        assert.ok(
+          outcome.results.some(
+            (result) =>
+              result.platform === target &&
+              result.status === 'skipped' &&
+              result.reason === 'outside managed roots'
+          )
+        );
+      })
+    );
+  }
 });
 
 test('distributeHooks: refuses to distribute over v0.4.28 transaction artifacts', () => {
