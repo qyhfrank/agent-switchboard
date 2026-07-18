@@ -14,7 +14,6 @@ import { getConfigDir } from '../config/paths.js';
 import type {
   ManagedMcpEntry,
   ManifestEntry,
-  ManifestSections,
   ProjectDistributionManifest,
   RulesManifestEntry,
 } from './types.js';
@@ -182,11 +181,6 @@ export function recordRulesEntry(
   manifest.sections.rules = sec;
 }
 
-export function removeRulesEntry(manifest: ProjectDistributionManifest, filePathKey: string): void {
-  const sec = manifest.sections.rules;
-  if (sec) delete sec[filePathKey];
-}
-
 // ── Cleanup computation ────────────────────────────────────
 
 /**
@@ -336,11 +330,4 @@ export function hasOtherLibraryEntryAtPath(
   }
 
   return false;
-}
-
-/**
- * Resolve the effective sections record, ensuring it exists.
- */
-export function ensureSections(manifest: ProjectDistributionManifest): ManifestSections {
-  return manifest.sections;
 }
