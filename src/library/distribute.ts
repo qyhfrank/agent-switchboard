@@ -74,6 +74,19 @@ export interface DistributeOutcome<Platform extends string> {
   results: DistributionResult<Platform>[];
 }
 
+function contentHash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function lstatIfExists(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.lstatSync(filePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+}
+
 /**
  * Generic library distributor: writes rendered content per-platform, skipping unchanged files,
  * backing up overwritten files, and updating agentSync hash in section state upon success.
@@ -100,12 +113,6 @@ export function distributeLibrary<TEntry, Platform extends string>(
     throw new Error('Managed project distribution requires a valid manifest');
   }
   const manifest = requiresManagedManifest ? opts.manifest : undefined;
-  // First managed sync: if manifest has no entries for this section, skip
-  // conflict detection so existing files get adopted into the manifest.
-  const sectionEntries = manifest?.sections[manifestSection];
-  const isBootstrapSync =
-    manifest != null && (!sectionEntries || Object.keys(sectionEntries).length === 0);
-
   for (const platform of opts.platforms) {
     const hash = createHash('sha256');
     const writtenOrSkipped: DistributionResult<Platform>[] = [];
@@ -123,27 +130,35 @@ export function distributeLibrary<TEntry, Platform extends string>(
       if (!dryRun) ensureParentDir(filePath);
 
       let existing: string | null = null;
+      const existingStat = lstatIfExists(filePath);
       try {
-        if (fs.existsSync(filePath)) existing = fs.readFileSync(filePath, 'utf-8');
+        if (existingStat?.isFile() && !existingStat.isSymbolicLink()) {
+          existing = fs.readFileSync(filePath, 'utf-8');
+        }
       } catch {
         existing = null;
       }
 
-      // Conflict detection in managed mode (skip during bootstrap to adopt pre-existing content)
-      if (manifest && !isBootstrapSync && existing !== null && entryId) {
-        const manifestEntry = getLibraryEntry(
-          manifest,
-          manifestSection,
-          entryId,
-          platform as string
-        );
-        if (!manifestEntry && collision !== 'takeover') {
+      const same = existing !== null && existing === content;
+      const manifestEntry =
+        manifest && entryId
+          ? getLibraryEntry(manifest, manifestSection, entryId, platform as string)
+          : undefined;
+      if (manifest && existingStat && entryId && collision !== 'takeover') {
+        const modifiedManagedFile =
+          manifestEntry && existing !== null && contentHash(existing) !== manifestEntry.hash;
+        if (
+          (!manifestEntry && !same) ||
+          (manifestEntry && (existing === null || (modifiedManagedFile && !same)))
+        ) {
           const isHardError = collision === 'error';
           writtenOrSkipped.push({
             platform,
             filePath,
             status: isHardError ? 'error' : 'conflict',
-            ...(isHardError ? { error: 'foreign file exists' } : { reason: 'foreign file exists' }),
+            ...(isHardError
+              ? { error: manifestEntry ? 'managed file was modified' : 'foreign file exists' }
+              : { reason: manifestEntry ? 'managed file was modified' : 'foreign file exists' }),
             entryId,
           });
           // Intentionally not included in aggregate hash: content was not
@@ -153,7 +168,6 @@ export function distributeLibrary<TEntry, Platform extends string>(
         // 'takeover' or manifestEntry exists: fall through to overwrite
       }
 
-      const same = existing !== null && existing === content;
       if (same) {
         writtenOrSkipped.push({ platform, filePath, status: 'skipped', reason: 'up-to-date' });
       } else if (dryRun) {
@@ -185,7 +199,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
           recordLibraryEntry(manifest, manifestSection, entryId, {
             relativePath: path.relative(path.resolve(managedProjectRoot), filePath),
             targetId: platform as string,
-            hash: createHash('sha256').update(content).digest('hex'),
+            hash: contentHash(content),
             updatedAt: timestamp,
           });
         }
@@ -237,7 +251,22 @@ export function distributeLibrary<TEntry, Platform extends string>(
                 reason: 'shared path still owned by another target',
                 entryId: item.id,
               });
-            } else if (fs.existsSync(entryPath)) {
+            } else if (lstatIfExists(entryPath)) {
+              const stat = fs.lstatSync(entryPath);
+              const matches =
+                stat.isFile() &&
+                !stat.isSymbolicLink() &&
+                contentHash(fs.readFileSync(entryPath, 'utf-8')) === item.entry.hash;
+              if (!matches) {
+                results.push({
+                  platform,
+                  filePath: entryPath,
+                  status: 'conflict',
+                  reason: 'managed file was modified',
+                  entryId: item.id,
+                });
+                continue;
+              }
               if (!dryRun) fs.unlinkSync(entryPath);
               results.push({
                 platform,

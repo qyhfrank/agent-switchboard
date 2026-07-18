@@ -99,6 +99,20 @@ function listRelativeFiles(dir: string, prefix = ''): string[] {
   return files;
 }
 
+function bundleFingerprint(dir: string): string | undefined {
+  const root = lstatIfExists(dir);
+  if (!root?.isDirectory() || root.isSymbolicLink()) return undefined;
+  const hash = createHash('sha256');
+  for (const relativePath of listRelativeFiles(dir).sort()) {
+    const filePath = path.join(dir, relativePath);
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+    hash.update(`${relativePath}\0${stat.mode & 0o777}\0`);
+    hash.update(fs.readFileSync(filePath));
+  }
+  return `tree:${hash.digest('hex')}`;
+}
+
 function lstatIfExists(filePath: string): fs.Stats | undefined {
   try {
     return fs.lstatSync(filePath);
@@ -375,8 +389,6 @@ export function distributeBundle<TEntry, Platform extends string>(
       let filesSkipped = 0;
       let hadError = false;
       let errorMessage = '';
-      const sourceContents: Buffer[] = [];
-
       for (const file of files) {
         const targetPath = path.join(targetDir, file.relativePath);
 
@@ -385,7 +397,6 @@ export function distributeBundle<TEntry, Platform extends string>(
 
           const srcContent = fs.readFileSync(file.sourcePath);
           const srcMode = fs.statSync(file.sourcePath).mode & 0o777;
-          sourceContents.push(srcContent);
           let same = false;
           let modeSame = true;
           let replaceExistingTarget = false;
@@ -469,20 +480,19 @@ export function distributeBundle<TEntry, Platform extends string>(
         });
       }
 
-      // Record in manifest after successful write or skip (reuse cached content)
+      // Record the exact installed tree after successful write or skip.
       if (!dryRun && manifest && managedProjectRoot) {
         const lastResult = results[results.length - 1];
         if (lastResult.status === 'written' || lastResult.status === 'skipped') {
-          const contentHash = createHash('sha256');
-          for (const buf of sourceContents) {
-            contentHash.update(buf);
+          const fingerprint = bundleFingerprint(targetDir);
+          if (fingerprint) {
+            recordLibraryEntry(manifest, manifestSection, entryId, {
+              relativePath: path.relative(path.resolve(managedProjectRoot), targetDir),
+              targetId: platform as string,
+              hash: fingerprint,
+              updatedAt: timestamp,
+            });
           }
-          recordLibraryEntry(manifest, manifestSection, entryId, {
-            relativePath: path.relative(path.resolve(managedProjectRoot), targetDir),
-            targetId: platform as string,
-            hash: contentHash.digest('hex'),
-            updatedAt: timestamp,
-          });
         }
       }
     }
@@ -522,6 +532,16 @@ export function distributeBundle<TEntry, Platform extends string>(
                 entryId: item.id,
               });
             } else if (lstatIfExists(entryPath)) {
+              if (bundleFingerprint(entryPath) !== item.entry.hash) {
+                results.push({
+                  platform,
+                  targetDir: entryPath,
+                  status: 'conflict',
+                  reason: 'managed directory was modified',
+                  entryId: item.id,
+                });
+                continue;
+              }
               if (!dryRun) removeBundlePath(entryPath);
               results.push({
                 platform,
