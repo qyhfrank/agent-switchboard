@@ -350,6 +350,7 @@ test('addRemoteSource clones a local git repo and saves config', () => {
 
     const cacheDir = path.join(getPluginsDir(), 'test-remote');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'test.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
 
     const record = getSourcesRecord();
     assert.equal(record['test-remote'], cacheDir);
@@ -452,6 +453,23 @@ test('removeSource cleans up cache for remote sources', () => {
 
     assert.equal(hasSource('cleanup-test'), false);
     assert.equal(fs.existsSync(cacheDir), false);
+  });
+});
+
+test('removeSource preserves a modified managed clone', () => {
+  withTempAsbHome((asbHome) => {
+    const parent = path.join(asbHome, 'modified-clone-fixture');
+    fs.mkdirSync(parent, { recursive: true });
+    const { bareRepo } = createBareRemote(parent);
+    addRemoteSource('modified-clone', { url: bareRepo, type: 'clone' });
+    const cloneDir = path.join(getPluginsDir(), 'modified-clone');
+    const userFile = path.join(cloneDir, 'keep.txt');
+    fs.writeFileSync(userFile, 'keep me\n');
+
+    assert.throws(() => removeSource('modified-clone'), /unverified or modified/);
+
+    assert.equal(hasSource('modified-clone'), true);
+    assert.equal(fs.readFileSync(userFile, 'utf-8'), 'keep me\n');
   });
 });
 
@@ -615,6 +633,12 @@ test('updateRemoteSources re-clones when cache is missing', () => {
     assert.equal(results.length, 1);
     assert.equal(results[0].status, 'updated');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'test.md')));
+
+    fs.rmSync(path.join(cacheDir, '.git'), { recursive: true, force: true });
+    fs.writeFileSync(path.join(cacheDir, 'keep.txt'), 'keep me\n');
+    const blocked = updateRemoteSources();
+    assert.equal(blocked[0]?.status, 'error');
+    assert.equal(fs.readFileSync(path.join(cacheDir, 'keep.txt'), 'utf-8'), 'keep me\n');
   });
 });
 

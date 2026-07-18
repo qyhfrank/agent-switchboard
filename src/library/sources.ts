@@ -4,6 +4,7 @@
  * Supports both local directory paths and remote git repository URLs.
  */
 
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { updateConfigLayer } from '../config/layered-config.js';
@@ -52,20 +53,61 @@ function ensureGitAvailable(): void {
   }
 }
 
-function gitClone(url: string, targetDir: string, ref?: string): void {
+interface CloneMarker {
+  version: 1;
+  namespace: string;
+  url: string;
+  ref?: string;
+}
+
+function cloneMarkerPath(repoDir: string): string {
+  return path.join(repoDir, '.git', 'asb-source.json');
+}
+
+function gitClone(url: string, targetDir: string, namespace: string, ref?: string): void {
   if (fs.existsSync(targetDir)) {
-    fs.rmSync(targetDir, { recursive: true, force: true });
+    throw new Error(`Source target already exists: ${targetDir}`);
   }
   fs.mkdirSync(path.dirname(targetDir), { recursive: true });
-
-  const args = ['clone', '--depth', '1'];
-  if (ref) args.push('--branch', ref);
+  const stagedDir = path.join(
+    path.dirname(targetDir),
+    `.${path.basename(targetDir)}.${randomUUID()}`
+  );
   const persistedUrl = credentialFreeGitUrl(url);
-  args.push(persistedUrl, targetDir);
-  runGit(args, {
-    env: authenticatedGitEnv(url, persistedUrl),
-    sensitiveUrls: [url],
-  });
+  try {
+    const args = ['clone', '--depth', '1'];
+    if (ref) args.push('--branch', ref);
+    args.push(persistedUrl, stagedDir);
+    runGit(args, {
+      env: authenticatedGitEnv(url, persistedUrl),
+      sensitiveUrls: [url],
+    });
+    const marker: CloneMarker = { version: 1, namespace, url: persistedUrl };
+    if (ref) marker.ref = ref;
+    fs.writeFileSync(cloneMarkerPath(stagedDir), `${JSON.stringify(marker)}\n`);
+    fs.renameSync(stagedDir, targetDir);
+  } catch (error) {
+    fs.rmSync(stagedDir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function isRemovableClone(repoDir: string, namespace: string, remote: RemoteSource): boolean {
+  try {
+    const marker = JSON.parse(fs.readFileSync(cloneMarkerPath(repoDir), 'utf-8')) as CloneMarker;
+    const expectedUrl = credentialFreeGitUrl(expandHome(remote.url));
+    const origin = credentialFreeGitUrl(runGit(['remote', 'get-url', 'origin'], { cwd: repoDir }));
+    return (
+      marker.version === 1 &&
+      marker.namespace === namespace &&
+      marker.url === expectedUrl &&
+      marker.ref === remote.ref &&
+      origin === expectedUrl &&
+      runGit(['status', '--porcelain'], { cwd: repoDir }) === ''
+    );
+  } catch {
+    return false;
+  }
 }
 
 function gitPull(repoDir: string, url: string): void {
@@ -406,7 +448,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
     gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
   } else {
     const cloneDir = path.join(getPluginsDir(), namespace);
-    gitClone(expandHome(remote.url), cloneDir, remote.ref);
+    gitClone(expandHome(remote.url), cloneDir, namespace, remote.ref);
   }
 
   const configValue: RemoteSource = {
@@ -479,8 +521,10 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
-      if (fs.existsSync(pluginDir)) {
+      if (fs.existsSync(pluginDir) && isRemovableClone(pluginDir, namespace, value)) {
         fs.rmSync(pluginDir, { recursive: true, force: true });
+      } else if (fs.existsSync(pluginDir)) {
+        throw new Error(`Source directory is unverified or modified; preserving it: ${pluginDir}`);
       }
     }
   }
@@ -606,7 +650,7 @@ export function updateRemoteSources(
         const cloneDir = path.join(getPluginsDir(), namespace);
         const gitDir = path.join(cloneDir, '.git');
         if (!fs.existsSync(gitDir)) {
-          gitClone(expandHome(value.url), cloneDir, value.ref);
+          gitClone(expandHome(value.url), cloneDir, namespace, value.ref);
         } else {
           gitPull(cloneDir, value.url);
         }
