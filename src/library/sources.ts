@@ -58,10 +58,33 @@ interface CloneMarker {
   namespace: string;
   url: string;
   ref?: string;
+  commit: string;
+  branch?: string;
 }
 
 function cloneMarkerPath(repoDir: string): string {
   return path.join(repoDir, '.git', 'asb-source.json');
+}
+
+function currentBranch(repoDir: string): string | undefined {
+  try {
+    return runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repoDir });
+  } catch {
+    return undefined;
+  }
+}
+
+function writeCloneMarker(repoDir: string, namespace: string, remote: RemoteSource): void {
+  const marker: CloneMarker = {
+    version: 1,
+    namespace,
+    url: credentialFreeGitUrl(expandHome(remote.url)),
+    commit: runGit(['rev-parse', 'HEAD'], { cwd: repoDir }),
+  };
+  if (remote.ref) marker.ref = remote.ref;
+  const branch = currentBranch(repoDir);
+  if (branch) marker.branch = branch;
+  fs.writeFileSync(cloneMarkerPath(repoDir), `${JSON.stringify(marker)}\n`);
 }
 
 function gitClone(url: string, targetDir: string, namespace: string, ref?: string): void {
@@ -82,9 +105,7 @@ function gitClone(url: string, targetDir: string, namespace: string, ref?: strin
       env: authenticatedGitEnv(url, persistedUrl),
       sensitiveUrls: [url],
     });
-    const marker: CloneMarker = { version: 1, namespace, url: persistedUrl };
-    if (ref) marker.ref = ref;
-    fs.writeFileSync(cloneMarkerPath(stagedDir), `${JSON.stringify(marker)}\n`);
+    writeCloneMarker(stagedDir, namespace, { url: persistedUrl, type: 'clone', ref });
     fs.renameSync(stagedDir, targetDir);
   } catch (error) {
     fs.rmSync(stagedDir, { recursive: true, force: true });
@@ -92,18 +113,23 @@ function gitClone(url: string, targetDir: string, namespace: string, ref?: strin
   }
 }
 
-function isRemovableClone(repoDir: string, namespace: string, remote: RemoteSource): boolean {
+function isVerifiedClone(repoDir: string, namespace: string, remote: RemoteSource): boolean {
   try {
     const marker = JSON.parse(fs.readFileSync(cloneMarkerPath(repoDir), 'utf-8')) as CloneMarker;
     const expectedUrl = credentialFreeGitUrl(expandHome(remote.url));
     const origin = credentialFreeGitUrl(runGit(['remote', 'get-url', 'origin'], { cwd: repoDir }));
+    const branch = currentBranch(repoDir);
     return (
       marker.version === 1 &&
       marker.namespace === namespace &&
       marker.url === expectedUrl &&
       marker.ref === remote.ref &&
       origin === expectedUrl &&
-      runGit(['status', '--porcelain'], { cwd: repoDir }) === ''
+      marker.commit === runGit(['rev-parse', 'HEAD'], { cwd: repoDir }) &&
+      marker.branch === branch &&
+      runGit(['rev-list', '--branches', '--not', '--remotes=origin'], { cwd: repoDir }) === '' &&
+      runGit(['status', '--porcelain', '--ignored', '--untracked-files=all'], { cwd: repoDir }) ===
+        ''
     );
   } catch {
     return false;
@@ -114,7 +140,7 @@ function gitPull(repoDir: string, url: string): void {
   const persistedUrl = credentialFreeGitUrl(url);
   const mergeAlreadyActive = isMergeInProgress(repoDir);
   try {
-    runGit(['pull', '--no-rebase'], {
+    runGit(['pull', '--ff-only'], {
       cwd: repoDir,
       env: authenticatedGitEnv(url, persistedUrl),
       sensitiveUrls: [url],
@@ -296,9 +322,9 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
 // ── Validation helpers ─────────────────────────────────────────────
 
 function validateNamespace(namespace: string): void {
-  if (!/^[a-zA-Z0-9_-]+$/.test(namespace)) {
+  if (!/^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$/.test(namespace)) {
     throw new Error(
-      `Invalid namespace "${namespace}". Use only letters, numbers, hyphens, and underscores.`
+      `Invalid namespace "${namespace}". Use dot-separated letters, numbers, hyphens, and underscores.`
     );
   }
 }
@@ -521,7 +547,7 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
-      if (fs.existsSync(pluginDir) && isRemovableClone(pluginDir, namespace, value)) {
+      if (fs.existsSync(pluginDir) && isVerifiedClone(pluginDir, namespace, value)) {
         fs.rmSync(pluginDir, { recursive: true, force: true });
       } else if (fs.existsSync(pluginDir)) {
         throw new Error(`Source directory is unverified or modified; preserving it: ${pluginDir}`);
@@ -652,7 +678,13 @@ export function updateRemoteSources(
         if (!fs.existsSync(gitDir)) {
           gitClone(expandHome(value.url), cloneDir, namespace, value.ref);
         } else {
+          if (!isVerifiedClone(cloneDir, namespace, value)) {
+            throw new Error(
+              `Source directory is unverified or modified; preserving it: ${cloneDir}`
+            );
+          }
           gitPull(cloneDir, value.url);
+          writeCloneMarker(cloneDir, namespace, value);
         }
       }
       const effectivePath = resolveEffectivePath(namespace, value);
