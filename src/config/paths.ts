@@ -160,14 +160,6 @@ export function getCodexAgentsDir(): string {
   return path.join(getCodexDir(), 'agents');
 }
 
-export function getCodexHooksDir(): string {
-  return path.join(getCodexDir(), 'hooks');
-}
-
-export function getProjectCodexHooksDir(projectRoot: string): string {
-  return path.join(getProjectCodexDir(projectRoot), 'hooks');
-}
-
 export function getCodexHooksJsonPath(): string {
   return path.join(getCodexDir(), 'hooks.json');
 }

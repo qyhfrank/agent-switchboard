@@ -5,10 +5,9 @@ import {
   resolveScopedPortablePluginConfig,
   resolveScopedSectionConfig,
 } from '../config/application-config.js';
-import type { ConfigLayers } from '../config/layered-config.js';
+import { type ConfigLayers, loadMergedSwitchboardConfig } from '../config/layered-config.js';
 import type { SwitchboardConfig } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
-import { loadSwitchboardConfigWithLayers } from '../config/switchboard-config.js';
 import { distributeHooks } from '../hooks/distribution.js';
 import { updateRemoteSources } from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
@@ -64,7 +63,7 @@ export interface RunSyncCommandOptions {
 export async function runSyncCommand(options: RunSyncCommandOptions): Promise<boolean> {
   const { scope, updateSources, dryRun = false } = options;
 
-  const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
+  const { config, layers } = loadMergedSwitchboardConfig(scopeToLayerOptions(scope));
 
   // CLI flag overrides config; config defaults to false
   const shouldUpdate = updateSources ?? config.plugins.auto_update;

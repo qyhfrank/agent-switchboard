@@ -1,5 +1,5 @@
+import { loadMergedSwitchboardConfig } from '../config/layered-config.js';
 import type { ConfigScope } from '../config/scope.js';
-import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { loadRuleLibrary, type RuleSnippet } from './library.js';
 import type { RuleState } from './schema.js';
 import { loadRuleState, loadWritableRuleState } from './state.js';
@@ -17,14 +17,14 @@ export function hasWritableRuleScope(scope?: ConfigScope): boolean {
 }
 
 export function loadRuleIncludeDelimiters(scope?: ConfigScope): boolean {
-  const config = loadSwitchboardConfig(
+  const config = loadMergedSwitchboardConfig(
     scope
       ? {
           profile: scope.profile ?? undefined,
           projectPath: scope.project ?? undefined,
         }
       : undefined
-  );
+  ).config;
   return config.rules?.includeDelimiters === true;
 }
 
