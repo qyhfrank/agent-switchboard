@@ -22,82 +22,55 @@ import { withTempAsbHome } from './helpers/tmp.js';
 
 // ── URL detection ──────────────────────────────────────────────────
 
-test('isGitUrl detects HTTPS URLs', () => {
-  assert.equal(isGitUrl('https://github.com/org/repo'), true);
-  assert.equal(isGitUrl('http://example.com/repo.git'), true);
-});
-
-test('isGitUrl detects SSH and git protocol URLs', () => {
-  assert.equal(isGitUrl('git@github.com:org/repo.git'), true);
-  assert.equal(isGitUrl('ssh://git@github.com/org/repo'), true);
-  assert.equal(isGitUrl('git://example.com/repo.git'), true);
-});
-
-test('isGitUrl rejects local paths', () => {
-  assert.equal(isGitUrl('/usr/local/lib'), false);
-  assert.equal(isGitUrl('./relative/path'), false);
-  assert.equal(isGitUrl('relative/path'), false);
+test('isGitUrl classifies remote URLs and local paths', () => {
+  for (const [value, expected] of [
+    ['https://github.com/org/repo', true],
+    ['http://example.com/repo.git', true],
+    ['git@github.com:org/repo.git', true],
+    ['ssh://git@github.com/org/repo', true],
+    ['git://example.com/repo.git', true],
+    ['/usr/local/lib', false],
+    ['./relative/path', false],
+    ['relative/path', false],
+  ] as const) {
+    assert.equal(isGitUrl(value), expected);
+  }
 });
 
 // ── GitHub URL parsing ─────────────────────────────────────────────
 
-test('parseGitUrl extracts bare GitHub repo URL', () => {
-  const result = parseGitUrl('https://github.com/org/repo');
-  assert.deepEqual(result, { url: 'https://github.com/org/repo.git' });
-});
-
-test('parseGitUrl handles .git suffix on GitHub URL', () => {
-  const result = parseGitUrl('https://github.com/org/repo.git');
-  assert.deepEqual(result, { url: 'https://github.com/org/repo.git' });
-});
-
-test('parseGitUrl handles trailing slash', () => {
-  const result = parseGitUrl('https://github.com/org/repo/');
-  assert.deepEqual(result, { url: 'https://github.com/org/repo.git' });
-});
-
-test('parseGitUrl extracts ref from /tree/branch', () => {
-  const result = parseGitUrl('https://github.com/org/repo/tree/main');
-  assert.deepEqual(result, { url: 'https://github.com/org/repo.git', ref: 'main' });
-});
-
-test('parseGitUrl extracts ref and subdir from /tree/branch/subdir', () => {
-  const result = parseGitUrl('https://github.com/org/repo/tree/main/lib/asb');
-  assert.deepEqual(result, {
-    url: 'https://github.com/org/repo.git',
-    ref: 'main',
-    subdir: 'lib/asb',
-  });
-});
-
-test('parseGitUrl passes through non-GitHub URLs unchanged', () => {
-  const result = parseGitUrl('https://gitlab.com/org/repo.git');
-  assert.deepEqual(result, { url: 'https://gitlab.com/org/repo.git' });
-});
-
-test('parseGitUrl passes through SSH URLs unchanged', () => {
-  const result = parseGitUrl('git@github.com:org/repo.git');
-  assert.deepEqual(result, { url: 'git@github.com:org/repo.git' });
+test('parseGitUrl normalizes GitHub URLs and passes other transports through', () => {
+  const cases = [
+    ['https://github.com/org/repo', { url: 'https://github.com/org/repo.git' }],
+    ['https://github.com/org/repo.git', { url: 'https://github.com/org/repo.git' }],
+    ['https://github.com/org/repo/', { url: 'https://github.com/org/repo.git' }],
+    [
+      'https://github.com/org/repo/tree/main',
+      { url: 'https://github.com/org/repo.git', ref: 'main' },
+    ],
+    [
+      'https://github.com/org/repo/tree/main/lib/asb',
+      { url: 'https://github.com/org/repo.git', ref: 'main', subdir: 'lib/asb' },
+    ],
+    ['https://gitlab.com/org/repo.git', { url: 'https://gitlab.com/org/repo.git' }],
+    ['git@github.com:org/repo.git', { url: 'git@github.com:org/repo.git' }],
+  ] as const;
+  for (const [value, expected] of cases) assert.deepEqual(parseGitUrl(value), expected);
 });
 
 // ── Name inference ─────────────────────────────────────────────────
 
-test('inferSourceName extracts repo name from GitHub HTTPS URL', () => {
-  assert.equal(inferSourceName('https://github.com/org/my-repo'), 'my-repo');
-  assert.equal(inferSourceName('https://github.com/org/my-repo.git'), 'my-repo');
-});
-
-test('inferSourceName extracts repo name from GitHub tree URL', () => {
-  assert.equal(inferSourceName('https://github.com/org/repo/tree/main/sub'), 'repo');
-});
-
-test('inferSourceName extracts repo name from SSH URL', () => {
-  assert.equal(inferSourceName('git@github.com:org/my-lib.git'), 'my-lib');
-});
-
-test('inferSourceName uses basename for local paths', () => {
-  assert.equal(inferSourceName('/path/to/team-library'), 'team-library');
-  assert.equal(inferSourceName('./relative/my-lib'), 'my-lib');
+test('inferSourceName handles remote and local source paths', () => {
+  for (const [value, expected] of [
+    ['https://github.com/org/my-repo', 'my-repo'],
+    ['https://github.com/org/my-repo.git', 'my-repo'],
+    ['https://github.com/org/repo/tree/main/sub', 'repo'],
+    ['git@github.com:org/my-lib.git', 'my-lib'],
+    ['/path/to/team-library', 'team-library'],
+    ['./relative/my-lib', 'my-lib'],
+  ]) {
+    assert.equal(inferSourceName(value), expected);
+  }
 });
 
 // ── Local sources ──────────────────────────────────────────────────
@@ -471,6 +444,7 @@ test('removeSource cleans up cache for remote sources', () => {
 
     const cacheDir = path.join(getPluginsDir(), 'cleanup-test');
     assert.ok(fs.existsSync(cacheDir));
+    fs.rmSync(path.join(cacheDir, '.git', 'asb-source.json'));
 
     removeSource('cleanup-test');
 
@@ -501,10 +475,14 @@ test('managed clone update rejects mismatched provenance without mutation', () =
     withTempAsbHome((asbHome) => {
       const parent = path.join(asbHome, `provenance-${mismatch}-fixture`);
       fs.mkdirSync(parent, { recursive: true });
-      const { bareRepo } = createBareRemote(parent);
+      const { bareRepo, workDir } = createBareRemote(parent);
       const namespace = `guarded-${mismatch}`;
       addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
       const cloneDir = path.join(getPluginsDir(), namespace);
+      fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+      execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+      execFileSync('git', ['commit', '-m', 'advance'], { cwd: workDir, stdio: 'pipe' });
+      execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
       const markerPath = path.join(cloneDir, '.git', 'asb-source.json');
       const marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8')) as Record<string, unknown>;
       if (mismatch === 'origin') {
@@ -518,18 +496,47 @@ test('managed clone update rejects mismatched provenance without mutation', () =
         fs.writeFileSync(markerPath, `${JSON.stringify(changed)}\n`);
       }
 
+      const beforeMarker = fs.readFileSync(markerPath, 'utf-8');
+      const beforeHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: cloneDir,
+        encoding: 'utf-8',
+      });
+
       const [result] = updateRemoteSources();
 
       assert.equal(result?.status, 'error');
       assert.match(result?.error ?? '', /unverified or modified/);
-      assert.equal(fs.existsSync(cloneDir), true);
-      assert.equal(hasSource(namespace), true);
+      assert.equal(fs.readFileSync(markerPath, 'utf-8'), beforeMarker);
+      assert.equal(
+        execFileSync('git', ['rev-parse', 'HEAD'], { cwd: cloneDir, encoding: 'utf-8' }),
+        beforeHead
+      );
+      assert.equal(fs.existsSync(path.join(cloneDir, 'rules', 'v2.md')), false);
     });
   }
 });
 
+test('managed clone supports configured detached tag refs', () => {
+  withTempAsbHome((asbHome) => {
+    const parent = path.join(asbHome, 'tag-ref-fixture');
+    fs.mkdirSync(parent, { recursive: true });
+    const { bareRepo, workDir } = createBareRemote(parent);
+    execFileSync('git', ['tag', 'v1'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', 'origin', 'v1'], { cwd: workDir, stdio: 'pipe' });
+
+    addRemoteSource('tagged-clone', { url: bareRepo, type: 'clone', ref: 'v1' });
+    const cloneDir = path.join(getPluginsDir(), 'tagged-clone');
+    const [result] = updateRemoteSources(undefined, 'tagged-clone');
+    assert.equal(result?.status, 'updated');
+
+    removeSource('tagged-clone');
+    assert.equal(fs.existsSync(cloneDir), false);
+    assert.equal(hasSource('tagged-clone'), false);
+  });
+});
+
 test('managed clone removal preserves local history and hidden files', () => {
-  for (const localChange of ['commit', 'ignored', 'hidden-index'] as const) {
+  for (const localChange of ['commit', 'reflog', 'ignored', 'hidden-index'] as const) {
     withTempAsbHome((asbHome) => {
       const parent = path.join(asbHome, `preserve-${localChange}-fixture`);
       fs.mkdirSync(parent, { recursive: true });
@@ -543,13 +550,20 @@ test('managed clone removal preserves local history and hidden files', () => {
           : path.join(cloneDir, `${localChange}.txt`);
 
       fs.writeFileSync(localFile, `${localChange}\n`);
-      if (localChange === 'commit') {
+      if (localChange === 'commit' || localChange === 'reflog') {
+        const managedHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+          cwd: cloneDir,
+          encoding: 'utf-8',
+        }).trim();
         execFileSync('git', ['add', '.'], { cwd: cloneDir, stdio: 'pipe' });
         execFileSync(
           'git',
           ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'local'],
           { cwd: cloneDir, stdio: 'pipe' }
         );
+        if (localChange === 'reflog') {
+          execFileSync('git', ['reset', '--hard', managedHead], { cwd: cloneDir, stdio: 'pipe' });
+        }
       } else {
         if (localChange === 'ignored') {
           fs.appendFileSync(path.join(cloneDir, '.git', 'info', 'exclude'), '\nignored.txt\n');
@@ -562,7 +576,9 @@ test('managed clone removal preserves local history and hidden files', () => {
       }
 
       assert.throws(() => removeSource(namespace), /unverified or modified/);
-      assert.equal(fs.readFileSync(localFile, 'utf-8'), `${localChange}\n`);
+      if (localChange !== 'reflog') {
+        assert.equal(fs.readFileSync(localFile, 'utf-8'), `${localChange}\n`);
+      }
       assert.equal(hasSource(namespace), true);
     });
   }
@@ -593,6 +609,7 @@ test('updateRemoteSources pulls latest changes', () => {
     addRemoteSource('update-test', { url: bareRepo, type: 'clone' });
     const cacheDir = path.join(getPluginsDir(), 'update-test');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+    fs.rmSync(path.join(cacheDir, '.git', 'asb-source.json'));
 
     fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
     execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
@@ -611,6 +628,7 @@ test('updateRemoteSources pulls latest changes', () => {
     assert.equal(results[0].status, 'updated');
     assert.equal(results[0].namespace, 'update-test');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
   });
 });
 
@@ -1151,7 +1169,6 @@ test('addRemoteSource with subdir resolves effective path correctly', () => {
 
 // ── Subtree source lifecycle ──────────────────────────────────────
 
-/** Create a bare remote repo with one commit containing rules/v1.md */
 function createBareRemote(parentDir: string): { bareRepo: string; workDir: string } {
   const bareRepo = path.join(parentDir, 'bare-repo.git');
   const workDir = path.join(parentDir, 'work');
@@ -1170,7 +1187,6 @@ function createBareRemote(parentDir: string): { bareRepo: string; workDir: strin
   return { bareRepo, workDir };
 }
 
-/** Initialize asbHome as a git repo with an empty config.toml */
 function initAsbAsGitRepo(asbHome: string): void {
   execFileSync('git', ['init', '--initial-branch=main'], { cwd: asbHome, stdio: 'pipe' });
   execFileSync('git', ['-C', asbHome, 'config', 'user.name', 'test'], { stdio: 'pipe' });
@@ -1189,15 +1205,12 @@ test('subtree lifecycle: add → update → remove', () => {
     const { bareRepo, workDir } = createBareRemote(path.dirname(asbHome));
     initAsbAsGitRepo(asbHome);
 
-    // Add as subtree
     addRemoteSource('st', { url: bareRepo, type: 'subtree', ref: 'main' });
     assert.equal(hasSource('st'), true);
     const pluginDir = path.join(getPluginsDir(), 'st');
     assert.ok(fs.existsSync(path.join(pluginDir, 'rules', 'v1.md')));
-    // No .git inside (it's a subtree, not a clone)
     assert.equal(fs.existsSync(path.join(pluginDir, '.git')), false);
 
-    // Commit the config change so the tree is clean for subtree pull
     execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
     execFileSync(
       'git',
@@ -1213,7 +1226,6 @@ test('subtree lifecycle: add → update → remove', () => {
       { cwd: asbHome, stdio: 'pipe' }
     );
 
-    // Push v2 to remote
     fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
     execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
     execFileSync(
@@ -1223,13 +1235,11 @@ test('subtree lifecycle: add → update → remove', () => {
     );
     execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
 
-    // Update (subtree pull)
     const results = updateRemoteSources();
     assert.equal(results.length, 1);
     assert.equal(results[0].status, 'updated');
     assert.ok(fs.existsSync(path.join(pluginDir, 'rules', 'v2.md')));
 
-    // Remove
     removeSource('st');
     assert.equal(hasSource('st'), false);
     assert.equal(fs.existsSync(pluginDir), false);
@@ -1251,7 +1261,6 @@ test('subtree requires explicit ref', () => {
 test('subtree errors when ASB_HOME is not a git repo', () => {
   withTempAsbHome((asbHome) => {
     const { bareRepo } = createBareRemote(path.dirname(asbHome));
-    // asbHome is NOT a git repo
 
     assert.throws(
       () => addRemoteSource('no-git', { url: bareRepo, type: 'subtree', ref: 'main' }),
@@ -1263,7 +1272,6 @@ test('subtree errors when ASB_HOME is not a git repo', () => {
 test('subtree errors when ASB_HOME is a subdirectory of a git repo', () => {
   withTempAsbHome((asbHome) => {
     const { bareRepo } = createBareRemote(path.dirname(asbHome));
-    // Init git in the PARENT dir, making asbHome a subdirectory
     const parentDir = path.dirname(asbHome);
     execFileSync('git', ['init', '--initial-branch=main'], { cwd: parentDir, stdio: 'pipe' });
     execFileSync('git', ['-C', parentDir, 'config', 'user.name', 'test'], { stdio: 'pipe' });
@@ -1283,7 +1291,6 @@ test('subtree errors on dirty working tree', () => {
     const { bareRepo } = createBareRemote(path.dirname(asbHome));
     initAsbAsGitRepo(asbHome);
 
-    // Dirty the tree
     fs.writeFileSync(path.join(asbHome, 'config.toml'), '# dirty');
 
     assert.throws(
