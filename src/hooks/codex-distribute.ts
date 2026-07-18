@@ -388,8 +388,6 @@ function addReviewResult(hooksJsonPath: string, results: CodexDistributionResult
 export interface CodexHookDistributeOptions {
   scope?: ConfigScope;
   selected: readonly HookEntry[];
-  /** Full hook library; ids join the managed-ownership candidates. */
-  allEntries?: readonly HookEntry[];
   dryRun?: boolean;
   projectMode?: 'managed' | 'exclusive' | 'none';
 }
@@ -398,8 +396,6 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   results: CodexDistributionResult[];
 } {
   const { scope, selected, dryRun = false, projectMode } = options;
-  const allEntries = options.allEntries ?? selected;
-
   if (scope?.project && projectMode === 'none') {
     return { results: [] };
   }
@@ -539,7 +535,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const removal = removeOwnedHookGroups(existingHooks, {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
-    knownManagedIds: new Set([...allEntries.map((entry) => entry.id), ...ownState.bundles]),
+    knownManagedIds: new Set(ownState.bundles),
     stateGroups: [ownState.events, ...legacy.groups],
   });
 
@@ -557,16 +553,11 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       ...cleanManagedBundleDirs(
         cleanupOpts,
         new Set(bundleEntries.map((entry) => entry.id)),
-        // Library-known ids count as deletable orphans too, so bundle dirs
-        // survive ownership-state loss without becoming permanent litter.
-        new Set([...ownState.bundles, ...allEntries.map((entry) => entry.id)])
+        new Set(ownState.bundles)
       )
     );
     results.push(
-      ...cleanLegacyAsbDir(
-        { ...cleanupOpts, parentDir: legacyParent },
-        new Set([...allEntries.map((entry) => entry.id), ...removal.removedLegacyAsbIds])
-      )
+      ...cleanLegacyAsbDir({ ...cleanupOpts, parentDir: legacyParent }, removal.removedLegacyAsbIds)
     );
     let realCodexRoot: string;
     try {
