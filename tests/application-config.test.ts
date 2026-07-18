@@ -2,14 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { resolveScopedSectionConfig } from '../src/config/application-config.js';
 import {
-  getApplicationsWithOverrides,
-  hasApplicationOverrides,
   mergeIncrementalSelection,
-  resolveApplicationSectionConfig,
-} from '../src/config/application-config.js';
-import { loadMergedSwitchboardConfig } from '../src/config/layered-config.js';
-import { resolveEffectiveSelection } from '../src/config/plugin-selection.js';
+  resolveEffectiveSelection,
+} from '../src/config/plugin-selection.js';
 import { clearPluginIndexCache } from '../src/plugins/index.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
@@ -64,7 +61,7 @@ test('resolveEffectiveSelection deduplicates normalized aliases in order', () =>
   assert.deepEqual(result, ['plugin-a@catalog']);
 });
 
-test('resolveApplicationSectionConfig applies per-agent override', () => {
+test('resolveScopedSectionConfig applies per-agent override', () => {
   withTempAsbHome((asbHome) => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
@@ -81,12 +78,12 @@ test('resolveApplicationSectionConfig applies per-agent override', () => {
       ].join('\n')
     );
 
-    const result = resolveApplicationSectionConfig('skills', 'codex');
+    const result = resolveScopedSectionConfig('skills', 'codex');
     assert.deepEqual(result.enabled, ['skill-a', 'skill-c', 'skill-d']);
   });
 });
 
-test('resolveApplicationSectionConfig returns global config when no override', () => {
+test('resolveScopedSectionConfig returns global config when no override', () => {
   withTempAsbHome((asbHome) => {
     fs.writeFileSync(
       path.join(asbHome, 'config.toml'),
@@ -99,49 +96,8 @@ test('resolveApplicationSectionConfig returns global config when no override', (
       ].join('\n')
     );
 
-    const result = resolveApplicationSectionConfig('skills', 'claude-code');
+    const result = resolveScopedSectionConfig('skills', 'claude-code');
     assert.deepEqual(result.enabled, ['skill-a', 'skill-b']);
-  });
-});
-
-test('hasApplicationOverrides detects agent with overrides', () => {
-  withTempAsbHome((asbHome) => {
-    fs.writeFileSync(
-      path.join(asbHome, 'config.toml'),
-      [
-        '[applications]',
-        'enabled = ["claude-code", "codex"]',
-        '',
-        '[applications.codex.skills]',
-        'remove = ["skill-a"]',
-      ].join('\n')
-    );
-
-    const { config } = loadMergedSwitchboardConfig();
-    assert.equal(hasApplicationOverrides(config, 'codex'), true);
-    assert.equal(hasApplicationOverrides(config, 'claude-code'), false);
-  });
-});
-
-test('getApplicationsWithOverrides lists all agents with overrides', () => {
-  withTempAsbHome((asbHome) => {
-    fs.writeFileSync(
-      path.join(asbHome, 'config.toml'),
-      [
-        '[applications]',
-        'enabled = ["claude-code", "codex", "gemini"]',
-        '',
-        '[applications.codex.skills]',
-        'remove = ["skill-a"]',
-        '',
-        '[applications.gemini.commands]',
-        'add = ["cmd-gemini"]',
-      ].join('\n')
-    );
-
-    const { config } = loadMergedSwitchboardConfig();
-    const result = getApplicationsWithOverrides(config);
-    assert.deepEqual(result.sort(), ['codex', 'gemini']);
   });
 });
 
@@ -161,7 +117,7 @@ test('per-agent override with complete active replacement', () => {
       ].join('\n')
     );
 
-    const result = resolveApplicationSectionConfig('skills', 'codex');
+    const result = resolveScopedSectionConfig('skills', 'codex');
     assert.deepEqual(result.enabled, ['skill-x', 'skill-y']);
   });
 });
@@ -191,12 +147,12 @@ test('per-application plugin enabled replaces the global portable plugin selecti
       ].join('\n')
     );
 
-    assert.deepEqual(resolveApplicationSectionConfig('commands', 'claude-code').enabled, [
+    assert.deepEqual(resolveScopedSectionConfig('commands', 'claude-code').enabled, [
       'global-plugin:global-plugin',
     ]);
-    assert.deepEqual(resolveApplicationSectionConfig('commands', 'codex').enabled, [
+    assert.deepEqual(resolveScopedSectionConfig('commands', 'codex').enabled, [
       'codex-plugin:codex-plugin',
     ]);
-    assert.deepEqual(resolveApplicationSectionConfig('commands', 'gemini').enabled, []);
+    assert.deepEqual(resolveScopedSectionConfig('commands', 'gemini').enabled, []);
   });
 });

@@ -4,25 +4,12 @@ import path from 'node:path';
 import { test } from 'node:test';
 
 import { loadJsonFile } from '../src/agents/json-utils.js';
-import { getAgentById } from '../src/agents/registry.js';
 import { TraeAgent } from '../src/agents/trae.js';
 import { distributeRules } from '../src/rules/distribution.js';
 import { ensureRulesDirectory } from '../src/rules/library.js';
 import { DEFAULT_RULE_STATE, saveRuleState } from '../src/rules/state.js';
 import { getTargetsForSection } from '../src/targets/registry.js';
 import { simulateTraeInstalled, withTempDir, withTempHomes } from './helpers/tmp.js';
-
-// ---------------------------------------------------------------------------
-// Registry: trae variants are registered
-// ---------------------------------------------------------------------------
-
-test('getAgentById returns TraeAgent for both variants', () => {
-  const trae = getAgentById('trae');
-  assert.equal(trae.id, 'trae');
-
-  const traeCn = getAgentById('trae-cn');
-  assert.equal(traeCn.id, 'trae-cn');
-});
 
 // ---------------------------------------------------------------------------
 // Rules: target registry includes trae

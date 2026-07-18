@@ -138,15 +138,3 @@ export function isCustomAgentsHandler(
 ): handler is TargetCustomAgentsHandler {
   return 'custom' in handler && (handler as TargetCustomAgentsHandler).custom === true;
 }
-
-/** List sections supported by a target */
-export function getTargetSections(target: ApplicationTarget): TargetSection[] {
-  const sections: TargetSection[] = [];
-  if (target.mcp) sections.push('mcp');
-  if (target.rules) sections.push('rules');
-  if (target.commands) sections.push('commands');
-  if (target.agents) sections.push('agents');
-  if (target.skills) sections.push('skills');
-  if (target.hooks) sections.push('hooks');
-  return sections;
-}

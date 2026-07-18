@@ -4,9 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import {
-  resolveApplicationNativePluginConfig,
-  resolveApplicationSectionConfig,
-  resolveEffectiveSectionConfig,
+  resolveScopedNativePluginConfig,
+  resolveScopedSectionConfig,
 } from '../src/config/application-config.js';
 import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
@@ -325,7 +324,7 @@ test('direct external component selection materializes its owning plugin', () =>
     const index = buildPluginIndex();
     assert.deepEqual(index.get(pluginId)?.components.skills, []);
 
-    const resolved = resolveApplicationSectionConfig('skills', 'codex');
+    const resolved = resolveScopedSectionConfig('skills', 'codex');
 
     assert.deepEqual(resolved.enabled, [skillId]);
     assert.equal(index.get(pluginId)?.meta.materialized, true);
@@ -578,7 +577,7 @@ test('PluginIndex.expand merges components from multiple plugins', () => {
   });
 });
 
-test('resolveEffectiveSectionConfig merges plugin expansion with global active', () => {
+test('resolveScopedSectionConfig merges plugin expansion with global active', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const mktDir = createMarketplaceFixture(asbHome, 'mkt', [
@@ -602,7 +601,7 @@ test('resolveEffectiveSectionConfig merges plugin expansion with global active',
       ].join('\n')
     );
 
-    const result = resolveEffectiveSectionConfig('commands', 'claude-code');
+    const result = resolveScopedSectionConfig('commands', 'claude-code');
     assert.ok(result.enabled.includes('local-cmd'));
     assert.ok(result.enabled.includes('my-plugin@mkt:plugin-cmd'));
   });
@@ -632,11 +631,11 @@ test('plugins.exclude removes specific entries from expansion', () => {
       ].join('\n')
     );
 
-    const result = resolveEffectiveSectionConfig('commands', 'claude-code');
+    const result = resolveScopedSectionConfig('commands', 'claude-code');
     assert.ok(result.enabled.includes('my-plugin@mkt:keep-cmd'));
     assert.ok(!result.enabled.includes('my-plugin@mkt:drop-cmd'));
 
-    const agentResult = resolveEffectiveSectionConfig('agents', 'claude-code');
+    const agentResult = resolveScopedSectionConfig('agents', 'claude-code');
     assert.ok(agentResult.enabled.includes('my-plugin@mkt:keep-agent'));
   });
 });
@@ -663,11 +662,11 @@ test('enabled plugins expand to commands for all active applications', () => {
       ].join('\n')
     );
 
-    const ccResult = resolveEffectiveSectionConfig('commands', 'claude-code');
+    const ccResult = resolveScopedSectionConfig('commands', 'claude-code');
     assert.ok(ccResult.enabled.includes('p1@mkt:p1-cmd'));
     assert.ok(ccResult.enabled.includes('p2@mkt:p2-cmd'));
 
-    const codexResult = resolveEffectiveSectionConfig('commands', 'codex');
+    const codexResult = resolveScopedSectionConfig('commands', 'codex');
     assert.ok(codexResult.enabled.includes('p1@mkt:p1-cmd'));
     assert.ok(codexResult.enabled.includes('p2@mkt:p2-cmd'));
   });
@@ -702,10 +701,10 @@ test('application plugin add and remove normalize bare and source-qualified alia
       ].join('\n')
     );
 
-    assert.deepEqual(resolveEffectiveSectionConfig('commands', 'claude-code').enabled, [
+    assert.deepEqual(resolveScopedSectionConfig('commands', 'claude-code').enabled, [
       'plugin-a@app-selection:a-one',
     ]);
-    assert.deepEqual(resolveEffectiveSectionConfig('commands', 'codex').enabled, [
+    assert.deepEqual(resolveScopedSectionConfig('commands', 'codex').enabled, [
       'plugin-b@app-selection:b-two',
       'manual-command',
     ]);
@@ -743,7 +742,7 @@ test('application removals do not materialize unselected external plugin aliases
       loadSkillLibrary().some((skill) => skill.id.includes('remote-plugin')),
       false
     );
-    assert.deepEqual(resolveEffectiveSectionConfig('skills', 'codex').enabled, []);
+    assert.deepEqual(resolveScopedSectionConfig('skills', 'codex').enabled, []);
     assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
   });
 });
@@ -771,7 +770,7 @@ test('plugin excludes do not remove an explicitly enabled component', () => {
       ].join('\n')
     );
 
-    assert.deepEqual(resolveEffectiveSectionConfig('commands', 'claude-code').enabled, [
+    assert.deepEqual(resolveScopedSectionConfig('commands', 'claude-code').enabled, [
       'plugin-a@exclude-boundary:keep-explicit',
     ]);
   });
@@ -1124,7 +1123,7 @@ test('old config without plugins section works (backward compatibility)', () => 
       ].join('\n')
     );
 
-    const result = resolveEffectiveSectionConfig('commands', 'claude-code');
+    const result = resolveScopedSectionConfig('commands', 'claude-code');
     assert.deepEqual(result.enabled, ['my-cmd']);
   });
 });
@@ -1505,7 +1504,7 @@ test('legacy bare component refs normalize to source-qualified marketplace IDs',
       ].join('\n')
     );
 
-    const result = resolveEffectiveSectionConfig('commands', 'claude-code');
+    const result = resolveScopedSectionConfig('commands', 'claude-code');
     assert.deepEqual(result.enabled, ['my-plugin@mkt:plugin-cmd']);
   });
 });
@@ -1810,7 +1809,7 @@ test('bare plugin sources can carry both Claude metadata and Codex native metada
   });
 });
 
-test('resolveApplicationNativePluginConfig keeps native plugins out of generic plugin expansion', () => {
+test('resolveScopedNativePluginConfig keeps native plugins out of generic plugin expansion', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const mktDir = createMarketplaceFixture(asbHome, 'openai-codex', [
@@ -1832,18 +1831,18 @@ test('resolveApplicationNativePluginConfig keeps native plugins out of generic p
       ].join('\n')
     );
 
-    const nativeConfig = resolveApplicationNativePluginConfig('claude-code');
+    const nativeConfig = resolveScopedNativePluginConfig('claude-code');
     assert.deepEqual(nativeConfig.enabled, ['codex@source-alias']);
     assert.equal(nativeConfig.scope, 'user');
 
-    const claudeCommands = resolveEffectiveSectionConfig('commands', 'claude-code');
-    const codexCommands = resolveEffectiveSectionConfig('commands', 'codex');
+    const claudeCommands = resolveScopedSectionConfig('commands', 'claude-code');
+    const codexCommands = resolveScopedSectionConfig('commands', 'codex');
     assert.deepEqual(claudeCommands.enabled, []);
     assert.deepEqual(codexCommands.enabled, []);
   });
 });
 
-test('resolveApplicationNativePluginConfig resolves Codex native refs by target', () => {
+test('resolveScopedNativePluginConfig resolves Codex native refs by target', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const pluginDir = path.join(asbHome, 'external', 'cowart');
@@ -1864,12 +1863,12 @@ test('resolveApplicationNativePluginConfig resolves Codex native refs by target'
       ].join('\n')
     );
 
-    const nativeConfig = resolveApplicationNativePluginConfig('codex');
+    const nativeConfig = resolveScopedNativePluginConfig('codex');
     assert.deepEqual(nativeConfig.enabled, ['cowart-source']);
   });
 });
 
-test('resolveApplicationNativePluginConfig preserves source-qualified refs for duplicate native install refs', () => {
+test('resolveScopedNativePluginConfig preserves source-qualified refs for duplicate native install refs', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     const sourceOne = createMarketplaceFixture(asbHome, 'openai-codex', [
@@ -1900,12 +1899,12 @@ test('resolveApplicationNativePluginConfig preserves source-qualified refs for d
       ].join('\n')
     );
 
-    const nativeConfig = resolveApplicationNativePluginConfig('claude-code');
+    const nativeConfig = resolveScopedNativePluginConfig('claude-code');
     assert.deepEqual(nativeConfig.enabled, ['codex@source-two']);
   });
 });
 
-test('resolveApplicationNativePluginConfig rejects unsupported native plugin scopes', () => {
+test('resolveScopedNativePluginConfig rejects unsupported native plugin scopes', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     writeConfigToml(
@@ -1918,13 +1917,13 @@ test('resolveApplicationNativePluginConfig rejects unsupported native plugin sco
     );
 
     assert.throws(
-      () => resolveApplicationNativePluginConfig('claude-code'),
+      () => resolveScopedNativePluginConfig('claude-code'),
       /Only "user" is currently supported/
     );
   });
 });
 
-test('resolveApplicationSectionConfig still works without plugins', () => {
+test('resolveScopedSectionConfig still works without plugins', () => {
   withTempAsbHome((asbHome) => {
     clearPluginIndexCache();
     writeConfigToml(
@@ -1941,7 +1940,7 @@ test('resolveApplicationSectionConfig still works without plugins', () => {
       ].join('\n')
     );
 
-    const result = resolveApplicationSectionConfig('commands', 'claude-code');
+    const result = resolveScopedSectionConfig('commands', 'claude-code');
     assert.deepEqual(result.enabled, ['cmd-a']);
   });
 });
