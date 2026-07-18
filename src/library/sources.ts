@@ -1,9 +1,3 @@
-/**
- * Library source management utilities.
- * Handles adding, removing, and listing external library sources.
- * Supports both local directory paths and remote git repository URLs.
- */
-
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -42,8 +36,6 @@ function markSourcesChanged(): void {
   sourceRevision++;
 }
 
-// ── Git utilities ──────────────────────────────────────────────────
-
 function ensureGitAvailable(): void {
   try {
     runGit(['--version']);
@@ -60,6 +52,7 @@ interface CloneMarker {
   commit: string;
   branch?: string;
   upstream?: string;
+  topology?: string;
 }
 
 function cloneMarkerPath(repoDir: string): string {
@@ -72,6 +65,21 @@ function tryGit(repoDir: string, args: string[]): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function cloneTopology(repoDir: string): string {
+  const refs = runGit(
+    [
+      'for-each-ref',
+      '--sort=refname',
+      '--format=%(refname)%00%(objectname)',
+      'refs/heads',
+      'refs/tags',
+    ],
+    { cwd: repoDir }
+  );
+  const reflog = runGit(['reflog', 'show', '--all', '--format=%gD%x00%H'], { cwd: repoDir });
+  return JSON.stringify([refs, reflog]);
 }
 
 function writeCloneMarker(repoDir: string, namespace: string, remote: RemoteSource): void {
@@ -91,6 +99,7 @@ function writeCloneMarker(repoDir: string, namespace: string, remote: RemoteSour
     '@{upstream}',
   ]);
   if (upstream) marker.upstream = upstream;
+  marker.topology = cloneTopology(repoDir);
   fs.writeFileSync(cloneMarkerPath(repoDir), `${JSON.stringify(marker)}\n`);
 }
 
@@ -126,6 +135,16 @@ function verifyClone(
   remote: RemoteSource
 ): 'branch' | 'detached' | undefined {
   try {
+    const rootStat = fs.lstatSync(repoDir);
+    const gitStat = fs.lstatSync(path.join(repoDir, '.git'));
+    if (
+      !rootStat.isDirectory() ||
+      rootStat.isSymbolicLink() ||
+      !gitStat.isDirectory() ||
+      gitStat.isSymbolicLink()
+    ) {
+      return undefined;
+    }
     const markerPath = cloneMarkerPath(repoDir);
     let marker: CloneMarker | undefined;
     try {
@@ -149,27 +168,47 @@ function verifyClone(
       '@{upstream}',
     ]);
     const head = runGit(['rev-parse', 'HEAD'], { cwd: repoDir });
-    const identityMatches = marker
-      ? marker.version === 1 &&
-        marker.namespace === namespace &&
-        marker.url === expectedUrl &&
-        marker.ref === remote.ref &&
-        marker.commit === head &&
-        marker.branch === branch &&
-        marker.upstream === upstream
-      : branch
-        ? (remote.ref === undefined || branch === remote.ref) &&
-          upstream === `origin/${branch}` &&
-          head === runGit(['rev-parse', '@{upstream}'], { cwd: repoDir })
-        : remote.ref !== undefined &&
-          upstream === undefined &&
-          head ===
-            runGit(['rev-parse', '--verify', `refs/tags/${remote.ref}^{commit}`], { cwd: repoDir });
-    if (rawOrigin !== origin || origin !== expectedUrl || !identityMatches) return undefined;
+    const markerIdentity =
+      marker &&
+      marker.version === 1 &&
+      marker.namespace === namespace &&
+      marker.url === expectedUrl &&
+      marker.ref === remote.ref &&
+      marker.commit === head &&
+      marker.branch === branch &&
+      marker.upstream === upstream;
+    const legacyIdentity = branch
+      ? (remote.ref === undefined || branch === remote.ref) &&
+        upstream === `origin/${branch}` &&
+        head === runGit(['rev-parse', '@{upstream}'], { cwd: repoDir })
+      : remote.ref !== undefined &&
+        upstream === undefined &&
+        head ===
+          runGit(['rev-parse', '--verify', `refs/tags/${remote.ref}^{commit}`], { cwd: repoDir });
+    if (
+      rawOrigin !== origin ||
+      origin !== expectedUrl ||
+      !(marker ? markerIdentity : legacyIdentity)
+    ) {
+      return undefined;
+    }
+
+    const topology = cloneTopology(repoDir);
+    if (marker?.topology) {
+      if (marker.topology !== topology) return undefined;
+    } else {
+      const expectedRefs = branch
+        ? `refs/heads/${branch}\0${head}`
+        : remote.ref
+          ? `refs/tags/${remote.ref}\0${runGit(['rev-parse', `refs/tags/${remote.ref}`], { cwd: repoDir })}`
+          : undefined;
+      if (JSON.parse(topology)[0] !== expectedRefs) return undefined;
+    }
 
     const allowedCommit = marker?.commit ?? (branch ? undefined : head);
     const exclusions = ['--not', '--remotes=origin', ...(allowedCommit ? [allowedCommit] : [])];
-    return runGit(['rev-list', '--all', '--reflog', ...exclusions], { cwd: repoDir }) === '' &&
+    return (marker?.topology ||
+      runGit(['rev-list', '--all', '--reflog', ...exclusions], { cwd: repoDir }) === '') &&
       runGit(['ls-files', '-v'], { cwd: repoDir })
         .split('\n')
         .every((line) => line === '' || line.startsWith('H ')) &&
@@ -270,8 +309,6 @@ function ensureCleanTree(dir: string): void {
   }
 }
 
-// ── URL detection and parsing ──────────────────────────────────────
-
 export function isGitUrl(source: string): boolean {
   return /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(source);
 }
@@ -336,8 +373,6 @@ export function inferSourceName(location: string): string {
   return path.basename(path.resolve(location));
 }
 
-// ── Config access helpers ──────────────────────────────────────────
-
 function getRawSources(scope?: ConfigScope): Record<string, SourceValue> {
   const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
   for (const namespace of Object.keys(config.plugins.sources)) validateNamespace(namespace);
@@ -379,8 +414,6 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
   return resolveLocalPath(expandHome(value));
 }
 
-// ── Validation helpers ─────────────────────────────────────────────
-
 function validateNamespace(namespace: string): void {
   if (!/^[a-zA-Z0-9_-]+(?:\.[a-zA-Z0-9_-]+)*$/.test(namespace)) {
     throw new Error(
@@ -396,8 +429,6 @@ function ensureNamespaceAvailable(namespace: string): void {
     );
   }
 }
-
-// ── Auto-discovery ─────────────────────────────────────────────────
 
 /**
  * Discover plugin sources from `~/.asb/plugins/`.
@@ -419,8 +450,6 @@ function discoverLocalSources(): Record<string, string> {
   }
   return result;
 }
-
-// ── Public API ─────────────────────────────────────────────────────
 
 /**
  * Get all plugin sources: auto-discovered from `~/.asb/plugins/` merged
@@ -574,9 +603,6 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   }
 }
 
-/**
- * Remove a source and clean up its cache directory if remote.
- */
 export function removeSource(namespace: string): void {
   const raw = getRawSources();
   if (!(namespace in raw)) {

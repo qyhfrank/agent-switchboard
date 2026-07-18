@@ -321,31 +321,14 @@ test('hasSource works for both local and remote', () => {
 
 test('addRemoteSource clones a local git repo and saves config', () => {
   withTempAsbHome((asbHome) => {
-    const bareRepo = path.join(asbHome, 'bare-repo.git');
-    fs.mkdirSync(bareRepo, { recursive: true });
-    execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
-
-    const workDir = path.join(asbHome, 'work');
-    execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
-    fs.mkdirSync(path.join(workDir, 'rules'), { recursive: true });
-    fs.writeFileSync(path.join(workDir, 'rules', 'test.md'), '# Test rule\nHello');
-    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
-    execFileSync(
-      'git',
-      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'init'],
-      {
-        cwd: workDir,
-        stdio: 'pipe',
-      }
-    );
-    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'remote-fixture'));
 
     addRemoteSource('test-remote', { url: bareRepo, type: 'clone' });
 
     assert.equal(hasSource('test-remote'), true);
 
     const cacheDir = path.join(getPluginsDir(), 'test-remote');
-    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'test.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
     assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
 
     const record = getSourcesRecord();
@@ -420,26 +403,7 @@ test('addRemoteSource preserves an existing auto-discovered plugin on name colli
 
 test('removeSource cleans up cache for remote sources', () => {
   withTempAsbHome((asbHome) => {
-    const bareRepo = path.join(asbHome, 'bare-repo.git');
-    fs.mkdirSync(bareRepo, { recursive: true });
-
-    execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
-
-    const workDir = path.join(asbHome, 'work');
-    execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
-    fs.mkdirSync(path.join(workDir, 'rules'), { recursive: true });
-    fs.writeFileSync(path.join(workDir, 'rules', 'a.md'), '# A');
-    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
-    execFileSync(
-      'git',
-      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'init'],
-      {
-        cwd: workDir,
-        stdio: 'pipe',
-      }
-    );
-    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
-
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'remove-fixture'));
     addRemoteSource('cleanup-test', { url: bareRepo, type: 'clone' });
 
     const cacheDir = path.join(getPluginsDir(), 'cleanup-test');
@@ -470,8 +434,8 @@ test('removeSource preserves a modified managed clone', () => {
   });
 });
 
-test('managed clone update rejects mismatched provenance without mutation', () => {
-  for (const mismatch of ['marker', 'origin', 'ref'] as const) {
+test('managed clone update rejects mismatched provenance without fetching', () => {
+  for (const mismatch of ['marker', 'origin', 'ref', 'branch', 'tag'] as const) {
     withTempAsbHome((asbHome) => {
       const parent = path.join(asbHome, `provenance-${mismatch}-fixture`);
       fs.mkdirSync(parent, { recursive: true });
@@ -490,14 +454,19 @@ test('managed clone update rejects mismatched provenance without mutation', () =
           cwd: cloneDir,
           stdio: 'pipe',
         });
-      } else {
+      } else if (mismatch === 'marker' || mismatch === 'ref') {
         const changed =
           mismatch === 'marker' ? { ...marker, namespace: 'foreign' } : { ...marker, ref: 'other' };
         fs.writeFileSync(markerPath, `${JSON.stringify(changed)}\n`);
+      } else {
+        execFileSync('git', [mismatch, 'user-local'], { cwd: cloneDir, stdio: 'pipe' });
       }
 
       const beforeMarker = fs.readFileSync(markerPath, 'utf-8');
-      const beforeHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      const gitBefore = ['HEAD', 'refs/remotes/origin/main'].map((ref) =>
+        execFileSync('git', ['rev-parse', ref], { cwd: cloneDir, encoding: 'utf-8' })
+      );
+      const objectsBefore = execFileSync('git', ['count-objects', '-v'], {
         cwd: cloneDir,
         encoding: 'utf-8',
       });
@@ -507,16 +476,22 @@ test('managed clone update rejects mismatched provenance without mutation', () =
       assert.equal(result?.status, 'error');
       assert.match(result?.error ?? '', /unverified or modified/);
       assert.equal(fs.readFileSync(markerPath, 'utf-8'), beforeMarker);
+      assert.deepEqual(
+        ['HEAD', 'refs/remotes/origin/main'].map((ref) =>
+          execFileSync('git', ['rev-parse', ref], { cwd: cloneDir, encoding: 'utf-8' })
+        ),
+        gitBefore
+      );
       assert.equal(
-        execFileSync('git', ['rev-parse', 'HEAD'], { cwd: cloneDir, encoding: 'utf-8' }),
-        beforeHead
+        execFileSync('git', ['count-objects', '-v'], { cwd: cloneDir, encoding: 'utf-8' }),
+        objectsBefore
       );
       assert.equal(fs.existsSync(path.join(cloneDir, 'rules', 'v2.md')), false);
     });
   }
 });
 
-test('managed clone supports configured detached tag refs', () => {
+test('managed clone adopts and repeatedly updates a force-moved detached tag', () => {
   withTempAsbHome((asbHome) => {
     const parent = path.join(asbHome, 'tag-ref-fixture');
     fs.mkdirSync(parent, { recursive: true });
@@ -526,8 +501,23 @@ test('managed clone supports configured detached tag refs', () => {
 
     addRemoteSource('tagged-clone', { url: bareRepo, type: 'clone', ref: 'v1' });
     const cloneDir = path.join(getPluginsDir(), 'tagged-clone');
-    const [result] = updateRemoteSources(undefined, 'tagged-clone');
-    assert.equal(result?.status, 'updated');
+    fs.rmSync(path.join(cloneDir, '.git', 'asb-source.json'));
+    execFileSync('git', ['checkout', '--orphan', 'replacement'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['rm', '-rf', '.'], { cwd: workDir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(workDir, 'replacement.md'), 'replacement\n');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'replacement'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['tag', '--force', 'v1'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push', '--force', 'origin', 'refs/tags/v1'], {
+      cwd: workDir,
+      stdio: 'pipe',
+    });
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const [result] = updateRemoteSources(undefined, 'tagged-clone');
+      assert.equal(result?.status, 'updated');
+    }
+    assert.equal(fs.existsSync(path.join(cloneDir, 'replacement.md')), true);
 
     removeSource('tagged-clone');
     assert.equal(fs.existsSync(cloneDir), false);
@@ -584,27 +574,38 @@ test('managed clone removal preserves local history and hidden files', () => {
   }
 });
 
+test('managed clone rejects symlinked clone and git roots', () => {
+  for (const linkedRoot of ['clone', 'git'] as const) {
+    withTempAsbHome((asbHome) => {
+      const parent = path.join(asbHome, `linked-${linkedRoot}-fixture`);
+      fs.mkdirSync(parent, { recursive: true });
+      const { bareRepo, workDir } = createBareRemote(parent);
+      const namespace = `linked-${linkedRoot}`;
+      addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
+      const cloneDir = path.join(getPluginsDir(), namespace);
+      const moved = path.join(parent, `external-${linkedRoot}`);
+      const link = linkedRoot === 'clone' ? cloneDir : path.join(cloneDir, '.git');
+      fs.renameSync(link, moved);
+      fs.symlinkSync(moved, link);
+      const markerPath = path.join(cloneDir, '.git', 'asb-source.json');
+      const markerBefore = fs.readFileSync(markerPath, 'utf-8');
+      fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+      execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+      execFileSync('git', ['commit', '-m', 'advance'], { cwd: workDir, stdio: 'pipe' });
+      execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+
+      const [result] = updateRemoteSources(undefined, namespace);
+
+      assert.equal(result?.status, 'error');
+      assert.equal(fs.readFileSync(markerPath, 'utf-8'), markerBefore);
+      assert.equal(fs.existsSync(path.join(cloneDir, 'rules', 'v2.md')), false);
+    });
+  }
+});
+
 test('updateRemoteSources pulls latest changes', () => {
   withTempAsbHome((asbHome) => {
-    const bareRepo = path.join(asbHome, 'bare-repo.git');
-    fs.mkdirSync(bareRepo, { recursive: true });
-
-    execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
-
-    const workDir = path.join(asbHome, 'work');
-    execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
-    fs.mkdirSync(path.join(workDir, 'rules'), { recursive: true });
-    fs.writeFileSync(path.join(workDir, 'rules', 'v1.md'), '# V1');
-    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
-    execFileSync(
-      'git',
-      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v1'],
-      {
-        cwd: workDir,
-        stdio: 'pipe',
-      }
-    );
-    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'update-fixture'));
 
     addRemoteSource('update-test', { url: bareRepo, type: 'clone' });
     const cacheDir = path.join(getPluginsDir(), 'update-test');
@@ -716,25 +717,7 @@ test('updateRemoteSources preserves a merge that existed before the pull', () =>
 
 test('updateRemoteSources re-clones when cache is missing', () => {
   withTempAsbHome((asbHome) => {
-    const bareRepo = path.join(asbHome, 'bare-repo.git');
-    fs.mkdirSync(bareRepo, { recursive: true });
-
-    execFileSync('git', ['init', '--bare', bareRepo], { stdio: 'pipe' });
-
-    const workDir = path.join(asbHome, 'work');
-    execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
-    fs.mkdirSync(path.join(workDir, 'rules'), { recursive: true });
-    fs.writeFileSync(path.join(workDir, 'rules', 'test.md'), '# Test');
-    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
-    execFileSync(
-      'git',
-      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'init'],
-      {
-        cwd: workDir,
-        stdio: 'pipe',
-      }
-    );
-    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'reclone-fixture'));
 
     addRemoteSource('reclone-test', { url: bareRepo, type: 'clone' });
     const cacheDir = path.join(getPluginsDir(), 'reclone-test');
@@ -745,7 +728,7 @@ test('updateRemoteSources re-clones when cache is missing', () => {
     const results = updateRemoteSources();
     assert.equal(results.length, 1);
     assert.equal(results[0].status, 'updated');
-    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'test.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
 
     fs.rmSync(path.join(cacheDir, '.git'), { recursive: true, force: true });
     fs.writeFileSync(path.join(cacheDir, 'keep.txt'), 'keep me\n');
@@ -1175,14 +1158,12 @@ function createBareRemote(parentDir: string): { bareRepo: string; workDir: strin
   fs.mkdirSync(bareRepo, { recursive: true });
   execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], { stdio: 'pipe' });
   execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.name', 'test'], { cwd: workDir, stdio: 'pipe' });
+  execFileSync('git', ['config', 'user.email', 'test@test.com'], { cwd: workDir, stdio: 'pipe' });
   fs.mkdirSync(path.join(workDir, 'rules'), { recursive: true });
   fs.writeFileSync(path.join(workDir, 'rules', 'v1.md'), '# V1');
   execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
-  execFileSync(
-    'git',
-    ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'v1'],
-    { cwd: workDir, stdio: 'pipe' }
-  );
+  execFileSync('git', ['commit', '-m', 'v1'], { cwd: workDir, stdio: 'pipe' });
   execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
   return { bareRepo, workDir };
 }
