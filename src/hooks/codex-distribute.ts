@@ -37,11 +37,17 @@ import type { HookEntry } from './library.js';
 import { listHookBundleFiles } from './library.js';
 import {
   collectV0428BundleDirs,
+  filterRecognizedDesiredGroups,
   removeOwnedHookGroups,
   stripLegacyMarkerLines,
 } from './ownership.js';
 import { HOOK_DIR_PLACEHOLDER } from './schema.js';
-import { consumeLegacyManagedState, loadHookState, saveHookState } from './state.js';
+import {
+  consumeLegacyManagedState,
+  loadHookState,
+  loadSharedHookState,
+  saveHookState,
+} from './state.js';
 import {
   deleteJsonConfig,
   expandPortablePath,
@@ -486,7 +492,8 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   const ownState = loadHookState('codex', scope);
-  const legacy = consumeLegacyManagedState('codex', scope, dryRun);
+  const sharedState = loadSharedHookState('codex', scope);
+  const legacy = consumeLegacyManagedState('codex', scope);
 
   // Phase 1: copy bundle files
   let bundleChanged = false;
@@ -536,12 +543,13 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
     knownManagedIds: new Set(ownState.bundles),
-    stateGroups: [ownState.events, ...legacy.groups],
+    stateGroups: [ownState.events],
   });
 
   const hadLegacyManagedKey = Object.hasOwn(fileData, LEGACY_ASB_MANAGED_KEY);
   delete fileData[LEGACY_ASB_MANAGED_KEY];
 
+  let bundleCleanupFailed = false;
   const appendCleanupResults = (): void => {
     const cleanupOpts: BundleCleanupOptions<CodexPlatform> = {
       platform: 'codex',
@@ -549,13 +557,13 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       safetyRoot: codexRoot(scope),
       dryRun,
     };
-    results.push(
-      ...cleanManagedBundleDirs(
-        cleanupOpts,
-        new Set(bundleEntries.map((entry) => entry.id)),
-        new Set(ownState.bundles)
-      )
+    const managedCleanup = cleanManagedBundleDirs(
+      cleanupOpts,
+      new Set(bundleEntries.map((entry) => entry.id)),
+      new Set(ownState.bundles)
     );
+    bundleCleanupFailed ||= managedCleanup.some((result) => result.status === 'error');
+    results.push(...managedCleanup);
     results.push(
       ...cleanLegacyAsbDir({ ...cleanupOpts, parentDir: legacyParent }, removal.removedLegacyAsbIds)
     );
@@ -603,11 +611,17 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const managedEvents: Record<string, unknown[]> = {};
   for (const { entry, hooks } of filteredEntries) {
     for (const [event, groups] of Object.entries(rewriteHookCommands(hooks, entry, scope))) {
-      if (!mergedHooks[event]) mergedHooks[event] = [];
       if (!Object.hasOwn(managedEvents, event)) managedEvents[event] = [];
-      mergedHooks[event].push(...groups);
       managedEvents[event].push(...groups);
     }
+  }
+  const toAppend = filterRecognizedDesiredGroups(removal.hooks, managedEvents, [
+    sharedState.events,
+    ...legacy.groups,
+  ]);
+  for (const [event, groups] of Object.entries(toAppend)) {
+    if (!mergedHooks[event]) mergedHooks[event] = [];
+    mergedHooks[event].push(...groups);
   }
   if (Object.keys(mergedHooks).length === 0) {
     delete fileData.hooks;
@@ -619,10 +633,18 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     if (dryRun) return;
     saveHookState(
       'codex',
-      { version: 1, events: managedEvents, bundles: bundleEntries.map((entry) => entry.id) },
+      {
+        version: 1,
+        events: managedEvents,
+        bundles: [
+          ...new Set([
+            ...bundleEntries.map((entry) => entry.id),
+            ...(bundleCleanupFailed ? ownState.bundles : []),
+          ]),
+        ],
+      },
       scope
     );
-    legacy.cleanup();
   };
 
   // No hooks remain and the file holds nothing else: remove it entirely.

@@ -34,8 +34,7 @@ export function hooksStateDir(): string {
   return path.join(getConfigDir(), 'state', 'hooks');
 }
 
-export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScope): string {
-  const stateDir = path.join(hooksStateDir(), deviceStateId());
+function hookStateFileName(target: HookStateTarget, scope?: ConfigScope): string {
   const projectRoot = scope?.project?.trim();
   if (projectRoot && projectRoot.length > 0) {
     const resolved = path.resolve(projectRoot);
@@ -44,18 +43,22 @@ export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScop
     // home-relative path disambiguates while staying machine-portable.
     const rel = path.relative(os.homedir(), resolved).split(path.sep).join('/');
     const hash = createHash('sha256').update(rel).digest('hex').slice(0, 10);
-    return path.join(stateDir, `${target}--${slug}-${hash}.json`);
+    return `${target}--${slug}-${hash}.json`;
   }
-  return path.join(stateDir, `${target}.json`);
+  return `${target}.json`;
+}
+
+export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScope): string {
+  return path.join(hooksStateDir(), deviceStateId(), hookStateFileName(target, scope));
 }
 
 export function emptyHookState(): HookOwnershipState {
   return { version: 1, events: {}, bundles: [] };
 }
 
-export function loadHookState(target: HookStateTarget, scope?: ConfigScope): HookOwnershipState {
+function loadHookStateAt(filePath: string): HookOwnershipState {
   try {
-    const raw = fs.readFileSync(resolveHookStatePath(target, scope), 'utf-8');
+    const raw = fs.readFileSync(filePath, 'utf-8');
     const parsed = JSON.parse(raw) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       const record = parsed as Record<string, unknown>;
@@ -78,6 +81,18 @@ export function loadHookState(target: HookStateTarget, scope?: ConfigScope): Hoo
   return emptyHookState();
 }
 
+export function loadHookState(target: HookStateTarget, scope?: ConfigScope): HookOwnershipState {
+  return loadHookStateAt(resolveHookStatePath(target, scope));
+}
+
+/** Shared predecessor state is read-only evidence and never deletion authority. */
+export function loadSharedHookState(
+  target: HookStateTarget,
+  scope?: ConfigScope
+): HookOwnershipState {
+  return loadHookStateAt(path.join(hooksStateDir(), hookStateFileName(target, scope)));
+}
+
 export function saveHookState(
   target: HookStateTarget,
   state: HookOwnershipState,
@@ -98,28 +113,19 @@ export function saveHookState(
 const LEGACY_STATE_FILE_RE = /^(claude-code|codex)-[0-9a-f]{64}\.json$/;
 
 export interface LegacyStateConsumption {
-  /** Event maps recovered from v0.4.28 state files, as removal candidates. */
+  /** Event maps recovered from v0.4.28 state files as read-only recognition evidence. */
   groups: Record<string, unknown[]>[];
   /** Whether any legacy state file or litter entry was found. */
   found: boolean;
-  /** Delete the consumed files and litter; call only after the config and new state committed. */
-  cleanup: () => void;
 }
 
 /**
- * Read the hook groups recorded by v0.4.28 state files so they can join the
- * removal candidates, and plan deletion of the v0.4.28 state litter:
- * hash-named state files, their `.lock`/`.legacy-bundles` variants, and the
- * `locks/` directory. The scan stays inside the current scope's own state
- * directory (global sync never consumes project evidence and vice versa;
- * the file names carry no config identity to match across scopes), and a
- * symlinked state directory is left alone. Deletion is deferred to
- * `cleanup()` so a failed sync keeps its migration evidence.
+ * Read v0.4.28 groups without deleting or granting ownership from their
+ * device-unattributed state. The scan stays inside the current scope.
  */
 export function consumeLegacyManagedState(
   target: HookStateTarget,
-  scope: ConfigScope | undefined,
-  dryRun: boolean
+  scope?: ConfigScope
 ): LegacyStateConsumption {
   const projectRoot = scope?.project?.trim();
   const dir =
@@ -128,7 +134,7 @@ export function consumeLegacyManagedState(
       : hooksStateDir();
 
   const groups: Record<string, unknown[]>[] = [];
-  const doomed: string[] = [];
+  let found = false;
 
   const dirStat = (() => {
     try {
@@ -149,6 +155,7 @@ export function consumeLegacyManagedState(
       const match = entry.name.match(LEGACY_STATE_FILE_RE);
       if (match && entry.isFile()) {
         if (match[1] === target) {
+          found = true;
           try {
             const parsed = JSON.parse(fs.readFileSync(entryPath, 'utf-8')) as {
               hooks?: Record<string, unknown[]>;
@@ -157,26 +164,20 @@ export function consumeLegacyManagedState(
               groups.push(parsed.hooks);
             }
           } catch {
-            // Unreadable legacy state carries nothing to remove.
+            // Unreadable legacy state carries no recognition evidence.
           }
-          doomed.push(entryPath);
         }
         continue;
       }
       const isLitter =
-        entry.name === 'locks' || /^(claude-code|codex)-[0-9a-f]{64}\./.test(entry.name);
-      if (isLitter) doomed.push(entryPath);
+        entry.name === 'locks' ||
+        (entry.name.startsWith(`${target}-`) && entry.name.includes('.json.'));
+      if (isLitter) found = true;
     }
   }
 
   return {
     groups,
-    found: doomed.length > 0,
-    cleanup: () => {
-      if (dryRun) return;
-      for (const entryPath of doomed) {
-        fs.rmSync(entryPath, { recursive: true, force: true });
-      }
-    },
+    found,
   };
 }
