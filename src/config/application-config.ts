@@ -19,18 +19,12 @@ import type {
   IncrementalSelection,
   NativePluginSelection,
   PluginExclude,
-  SwitchboardConfig,
   SwitchboardConfigLayer,
 } from './schemas.js';
 import type { ConfigScope } from './scope.js';
 import { scopeToLayerOptions } from './scope.js';
 
 export type ConfigSection = 'mcp' | 'commands' | 'agents' | 'skills' | 'hooks' | 'rules';
-
-export { mergeIncrementalSelection } from './plugin-selection.js';
-
-/** Schema-level keys in [applications] that are NOT per-app override objects. */
-const APPLICATION_SCHEMA_KEYS = new Set(['enabled', 'active', 'assume_installed']);
 
 export interface ResolvedSectionConfig {
   enabled: string[];
@@ -43,24 +37,7 @@ export interface ResolvedNativePluginConfig {
   scope: NativePluginScope;
 }
 
-type ApplicationConfigSource = SwitchboardConfig | SwitchboardConfigLayer;
-
-/**
- * Merge incremental selection with base enabled list
- *
- * Priority: enabled > add/remove
- * Formula: (base - remove) ∪ add
- */
-/**
- * Get per-application override configuration for a specific section
- */
-export function getApplicationOverride(
-  config: SwitchboardConfig,
-  appId: string,
-  section: ConfigSection
-): IncrementalSelection | undefined {
-  return getApplicationOverrideFromConfig(config, appId, section);
-}
+type ApplicationConfigSource = SwitchboardConfigLayer;
 
 function getApplicationOverrideFromConfig(
   config: ApplicationConfigSource,
@@ -234,88 +211,14 @@ function resolveNativePluginConfigFromConfig(
   };
 }
 
-/**
- * Resolve effective configuration for a specific application and section.
- * Applies per-application overrides to the global section config.
- */
-export function resolveApplicationSectionConfig(
-  section: ConfigSection,
-  appId: string,
-  scope?: ConfigScope
-): ResolvedSectionConfig {
-  const layerOptions = scopeToLayerOptions(scope);
-  const { config } = loadMergedSwitchboardConfig(layerOptions);
-  return resolveSectionConfigFromConfig(config, section, appId, scope);
-}
-
-/**
- * Check if an application has any overrides configured
- */
-export function hasApplicationOverrides(config: SwitchboardConfig, appId: string): boolean {
-  const applications = config.applications as Record<string, unknown>;
-  if (APPLICATION_SCHEMA_KEYS.has(appId)) return false;
-  const appOverrides = applications[appId];
-  return appOverrides !== undefined && typeof appOverrides === 'object';
-}
-
-/**
- * Get list of applications that have overrides configured
- */
-export function getApplicationsWithOverrides(config: SwitchboardConfig): string[] {
-  const applications = config.applications as Record<string, unknown>;
-  const result: string[] = [];
-  for (const key of Object.keys(applications)) {
-    if (!APPLICATION_SCHEMA_KEYS.has(key) && typeof applications[key] === 'object') {
-      result.push(key);
-    }
-  }
-  return result;
-}
-
-// ── Plugin-aware effective config ──────────────────────────────────
-
-/**
- * Resolve the effective enabled list for a section, merging:
- *   1. Global `config.<section>.enabled`
- *   2. Per-application plugin selection over `config.plugins.enabled`
- *   3. Plugin expansion and `config.plugins.exclude.<section>` filtering
- *   4. Per-application component overrides (`add`/`remove`/`enabled`)
- *
- * This is the function distribution modules should use to determine
- * what entries to distribute for a given app.
- */
-export function resolveEffectiveSectionConfig(
-  section: ConfigSection,
-  appId: string,
-  scope?: ConfigScope
-): ResolvedSectionConfig {
-  const layerOptions = scopeToLayerOptions(scope);
-  const { config } = loadMergedSwitchboardConfig(layerOptions);
-
-  return resolveSectionConfigFromConfig(config, section, appId, scope);
-}
-
-/**
- * Resolve target-native plugin selections for a specific application.
- * Native plugins are application-owned lifecycle objects and are not expanded
- * through global `[plugins].enabled`.
- */
-export function resolveApplicationNativePluginConfig(
-  appId: string,
-  scope?: ConfigScope
-): ResolvedNativePluginConfig {
-  const layerOptions = scopeToLayerOptions(scope);
-  const { config } = loadMergedSwitchboardConfig(layerOptions);
-  return resolveNativePluginConfigFromConfig(config, appId, scope);
-}
-
 export function resolveScopedSectionConfig(
   section: ConfigSection,
   appId: string,
   scope?: ConfigScope
 ): ResolvedSectionConfig {
   if (!scope?.profile && !scope?.project) {
-    return resolveEffectiveSectionConfig(section, appId, scope);
+    const { config } = loadMergedSwitchboardConfig(scopeToLayerOptions(scope));
+    return resolveSectionConfigFromConfig(config, section, appId, scope);
   }
 
   const layer = loadWritableConfigLayer(scopeToLayerOptions(scope));
@@ -327,7 +230,8 @@ export function resolveScopedNativePluginConfig(
   scope?: ConfigScope
 ): ResolvedNativePluginConfig {
   if (!scope?.profile && !scope?.project) {
-    return resolveApplicationNativePluginConfig(appId, scope);
+    const { config } = loadMergedSwitchboardConfig(scopeToLayerOptions(scope));
+    return resolveNativePluginConfigFromConfig(config, appId, scope);
   }
 
   const layer = loadWritableConfigLayer(scopeToLayerOptions(scope));

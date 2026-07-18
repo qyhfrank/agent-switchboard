@@ -3,9 +3,7 @@ import path from 'node:path';
 import { getAgentsDir, getCommandsDir, getConfigDir, getHooksDir } from '../config/paths.js';
 
 function ensureDir(dirPath: string, mode: number): void {
-  if (!fs.existsSync(dirPath)) {
-    fs.mkdirSync(dirPath, { recursive: true, mode });
-  }
+  fs.mkdirSync(dirPath, { recursive: true, mode });
   try {
     fs.chmodSync(dirPath, mode);
   } catch {
@@ -37,11 +35,6 @@ function migrateLegacySubagentsDir(): void {
  * Runs legacy migration first, then creates missing directories.
  */
 export function ensureLibraryDirectories(): void {
-  const base = getConfigDir();
-  if (!fs.existsSync(base)) {
-    fs.mkdirSync(base, { recursive: true });
-  }
-
   migrateLegacySubagentsDir();
 
   ensureDir(getCommandsDir(), 0o700);
@@ -55,9 +48,7 @@ export function ensureLibraryDirectories(): void {
  */
 export function writeFileSecure(filePath: string, content: string): void {
   const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
+  fs.mkdirSync(dir, { recursive: true });
   // Create or truncate; ensure mode for new files
   fs.writeFileSync(filePath, content, { encoding: 'utf-8', mode: 0o600 });
   try {
@@ -69,14 +60,13 @@ export function writeFileSecure(filePath: string, content: string): void {
 
 /** Ensure parent directory for an arbitrary file path exists. */
 export function ensureParentDir(filePath: string): void {
-  const dir = path.dirname(filePath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
 /** Check if path exists and is a directory. */
 export function isDir(p: string): boolean {
   try {
-    return fs.existsSync(p) && fs.statSync(p).isDirectory();
+    return fs.statSync(p).isDirectory();
   } catch {
     return false;
   }
@@ -85,7 +75,7 @@ export function isDir(p: string): boolean {
 /** Check if path exists and is a file. */
 export function isFile(p: string): boolean {
   try {
-    return fs.existsSync(p) && fs.statSync(p).isFile();
+    return fs.statSync(p).isFile();
   } catch {
     return false;
   }
@@ -140,15 +130,5 @@ export function copyDirRecursive(
 
 /** Recursively delete a directory and all its contents. */
 export function rmDirRecursive(dirPath: string): void {
-  if (!fs.existsSync(dirPath)) return;
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      rmDirRecursive(fullPath);
-    } else {
-      fs.unlinkSync(fullPath);
-    }
-  }
-  fs.rmdirSync(dirPath);
+  fs.rmSync(dirPath, { recursive: true, force: true });
 }
