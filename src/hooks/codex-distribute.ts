@@ -1,17 +1,3 @@
-/**
- * Codex hook distribution: writes hooks.json and copies bundle files.
- *
- * Codex reads hooks from ~/.codex/hooks.json (global) and
- * <project>/.codex/hooks.json (project scope). Unlike Claude Code which
- * embeds hooks inside settings.json, Codex uses a dedicated file.
- *
- * ASB distributes synchronous command handlers to Codex and Codex has no
- * ${HOOK_DIR} runtime expansion, so unsupported entries are filtered and
- * bundle paths are resolved (in `$HOME`-portable form) before writing.
- * The written file carries no ASB metadata; ownership lives in
- * `<ASB_HOME>/state/hooks/<device>/` (see `state.ts`).
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseToml } from '@iarna/toml';
@@ -43,6 +29,7 @@ import {
 } from './ownership.js';
 import { HOOK_DIR_PLACEHOLDER } from './schema.js';
 import {
+  allHookGroupsAppended,
   consumeLegacyManagedState,
   loadHookState,
   loadSharedHookState,
@@ -84,10 +71,6 @@ const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX = '${CLAUDE_PLUGIN_ROOT}/hooks';
 const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS = '${CLAUDE_PLUGIN_ROOT}\\hooks';
 const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_POWERSHELL = '$env:CLAUDE_PLUGIN_ROOT\\hooks';
 
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
-
 function resolveHooksJsonPath(scope?: ConfigScope): string {
   const projectRoot = scope?.project?.trim();
   if (projectRoot && projectRoot.length > 0) {
@@ -113,10 +96,6 @@ function legacyAsbParentDir(scope?: ConfigScope): string {
 function resolveHookBundleTargetDir(entry: HookEntry, scope?: ConfigScope): string {
   return path.join(managedBundleParentDir(scope), entry.id);
 }
-
-// ---------------------------------------------------------------------------
-// Filtering for Codex compatibility
-// ---------------------------------------------------------------------------
 
 interface FilteredHookEntry {
   entry: HookEntry;
@@ -263,10 +242,6 @@ function filterForCodex(entries: readonly HookEntry[]): {
   return { entries: result, diagnostics };
 }
 
-// ---------------------------------------------------------------------------
-// Command rewriting
-// ---------------------------------------------------------------------------
-
 function rewriteHookCommands(
   hooks: Record<string, unknown[]>,
   entry: HookEntry,
@@ -299,10 +274,6 @@ function rewriteHookCommands(
 
   return result;
 }
-
-// ---------------------------------------------------------------------------
-// Codex prerequisites: feature flag + project trust + review gate
-// ---------------------------------------------------------------------------
 
 type CodexDistributionResult =
   | DistributionResult<CodexPlatform>
@@ -387,10 +358,6 @@ function addReviewResult(hooksJsonPath: string, results: CodexDistributionResult
     reason: 'open /hooks in Codex to review new or modified hooks before they can run',
   });
 }
-
-// ---------------------------------------------------------------------------
-// Main distribution entry point
-// ---------------------------------------------------------------------------
 
 export interface CodexHookDistributeOptions {
   scope?: ConfigScope;
@@ -622,6 +589,13 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     sharedState.events,
     ...legacy.groups,
   ]);
+  const ownedBundleIds = filteredEntries
+    .filter(
+      ({ entry, hooks }) =>
+        entry.isBundle &&
+        allHookGroupsAppended(rewriteHookCommands(hooks, entry, scope), managedEvents, toAppend)
+    )
+    .map(({ entry }) => entry.id);
   for (const [event, groups] of Object.entries(toAppend)) {
     if (!mergedHooks[event]) mergedHooks[event] = [];
     mergedHooks[event].push(...groups);
@@ -639,7 +613,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       {
         version: 1,
         events: toAppend,
-        bundles: [...activeBundleIds, ...retainedManagedBundles],
+        bundles: [...ownedBundleIds, ...retainedManagedBundles],
         legacyBundles: retainedLegacyBundles,
       },
       scope

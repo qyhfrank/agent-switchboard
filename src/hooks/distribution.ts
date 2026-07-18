@@ -1,22 +1,3 @@
-/**
- * Hook distribution: copies bundle files and merges hook configurations
- * into target-specific runtime files.
- *
- * Claude Code distribution:
- *  1. **Bundle copy** (bundle hooks only): copy script files to
- *     `~/.claude/hooks/managed/<hook-id>/` using the existing bundle distributor.
- *  2. **Config merge**: deep-merge all active hooks' event maps into
- *     `~/.claude/settings.json` under the `hooks` key. For bundle hooks,
- *     `${HOOK_DIR}` placeholders are resolved to the distributed path.
- *
- * The written config carries no ASB metadata and no machine-absolute paths;
- * ownership lives under `<ASB_HOME>/state/hooks/<device>/` (see `state.ts`).
- *
- * Codex distribution is delegated to `codex-distribute.ts`, which writes
- * `hooks.json`, filters to Codex-compatible synchronous command hooks, and
- * reports Codex-specific feature flag, project trust, and review prerequisites.
- */
-
 import fs from 'node:fs';
 import path from 'node:path';
 import { getClaudeDir, getProjectClaudeDir } from '../config/paths.js';
@@ -44,6 +25,7 @@ import {
 } from './ownership.js';
 import { HOOK_DIR_PLACEHOLDER, type MatcherGroup } from './schema.js';
 import {
+  allHookGroupsAppended,
   consumeLegacyManagedState,
   loadHookState,
   loadSharedHookState,
@@ -73,10 +55,6 @@ const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX = '${CLAUDE_PLUGIN_ROOT}/hooks';
 const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_WINDOWS = '${CLAUDE_PLUGIN_ROOT}\\hooks';
 const CLAUDE_PLUGIN_ROOT_HOOKS_PREFIX_POWERSHELL = '$env:CLAUDE_PLUGIN_ROOT\\hooks';
 
-// ---------------------------------------------------------------------------
-// Path helpers
-// ---------------------------------------------------------------------------
-
 function resolveSettingsPath(scope?: ConfigScope): string {
   const projectRoot = scope?.project?.trim();
   if (projectRoot && projectRoot.length > 0) {
@@ -102,10 +80,6 @@ function legacyAsbParentDir(scope?: ConfigScope): string {
 function resolveHookBundleTargetDir(entry: HookEntry, scope?: ConfigScope): string {
   return path.join(managedBundleParentDir(scope), entry.id);
 }
-
-// ---------------------------------------------------------------------------
-// Command rewriting
-// ---------------------------------------------------------------------------
 
 /**
  * Resolve `${HOOK_DIR}` and plugin-root placeholders to the distributed
@@ -162,10 +136,6 @@ function resolveEntryGroups(entry: HookEntry, scope?: ConfigScope): Record<strin
   return resolved;
 }
 
-// ---------------------------------------------------------------------------
-// Main distribution entry point
-// ---------------------------------------------------------------------------
-
 function isTargetReachable(platformId: string, assumeInstalled?: ReadonlySet<string>): boolean {
   const target = getTargetById(platformId);
   if (target?.isInstalled?.() === false && !assumeInstalled?.has(platformId)) {
@@ -219,10 +189,6 @@ export function distributeHooks(
 
   return { results };
 }
-
-// ---------------------------------------------------------------------------
-// Claude Code distribution
-// ---------------------------------------------------------------------------
 
 interface TargetDistributeContext {
   scope?: ConfigScope;
@@ -452,6 +418,11 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
     sharedState.events,
     ...legacy.groups,
   ]);
+  const ownedBundleIds = bundleEntries
+    .filter((entry) =>
+      allHookGroupsAppended(resolveEntryGroups(entry, ctx.scope), managedEvents, toAppend)
+    )
+    .map((entry) => entry.id);
   for (const [event, groups] of Object.entries(toAppend)) {
     if (!mergedHooks[event]) mergedHooks[event] = [];
     mergedHooks[event].push(...groups);
@@ -471,7 +442,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       {
         version: 1,
         events: toAppend,
-        bundles: [...activeBundleIds, ...retainedManagedBundles],
+        bundles: [...ownedBundleIds, ...retainedManagedBundles],
         legacyBundles: retainedLegacyBundles,
       },
       ctx.scope
@@ -501,10 +472,6 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
 
   return results;
 }
-
-// ---------------------------------------------------------------------------
-// Codex distribution (delegates to codex-distribute module)
-// ---------------------------------------------------------------------------
 
 function distributeCodex(ctx: TargetDistributeContext): HookDistributionOutcome['results'] {
   const platform = 'codex';
