@@ -66,19 +66,9 @@ function cloneMarkerPath(repoDir: string): string {
   return path.join(repoDir, '.git', 'asb-source.json');
 }
 
-function currentBranch(repoDir: string): string | undefined {
+function tryGit(repoDir: string, args: string[]): string | undefined {
   try {
-    return runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repoDir });
-  } catch {
-    return undefined;
-  }
-}
-
-function currentUpstream(repoDir: string): string | undefined {
-  try {
-    return runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], {
-      cwd: repoDir,
-    });
+    return runGit(args, { cwd: repoDir });
   } catch {
     return undefined;
   }
@@ -92,9 +82,14 @@ function writeCloneMarker(repoDir: string, namespace: string, remote: RemoteSour
     commit: runGit(['rev-parse', 'HEAD'], { cwd: repoDir }),
   };
   if (remote.ref) marker.ref = remote.ref;
-  const branch = currentBranch(repoDir);
+  const branch = tryGit(repoDir, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
   if (branch) marker.branch = branch;
-  const upstream = currentUpstream(repoDir);
+  const upstream = tryGit(repoDir, [
+    'rev-parse',
+    '--abbrev-ref',
+    '--symbolic-full-name',
+    '@{upstream}',
+  ]);
   if (upstream) marker.upstream = upstream;
   fs.writeFileSync(cloneMarkerPath(repoDir), `${JSON.stringify(marker)}\n`);
 }
@@ -125,44 +120,90 @@ function gitClone(url: string, targetDir: string, namespace: string, ref?: strin
   }
 }
 
-function isVerifiedClone(repoDir: string, namespace: string, remote: RemoteSource): boolean {
+function verifyClone(
+  repoDir: string,
+  namespace: string,
+  remote: RemoteSource
+): 'branch' | 'detached' | undefined {
   try {
-    const marker = JSON.parse(fs.readFileSync(cloneMarkerPath(repoDir), 'utf-8')) as CloneMarker;
+    const markerPath = cloneMarkerPath(repoDir);
+    let marker: CloneMarker | undefined;
+    try {
+      const stat = fs.lstatSync(markerPath);
+      if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
+      const parsed = JSON.parse(fs.readFileSync(markerPath, 'utf-8')) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+      marker = parsed as CloneMarker;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined;
+    }
+
     const expectedUrl = credentialFreeGitUrl(expandHome(remote.url));
     const rawOrigin = runGit(['remote', 'get-url', 'origin'], { cwd: repoDir });
     const origin = credentialFreeGitUrl(rawOrigin);
-    const branch = currentBranch(repoDir);
-    return (
-      marker.version === 1 &&
-      marker.namespace === namespace &&
-      marker.url === expectedUrl &&
-      marker.ref === remote.ref &&
-      rawOrigin === origin &&
-      origin === expectedUrl &&
-      marker.commit === runGit(['rev-parse', 'HEAD'], { cwd: repoDir }) &&
-      marker.branch === branch &&
-      marker.upstream === currentUpstream(repoDir) &&
-      runGit(['rev-list', '--all', '--not', '--remotes=origin'], { cwd: repoDir }) === '' &&
+    const branch = tryGit(repoDir, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const upstream = tryGit(repoDir, [
+      'rev-parse',
+      '--abbrev-ref',
+      '--symbolic-full-name',
+      '@{upstream}',
+    ]);
+    const head = runGit(['rev-parse', 'HEAD'], { cwd: repoDir });
+    const identityMatches = marker
+      ? marker.version === 1 &&
+        marker.namespace === namespace &&
+        marker.url === expectedUrl &&
+        marker.ref === remote.ref &&
+        marker.commit === head &&
+        marker.branch === branch &&
+        marker.upstream === upstream
+      : branch
+        ? (remote.ref === undefined || branch === remote.ref) &&
+          upstream === `origin/${branch}` &&
+          head === runGit(['rev-parse', '@{upstream}'], { cwd: repoDir })
+        : remote.ref !== undefined &&
+          upstream === undefined &&
+          head ===
+            runGit(['rev-parse', '--verify', `refs/tags/${remote.ref}^{commit}`], { cwd: repoDir });
+    if (rawOrigin !== origin || origin !== expectedUrl || !identityMatches) return undefined;
+
+    const allowedCommit = marker?.commit ?? (branch ? undefined : head);
+    const exclusions = ['--not', '--remotes=origin', ...(allowedCommit ? [allowedCommit] : [])];
+    return runGit(['rev-list', '--all', '--reflog', ...exclusions], { cwd: repoDir }) === '' &&
       runGit(['ls-files', '-v'], { cwd: repoDir })
         .split('\n')
         .every((line) => line === '' || line.startsWith('H ')) &&
       runGit(['status', '--porcelain', '--ignored', '--untracked-files=all'], { cwd: repoDir }) ===
         ''
-    );
+      ? branch
+        ? 'branch'
+        : 'detached'
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-function gitPull(repoDir: string, url: string): void {
+function gitUpdate(
+  repoDir: string,
+  url: string,
+  ref: string | undefined,
+  detachedRef: boolean
+): void {
   const persistedUrl = credentialFreeGitUrl(url);
+  const gitOptions = {
+    cwd: repoDir,
+    env: authenticatedGitEnv(url, persistedUrl),
+    sensitiveUrls: [url],
+  };
+  if (detachedRef && ref) {
+    runGit(['fetch', '--depth', '1', 'origin', ref], gitOptions);
+    runGit(['checkout', '--detach', 'FETCH_HEAD'], gitOptions);
+    return;
+  }
   const mergeAlreadyActive = isMergeInProgress(repoDir);
   try {
-    runGit(['pull', '--ff-only'], {
-      cwd: repoDir,
-      env: authenticatedGitEnv(url, persistedUrl),
-      sensitiveUrls: [url],
-    });
+    runGit(['pull', '--ff-only'], gitOptions);
   } catch (error) {
     if (!mergeAlreadyActive) abortMerge(repoDir);
     throw error;
@@ -566,7 +607,7 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
-      if (fs.existsSync(pluginDir) && isVerifiedClone(pluginDir, namespace, value)) {
+      if (fs.existsSync(pluginDir) && verifyClone(pluginDir, namespace, value) !== undefined) {
         fs.rmSync(pluginDir, { recursive: true, force: true });
       } else if (fs.existsSync(pluginDir)) {
         throw new Error(`Source directory is unverified or modified; preserving it: ${pluginDir}`);
@@ -697,12 +738,13 @@ export function updateRemoteSources(
         if (!fs.existsSync(gitDir)) {
           gitClone(expandHome(value.url), cloneDir, namespace, value.ref);
         } else {
-          if (!isVerifiedClone(cloneDir, namespace, value)) {
+          const verification = verifyClone(cloneDir, namespace, value);
+          if (verification === undefined) {
             throw new Error(
               `Source directory is unverified or modified; preserving it: ${cloneDir}`
             );
           }
-          gitPull(cloneDir, value.url);
+          gitUpdate(cloneDir, value.url, value.ref, verification === 'detached');
           writeCloneMarker(cloneDir, namespace, value);
         }
       }
