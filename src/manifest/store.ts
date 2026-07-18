@@ -1,14 +1,15 @@
 /**
  * Project distribution manifest I/O and helpers.
  *
- * Manifests are stored globally at `~/.asb/state/manifests/<slug>.json`,
- * where the slug is the project path relative to home with `/` replaced by `--`.
- * Projects outside home use an `_abs--` prefix.
+ * Manifests are stored at `~/.asb/state/manifests/<device>/<slug>.json`.
+ * The slug is the project path relative to home with `/` replaced by `--`;
+ * projects outside home use an `_abs--` prefix.
  */
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { deviceStateId } from '../config/device-id.js';
 import { getConfigDir } from '../config/paths.js';
 import type {
   ManagedMcpEntry,
@@ -45,7 +46,7 @@ export function projectPathToSlug(projectRoot: string): string {
 
 export function resolveManifestPath(projectRoot: string): string {
   const slug = projectPathToSlug(projectRoot);
-  return path.join(getConfigDir(), MANIFESTS_DIR, `${slug}.json`);
+  return path.join(getConfigDir(), MANIFESTS_DIR, deviceStateId(), `${slug}.json`);
 }
 
 function emptyManifest(): ProjectDistributionManifest {

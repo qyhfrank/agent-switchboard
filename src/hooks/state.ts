@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { deviceStateId } from '../config/device-id.js';
 import { getConfigDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import { ensureParentDir } from '../library/fs.js';
@@ -33,6 +34,7 @@ export function hooksStateDir(): string {
 }
 
 export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScope): string {
+  const stateDir = path.join(hooksStateDir(), deviceStateId());
   const projectRoot = scope?.project?.trim();
   if (projectRoot && projectRoot.length > 0) {
     const resolved = path.resolve(projectRoot);
@@ -41,9 +43,9 @@ export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScop
     // home-relative path disambiguates while staying machine-portable.
     const rel = path.relative(os.homedir(), resolved).split(path.sep).join('/');
     const hash = createHash('sha256').update(rel).digest('hex').slice(0, 10);
-    return path.join(hooksStateDir(), `${target}--${slug}-${hash}.json`);
+    return path.join(stateDir, `${target}--${slug}-${hash}.json`);
   }
-  return path.join(hooksStateDir(), `${target}.json`);
+  return path.join(stateDir, `${target}.json`);
 }
 
 export function emptyHookState(): HookOwnershipState {
