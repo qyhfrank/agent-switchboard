@@ -46,6 +46,7 @@ import {
   consumeLegacyManagedState,
   loadHookState,
   loadSharedHookState,
+  retainedCleanupIds,
   saveHookState,
 } from './state.js';
 import {
@@ -510,6 +511,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       return { results };
     }
   }
+  const activeBundleIds = new Set(bundleEntries.map((entry) => entry.id));
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, CodexPlatform>({
       section: 'hooks',
@@ -549,7 +551,8 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const hadLegacyManagedKey = Object.hasOwn(fileData, LEGACY_ASB_MANAGED_KEY);
   delete fileData[LEGACY_ASB_MANAGED_KEY];
 
-  let bundleCleanupFailed = false;
+  let retainedManagedBundles: string[] = [];
+  let retainedLegacyBundles: string[] = [];
   const appendCleanupResults = (): void => {
     const cleanupOpts: BundleCleanupOptions<CodexPlatform> = {
       platform: 'codex',
@@ -557,24 +560,25 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       safetyRoot: codexRoot(scope),
       dryRun,
     };
-    const managedCleanup = cleanManagedBundleDirs(
-      cleanupOpts,
-      new Set(bundleEntries.map((entry) => entry.id)),
-      new Set(ownState.bundles)
-    );
-    bundleCleanupFailed ||= managedCleanup.some((result) => result.status === 'error');
+    const managedCandidates = new Set(ownState.bundles.filter((id) => !activeBundleIds.has(id)));
+    const managedCleanup = cleanManagedBundleDirs(cleanupOpts, activeBundleIds, managedCandidates);
+    retainedManagedBundles = retainedCleanupIds(managedCandidates, managedCleanup);
     results.push(...managedCleanup);
-    results.push(
-      ...cleanLegacyAsbDir({ ...cleanupOpts, parentDir: legacyParent }, removal.removedLegacyAsbIds)
+    const legacyCandidates = new Set([...ownState.legacyBundles, ...removal.removedLegacyAsbIds]);
+    const legacyCleanup = cleanLegacyAsbDir(
+      { ...cleanupOpts, parentDir: legacyParent },
+      legacyCandidates
     );
+    retainedLegacyBundles = retainedCleanupIds(legacyCandidates, legacyCleanup);
+    results.push(...legacyCleanup);
     let realCodexRoot: string;
     try {
       realCodexRoot = fs.realpathSync(codexRoot(scope));
     } catch {
       realCodexRoot = codexRoot(scope);
     }
-    const containRoots = [resolvedHomeDir(), realCodexRoot];
     const projectRoot = scope?.project?.trim();
+    const containRoots = projectRoot ? [realCodexRoot] : [resolvedHomeDir(), realCodexRoot];
     if (projectRoot) {
       try {
         containRoots.push(fs.realpathSync(path.resolve(projectRoot)));
@@ -592,13 +596,12 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
     );
   };
 
-  const stateHasContent = Object.keys(ownState.events).length > 0 || ownState.bundles.length > 0;
+  const stateHasContent =
+    Object.keys(ownState.events).length > 0 ||
+    ownState.bundles.length > 0 ||
+    ownState.legacyBundles.length > 0;
   const nothingToDo =
-    filteredEntries.length === 0 &&
-    !removal.removed &&
-    !hadLegacyManagedKey &&
-    !stateHasContent &&
-    !legacy.found;
+    filteredEntries.length === 0 && !removal.removed && !hadLegacyManagedKey && !stateHasContent;
   if (nothingToDo) {
     appendCleanupResults();
     return { results };
@@ -635,13 +638,9 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       'codex',
       {
         version: 1,
-        events: managedEvents,
-        bundles: [
-          ...new Set([
-            ...bundleEntries.map((entry) => entry.id),
-            ...(bundleCleanupFailed ? ownState.bundles : []),
-          ]),
-        ],
+        events: toAppend,
+        bundles: [...activeBundleIds, ...retainedManagedBundles],
+        legacyBundles: retainedLegacyBundles,
       },
       scope
     );
