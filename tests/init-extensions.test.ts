@@ -24,8 +24,10 @@ function makeTempAsbHome(): { asbHome: string; tmpRoot: string; cleanup: () => v
     cleanup: () => {
       clearExtensionTargets();
       resetTargetInit();
-      process.env.ASB_HOME = prevAsb;
-      process.env.ASB_AGENTS_HOME = prevAgents;
+      if (prevAsb === undefined) delete process.env.ASB_HOME;
+      else process.env.ASB_HOME = prevAsb;
+      if (prevAgents === undefined) delete process.env.ASB_AGENTS_HOME;
+      else process.env.ASB_AGENTS_HOME = prevAgents;
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     },
   };
