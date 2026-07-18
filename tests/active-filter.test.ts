@@ -119,13 +119,13 @@ test('managed project preserves legacy OpenCode paths and calls extension agents
     simulateAppsInstalled('codex', 'opencode');
     const projectRoot = path.join(agentsHome, 'managed-opencode-project');
     const files = [
-      path.join(agentsHome, '.codex', 'agents', 'global.toml'),
-      path.join(projectRoot, '.opencode', 'agent', 'foreign.md'),
-      path.join(projectRoot, '.opencode', 'skill', 'foreign', 'SKILL.md'),
-    ];
-    for (const file of files) {
+      [path.join(agentsHome, '.codex', 'agents', 'global.toml'), '# managed-by: asb\n'],
+      [path.join(projectRoot, '.opencode', 'agent', 'foreign.md'), 'keep\n'],
+      [path.join(projectRoot, '.opencode', 'skill', 'foreign', 'SKILL.md'), 'keep\n'],
+    ] as const;
+    for (const [file, content] of files) {
       fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, 'keep\n');
+      fs.writeFileSync(file, content);
     }
     let receivedProject: string | undefined;
     registerExtensionTarget({
@@ -154,8 +154,8 @@ test('managed project preserves legacy OpenCode paths and calls extension agents
       }
     );
     assert.equal(receivedProject, projectRoot);
-    assert.ok(outcome.results.every((result) => result.status !== 'error'));
-    for (const file of files) assert.equal(fs.readFileSync(file, 'utf-8'), 'keep\n');
+    assert.ok(outcome.results.every((r) => r.platform !== 'codex' && r.status !== 'error'));
+    for (const [file, content] of files) assert.equal(fs.readFileSync(file, 'utf-8'), content);
   });
 });
 
