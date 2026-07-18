@@ -99,23 +99,17 @@ export function saveManifest(projectRoot: string, manifest: ProjectDistributionM
   fs.renameSync(tmpPath, filePath);
 }
 
-// ── Composite key helpers ──────────────────────────────────
-
 const KEY_SEP = '::';
 
-/** Build a manifest key that is unique per (id, targetId) pair. */
 function manifestKey(id: string, targetId: string): string {
   return `${id}${KEY_SEP}${targetId}`;
 }
 
-/** Parse a composite manifest key back to id and targetId. */
 function parseManifestKey(key: string): { id: string; targetId: string } {
   const sep = key.indexOf(KEY_SEP);
   if (sep === -1) return { id: key, targetId: '' };
   return { id: key.slice(0, sep), targetId: key.slice(sep + KEY_SEP.length) };
 }
-
-// ── Entry-level helpers ────────────────────────────────────
 
 export type LibraryManifestSection = 'skills' | 'commands' | 'agents';
 
@@ -131,6 +125,11 @@ export function recordLibraryEntry(
   entry: ManifestEntry
 ): void {
   const sec = (manifest.sections[section] ?? {}) as Record<string, ManifestEntry>;
+  for (const [key, owned] of Object.entries(sec)) {
+    if (parseManifestKey(key).id !== id || owned.relativePath !== entry.relativePath) continue;
+    owned.hash = entry.hash;
+    owned.updatedAt = entry.updatedAt;
+  }
   sec[manifestKey(id, entry.targetId)] = entry;
   manifest.sections[section] = sec;
 }
@@ -180,8 +179,6 @@ export function recordRulesEntry(
   sec[filePathKey] = entry;
   manifest.sections.rules = sec;
 }
-
-// ── Cleanup computation ────────────────────────────────────
 
 /**
  * Compute entries that were previously owned by ASB but are no longer in the
