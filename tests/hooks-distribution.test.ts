@@ -1,8 +1,3 @@
-/**
- * Tests: distributeHooks respects isInstalled, merges without ASB metadata,
- * tracks ownership in ~/.asb/state/hooks/, migrates legacy layouts, and
- * cleans up bundle directories it can prove it owns.
- */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -144,10 +139,6 @@ function createPluginHookSource(asbHome: string): { pluginDir: string; hookId: s
   return { pluginDir, hookId: 'superpowers@superpowers:hooks' };
 }
 
-// ---------------------------------------------------------------------------
-// Claude Code: install gating and basic distribution
-// ---------------------------------------------------------------------------
-
 test('distributeHooks: skips when claude-code not installed and not in assumeInstalled', () => {
   withTempHomes(() => {
     createHookEntry('test-hook');
@@ -242,10 +233,6 @@ test('distributeHooks: skips malformed standalone plugin hook files', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Claude Code: clean output, ownership state, idempotency
-// ---------------------------------------------------------------------------
-
 test('distributeHooks: writes no ASB metadata and no absolute home paths', () => {
   withTempHomes(({ asbHome }) => {
     const fakeHome = path.dirname(asbHome);
@@ -304,7 +291,6 @@ test('distributeHooks: user reordering does not duplicate or remove groups', () 
     enableHooks(['test-hook']);
     distributeHooks(undefined, ['claude-code']);
 
-    // User prepends their own group in front of the ASB-written one
     const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
     const userGroup = { matcher: 'user', hooks: [{ type: 'command', command: 'echo mine' }] };
     settings.hooks.PreToolUse.unshift(userGroup);
@@ -377,8 +363,6 @@ test('distributeHooks: definition-only hook duplicates once after state loss, th
 
     fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
 
-    // Without state or path evidence the surviving copy reads as user-owned;
-    // duplication is the safe failure mode (never claim what we cannot prove).
     distributeHooks(undefined, ['claude-code']);
     let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
     assert.equal(settings.hooks.PreToolUse.length, 2, 'state loss duplicates once');
@@ -390,7 +374,7 @@ test('distributeHooks: definition-only hook duplicates once after state loss, th
   });
 });
 
-test('distributeHooks: v0.4.31 root state avoids duplicate Claude and Codex groups', () => {
+test('distributeHooks: shared predecessor state never becomes device ownership', () => {
   withTempHomes(({ asbHome }) => {
     simulateAppsInstalled('claude-code', 'codex');
     createHookEntry('upgrade-hook');
@@ -398,28 +382,28 @@ test('distributeHooks: v0.4.31 root state avoids duplicate Claude and Codex grou
     distributeHooks(undefined, ['claude-code', 'codex']);
 
     const stateDir = path.join(asbHome, 'state', 'hooks');
-    for (const target of ['claude-code', 'codex'] as const) {
-      fs.renameSync(resolveHookStatePath(target), path.join(stateDir, `${target}.json`));
-    }
-
-    distributeHooks(undefined, ['claude-code', 'codex']);
-
-    const claude = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    const codex = readJson(getCodexHooksJsonPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(claude.hooks.PreToolUse.length, 1);
-    assert.equal(codex.hooks.PreToolUse.length, 1);
-    for (const target of ['claude-code', 'codex'] as const) {
-      assert.equal(fs.existsSync(path.join(stateDir, `${target}.json`)), true);
-      assert.equal(fs.existsSync(resolveHookStatePath(target)), true);
-    }
+    fs.renameSync(resolveHookStatePath('claude-code'), path.join(stateDir, 'claude-code.json'));
+    const codexState = readJson(resolveHookStatePath('codex')) as { events: unknown };
+    fs.writeFileSync(
+      path.join(stateDir, `codex-${HEX64_A}.json`),
+      JSON.stringify({ hooks: codexState.events })
+    );
+    fs.rmSync(resolveHookStatePath('codex'));
 
     const previous = process.env.ASB_DEVICE_ID;
     try {
-      process.env.ASB_DEVICE_ID = 'peer-without-ownership';
+      for (const device of ['server-a', 'server-b']) {
+        process.env.ASB_DEVICE_ID = device;
+        distributeHooks(undefined, ['claude-code', 'codex']);
+        for (const target of ['claude-code', 'codex'] as const)
+          assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
+      }
       enableHooks([], ['claude-code', 'codex']);
       distributeHooks(undefined, ['claude-code', 'codex']);
-      const preserved = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-      assert.equal(preserved.hooks.PreToolUse.length, 1);
+      for (const file of [claudeSettingsPath(), getCodexHooksJsonPath()]) {
+        const preserved = readJson(file) as { hooks: Record<string, unknown[]> };
+        assert.equal(preserved.hooks.PreToolUse.length, 1);
+      }
     } finally {
       if (previous === undefined) delete process.env.ASB_DEVICE_ID;
       else process.env.ASB_DEVICE_ID = previous;
@@ -432,8 +416,10 @@ test('distributeHooks: cleanup failure retains bundle ownership for retry', () =
     withTempHomes(() => {
       simulateAppsInstalled(target);
       const hookId = `${target}-retry-bundle`;
+      const removedId = `${target}-removed-bundle`;
       createBundleHook(hookId);
-      enableHooks([hookId], [target]);
+      createBundleHook(removedId);
+      enableHooks([hookId, removedId], [target]);
       distributeHooks(undefined, [target], new Set([target]));
       const root = target === 'claude-code' ? getClaudeDir() : getCodexDir();
       const bundleDir = path.join(root, 'hooks', 'managed', hookId);
@@ -458,8 +444,33 @@ test('distributeHooks: cleanup failure retains bundle ownership for retry', () =
 
       const state = readJson(resolveHookStatePath(target)) as { bundles: string[] };
       assert.deepEqual(state.bundles, [hookId]);
+      assert.equal(fs.existsSync(path.join(root, 'hooks', 'managed', removedId)), false);
       distributeHooks(undefined, [target], new Set([target]));
       assert.equal(fs.existsSync(bundleDir), false);
+      assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
+
+      const legacyId = `${target}-legacy-retry`;
+      const legacyDir = path.join(root, 'hooks', 'asb', legacyId);
+      const script = path.join(legacyDir, 'run.sh');
+      fs.mkdirSync(legacyDir, { recursive: true });
+      fs.writeFileSync(script, '#!/bin/sh\n');
+      const configPath = target === 'claude-code' ? claudeSettingsPath() : getCodexHooksJsonPath();
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({
+          hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: script }] }] },
+        })
+      );
+      fs.rmdirSync = ((candidate: fs.PathLike) => {
+        if (path.resolve(String(candidate)) === legacyDir) throw new Error('mock legacy failure');
+        return originalRmdirSync(candidate);
+      }) as typeof fs.rmdirSync;
+      distributeHooks(undefined, [target], new Set([target]));
+      fs.rmdirSync = originalRmdirSync;
+      const legacyState = readJson(resolveHookStatePath(target)) as { legacyBundles: string[] };
+      assert.deepEqual(legacyState.legacyBundles, [legacyId]);
+      distributeHooks(undefined, [target], new Set([target]));
+      assert.equal(fs.existsSync(legacyDir), false);
       assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
     });
   }
@@ -537,10 +548,6 @@ test('distributeHooks: executable mode drift is repaired for claude-code bundles
     assert.equal(result?.filesSkipped, 1);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Claude Code: migration from legacy and v0.4.28 layouts
-// ---------------------------------------------------------------------------
 
 test('distributeHooks: migrates legacy markers, tags, state files, and bundle dirs', () => {
   withTempHomes(({ asbHome }) => {
@@ -719,37 +726,49 @@ test('distributeHooks: URL containing hooks/managed/<hex> is not v0.4.28 evidenc
   });
 });
 
-test('distributeHooks: v0.4.28 dir outside managed roots is reported, not deleted', () => {
+test('distributeHooks: project migration cannot delete global v0.4.28 bundles', () => {
   withTempHomes(({ agentsHome }) => {
-    simulateAppsInstalled('claude-code');
-    enableHooks([]);
+    withHome(agentsHome, () => {
+      const projectRoot = path.join(agentsHome, 'project');
+      simulateAppsInstalled('claude-code');
+      updateLibraryStateSection('hooks', () => ({ enabled: [], agentSync: {} }), {
+        project: projectRoot,
+      });
 
-    const outside = path.join(agentsHome, 'elsewhere', 'hooks', 'managed', HEX64_A);
-    fs.mkdirSync(outside, { recursive: true });
-    fs.writeFileSync(path.join(outside, 'run.sh'), '#!/bin/sh\n');
-    fs.writeFileSync(
-      claudeSettingsPath(),
-      JSON.stringify({
-        hooks: {
-          PreToolUse: [
-            { matcher: 'v0428', hooks: [{ type: 'command', command: `${outside}/run.sh` }] },
-          ],
-        },
-      })
-    );
+      const outside = path.join(getClaudeDir(), 'hooks', 'managed', HEX64_A);
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(outside, 'run.sh'), '#!/bin/sh\n');
+      const projectSettings = path.join(projectRoot, '.claude', 'settings.local.json');
+      fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
+      fs.writeFileSync(
+        projectSettings,
+        JSON.stringify({
+          hooks: {
+            PreToolUse: [
+              { matcher: 'v0428', hooks: [{ type: 'command', command: `${outside}/run.sh` }] },
+            ],
+          },
+        })
+      );
 
-    const outcome = distributeHooks(undefined, ['claude-code']);
+      const outcome = distributeHooks(
+        { project: projectRoot },
+        ['claude-code'],
+        new Set(['claude-code']),
+        { projectMode: 'managed' }
+      );
 
-    assert.ok(fs.existsSync(path.join(outside, 'run.sh')), 'dir outside managed roots untouched');
-    assert.ok(
-      outcome.results.some(
-        (r) =>
-          r.platform === 'claude-code' &&
-          r.status === 'skipped' &&
-          r.reason === 'outside managed roots'
-      ),
-      'skip is reported'
-    );
+      assert.ok(fs.existsSync(path.join(outside, 'run.sh')), 'dir outside managed roots untouched');
+      assert.ok(
+        outcome.results.some(
+          (r) =>
+            r.platform === 'claude-code' &&
+            r.status === 'skipped' &&
+            r.reason === 'outside managed roots'
+        ),
+        'skip is reported'
+      );
+    });
   });
 });
 
@@ -885,12 +904,10 @@ test('consumeLegacyManagedState: project scope never consumes global legacy stat
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-proj-'));
     try {
       const legacy = consumeLegacyManagedState('claude-code', { project: projectRoot });
-      assert.equal(legacy.found, false, 'project scope sees no global legacy state');
       assert.deepEqual(legacy.groups, []);
       assert.ok(fs.existsSync(globalLegacy), 'global legacy state untouched by project scope');
 
       const globalScope = consumeLegacyManagedState('claude-code');
-      assert.equal(globalScope.found, true, 'global scope still consumes it');
       assert.equal(globalScope.groups.length, 1);
       assert.ok(fs.existsSync(globalLegacy), 'ambiguous shared state remains read-only evidence');
     } finally {
@@ -922,10 +939,6 @@ test('distributeHooks: claude-code waits for readable settings before touching a
     assert.equal(fs.existsSync(staleDir), true, 'cleanup does not run on unreadable config');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Claude Code: symlinked layouts (dotfile-managed directories)
-// ---------------------------------------------------------------------------
 
 test('distributeHooks: claude-code writes bundles through a symlinked bundle parent', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
@@ -1026,10 +1039,6 @@ test('distributeHooks: claude-code cleanup scans a symlinked app root, keeping u
     assert.ok(!outcome.results.some((r) => r.platform === 'claude-code' && r.status === 'error'));
   });
 });
-
-// ---------------------------------------------------------------------------
-// Codex hook distribution
-// ---------------------------------------------------------------------------
 
 function createCodexCompatibleHook(id: string, event = 'UserPromptSubmit'): void {
   const hooksDir = ensureHooksDirectory();
@@ -1459,8 +1468,6 @@ test('distributeHooks: foreign-home paths survive without local ownership state'
       createBundleHook('bundle-test');
       enableHooks(['bundle-test'], ['claude-code', 'codex']);
 
-      // Simulate mackup/dotfile sync that left another machine's absolute home
-      // plus the correct portable form and a real user-owned hook.
       const foreignClaude = '/home/ubuntu/.claude/hooks/managed/bundle-test/run.sh';
       const foreignCodex = '/home/ubuntu/.codex/hooks/managed/bundle-test/run.sh';
       const foreignUnknown = '/home/ubuntu/.codex/hooks/managed/not-an-asb-hook/run.sh';

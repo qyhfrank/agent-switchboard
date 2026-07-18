@@ -1,14 +1,4 @@
-/**
- * Managed hook ownership state.
- *
- * Records, per (target, scope), exactly the hook groups ASB last wrote into
- * the application config plus the bundle directory names it manages, so
- * distribution can remove its own output without leaving any ASB metadata
- * inside application configs. Files live under
- * `<ASB_HOME>/state/hooks/<device>/` and stay
- * machine-portable: commands in `$HOME` form, bare directory names, no
- * absolute paths.
- */
+/** Device-scoped ownership; shared predecessor state is recognition-only. */
 
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -28,6 +18,8 @@ export interface HookOwnershipState {
   events: Record<string, unknown[]>;
   /** Bundle directory names managed under the target's hooks/managed/. */
   bundles: string[];
+  /** Failed legacy hooks/asb directory removals awaiting retry. */
+  legacyBundles: string[];
 }
 
 export function hooksStateDir(): string {
@@ -53,7 +45,7 @@ export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScop
 }
 
 export function emptyHookState(): HookOwnershipState {
-  return { version: 1, events: {}, bundles: [] };
+  return { version: 1, events: {}, bundles: [], legacyBundles: [] };
 }
 
 function loadHookStateAt(filePath: string): HookOwnershipState {
@@ -73,7 +65,10 @@ function loadHookStateAt(filePath: string): HookOwnershipState {
       const bundles = Array.isArray(record.bundles)
         ? record.bundles.filter((b): b is string => typeof b === 'string' && b.length > 0)
         : [];
-      return { version: 1, events, bundles };
+      const legacyBundles = Array.isArray(record.legacyBundles)
+        ? record.legacyBundles.filter((b): b is string => typeof b === 'string' && b.length > 0)
+        : [];
+      return { version: 1, events, bundles, legacyBundles };
     }
   } catch {
     // Missing or corrupt state loads as empty and grants no deletion authority.
@@ -99,7 +94,10 @@ export function saveHookState(
   scope?: ConfigScope
 ): void {
   const filePath = resolveHookStatePath(target, scope);
-  const hasContent = Object.keys(state.events).length > 0 || state.bundles.length > 0;
+  const hasContent =
+    Object.keys(state.events).length > 0 ||
+    state.bundles.length > 0 ||
+    state.legacyBundles.length > 0;
   if (!hasContent) {
     fs.rmSync(filePath, { force: true });
     return;
@@ -115,14 +113,23 @@ const LEGACY_STATE_FILE_RE = /^(claude-code|codex)-[0-9a-f]{64}\.json$/;
 export interface LegacyStateConsumption {
   /** Event maps recovered from v0.4.28 state files as read-only recognition evidence. */
   groups: Record<string, unknown[]>[];
-  /** Whether any legacy state file or litter entry was found. */
-  found: boolean;
 }
 
-/**
- * Read v0.4.28 groups without deleting or granting ownership from their
- * device-unattributed state. The scan stays inside the current scope.
- */
+export function retainedCleanupIds(
+  candidates: ReadonlySet<string>,
+  results: readonly { status: string; entryId?: string }[]
+): string[] {
+  if (results.some((result) => result.status === 'error' && !result.entryId)) {
+    return [...candidates];
+  }
+  return results.flatMap((result) =>
+    result.status === 'error' && result.entryId && candidates.has(result.entryId)
+      ? [result.entryId]
+      : []
+  );
+}
+
+/** Read v0.4.28 groups as scope-local recognition evidence. */
 export function consumeLegacyManagedState(
   target: HookStateTarget,
   scope?: ConfigScope
@@ -134,7 +141,6 @@ export function consumeLegacyManagedState(
       : hooksStateDir();
 
   const groups: Record<string, unknown[]>[] = [];
-  let found = false;
 
   const dirStat = (() => {
     try {
@@ -153,31 +159,20 @@ export function consumeLegacyManagedState(
     for (const entry of entries) {
       const entryPath = path.join(dir, entry.name);
       const match = entry.name.match(LEGACY_STATE_FILE_RE);
-      if (match && entry.isFile()) {
-        if (match[1] === target) {
-          found = true;
-          try {
-            const parsed = JSON.parse(fs.readFileSync(entryPath, 'utf-8')) as {
-              hooks?: Record<string, unknown[]>;
-            };
-            if (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) {
-              groups.push(parsed.hooks);
-            }
-          } catch {
-            // Unreadable legacy state carries no recognition evidence.
+      if (match?.[1] === target && entry.isFile()) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(entryPath, 'utf-8')) as {
+            hooks?: Record<string, unknown[]>;
+          };
+          if (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) {
+            groups.push(parsed.hooks);
           }
+        } catch {
+          // Unreadable legacy state carries no recognition evidence.
         }
-        continue;
       }
-      const isLitter =
-        entry.name === 'locks' ||
-        (entry.name.startsWith(`${target}-`) && entry.name.includes('.json.'));
-      if (isLitter) found = true;
     }
   }
 
-  return {
-    groups,
-    found,
-  };
+  return { groups };
 }

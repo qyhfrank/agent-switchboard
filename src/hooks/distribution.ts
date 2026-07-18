@@ -47,6 +47,7 @@ import {
   consumeLegacyManagedState,
   loadHookState,
   loadSharedHookState,
+  retainedCleanupIds,
   saveHookState,
 } from './state.js';
 import {
@@ -309,6 +310,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       return results;
     }
   }
+  const activeBundleIds = new Set(bundleEntries.map((entry) => entry.id));
   if (bundleEntries.length > 0) {
     const bundleOutcome = distributeBundle<HookEntry, HookPlatform>({
       section: 'hooks',
@@ -383,15 +385,15 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
   const hadLegacyManagedKey = Object.hasOwn(settings, LEGACY_ASB_MANAGED_KEY);
   delete settings[LEGACY_ASB_MANAGED_KEY];
 
-  const stateHasContent = Object.keys(ownState.events).length > 0 || ownState.bundles.length > 0;
+  const stateHasContent =
+    Object.keys(ownState.events).length > 0 ||
+    ownState.bundles.length > 0 ||
+    ownState.legacyBundles.length > 0;
   const nothingToDo =
-    selected.length === 0 &&
-    !removal.removed &&
-    !hadLegacyManagedKey &&
-    !stateHasContent &&
-    !legacy.found;
+    selected.length === 0 && !removal.removed && !hadLegacyManagedKey && !stateHasContent;
 
-  let bundleCleanupFailed = false;
+  let retainedManagedBundles: string[] = [];
+  let retainedLegacyBundles: string[] = [];
   const appendCleanupResults = (): void => {
     const cleanupOpts: BundleCleanupOptions<HookPlatform> = {
       platform,
@@ -399,18 +401,20 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       safetyRoot: claudeRoot(ctx.scope),
       dryRun: ctx.dryRun,
     };
-    const managedCleanup = cleanManagedBundleDirs(
-      cleanupOpts,
-      new Set(bundleEntries.map((e) => e.id)),
-      new Set(ownState.bundles)
-    );
-    bundleCleanupFailed ||= managedCleanup.some((result) => result.status === 'error');
+    const managedCandidates = new Set(ownState.bundles.filter((id) => !activeBundleIds.has(id)));
+    const managedCleanup = cleanManagedBundleDirs(cleanupOpts, activeBundleIds, managedCandidates);
+    retainedManagedBundles = retainedCleanupIds(managedCandidates, managedCleanup);
     results.push(...managedCleanup);
-    results.push(
-      ...cleanLegacyAsbDir({ ...cleanupOpts, parentDir: legacyParent }, removal.removedLegacyAsbIds)
+    const legacyCandidates = new Set([...ownState.legacyBundles, ...removal.removedLegacyAsbIds]);
+    const legacyCleanup = cleanLegacyAsbDir(
+      { ...cleanupOpts, parentDir: legacyParent },
+      legacyCandidates
     );
-    const containRoots = [resolvedHomeDir()];
-    for (const root of [claudeRoot(ctx.scope), ctx.scope?.project?.trim()]) {
+    retainedLegacyBundles = retainedCleanupIds(legacyCandidates, legacyCleanup);
+    results.push(...legacyCleanup);
+    const projectRoot = ctx.scope?.project?.trim();
+    const containRoots = projectRoot ? [] : [resolvedHomeDir()];
+    for (const root of [claudeRoot(ctx.scope), projectRoot]) {
       if (!root) continue;
       try {
         containRoots.push(fs.realpathSync(root));
@@ -466,13 +470,9 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       'claude-code',
       {
         version: 1,
-        events: managedEvents,
-        bundles: [
-          ...new Set([
-            ...bundleEntries.map((entry) => entry.id),
-            ...(bundleCleanupFailed ? ownState.bundles : []),
-          ]),
-        ],
+        events: toAppend,
+        bundles: [...activeBundleIds, ...retainedManagedBundles],
+        legacyBundles: retainedLegacyBundles,
       },
       ctx.scope
     );
