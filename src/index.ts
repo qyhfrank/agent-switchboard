@@ -19,6 +19,7 @@ import { importCommandFromFile } from './commands/importer.js';
 import type { CommandInventoryRow } from './commands/inventory.js';
 import { buildCommandInventory } from './commands/inventory.js';
 import {
+  loadMergedSwitchboardConfig,
   loadWritableConfigLayer,
   type UpdateConfigLayerOptions,
   updateConfigLayer,
@@ -44,10 +45,6 @@ import {
 import { loadConfiguredPortableSelections } from './config/plugin-selection.js';
 import type { ApplicationConfigOverride, IncrementalSelection } from './config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from './config/scope.js';
-import {
-  loadSwitchboardConfig,
-  loadSwitchboardConfigWithLayers,
-} from './config/switchboard-config.js';
 import { distributeHooks, stripAsbOwnedClaudeGroups } from './hooks/distribution.js';
 import { loadHookLibrary } from './hooks/library.js';
 import {
@@ -424,7 +421,7 @@ program
   .action(async (options: ScopeOptionInput) => {
     try {
       const scope = resolveScope(options);
-      const { config, layers } = loadSwitchboardConfigWithLayers(scopeToLayerOptions(scope));
+      const { config, layers } = loadMergedSwitchboardConfig(scopeToLayerOptions(scope));
       const mcpConfig = loadMcpConfig();
       const pluginIndex = buildPluginIndex(scope);
 
@@ -611,7 +608,7 @@ ruleCommand
 ruleCommand.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
+    const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
     await initTargets(config);
     const selection = await showRuleSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) {
@@ -736,7 +733,7 @@ const commandRoot = program
 commandRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
+    const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
     await initTargets(config);
     const selection = await showCommandSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
@@ -935,7 +932,7 @@ const agentRoot = program
 agentRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
+    const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
     await initTargets(config);
     const selection = await showSubagentSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
@@ -1131,7 +1128,7 @@ const skillRoot = program
 skillRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
+    const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
     await initTargets(config);
     const selection = await showSkillSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
@@ -1335,7 +1332,7 @@ const hookRoot = program
 hookRoot.action(async (options: ScopeOptionInput) => {
   try {
     const scope = resolveScope(options);
-    const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
+    const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
     const selection = await showHookSelector({ scope, pageSize: config.ui.page_size });
     if (!selection) return;
     console.log();
@@ -1547,7 +1544,7 @@ function showSummary(selectedServers: string[], scope?: ConfigScope): void {
     }
   }
 
-  const switchboardConfig = loadSwitchboardConfig(scopeToLayerOptions(scope));
+  const switchboardConfig = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
   if (switchboardConfig.applications.enabled.length > 0) {
     console.log(
       chalk.blue(`\nApplied to applications (${switchboardConfig.applications.enabled.length}):`)
@@ -1763,7 +1760,9 @@ function pluginEnableAction(id: string, options: ScopeOptionInput) {
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
     const index = buildPluginIndex(scope);
-    const activeAppIds = new Set(loadSwitchboardConfig(layerOpts).applications.enabled);
+    const activeAppIds = new Set(
+      loadMergedSwitchboardConfig(layerOpts).config.applications.enabled
+    );
     const plugin = index.get(id);
     if (!plugin) {
       console.error(chalk.red(`✗ Plugin "${id}" not found.`));
@@ -1795,7 +1794,9 @@ function pluginRemoveAction(id: string, options: ScopeOptionInput, verb: string)
     const layerOpts = scopeToLayerOptions(scope);
     const layer = loadWritableConfigLayer(layerOpts);
     const index = buildPluginIndex(scope);
-    const activeAppIds = new Set(loadSwitchboardConfig(layerOpts).applications.enabled);
+    const activeAppIds = new Set(
+      loadMergedSwitchboardConfig(layerOpts).config.applications.enabled
+    );
     const pluginId = index.get(id)?.id ?? id;
     const existing = canonicalPluginRefs(layer.config.plugins?.enabled ?? [], index);
     if (!hasPluginSelection(layer.config, pluginId, index, activeAppIds)) {

@@ -3,11 +3,11 @@ import path from 'node:path';
 import chalk from 'chalk';
 import ora from 'ora';
 import { resolveScopedSectionConfig } from '../config/application-config.js';
+import { loadMergedSwitchboardConfig } from '../config/layered-config.js';
 import { loadMcpConfigWithPlugins } from '../config/mcp-config.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { scopeToLayerOptions } from '../config/scope.js';
-import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { loadMcpEnabledState } from '../library/state.js';
 import {
   computeMcpCleanupSet,
@@ -65,7 +65,7 @@ export async function distributeMcp(
   }
 
   const layerOpts = scopeToLayerOptions(scope);
-  const switchboardConfig = loadSwitchboardConfig(layerOpts);
+  const switchboardConfig = loadMergedSwitchboardConfig(layerOpts).config;
   const mcpConfig = loadMcpConfigWithPlugins(scope);
   await initTargets(switchboardConfig);
   const useSpinner = options?.useSpinner ?? true;
