@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { deviceStateId } from '../config/device-id.js';
 import { getConfigDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
@@ -120,12 +121,32 @@ export function retainedCleanupIds(
   results: readonly { status: string; entryId?: string }[]
 ): string[] {
   if (results.some((result) => result.status === 'error' && !result.entryId)) {
-    return [...candidates];
+    return [...candidates].filter(
+      (id) => !results.some((result) => result.entryId === id && result.status !== 'error')
+    );
   }
   return results.flatMap((result) =>
     result.status === 'error' && result.entryId && candidates.has(result.entryId)
       ? [result.entryId]
       : []
+  );
+}
+
+export function allHookGroupsAppended(
+  groups: Record<string, unknown[]>,
+  desired: Record<string, unknown[]>,
+  appended: Record<string, unknown[]>
+): boolean {
+  return (
+    Object.values(groups).some((values) => values.length > 0) &&
+    Object.entries(groups).every(([event, values]) =>
+      values.every(
+        (value) =>
+          (desired[event] ?? []).filter((candidate) => isDeepStrictEqual(candidate, value))
+            .length ===
+          (appended[event] ?? []).filter((candidate) => isDeepStrictEqual(candidate, value)).length
+      )
+    )
   );
 }
 
