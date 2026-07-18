@@ -763,59 +763,58 @@ test('managed skill bootstrap preserves an extra empty directory', () => {
   });
 });
 
-test('managed skill cleanup preserves shared project path owned by another target', () => {
+test('managed skill sync updates and preserves a shared project path', () => {
   withTempHomes(({ agentsHome }) => {
     simulateTraeInstalled();
-    createSkill('shared-skill');
-
+    const skillId = 'shared-skill';
+    createSkill(skillId, 'v1');
     const projectRoot = path.join(agentsHome, 'project-shared-trae');
     fs.mkdirSync(projectRoot, { recursive: true });
-    fs.writeFileSync(
-      path.join(projectRoot, '.asb.toml'),
-      [
-        '[applications]',
-        'enabled = ["trae", "trae-cn"]',
-        '',
-        '[skills]',
-        'enabled = ["shared-skill"]',
-      ].join('\n'),
-      'utf-8'
-    );
-
+    const configPath = path.join(projectRoot, '.asb.toml');
+    const configure = (disableTrae = false) =>
+      fs.writeFileSync(
+        configPath,
+        [
+          '[applications]',
+          'enabled = ["trae", "trae-cn"]',
+          '',
+          '[skills]',
+          `enabled = ["${skillId}"]`,
+          ...(disableTrae ? ['', '[applications.trae.skills]', 'enabled = []'] : []),
+        ].join('\n'),
+        'utf-8'
+      );
+    configure();
     const { manifest } = loadManifest(projectRoot);
     distributeSkills(
       { project: projectRoot },
       { manifest, projectMode: 'managed', collision: 'warn-skip' }
     );
-
-    fs.writeFileSync(
-      path.join(projectRoot, '.asb.toml'),
-      [
-        '[applications]',
-        'enabled = ["trae", "trae-cn"]',
-        '',
-        '[skills]',
-        'enabled = ["shared-skill"]',
-        '',
-        '[applications.trae-cn.skills]',
-        'enabled = []',
-      ].join('\n'),
-      'utf-8'
+    createSkill(skillId, 'v2');
+    const update = distributeSkills(
+      { project: projectRoot },
+      { manifest, projectMode: 'managed', collision: 'warn-skip' }
     );
+    const conflicts = update.results.filter((entry) => entry.status === 'conflict');
+    assert.deepStrictEqual(conflicts, []);
 
+    configure(true);
+    createSkill(skillId, 'v3');
     const outcome = distributeSkills(
       { project: projectRoot },
       { manifest, projectMode: 'managed', collision: 'warn-skip' }
     );
-    const targetDir = path.join(projectRoot, '.trae', 'skills', 'shared-skill');
-    const skipResult = outcome.results.find(
-      (entry) =>
-        entry.platform === 'trae-cn' &&
-        entry.entryId === 'shared-skill' &&
-        entry.status === 'skipped'
+    const targetDir = path.join(projectRoot, '.trae', 'skills', skillId);
+    assert.equal(
+      outcome.results.find((entry) => entry.platform === 'trae' && entry.entryId === skillId)
+        ?.reason,
+      'shared path still owned by another target'
     );
-
-    assert.ok(fs.existsSync(targetDir), 'shared skill directory should remain for trae');
-    assert.ok(skipResult, 'trae-cn cleanup should skip deleting a shared path still owned by trae');
+    assert.equal(
+      outcome.results.find((entry) => entry.platform === 'trae-cn' && entry.targetDir === targetDir)
+        ?.status,
+      'written'
+    );
+    assert.match(fs.readFileSync(path.join(targetDir, 'SKILL.md'), 'utf-8'), /v3/);
   });
 });
