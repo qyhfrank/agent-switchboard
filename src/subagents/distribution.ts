@@ -42,6 +42,8 @@ export function distributeSubagents(
   assumeInstalled?: ReadonlySet<string>,
   managedOptions?: LibraryManagedOptions
 ): SubagentDistributionOutcome {
+  if (scope?.project && managedOptions?.projectMode === 'none') return { results: [] };
+
   const entries = loadSubagentLibrary(scope);
   const byId = new Map(entries.map((e) => [e.id, e]));
 
@@ -130,6 +132,17 @@ export function distributeSubagents(
   }
 
   const customResults: DistributionResult<string>[] = [];
+  if (scope?.project) {
+    for (const target of activeCustomTargets) {
+      customResults.push({
+        platform: target.id,
+        filePath: scope.project,
+        status: 'error',
+        error: `Project-scoped ${target.id} agents are not supported`,
+      });
+    }
+    return { results: [...markdownOutcome.results, ...customResults] };
+  }
   for (const target of activeCustomTargets) {
     if (target.agents && isCustomAgentsHandler(target.agents)) {
       const results = target.agents.distribute(entries, byId, scope);

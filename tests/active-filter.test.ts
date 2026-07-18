@@ -125,6 +125,23 @@ test('distributeSubagents: empty activeAppIds produces no results', () => {
   });
 });
 
+test('distributeSubagents: project mode none leaves global Codex agents untouched', () => {
+  withTempHomes(({ agentsHome }) => {
+    const globalAgent = path.join(agentsHome, '.codex', 'agents', 'global.toml');
+    fs.mkdirSync(path.dirname(globalAgent), { recursive: true });
+    fs.writeFileSync(globalAgent, '# managed-by: asb\nmodel = "global"\n');
+    const projectRoot = path.join(agentsHome, 'none-agent-project');
+    fs.mkdirSync(projectRoot);
+
+    const outcome = distributeSubagents({ project: projectRoot }, ['codex'], new Set(['codex']), {
+      projectMode: 'none',
+    });
+
+    assert.equal(fs.readFileSync(globalAgent, 'utf-8'), '# managed-by: asb\nmodel = "global"\n');
+    assert.equal(outcome.results.length, 0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Skills: activeAppIds restricts distribution targets
 // ---------------------------------------------------------------------------
@@ -200,6 +217,28 @@ test('distributeSkills: empty activeAppIds produces no results', () => {
 
     const outcome = distributeSkills(undefined, { activeAppIds: [] });
 
+    assert.equal(outcome.results.length, 0);
+  });
+});
+
+test('distributeSkills: project mode none leaves global legacy skills untouched', () => {
+  withTempHomes(({ agentsHome }) => {
+    const globalLegacy = path.join(agentsHome, '.gemini', 'skills');
+    fs.mkdirSync(globalLegacy, { recursive: true });
+    const projectRoot = path.join(agentsHome, 'none-skill-project');
+    fs.mkdirSync(projectRoot);
+
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      {
+        useAgentsDir: true,
+        activeAppIds: ['codex'],
+        assumeInstalled: new Set(['codex']),
+        projectMode: 'none',
+      }
+    );
+
+    assert.equal(fs.existsSync(globalLegacy), true);
     assert.equal(outcome.results.length, 0);
   });
 });
