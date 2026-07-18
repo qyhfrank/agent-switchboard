@@ -8,7 +8,7 @@ export type SkillImportPlatform = 'claude-code' | 'codex' | 'cursor';
 
 const SKILL_FILE = 'SKILL.md';
 
-export interface ImportedSkill {
+interface ImportedSkill {
   /** Skill ID (directory name) */
   id: string;
   /** Skill name from frontmatter */
@@ -17,11 +17,9 @@ export interface ImportedSkill {
   sourcePath: string;
   /** Target directory path in ASB library */
   targetPath: string;
-  /** Number of files to copy */
-  fileCount: number;
 }
 
-export interface SkillImportResult {
+interface SkillImportResult {
   skill: ImportedSkill;
   status: 'success' | 'skipped' | 'error';
   reason?: string;
@@ -55,34 +53,9 @@ export function listSkillsInDirectory(sourceDir: string): string[] {
 }
 
 /**
- * Count files in a directory recursively.
- */
-function countFilesRecursive(dir: string): number {
-  let count = 0;
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-
-  for (const entry of entries) {
-    if (entry.name.startsWith('.')) continue;
-    const fullPath = path.join(dir, entry.name);
-
-    if (entry.isDirectory()) {
-      count += countFilesRecursive(fullPath);
-    } else if (entry.isFile()) {
-      count++;
-    }
-  }
-
-  return count;
-}
-
-/**
  * Prepare skill import info without actually copying.
  */
-export function prepareSkillImport(
-  _platform: SkillImportPlatform,
-  sourceDir: string,
-  skillId: string
-): ImportedSkill {
+function prepareSkillImport(sourceDir: string, skillId: string): ImportedSkill {
   const sourcePath = path.join(sourceDir, skillId);
   const skillPath = path.join(sourcePath, SKILL_FILE);
 
@@ -94,14 +67,12 @@ export function prepareSkillImport(
   const parsed = parseSkillMarkdown(rawContent);
 
   const targetPath = path.join(getSkillsDir(), skillId);
-  const fileCount = countFilesRecursive(sourcePath);
 
   return {
     id: skillId,
     name: parsed.metadata.name,
     sourcePath,
     targetPath,
-    fileCount,
   };
 }
 
@@ -109,7 +80,7 @@ export function prepareSkillImport(
  * Import a skill from a platform directory to ASB library.
  */
 export function importSkill(
-  platform: SkillImportPlatform,
+  _platform: SkillImportPlatform,
   sourceDir: string,
   skillId: string,
   options?: { force?: boolean }
@@ -117,7 +88,7 @@ export function importSkill(
   const force = options?.force ?? false;
 
   try {
-    const skill = prepareSkillImport(platform, sourceDir, skillId);
+    const skill = prepareSkillImport(sourceDir, skillId);
 
     // Check if target already exists
     if (fs.existsSync(skill.targetPath)) {
@@ -148,34 +119,9 @@ export function importSkill(
         name: skillId,
         sourcePath: path.join(sourceDir, skillId),
         targetPath: path.join(getSkillsDir(), skillId),
-        fileCount: 0,
       },
       status: 'error',
       error: errorMsg,
     };
   }
-}
-
-/**
- * Import all skills from a platform directory.
- */
-export function importAllSkills(
-  platform: SkillImportPlatform,
-  sourceDir: string,
-  options?: { force?: boolean; filter?: (id: string) => boolean }
-): SkillImportResult[] {
-  const skillIds = listSkillsInDirectory(sourceDir);
-  const results: SkillImportResult[] = [];
-
-  for (const id of skillIds) {
-    // Apply filter if provided
-    if (options?.filter && !options.filter(id)) {
-      continue;
-    }
-
-    const result = importSkill(platform, sourceDir, id, { force: options?.force });
-    results.push(result);
-  }
-
-  return results;
 }

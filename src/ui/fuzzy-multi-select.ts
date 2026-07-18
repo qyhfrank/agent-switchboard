@@ -11,7 +11,6 @@ import {
   useRef,
   useState,
 } from '@inquirer/core';
-import figures from '@inquirer/figures';
 import chalk from 'chalk';
 
 interface ChoiceInput {
@@ -222,7 +221,7 @@ const prompt = createPrompt<string[], PromptConfig>((config, done) => {
       pageSize,
       loop: true,
       renderItem({ item, isActive }) {
-        const pointer = isActive ? chalk.cyan(figures.pointerSmall) : ' ';
+        const pointer = isActive ? chalk.cyan('›') : ' ';
         const checked = selectedRef.current.has(item.value) ? chalk.green('◉') : chalk.gray('◯');
         const label = item.highlightedLabel;
         const hint = item.highlightedHint ?? item.hint;
