@@ -14,7 +14,7 @@
     "lint": "biome ci .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "test": "tsx --test",
+    "test": "node scripts/test.mjs",
     "prepublishOnly": "pnpm run build",
     "prepare": "git config core.hooksPath .githooks || true"
   },
