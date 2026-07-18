@@ -21,7 +21,7 @@ import {
 import type { ProjectDistributionManifest } from '../src/manifest/types.js';
 import { withTempAsbHome } from './helpers/tmp.js';
 
-test('device-scoped ownership state stays isolated in a shared ASB_HOME', () => {
+test('hook ownership is shared while manifests remain device-scoped', () => {
   withTempAsbHome(() => {
     const previous = process.env.ASB_DEVICE_ID;
     try {
@@ -32,13 +32,14 @@ test('device-scoped ownership state stays isolated in a shared ASB_HOME', () => 
         version: 1,
         events: { PreToolUse: [{ matcher: 'from-a', hooks: [] }] },
         bundles: [],
+        legacyBundles: [],
       });
       saveManifest('/shared/project', loadManifest('/shared/project').manifest);
 
       process.env.ASB_DEVICE_ID = 'server-b';
-      assert.notEqual(resolveHookStatePath('claude-code'), hookPathA);
+      assert.equal(resolveHookStatePath('claude-code'), hookPathA);
       assert.notEqual(resolveManifestPath('/shared/project'), manifestPathA);
-      assert.deepEqual(loadHookState('claude-code').events, {});
+      assert.equal(loadHookState('claude-code').events.PreToolUse?.length, 1);
       assert.equal(loadManifest('/shared/project').existedOnDisk, false);
 
       process.env.ASB_DEVICE_ID = 'server-a';

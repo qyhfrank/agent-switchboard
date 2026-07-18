@@ -1,11 +1,10 @@
-/** Device-scoped ownership; shared predecessor state is recognition-only. */
+/** Shared hook ownership state; any peer may reconcile ASB-managed hooks. */
 
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { deviceStateId } from '../config/device-id.js';
 import { getConfigDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import { ensureParentDir } from '../library/fs.js';
@@ -42,7 +41,7 @@ function hookStateFileName(target: HookStateTarget, scope?: ConfigScope): string
 }
 
 export function resolveHookStatePath(target: HookStateTarget, scope?: ConfigScope): string {
-  return path.join(hooksStateDir(), deviceStateId(), hookStateFileName(target, scope));
+  return path.join(hooksStateDir(), hookStateFileName(target, scope));
 }
 
 export function emptyHookState(): HookOwnershipState {
@@ -78,15 +77,54 @@ function loadHookStateAt(filePath: string): HookOwnershipState {
 }
 
 export function loadHookState(target: HookStateTarget, scope?: ConfigScope): HookOwnershipState {
-  return loadHookStateAt(resolveHookStatePath(target, scope));
+  const sharedPath = resolveHookStatePath(target, scope);
+  const states = [
+    ...(fs.existsSync(sharedPath) ? [loadHookStateAt(sharedPath)] : []),
+    ...deviceScopedHookStatePaths(target, scope).map(loadHookStateAt),
+  ];
+  const merged = emptyHookState();
+  for (const state of states) {
+    for (const [event, groups] of Object.entries(state.events)) {
+      merged.events[event] = [...(merged.events[event] ?? []), ...groups];
+    }
+    merged.bundles.push(...state.bundles);
+    merged.legacyBundles.push(...state.legacyBundles);
+  }
+  merged.bundles = [...new Set(merged.bundles)];
+  merged.legacyBundles = [...new Set(merged.legacyBundles)];
+  return merged;
 }
 
-/** Shared predecessor state is read-only evidence and never deletion authority. */
-export function loadSharedHookState(
-  target: HookStateTarget,
-  scope?: ConfigScope
-): HookOwnershipState {
-  return loadHookStateAt(path.join(hooksStateDir(), hookStateFileName(target, scope)));
+function deviceScopedHookStatePaths(target: HookStateTarget, scope?: ConfigScope): string[] {
+  const dir = hooksStateDir();
+  const fileName = hookStateFileName(target, scope);
+  try {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && /^[0-9a-f]{16}$/.test(entry.name))
+      .map((entry) => path.join(dir, entry.name, fileName))
+      .filter((candidate) => {
+        try {
+          const stat = fs.lstatSync(candidate);
+          return stat.isFile() && !stat.isSymbolicLink();
+        } catch {
+          return false;
+        }
+      });
+  } catch {
+    return [];
+  }
+}
+
+function removeDeviceScopedHookStates(target: HookStateTarget, scope?: ConfigScope): void {
+  for (const filePath of deviceScopedHookStatePaths(target, scope)) {
+    fs.rmSync(filePath, { force: true });
+    try {
+      fs.rmdirSync(path.dirname(filePath));
+    } catch {
+      // The device directory still contains another target or scope.
+    }
+  }
 }
 
 export function saveHookState(
@@ -101,12 +139,14 @@ export function saveHookState(
     state.legacyBundles.length > 0;
   if (!hasContent) {
     fs.rmSync(filePath, { force: true });
+    removeDeviceScopedHookStates(target, scope);
     return;
   }
   ensureParentDir(filePath);
   const tmpPath = `${filePath}.${process.pid}.tmp`;
   fs.writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
   fs.renameSync(tmpPath, filePath);
+  removeDeviceScopedHookStates(target, scope);
 }
 
 const LEGACY_STATE_FILE_RE = /^(claude-code|codex)-[0-9a-f]{64}\.json$/;

@@ -20,7 +20,7 @@ import {
   removeV0428BundleDirs,
 } from './bundle-dirs.js';
 import type { HookEntry } from './library.js';
-import { listHookBundleFiles } from './library.js';
+import { listHookBundleFiles, loadHookLibrary } from './library.js';
 import {
   collectV0428BundleDirs,
   filterRecognizedDesiredGroups,
@@ -32,7 +32,6 @@ import {
   allHookGroupsAppended,
   consumeLegacyManagedState,
   loadHookState,
-  loadSharedHookState,
   retainedCleanupIds,
   saveHookState,
 } from './state.js';
@@ -460,7 +459,9 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   }
 
   const ownState = loadHookState('codex', scope);
-  const sharedState = loadSharedHookState('codex', scope);
+  const availableBundleIds = loadHookLibrary(scope)
+    .filter((entry) => entry.isBundle)
+    .map((entry) => entry.id);
   const legacy = consumeLegacyManagedState('codex', scope);
 
   // Phase 1: copy bundle files
@@ -511,7 +512,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
   const removal = removeOwnedHookGroups(existingHooks, {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
-    knownManagedIds: new Set(ownState.bundles),
+    knownManagedIds: new Set([...availableBundleIds, ...ownState.bundles]),
     stateGroups: [ownState.events],
   });
 
@@ -527,7 +528,9 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       safetyRoot: codexRoot(scope),
       dryRun,
     };
-    const managedCandidates = new Set(ownState.bundles.filter((id) => !activeBundleIds.has(id)));
+    const managedCandidates = new Set(
+      [...ownState.bundles, ...availableBundleIds].filter((id) => !activeBundleIds.has(id))
+    );
     const managedCleanup = cleanManagedBundleDirs(cleanupOpts, activeBundleIds, managedCandidates);
     retainedManagedBundles = retainedCleanupIds(managedCandidates, managedCleanup);
     results.push(...managedCleanup);
@@ -585,10 +588,7 @@ export function distributeCodexHooks(options: CodexHookDistributeOptions): {
       managedEvents[event].push(...groups);
     }
   }
-  const toAppend = filterRecognizedDesiredGroups(removal.hooks, managedEvents, [
-    sharedState.events,
-    ...legacy.groups,
-  ]);
+  const toAppend = filterRecognizedDesiredGroups(removal.hooks, managedEvents, legacy.groups);
   const ownedBundleIds = filteredEntries
     .filter(
       ({ entry, hooks }) =>

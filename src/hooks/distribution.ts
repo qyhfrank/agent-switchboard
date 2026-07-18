@@ -28,7 +28,6 @@ import {
   allHookGroupsAppended,
   consumeLegacyManagedState,
   loadHookState,
-  loadSharedHookState,
   retainedCleanupIds,
   saveHookState,
 } from './state.js';
@@ -208,12 +207,15 @@ export function stripAsbOwnedClaudeGroups(
   scope?: ConfigScope
 ): Record<string, unknown[]> {
   const ownState = loadHookState('claude-code', scope);
+  const knownBundleIds = loadHookLibrary(scope)
+    .filter((entry) => entry.isBundle)
+    .map((entry) => entry.id);
   const managedParent = managedBundleParentDir(scope);
   const legacyParent = legacyAsbParentDir(scope);
   const removal = removeOwnedHookGroups(hooks, {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
-    knownManagedIds: new Set(ownState.bundles),
+    knownManagedIds: new Set([...knownBundleIds, ...ownState.bundles]),
     stateGroups: [ownState.events],
   });
   return { ...removal.hooks };
@@ -257,7 +259,9 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
   }
 
   const ownState = loadHookState('claude-code', ctx.scope);
-  const sharedState = loadSharedHookState('claude-code', ctx.scope);
+  const availableBundleIds = [...ctx.byId.values()]
+    .filter((entry) => entry.isBundle)
+    .map((entry) => entry.id);
   const legacy = consumeLegacyManagedState('claude-code', ctx.scope);
 
   // Phase 1: Copy bundle files for bundle-type hooks
@@ -344,7 +348,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
   const removal = removeOwnedHookGroups(existingHooks, {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
-    knownManagedIds: new Set(ownState.bundles),
+    knownManagedIds: new Set([...availableBundleIds, ...ownState.bundles]),
     stateGroups: [ownState.events],
   });
 
@@ -367,7 +371,9 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       safetyRoot: claudeRoot(ctx.scope),
       dryRun: ctx.dryRun,
     };
-    const managedCandidates = new Set(ownState.bundles.filter((id) => !activeBundleIds.has(id)));
+    const managedCandidates = new Set(
+      [...ownState.bundles, ...availableBundleIds].filter((id) => !activeBundleIds.has(id))
+    );
     const managedCleanup = cleanManagedBundleDirs(cleanupOpts, activeBundleIds, managedCandidates);
     retainedManagedBundles = retainedCleanupIds(managedCandidates, managedCleanup);
     results.push(...managedCleanup);
@@ -414,10 +420,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       managedEvents[event].push(...groups);
     }
   }
-  const toAppend = filterRecognizedDesiredGroups(removal.hooks, managedEvents, [
-    sharedState.events,
-    ...legacy.groups,
-  ]);
+  const toAppend = filterRecognizedDesiredGroups(removal.hooks, managedEvents, legacy.groups);
   const ownedBundleIds = bundleEntries
     .filter((entry) =>
       allHookGroupsAppended(resolveEntryGroups(entry, ctx.scope), managedEvents, toAppend)
