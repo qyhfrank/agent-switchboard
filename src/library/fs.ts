@@ -63,15 +63,30 @@ export function ensureParentDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
-function resolveThroughExistingAncestor(value: string): string {
+function resolveThroughExistingAncestor(value: string, seen = new Set<string>()): string {
   const resolved = path.resolve(value);
   let existing = resolved;
-  while (!fs.existsSync(existing)) {
-    const parent = path.dirname(existing);
-    if (parent === existing) return resolved;
-    existing = parent;
+  while (true) {
+    try {
+      const stat = fs.lstatSync(existing);
+      if (stat.isSymbolicLink()) {
+        if (seen.has(existing)) throw new Error(`symlink loop in path: ${value}`);
+        seen.add(existing);
+        const target = path.resolve(path.dirname(existing), fs.readlinkSync(existing));
+        return resolveThroughExistingAncestor(
+          path.join(target, path.relative(existing, resolved)),
+          seen
+        );
+      }
+      return path.resolve(fs.realpathSync.native(existing), path.relative(existing, resolved));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') throw error;
+      const parent = path.dirname(existing);
+      if (parent === existing) return resolved;
+      existing = parent;
+    }
   }
-  return path.resolve(fs.realpathSync.native(existing), path.relative(existing, resolved));
 }
 
 /** Reject lexical escapes and paths redirected outside root by an existing symlink. */
