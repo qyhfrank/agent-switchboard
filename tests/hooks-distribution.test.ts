@@ -514,11 +514,9 @@ test('distributeHooks: migrates legacy markers, tags, state files, and bundle di
     assert.equal(settings.theme, 'dark');
 
     assert.equal(fs.existsSync(legacyAsbDir), false, 'legacy hooks/asb dir is fully removed');
-    assert.deepEqual(
-      fs.readdirSync(stateDir).sort(),
-      ['claude-code.json'],
-      'legacy state files and litter are replaced by the new state file'
-    );
+    const newStatePath = resolveHookStatePath('claude-code');
+    assert.ok(fs.existsSync(newStatePath), 'device-scoped state replaces legacy state');
+    assert.deepEqual(fs.readdirSync(stateDir), [path.basename(path.dirname(newStatePath))]);
 
     const second = distributeHooks(undefined, ['claude-code']);
     assert.ok(
