@@ -11,7 +11,7 @@ import {
   removeLibraryEntry,
 } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
-import { ensureParentDir } from './fs.js';
+import { assertPathWithinRoot, ensureParentDir } from './fs.js';
 import { type LibrarySection, loadLibraryAgentSync, updateLibraryAgentSync } from './state.js';
 
 export type DistributionStatus = 'written' | 'skipped' | 'error' | 'deleted' | 'conflict';
@@ -127,6 +127,20 @@ export function distributeLibrary<TEntry, Platform extends string>(
       const content = opts.render(platform, entry);
       const entryId = opts.getId?.(entry);
 
+      if (manifest && managedProjectRoot) {
+        try {
+          assertPathWithinRoot(managedProjectRoot, filePath);
+        } catch (error) {
+          results.push({
+            platform,
+            filePath,
+            status: 'error',
+            error: error instanceof Error ? error.message : String(error),
+            entryId,
+          });
+          continue;
+        }
+      }
       if (!dryRun) ensureParentDir(filePath);
 
       let existing: string | null = null;
@@ -236,6 +250,7 @@ export function distributeLibrary<TEntry, Platform extends string>(
         for (const item of toRemove) {
           const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
           try {
+            assertPathWithinRoot(managedProjectRoot, entryPath);
             const sharedPathStillOwned = hasOtherLibraryEntryAtPath(
               manifest,
               manifestSection,
@@ -267,7 +282,10 @@ export function distributeLibrary<TEntry, Platform extends string>(
                 });
                 continue;
               }
-              if (!dryRun) fs.unlinkSync(entryPath);
+              if (!dryRun) {
+                assertPathWithinRoot(managedProjectRoot, entryPath);
+                fs.unlinkSync(entryPath);
+              }
               results.push({
                 platform,
                 filePath: entryPath,

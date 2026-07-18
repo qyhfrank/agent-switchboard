@@ -2,7 +2,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { DistributionResult } from '../../library/distribute.js';
 import type { BundleDistributionResult } from '../../library/distribute-bundle.js';
-import { rmDirRecursive } from '../../library/fs.js';
 
 export function cleanupLegacyOpencodeFiles(options: {
   platform: string;
@@ -84,7 +83,7 @@ export function cleanupLegacyOpencodeBundles(options: {
       if (!shouldDelete) continue;
 
       try {
-        if (!options.dryRun) rmDirRecursive(legacyDir);
+        if (!options.dryRun) fs.rmSync(legacyDir, { recursive: true, force: true });
         results.push({
           platform: options.platform,
           targetDir: legacyDir,

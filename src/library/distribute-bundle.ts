@@ -13,6 +13,7 @@ import {
 } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
 import type { CollisionPolicy, ProjectMode } from './distribute.js';
+import { assertPathWithinRoot } from './fs.js';
 import { type LibrarySection, loadLibraryAgentSync, updateLibraryAgentSync } from './state.js';
 
 export type BundleDistributionStatus = 'written' | 'skipped' | 'error' | 'deleted' | 'conflict';
@@ -103,14 +104,37 @@ function bundleFingerprint(dir: string): string | undefined {
   const root = lstatIfExists(dir);
   if (!root?.isDirectory() || root.isSymbolicLink()) return undefined;
   const hash = createHash('sha256');
-  for (const relativePath of listRelativeFiles(dir).sort()) {
-    const filePath = path.join(dir, relativePath);
-    const stat = fs.lstatSync(filePath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return undefined;
-    hash.update(`${relativePath}\0${stat.mode & 0o777}\0`);
-    hash.update(fs.readFileSync(filePath));
-  }
+  const visit = (current: string, prefix = ''): boolean => {
+    for (const entry of fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const filePath = path.join(current, entry.name);
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink()) return false;
+      if (stat.isDirectory()) {
+        hash.update(`d\0${relativePath}\0${stat.mode & 0o777}\0`);
+        if (!visit(filePath, relativePath)) return false;
+      } else if (stat.isFile()) {
+        hash.update(`f\0${relativePath}\0${stat.mode & 0o777}\0`);
+        hash.update(fs.readFileSync(filePath));
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!visit(dir)) return undefined;
   return `tree:${hash.digest('hex')}`;
+}
+
+function hasEmptyDirectory(dir: string): boolean {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const child = path.join(dir, entry.name);
+    if (fs.readdirSync(child).length === 0 || hasEmptyDirectory(child)) return true;
+  }
+  return false;
 }
 
 function lstatIfExists(filePath: string): fs.Stats | undefined {
@@ -308,7 +332,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       const entryId = opts.getId(entry);
       if (managedProjectRoot) {
         try {
-          assertTargetWithinRoot(managedProjectRoot, targetDir);
+          assertPathWithinRoot(managedProjectRoot, targetDir);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
@@ -348,6 +372,30 @@ export function distributeBundle<TEntry, Platform extends string>(
         !manifestEntry &&
         targetDirExists &&
         isAdoptableBundleDir(targetDir, files);
+
+      if (
+        manifestEntry &&
+        targetDirExists &&
+        collision !== 'takeover' &&
+        bundleFingerprint(targetDir) !== manifestEntry.hash &&
+        !(
+          !manifestEntry.hash.startsWith('tree:') &&
+          isAdoptableBundleDir(targetDir, files) &&
+          !hasEmptyDirectory(targetDir)
+        )
+      ) {
+        const isHardError = collision === 'error';
+        results.push({
+          platform,
+          targetDir,
+          status: isHardError ? 'error' : 'conflict',
+          ...(isHardError
+            ? { error: 'managed directory was modified' }
+            : { reason: 'managed directory was modified' }),
+          entryId,
+        });
+        continue;
+      }
 
       // Conflict detection in managed mode: check if target dir exists but isn't owned.
       if (manifest && targetDirExists && !manifestEntry && collision !== 'takeover') {
@@ -515,7 +563,7 @@ export function distributeBundle<TEntry, Platform extends string>(
         for (const item of toRemove) {
           const entryPath = path.join(path.resolve(managedProjectRoot), item.entry.relativePath);
           try {
-            assertTargetWithinRoot(managedProjectRoot, entryPath);
+            assertPathWithinRoot(managedProjectRoot, entryPath);
             const sharedPathStillOwned = hasOtherLibraryEntryAtPath(
               manifest,
               manifestSection,
@@ -542,7 +590,10 @@ export function distributeBundle<TEntry, Platform extends string>(
                 });
                 continue;
               }
-              if (!dryRun) removeBundlePath(entryPath);
+              if (!dryRun) {
+                assertPathWithinRoot(managedProjectRoot, entryPath);
+                removeBundlePath(entryPath);
+              }
               results.push({
                 platform,
                 targetDir: entryPath,

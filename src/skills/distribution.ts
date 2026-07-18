@@ -67,6 +67,10 @@ export function distributeSkills(
     dryRun?: boolean;
   }
 ): SkillDistributionOutcome {
+  if (scope?.project && options?.projectMode === 'none') {
+    return { results: [], successTargets: [], totalWritten: 0, totalSkipped: 0, totalErrors: 0 };
+  }
+
   const entries = loadSkillLibrary(scope);
   const activeAppIds = options?.activeAppIds;
   // Enumerate ALL installed targets so cleanup runs for inactive platforms too
@@ -86,24 +90,23 @@ export function distributeSkills(
     return distributeSkillsInternal(entries, scope, {
       platforms,
       activeSet,
-      legacyDirs: [
-        { path: path.join(getGeminiDir(), 'skills'), platform: 'agents' },
-        {
-          path: path.join(getOpencodeRoot(), 'skill'),
-          platform: 'agents',
-          cleanupMode: 'duplicates' as const,
-        },
-        ...(scope?.project
-          ? [
-              { path: path.join(getProjectGeminiDir(scope.project), 'skills'), platform: 'agents' },
-              {
-                path: path.join(getProjectOpencodeRoot(scope.project), 'skill'),
-                platform: 'agents',
-                cleanupMode: 'duplicates' as const,
-              },
-            ]
-          : []),
-      ],
+      legacyDirs: scope?.project
+        ? [
+            { path: path.join(getProjectGeminiDir(scope.project), 'skills'), platform: 'agents' },
+            {
+              path: path.join(getProjectOpencodeRoot(scope.project), 'skill'),
+              platform: 'agents',
+              cleanupMode: 'duplicates' as const,
+            },
+          ]
+        : [
+            { path: path.join(getGeminiDir(), 'skills'), platform: 'agents' },
+            {
+              path: path.join(getOpencodeRoot(), 'skill'),
+              platform: 'agents',
+              cleanupMode: 'duplicates' as const,
+            },
+          ],
       manifest: options?.manifest,
       projectMode: options?.projectMode,
       collision: options?.collision,
@@ -116,19 +119,12 @@ export function distributeSkills(
     activeSet,
     legacyDirs: [
       {
-        path: path.join(getOpencodeRoot(), 'skill'),
+        path: scope?.project
+          ? path.join(getProjectOpencodeRoot(scope.project), 'skill')
+          : path.join(getOpencodeRoot(), 'skill'),
         platform: 'opencode',
         cleanupMode: 'duplicates' as const,
       },
-      ...(scope?.project
-        ? [
-            {
-              path: path.join(getProjectOpencodeRoot(scope.project), 'skill'),
-              platform: 'opencode',
-              cleanupMode: 'duplicates' as const,
-            },
-          ]
-        : []),
     ],
     manifest: options?.manifest,
     projectMode: options?.projectMode,
