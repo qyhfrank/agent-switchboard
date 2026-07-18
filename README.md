@@ -383,7 +383,7 @@ Bundle scripts are copied under the target agent's managed hook root, one direct
 - Claude Code: `~/.claude/hooks/managed/<hook-id>/` or `<project>/.claude/hooks/managed/<hook-id>/`
 - Codex: `~/.codex/hooks/managed/<hook-id>/` or `<project>/.codex/hooks/managed/<hook-id>/`
 
-Distributed configs carry no ASB markers and no machine-absolute paths, so they stay portable across machines sharing the same dotfiles. Hook ownership lives under `<ASB_HOME>/state/hooks/<device-id>/`; keep it intact so each device can recognize and remove only its own output.
+Distributed configs carry no ASB markers and no machine-absolute paths, so they stay portable across machines sharing the same dotfiles. Hook ownership lives under `<ASB_HOME>/state/hooks/`; peers sharing that state may reconcile and remove each other's ASB-managed hooks.
 
 Codex hook sync writes `~/.codex/hooks.json` for global scope or `<project>/.codex/hooks.json` for project scope. ASB emits synchronous command handlers for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, and `Stop`; unsupported events, asynchronous handlers, and non-command handler types are filtered from Codex output and reported in sync results. Codex uses `[features].hooks` in `~/.codex/config.toml` (enabled by default when absent; legacy `[features].codex_hooks` is accepted for compatibility). Project-scoped hooks require the project to be trusted, and new or changed Codex hooks must be reviewed from `/hooks` in Codex before they run.
 
@@ -534,9 +534,9 @@ For project scope, sync honors `[distribution.project].mode`:
 |:------------------|:-------------|:---------------------------------------------|
 | `ASB_HOME`        | `~/.asb`     | Library, config, and state directory         |
 | `ASB_AGENTS_HOME` | OS user home | Base path for agent config locations         |
-| `ASB_DEVICE_ID`   | Hostname     | Stable local identity for ownership state    |
+| `ASB_DEVICE_ID`   | Hostname     | Stable local identity for project manifests  |
 
-When Mackup synchronizes `ASB_HOME`, set a stable, distinct `ASB_DEVICE_ID` on every server or device. Ownership state is partitioned by that value and the resolved `ASB_AGENTS_HOME`, so one peer cannot use another peer's state as deletion authority. Configuration files remain shared and last-writer-wins: run mutating ASB commands on one peer at a time and let Mackup finish syncing before switching peers.
+When Mackup synchronizes `ASB_HOME`, set a stable, distinct `ASB_DEVICE_ID` on every server or device. Managed project manifests are partitioned by that value and the resolved `ASB_AGENTS_HOME`; hook ownership is shared so any peer can reconcile ASB-managed hook groups. Configuration files remain last-writer-wins: run mutating ASB commands on one peer at a time and let Mackup finish syncing before switching peers.
 
 When `ASB_HOME` is unset, ASB uses an existing `~/.asb`, then an existing legacy `~/.agent-switchboard`, and defaults new installations to `~/.asb`.
 
