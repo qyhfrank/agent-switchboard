@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { loadHookState, resolveHookStatePath, saveHookState } from '../src/hooks/state.js';
 import {
   computeLibraryCleanupSet,
   computeMcpCleanupSet,
@@ -19,6 +20,36 @@ import {
 } from '../src/manifest/store.js';
 import type { ProjectDistributionManifest } from '../src/manifest/types.js';
 import { withTempAsbHome } from './helpers/tmp.js';
+
+test('device-scoped ownership state stays isolated in a shared ASB_HOME', () => {
+  withTempAsbHome(() => {
+    const previous = process.env.ASB_DEVICE_ID;
+    try {
+      process.env.ASB_DEVICE_ID = 'server-a';
+      const hookPathA = resolveHookStatePath('claude-code');
+      const manifestPathA = resolveManifestPath('/shared/project');
+      saveHookState('claude-code', {
+        version: 1,
+        events: { PreToolUse: [{ matcher: 'from-a', hooks: [] }] },
+        bundles: [],
+      });
+      saveManifest('/shared/project', loadManifest('/shared/project').manifest);
+
+      process.env.ASB_DEVICE_ID = 'server-b';
+      assert.notEqual(resolveHookStatePath('claude-code'), hookPathA);
+      assert.notEqual(resolveManifestPath('/shared/project'), manifestPathA);
+      assert.deepEqual(loadHookState('claude-code').events, {});
+      assert.equal(loadManifest('/shared/project').existedOnDisk, false);
+
+      process.env.ASB_DEVICE_ID = 'server-a';
+      assert.equal(loadHookState('claude-code').events.PreToolUse?.length, 1);
+      assert.equal(loadManifest('/shared/project').existedOnDisk, true);
+    } finally {
+      if (previous === undefined) delete process.env.ASB_DEVICE_ID;
+      else process.env.ASB_DEVICE_ID = previous;
+    }
+  });
+});
 
 test('projectPathToSlug: path under home uses -- separator', () => {
   const home = os.homedir();
