@@ -115,7 +115,10 @@ export function distributeSubagents(
     dryRun: managedOptions?.dryRun,
   });
 
-  if (handlerMap.has('opencode')) {
+  if (
+    handlerMap.has('opencode') &&
+    !(scope?.project && managedOptions?.projectMode === 'managed')
+  ) {
     const activeIds = new Set(filterSelected('opencode', entries).map((entry) => entry.id));
     markdownOutcome.results.push(
       ...cleanupLegacyOpencodeFiles({
@@ -132,17 +135,6 @@ export function distributeSubagents(
   }
 
   const customResults: DistributionResult<string>[] = [];
-  if (scope?.project) {
-    for (const target of activeCustomTargets) {
-      customResults.push({
-        platform: target.id,
-        filePath: scope.project,
-        status: 'error',
-        error: `Project-scoped ${target.id} agents are not supported`,
-      });
-    }
-    return { results: [...markdownOutcome.results, ...customResults] };
-  }
   for (const target of activeCustomTargets) {
     if (target.agents && isCustomAgentsHandler(target.agents)) {
       const results = target.agents.distribute(entries, byId, scope);

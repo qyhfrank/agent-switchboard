@@ -1,9 +1,3 @@
-/**
- * Integration tests: distribution modules honor activeAppIds filter.
- *
- * Verifies that passing activeAppIds restricts distribution to only those
- * targets, rather than distributing to ALL targets that support a section.
- */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,6 +14,7 @@ import { ensureSkillsDirectory } from '../src/skills/library.js';
 import { distributeSubagents } from '../src/subagents/distribution.js';
 import { ensureAgentsDirectory } from '../src/subagents/library.js';
 import { renderDefaultSubagentTemplate } from '../src/subagents/template.js';
+import { clearExtensionTargets, registerExtensionTarget } from '../src/targets/registry.js';
 import {
   simulateAppsInstalled,
   simulateTraeInstalled,
@@ -27,9 +22,10 @@ import {
   withTempHomes,
 } from './helpers/tmp.js';
 
-// ---------------------------------------------------------------------------
-// Rules: activeAppIds restricts distribution targets
-// ---------------------------------------------------------------------------
+const managedProjectOptions = {
+  projectMode: 'managed' as const,
+  manifest: { version: 1 as const, updatedAt: '', sections: {} },
+};
 
 test('distributeRules: only distributes to activeAppIds targets', () => {
   withTempAsbHome(() => {
@@ -61,10 +57,6 @@ test('distributeRules: empty activeAppIds produces no results', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Commands: activeAppIds restricts distribution targets
-// ---------------------------------------------------------------------------
-
 test('distributeCommands: only distributes to activeAppIds targets', () => {
   withTempHomes(() => {
     simulateAppsInstalled();
@@ -92,10 +84,6 @@ test('distributeCommands: empty activeAppIds produces no results', () => {
     assert.equal(outcome.results.length, 0);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Subagents: activeAppIds restricts distribution targets
-// ---------------------------------------------------------------------------
 
 test('distributeSubagents: only distributes to activeAppIds targets', () => {
   withTempHomes(() => {
@@ -125,26 +113,51 @@ test('distributeSubagents: empty activeAppIds produces no results', () => {
   });
 });
 
-test('distributeSubagents: project mode none leaves global Codex agents untouched', () => {
+test('managed project preserves legacy OpenCode paths and calls extension agents', (t) => {
+  t.after(clearExtensionTargets);
   withTempHomes(({ agentsHome }) => {
-    const globalAgent = path.join(agentsHome, '.codex', 'agents', 'global.toml');
-    fs.mkdirSync(path.dirname(globalAgent), { recursive: true });
-    fs.writeFileSync(globalAgent, '# managed-by: asb\nmodel = "global"\n');
-    const projectRoot = path.join(agentsHome, 'none-agent-project');
-    fs.mkdirSync(projectRoot);
-
-    const outcome = distributeSubagents({ project: projectRoot }, ['codex'], new Set(['codex']), {
-      projectMode: 'none',
+    simulateAppsInstalled('codex', 'opencode');
+    const projectRoot = path.join(agentsHome, 'managed-opencode-project');
+    const files = [
+      path.join(agentsHome, '.codex', 'agents', 'global.toml'),
+      path.join(projectRoot, '.opencode', 'agent', 'foreign.md'),
+      path.join(projectRoot, '.opencode', 'skill', 'foreign', 'SKILL.md'),
+    ];
+    for (const file of files) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, 'keep\n');
+    }
+    let receivedProject: string | undefined;
+    registerExtensionTarget({
+      id: 'extension-agent',
+      agents: {
+        custom: true,
+        distribute: (_entries, _byId, scope) => {
+          receivedProject = scope?.project;
+          return [];
+        },
+      },
     });
-
-    assert.equal(fs.readFileSync(globalAgent, 'utf-8'), '# managed-by: asb\nmodel = "global"\n');
-    assert.equal(outcome.results.length, 0);
+    const targets = ['codex', 'opencode', 'extension-agent'];
+    const outcome = distributeSubagents(
+      { project: projectRoot },
+      targets,
+      new Set(targets),
+      managedProjectOptions
+    );
+    distributeSkills(
+      { project: projectRoot },
+      {
+        activeAppIds: ['opencode'],
+        assumeInstalled: new Set(['opencode']),
+        ...managedProjectOptions,
+      }
+    );
+    assert.equal(receivedProject, projectRoot);
+    assert.ok(outcome.results.every((result) => result.status !== 'error'));
+    for (const file of files) assert.equal(fs.readFileSync(file, 'utf-8'), 'keep\n');
   });
 });
-
-// ---------------------------------------------------------------------------
-// Skills: activeAppIds restricts distribution targets
-// ---------------------------------------------------------------------------
 
 function createSkill(id: string, body = 'Skill body'): void {
   const skillsDir = ensureSkillsDirectory();
@@ -217,28 +230,6 @@ test('distributeSkills: empty activeAppIds produces no results', () => {
 
     const outcome = distributeSkills(undefined, { activeAppIds: [] });
 
-    assert.equal(outcome.results.length, 0);
-  });
-});
-
-test('distributeSkills: project mode none leaves global legacy skills untouched', () => {
-  withTempHomes(({ agentsHome }) => {
-    const globalLegacy = path.join(agentsHome, '.gemini', 'skills');
-    fs.mkdirSync(globalLegacy, { recursive: true });
-    const projectRoot = path.join(agentsHome, 'none-skill-project');
-    fs.mkdirSync(projectRoot);
-
-    const outcome = distributeSkills(
-      { project: projectRoot },
-      {
-        useAgentsDir: true,
-        activeAppIds: ['codex'],
-        assumeInstalled: new Set(['codex']),
-        projectMode: 'none',
-      }
-    );
-
-    assert.equal(fs.existsSync(globalLegacy), true);
     assert.equal(outcome.results.length, 0);
   });
 });

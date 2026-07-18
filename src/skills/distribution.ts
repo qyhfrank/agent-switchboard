@@ -235,6 +235,8 @@ function distributeSkillsInternal(
     dryRun: options.dryRun,
   });
 
+  if (scope?.project && options.projectMode === 'managed') return summarize(outcome);
+
   for (const { path: legacyDir, platform, cleanupMode } of options.legacyDirs) {
     if (cleanupMode === 'duplicates') {
       const activeIds = new Set(filterSelected(platform, entries).map((entry) => entry.id));
