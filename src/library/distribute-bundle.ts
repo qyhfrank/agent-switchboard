@@ -83,21 +83,22 @@ export interface DistributeBundleOutcome<Platform extends string> {
   results: BundleDistributionResult<Platform>[];
 }
 
-function listRelativeFiles(dir: string, prefix = ''): string[] {
-  const files: string[] = [];
+function listRelativeEntries(dir: string, prefix = ''): string[] {
+  const found: string[] = [];
   const entries = fs.readdirSync(dir, { withFileTypes: true });
 
   for (const entry of entries) {
     const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
     const abs = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      files.push(...listRelativeFiles(abs, rel));
+      found.push(`d:${rel}`);
+      found.push(...listRelativeEntries(abs, rel));
       continue;
     }
-    files.push(rel);
+    found.push(`${entry.isFile() ? 'f' : 'o'}:${rel}`);
   }
 
-  return files;
+  return found;
 }
 
 function bundleFingerprint(dir: string): string | undefined {
@@ -126,15 +127,6 @@ function bundleFingerprint(dir: string): string | undefined {
   };
   if (!visit(dir)) return undefined;
   return `tree:${hash.digest('hex')}`;
-}
-
-function hasEmptyDirectory(dir: string): boolean {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    const child = path.join(dir, entry.name);
-    if (fs.readdirSync(child).length === 0 || hasEmptyDirectory(child)) return true;
-  }
-  return false;
 }
 
 function lstatIfExists(filePath: string): fs.Stats | undefined {
@@ -199,17 +191,27 @@ function isAdoptableBundleDir(targetDir: string, files: BundleFile[]): boolean {
     return false;
   }
 
-  const expected = new Map(files.map((file) => [file.relativePath, file.sourcePath]));
-  const actualFiles = listRelativeFiles(targetDir);
-  if (actualFiles.length !== files.length) return false;
+  const expected = new Map<string, string>();
+  for (const file of files) {
+    const relativePath = file.relativePath.split(path.sep).join('/');
+    expected.set(`f:${relativePath}`, file.sourcePath);
+    for (
+      let parent = path.posix.dirname(relativePath);
+      parent !== '.';
+      parent = path.posix.dirname(parent)
+    ) {
+      expected.set(`d:${parent}`, '');
+    }
+  }
+  const actualEntries = listRelativeEntries(targetDir);
+  if (actualEntries.length !== expected.size) return false;
 
-  for (const rel of actualFiles) {
-    const sourcePath = expected.get(rel);
-    if (!sourcePath) return false;
+  for (const actual of actualEntries) {
+    const sourcePath = expected.get(actual);
+    if (sourcePath === undefined) return false;
+    if (actual.startsWith('d:')) continue;
 
-    const targetPath = path.join(targetDir, rel);
-    if (lstatIfExists(targetPath)?.isSymbolicLink()) return false;
-
+    const targetPath = path.join(targetDir, actual.slice(2));
     const sourceContent = fs.readFileSync(sourcePath);
     const targetContent = fs.readFileSync(targetPath);
     if (Buffer.compare(sourceContent, targetContent) !== 0) return false;
@@ -285,10 +287,7 @@ function removeBundlePath(targetPath: string): void {
   fs.unlinkSync(targetPath);
 }
 
-/**
- * Distribute skill bundles (directories) to target platforms.
- * Copies all files in each skill directory, preserving structure.
- */
+/** Distribute directory bundles to target platforms. */
 export function distributeBundle<TEntry, Platform extends string>(
   opts: DistributeBundleOptions<TEntry, Platform>
 ): DistributeBundleOutcome<Platform> {
@@ -320,6 +319,20 @@ export function distributeBundle<TEntry, Platform extends string>(
   for (const platform of opts.platforms) {
     const platformHash = createHash('sha256');
     const bundleRootDir = resolveBundleRootDir(opts, platform);
+    const checkpoint = (entryId: string, targetDir: string): void => {
+      if (dryRun || !manifest || !managedProjectRoot) return;
+      try {
+        assertPathWithinRoot(managedProjectRoot, targetDir);
+        const hash = bundleFingerprint(targetDir);
+        if (!hash) return;
+        recordLibraryEntry(manifest, manifestSection, entryId, {
+          relativePath: path.relative(path.resolve(managedProjectRoot), targetDir),
+          targetId: platform as string,
+          hash,
+          updatedAt: timestamp,
+        });
+      } catch {}
+    };
 
     // Apply per-platform filter if provided
     const platformSelected = opts.filterSelected
@@ -378,11 +391,7 @@ export function distributeBundle<TEntry, Platform extends string>(
         targetDirExists &&
         collision !== 'takeover' &&
         bundleFingerprint(targetDir) !== manifestEntry.hash &&
-        !(
-          !manifestEntry.hash.startsWith('tree:') &&
-          isAdoptableBundleDir(targetDir, files) &&
-          !hasEmptyDirectory(targetDir)
-        )
+        !(!manifestEntry.hash.startsWith('tree:') && isAdoptableBundleDir(targetDir, files))
       ) {
         const isHardError = collision === 'error';
         results.push({
@@ -528,21 +537,8 @@ export function distributeBundle<TEntry, Platform extends string>(
         });
       }
 
-      // Record the exact installed tree after successful write or skip.
-      if (!dryRun && manifest && managedProjectRoot) {
-        const lastResult = results[results.length - 1];
-        if (lastResult.status === 'written' || lastResult.status === 'skipped') {
-          const fingerprint = bundleFingerprint(targetDir);
-          if (fingerprint) {
-            recordLibraryEntry(manifest, manifestSection, entryId, {
-              relativePath: path.relative(path.resolve(managedProjectRoot), targetDir),
-              targetId: platform as string,
-              hash: fingerprint,
-              updatedAt: timestamp,
-            });
-          }
-        }
-      }
+      // Record the surviving tree so a handled partial write can be retried.
+      checkpoint(entryId, targetDir);
     }
 
     const aggregateHash = platformHash.digest('hex');
@@ -613,6 +609,7 @@ export function distributeBundle<TEntry, Platform extends string>(
             if (!dryRun) removeLibraryEntry(manifest, manifestSection, item.id, platform as string);
           } catch (error) {
             const msg = error instanceof Error ? error.message : String(error);
+            checkpoint(item.id, entryPath);
             results.push({
               platform,
               targetDir: entryPath,
