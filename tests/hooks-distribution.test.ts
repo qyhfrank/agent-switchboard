@@ -320,7 +320,7 @@ test('distributeHooks: user reordering does not duplicate or remove groups', () 
   });
 });
 
-test('distributeHooks: bundle hook survives ownership state loss', () => {
+test('distributeHooks: bundle state loss duplicates once then converges', () => {
   withTempHomes(() => {
     simulateAppsInstalled('claude-code');
     createBundleHook('bundle-test');
@@ -329,17 +329,42 @@ test('distributeHooks: bundle hook survives ownership state loss', () => {
 
     fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
 
-    const outcome = distributeHooks(undefined, ['claude-code']);
-
-    assert.ok(
-      outcome.results.some(
-        (r) => r.platform === 'claude-code' && r.status === 'skipped' && r.reason === 'up-to-date'
-      ),
-      'path heuristics should re-identify the bundle group'
-    );
-    const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.UserPromptSubmit.length, 1);
+    distributeHooks(undefined, ['claude-code']);
+    let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.UserPromptSubmit.length, 2, 'state loss duplicates safely');
     assert.ok(fs.existsSync(resolveHookStatePath('claude-code')), 'state file is re-created');
+
+    distributeHooks(undefined, ['claude-code']);
+    settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.UserPromptSubmit.length, 1, 're-created state converges safely');
+  });
+});
+
+test('distributeHooks: one device cannot clean another device ownership', () => {
+  withTempHomes(() => {
+    const previous = process.env.ASB_DEVICE_ID;
+    try {
+      simulateAppsInstalled('claude-code');
+      createBundleHook('device-bundle');
+      enableHooks(['device-bundle']);
+      process.env.ASB_DEVICE_ID = 'server-a';
+      distributeHooks(undefined, ['claude-code']);
+      const bundleDir = path.join(getClaudeDir(), 'hooks', 'managed', 'device-bundle');
+
+      process.env.ASB_DEVICE_ID = 'server-b';
+      enableHooks([]);
+      distributeHooks(undefined, ['claude-code']);
+      const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+      assert.equal(settings.hooks.UserPromptSubmit.length, 1);
+      assert.equal(fs.existsSync(bundleDir), true);
+
+      process.env.ASB_DEVICE_ID = 'server-a';
+      distributeHooks(undefined, ['claude-code']);
+      assert.equal(fs.existsSync(bundleDir), false, 'owning device can clean its output');
+    } finally {
+      if (previous === undefined) delete process.env.ASB_DEVICE_ID;
+      else process.env.ASB_DEVICE_ID = previous;
+    }
   });
 });
 
@@ -513,7 +538,12 @@ test('distributeHooks: migrates legacy markers, tags, state files, and bundle di
     assert.deepEqual(commands.sort(), ['echo mine', 'echo test']);
     assert.equal(settings.theme, 'dark');
 
-    assert.equal(fs.existsSync(legacyAsbDir), false, 'legacy hooks/asb dir is fully removed');
+    assert.equal(fs.existsSync(path.join(legacyAsbDir, 'old-thing')), false);
+    assert.equal(
+      fs.existsSync(path.join(legacyAsbDir, 'test-hook')),
+      true,
+      'library membership alone cannot authorize deletion'
+    );
     const newStatePath = resolveHookStatePath('claude-code');
     assert.ok(fs.existsSync(newStatePath), 'device-scoped state replaces legacy state');
     assert.deepEqual(fs.readdirSync(stateDir), [path.basename(path.dirname(newStatePath))]);
@@ -1343,7 +1373,7 @@ test('distributeHooks: codex bundle hook copies files and rewrites HOOK_DIR port
   });
 });
 
-test('distributeHooks: foreign-home absolute managed paths are reclaimed as $HOME', () => {
+test('distributeHooks: foreign-home paths survive without local ownership state', () => {
   withTempHomes(({ asbHome }) => {
     const fakeHome = path.dirname(asbHome);
     withHome(fakeHome, () => {
@@ -1403,25 +1433,35 @@ test('distributeHooks: foreign-home absolute managed paths are reclaimed as $HOM
       distributeHooks(undefined, ['claude-code', 'codex'], new Set(['claude-code', 'codex']));
 
       const claudeRaw = fs.readFileSync(claudeSettingsPath(), 'utf-8');
-      assert.ok(!claudeRaw.includes('/home/ubuntu'), 'claude foreign absolute home is gone');
+      assert.ok(claudeRaw.includes(foreignClaude), 'foreign device group is preserved');
       const claudeSettings = readJson(claudeSettingsPath()) as {
         hooks: Record<string, Array<Record<string, unknown>>>;
       };
-      assert.deepEqual(groupCommands(claudeSettings.hooks.UserPromptSubmit).sort(), [
-        '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
-        'echo mine',
-      ]);
+      assert.deepEqual(
+        groupCommands(claudeSettings.hooks.UserPromptSubmit).sort(),
+        [
+          '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
+          '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
+          foreignClaude,
+          'echo mine',
+        ].sort()
+      );
 
       const codexRaw = fs.readFileSync(getCodexHooksJsonPath(), 'utf-8');
-      assert.ok(!codexRaw.includes('/home/ubuntu/.codex/hooks/managed/bundle-test'));
+      assert.ok(codexRaw.includes(foreignCodex), 'foreign device group is preserved');
       const codexContent = readJson(getCodexHooksJsonPath()) as {
         hooks: Record<string, Array<Record<string, unknown>>>;
       };
-      assert.deepEqual(groupCommands(codexContent.hooks.UserPromptSubmit).sort(), [
-        '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
-        foreignUnknown,
-        'echo mine',
-      ]);
+      assert.deepEqual(
+        groupCommands(codexContent.hooks.UserPromptSubmit).sort(),
+        [
+          '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
+          '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
+          foreignCodex,
+          foreignUnknown,
+          'echo mine',
+        ].sort()
+      );
     });
   });
 });

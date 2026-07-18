@@ -3,11 +3,9 @@
  *
  * Application configs carry no ASB metadata, so ownership is established from
  * the ASB side: the state file records exactly what was written, and path
- * heuristics recognize ASB bundle references (including legacy `hooks/asb/`
- * layouts, legacy Codex command markers, v0.4.28 `hooks/managed/<sha256>`
- * output, and known managed ids under any home prefix left by cross-machine
- * dotfile sync) without ever treating the neutral `hooks/managed/` root alone
- * as proof of ownership.
+ * heuristics recognize ASB bundle references supported by current-device state
+ * or intrinsic legacy evidence. A library entry with the same id is not
+ * ownership proof because application configs can be shared across devices.
  */
 
 import { isDeepStrictEqual } from 'node:util';
@@ -31,16 +29,14 @@ const V0428_MANAGED_DIR_RE =
   /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
 
 /**
- * Named managed bundles under any home prefix (current machine, `$HOME`, `~`,
- * or a foreign absolute home left by dotfile sync). The known bundle id is the
- * ownership proof; the home prefix is not.
+ * Named managed bundles under any home prefix. The known bundle id must come
+ * from current-device ownership state; the home prefix is not proof.
  */
 const MANAGED_ID_ANY_HOME_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/([^/\s"'`;|&<>]+)/g;
 
 /**
- * Legacy ASB-branded `hooks/asb/<id>/` under any home prefix (same cross-machine
- * case as managed ids).
+ * Legacy ASB-branded `hooks/asb/<id>/` under any home prefix.
  */
 const LEGACY_ASB_ID_ANY_HOME_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/asb\/([^/\s"'`;|&<>]+)/g;
@@ -52,7 +48,7 @@ export interface OwnershipContext {
   legacyAsbRoots: readonly string[];
   /** `hooks/managed` parent dirs, raw and `$HOME` forms, no trailing slash. */
   managedRoots: readonly string[];
-  /** Bundle directory names ASB may own under the managed roots. */
+  /** Bundle directory names recorded in current-device ownership state. */
   knownManagedIds: ReadonlySet<string>;
   /** Event maps whose groups are removed by count-bounded deep equality. */
   stateGroups: ReadonlyArray<Record<string, unknown[]>>;
@@ -135,7 +131,7 @@ function isLegacyOwnedGroup(
       hasLegacyMarker(command) ||
       V0428_MANAGED_RE.test(command) ||
       legacyAsbRoots.some((root) => commandContainsPathToken(command, root)) ||
-      // Foreign-home legacy asb paths only when the id is still a known ASB hook.
+      // Foreign-home paths require current-device state for the exact id.
       extractIdsByPattern(command, LEGACY_ASB_ID_ANY_HOME_RE).some((id) => knownManagedIds.has(id))
   );
 }
@@ -143,9 +139,8 @@ function isLegacyOwnedGroup(
 /**
  * Owned via the neutral managed root only when every command-bearing handler
  * references a known bundle id under a managed root (and at least one does).
- * Foreign absolute homes from cross-machine dotfile sync count when the
- * trailing managed id is known; an unknown id under `hooks/managed/` stays
- * user-owned.
+ * Foreign absolute homes count only when current-device state owns the trailing
+ * id; an unknown id under `hooks/managed/` stays user-owned.
  */
 function isManagedPathOwnedGroup(
   group: unknown,
