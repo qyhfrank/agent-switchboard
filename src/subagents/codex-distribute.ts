@@ -80,6 +80,8 @@ export function distributeCodexSubagents(
   byId: Map<string, GenericLibraryEntry>,
   scope?: ConfigScope
 ): DistributionResult<string>[] {
+  if (scope?.project) return [];
+
   const results: DistributionResult<string>[] = [];
   const platform = 'codex';
 
