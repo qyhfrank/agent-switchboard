@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -65,5 +66,26 @@ test('CLI: command load (claude-code) imports with minimal schema (description +
     const bTxt = fs.readFileSync(libBeta, 'utf-8');
     const bCount = (bTxt.match(/^---\s*\r?\n[\s\S]*?\r?\n---\s*\r?\n/gm) || []).length;
     assert.equal(bCount, 1);
+  });
+});
+
+test('CLI: command load exits nonzero after a partial import failure', () => {
+  withTempHomes(({ agentsHome, asbHome }) => {
+    const srcDir = path.join(agentsHome, '.claude', 'commands');
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, 'good.md'), 'Good');
+    fs.writeFileSync(path.join(srcDir, 'blocked.md'), 'Blocked');
+    fs.mkdirSync(path.join(asbHome, 'commands', 'blocked.md'), { recursive: true });
+
+    const entry = path.join(process.cwd(), 'src', 'index.ts');
+    const result = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', entry, 'command', 'load', 'claude-code', srcDir, '-r', '-f'],
+      { encoding: 'utf-8', env: { ...process.env, FORCE_COLOR: '0' } }
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(stripAnsi(result.stdout), /1 failed/);
+    assert.equal(fs.existsSync(path.join(asbHome, 'commands', 'good.md')), true);
   });
 });
