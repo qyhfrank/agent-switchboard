@@ -7,11 +7,10 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { updateConfigLayer } from '../config/layered-config.js';
+import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
 import { expandHome, getConfigDir, getPluginsDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
-import { loadSwitchboardConfig } from '../config/switchboard-config.js';
 import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
 import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from '../marketplace/git-transport.js';
 import {
@@ -60,6 +59,7 @@ interface CloneMarker {
   ref?: string;
   commit: string;
   branch?: string;
+  upstream?: string;
 }
 
 function cloneMarkerPath(repoDir: string): string {
@@ -69,6 +69,16 @@ function cloneMarkerPath(repoDir: string): string {
 function currentBranch(repoDir: string): string | undefined {
   try {
     return runGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], { cwd: repoDir });
+  } catch {
+    return undefined;
+  }
+}
+
+function currentUpstream(repoDir: string): string | undefined {
+  try {
+    return runGit(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], {
+      cwd: repoDir,
+    });
   } catch {
     return undefined;
   }
@@ -84,6 +94,8 @@ function writeCloneMarker(repoDir: string, namespace: string, remote: RemoteSour
   if (remote.ref) marker.ref = remote.ref;
   const branch = currentBranch(repoDir);
   if (branch) marker.branch = branch;
+  const upstream = currentUpstream(repoDir);
+  if (upstream) marker.upstream = upstream;
   fs.writeFileSync(cloneMarkerPath(repoDir), `${JSON.stringify(marker)}\n`);
 }
 
@@ -117,17 +129,23 @@ function isVerifiedClone(repoDir: string, namespace: string, remote: RemoteSourc
   try {
     const marker = JSON.parse(fs.readFileSync(cloneMarkerPath(repoDir), 'utf-8')) as CloneMarker;
     const expectedUrl = credentialFreeGitUrl(expandHome(remote.url));
-    const origin = credentialFreeGitUrl(runGit(['remote', 'get-url', 'origin'], { cwd: repoDir }));
+    const rawOrigin = runGit(['remote', 'get-url', 'origin'], { cwd: repoDir });
+    const origin = credentialFreeGitUrl(rawOrigin);
     const branch = currentBranch(repoDir);
     return (
       marker.version === 1 &&
       marker.namespace === namespace &&
       marker.url === expectedUrl &&
       marker.ref === remote.ref &&
+      rawOrigin === origin &&
       origin === expectedUrl &&
       marker.commit === runGit(['rev-parse', 'HEAD'], { cwd: repoDir }) &&
       marker.branch === branch &&
-      runGit(['rev-list', '--branches', '--not', '--remotes=origin'], { cwd: repoDir }) === '' &&
+      marker.upstream === currentUpstream(repoDir) &&
+      runGit(['rev-list', '--all', '--not', '--remotes=origin'], { cwd: repoDir }) === '' &&
+      runGit(['ls-files', '-v'], { cwd: repoDir })
+        .split('\n')
+        .every((line) => line === '' || line.startsWith('H ')) &&
       runGit(['status', '--porcelain', '--ignored', '--untracked-files=all'], { cwd: repoDir }) ===
         ''
     );
@@ -280,7 +298,8 @@ export function inferSourceName(location: string): string {
 // ── Config access helpers ──────────────────────────────────────────
 
 function getRawSources(scope?: ConfigScope): Record<string, SourceValue> {
-  const config = loadSwitchboardConfig(scopeToLayerOptions(scope));
+  const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
+  for (const namespace of Object.keys(config.plugins.sources)) validateNamespace(namespace);
   return config.plugins.sources;
 }
 
