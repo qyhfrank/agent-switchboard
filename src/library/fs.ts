@@ -63,6 +63,33 @@ export function ensureParentDir(filePath: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 }
 
+function resolveThroughExistingAncestor(value: string): string {
+  const resolved = path.resolve(value);
+  let existing = resolved;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) return resolved;
+    existing = parent;
+  }
+  return path.resolve(fs.realpathSync.native(existing), path.relative(existing, resolved));
+}
+
+/** Reject lexical escapes and paths redirected outside root by an existing symlink. */
+export function assertPathWithinRoot(rootPath: string, targetPath: string): void {
+  const root = resolveThroughExistingAncestor(rootPath);
+  const target = resolveThroughExistingAncestor(targetPath);
+  const lexical = path.relative(path.resolve(rootPath), path.resolve(targetPath));
+  const physical = path.relative(root, target);
+  if (
+    lexical.startsWith('..') ||
+    path.isAbsolute(lexical) ||
+    physical.startsWith('..') ||
+    path.isAbsolute(physical)
+  ) {
+    throw new Error(`target path escapes root: ${targetPath}`);
+  }
+}
+
 /** Check if path exists and is a directory. */
 export function isDir(p: string): boolean {
   try {
@@ -126,9 +153,4 @@ export function copyDirRecursive(
       }
     }
   }
-}
-
-/** Recursively delete a directory and all its contents. */
-export function rmDirRecursive(dirPath: string): void {
-  fs.rmSync(dirPath, { recursive: true, force: true });
 }
