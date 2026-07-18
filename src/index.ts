@@ -133,7 +133,7 @@ Examples:
   $ asb sync -P .                    Sync with project-level overrides
 
 Alias: agent-switchboard
-Config: ~/.agent-switchboard/config.toml`
+Config: ~/.asb/config.toml`
   );
 
 // Initialize library directories for commands/agents (secure permissions)
@@ -490,8 +490,9 @@ program
       // Step 3: Apply to registered agents
       const projectMode = getScopedProjectMode(scope, config);
       const manifest = loadManagedProjectManifest(scope, projectMode);
+      let mcpResults: Awaited<ReturnType<typeof distributeMcp>>;
       try {
-        await distributeMcp(scope, selectedServers, { manifest, projectMode });
+        mcpResults = await distributeMcp(scope, selectedServers, { manifest, projectMode });
       } finally {
         saveManagedProjectManifest(scope, projectMode, manifest);
       }
@@ -502,6 +503,7 @@ program
 
       // Step 4: Show summary
       showSummary(selectedServers, scope);
+      if (mcpResults.some((result) => result.status === 'error')) process.exitCode = 1;
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -770,6 +772,7 @@ commandRoot.action(async (options: ScopeOptionInput) => {
       console.log();
       printProjectDistributionDisabledMessage();
     }
+    if (out.results.some((result) => result.status === 'error')) process.exitCode = 1;
     // Guidance: unsupported platforms for commands
     console.log();
     console.log(chalk.gray('Unsupported platforms (manual steps required): Claude Desktop'));
@@ -824,6 +827,7 @@ commandRoot
 
         const outDir = getCommandsDir();
         let imported = 0;
+        let failed = 0;
         for (const file of inputs) {
           try {
             const { slug, content } = importCommandFromFile(platform, file);
@@ -833,12 +837,20 @@ commandRoot
             imported++;
             console.log(`${chalk.green('✓')} ${chalk.cyan(slug)} → ${chalk.dim(target)}`);
           } catch (error) {
+            failed++;
             const msg = error instanceof Error ? error.message : String(error);
             console.log(`${chalk.red('✗')} ${chalk.dim(file)} ${chalk.red(msg)}`);
           }
         }
 
-        console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into command library.`);
+        if (failed > 0) {
+          console.log(
+            `\n${chalk.red('✗')} Imported ${imported} command file(s); ${failed} failed.`
+          );
+          process.exitCode = 1;
+        } else {
+          console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into command library.`);
+        }
       } catch (error) {
         if (error instanceof Error) {
           console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -959,6 +971,7 @@ agentRoot.action(async (options: ScopeOptionInput) => {
       console.log();
       printProjectDistributionDisabledMessage();
     }
+    if (out.results.some((result) => result.status === 'error')) process.exitCode = 1;
 
     console.log();
     console.log(chalk.gray('Unsupported platforms (manual steps required): Codex, Gemini'));
@@ -1012,6 +1025,7 @@ agentRoot
 
         const outDir = getAgentsDir();
         let imported = 0;
+        let failed = 0;
         for (const file of inputs) {
           try {
             const { slug, content } = importSubagentFromFile(platform, file);
@@ -1021,12 +1035,18 @@ agentRoot
             imported++;
             console.log(`${chalk.green('✓')} ${chalk.cyan(slug)} → ${chalk.dim(target)}`);
           } catch (error) {
+            failed++;
             const msg = error instanceof Error ? error.message : String(error);
             console.log(`${chalk.red('✗')} ${chalk.dim(file)} ${chalk.red(msg)}`);
           }
         }
 
-        console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into agent library.`);
+        if (failed > 0) {
+          console.log(`\n${chalk.red('✗')} Imported ${imported} agent file(s); ${failed} failed.`);
+          process.exitCode = 1;
+        } else {
+          console.log(`\n${chalk.green('✓')} Imported ${imported} file(s) into agent library.`);
+        }
       } catch (error) {
         if (error instanceof Error) {
           console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1153,6 +1173,7 @@ skillRoot.action(async (options: ScopeOptionInput) => {
       console.log();
       printProjectDistributionDisabledMessage();
     }
+    if (out.results.some((result) => result.status === 'error')) process.exitCode = 1;
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -1260,6 +1281,7 @@ skillRoot
         const outDir = getSkillsDir();
         let imported = 0;
         let skipped = 0;
+        let failed = 0;
 
         for (const id of skillIds) {
           const result = importSkill(platform, source, id, { force: opts.force });
@@ -1273,6 +1295,7 @@ skillRoot
             skipped++;
             console.log(`${chalk.gray('•')} ${chalk.cyan(id)} ${chalk.gray(`(${result.reason})`)}`);
           } else {
+            failed++;
             console.log(
               `${chalk.red('✗')} ${chalk.cyan(id)} ${chalk.red(result.error ?? 'unknown error')}`
             );
@@ -1280,7 +1303,10 @@ skillRoot
         }
 
         console.log();
-        if (imported > 0) {
+        if (failed > 0) {
+          console.log(`${chalk.red('✗')} Imported ${imported} skill(s); ${failed} failed.`);
+          process.exitCode = 1;
+        } else if (imported > 0) {
           console.log(
             `${chalk.green('✓')} Imported ${imported} skill(s) into ${chalk.dim(outDir)}`
           );
@@ -1337,6 +1363,7 @@ hookRoot.action(async (options: ScopeOptionInput) => {
       console.log();
       printProjectDistributionDisabledMessage();
     }
+    if (out.results.some((result) => result.status === 'error')) process.exitCode = 1;
   } catch (error) {
     if (error instanceof Error) {
       console.error(chalk.red(`\n✗ Error: ${error.message}`));
@@ -2225,4 +2252,4 @@ program
     process.exit(1);
   });
 
-program.parse(process.argv);
+await program.parseAsync(process.argv);
