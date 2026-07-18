@@ -10,7 +10,7 @@
  *     `${HOOK_DIR}` placeholders are resolved to the distributed path.
  *
  * The written config carries no ASB metadata and no machine-absolute paths;
- * ownership lives in `~/.asb/state/hooks/` (see `state.ts` and `ownership.ts`).
+ * ownership lives under `<ASB_HOME>/state/hooks/<device>/` (see `state.ts`).
  *
  * Codex distribution is delegated to `codex-distribute.ts`, which writes
  * `hooks.json`, filters to Codex-compatible synchronous command hooks, and

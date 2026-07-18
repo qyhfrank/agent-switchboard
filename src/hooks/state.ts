@@ -4,7 +4,8 @@
  * Records, per (target, scope), exactly the hook groups ASB last wrote into
  * the application config plus the bundle directory names it manages, so
  * distribution can remove its own output without leaving any ASB metadata
- * inside application configs. Files live under `~/.asb/state/hooks/` and stay
+ * inside application configs. Files live under
+ * `<ASB_HOME>/state/hooks/<device>/` and stay
  * machine-portable: commands in `$HOME` form, bare directory names, no
  * absolute paths.
  */
@@ -72,8 +73,7 @@ export function loadHookState(target: HookStateTarget, scope?: ConfigScope): Hoo
       return { version: 1, events, bundles };
     }
   } catch {
-    // Missing or corrupt state loads as empty; path heuristics still identify
-    // bundle-backed groups on the next sync.
+    // Missing or corrupt state loads as empty and grants no deletion authority.
   }
   return emptyHookState();
 }

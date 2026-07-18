@@ -5,6 +5,7 @@
 
 import chalk from 'chalk';
 import { loadMcpConfigWithPlugins } from '../config/mcp-config.js';
+import { getMcpConfigPath } from '../config/paths.js';
 import type { McpServer } from '../config/schemas.js';
 import type { ConfigScope } from '../config/scope.js';
 import { type FuzzyMultiSelectChoice, fuzzyMultiSelect } from './fuzzy-multi-select.js';
@@ -56,10 +57,11 @@ export async function showMcpServerUI(options: McpServerUIOptions): Promise<stri
   const choices = buildMcpChoices(options.enabled, options.scope);
 
   if (choices.length === 0) {
-    console.log(chalk.yellow('⚠ No MCP servers found in ~/.agent-switchboard/mcp.json'));
+    const configPath = getMcpConfigPath();
+    console.log(chalk.yellow(`⚠ No MCP servers found in ${configPath}`));
     console.log();
     console.log('Please add servers manually to the config file:');
-    console.log(chalk.dim('  ~/.agent-switchboard/mcp.json'));
+    console.log(chalk.dim(`  ${configPath}`));
     console.log();
     console.log('Example:');
     console.log(
