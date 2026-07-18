@@ -3,9 +3,8 @@
  *
  * Application configs carry no ASB metadata, so ownership is established from
  * the ASB side: the state file records exactly what was written, and path
- * heuristics recognize ASB bundle references supported by current-device state
- * or intrinsic legacy evidence. A library entry with the same id is not
- * ownership proof because application configs can be shared across devices.
+ * heuristics recognize ASB bundle references supported by shared state,
+ * library identity, or intrinsic legacy evidence.
  */
 
 import { isDeepStrictEqual } from 'node:util';
@@ -29,8 +28,8 @@ const V0428_MANAGED_DIR_RE =
   /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
 
 /**
- * Named managed bundles under any home prefix. The known bundle id must come
- * from current-device ownership state; the home prefix is not proof.
+ * Named managed bundles under any home prefix. The known bundle id comes from
+ * shared ownership state or the shared hook library; the home prefix is not proof.
  */
 const MANAGED_ID_ANY_HOME_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/([^/\s"'`;|&<>]+)/g;
@@ -48,7 +47,7 @@ export interface OwnershipContext {
   legacyAsbRoots: readonly string[];
   /** `hooks/managed` parent dirs, raw and `$HOME` forms, no trailing slash. */
   managedRoots: readonly string[];
-  /** Bundle directory names recorded in current-device ownership state. */
+  /** Bundle directory names supported by shared state or library identity. */
   knownManagedIds: ReadonlySet<string>;
   /** Event maps whose groups are removed by count-bounded deep equality. */
   stateGroups: ReadonlyArray<Record<string, unknown[]>>;
@@ -131,7 +130,7 @@ function isLegacyOwnedGroup(
       hasLegacyMarker(command) ||
       V0428_MANAGED_RE.test(command) ||
       legacyAsbRoots.some((root) => commandContainsPathToken(command, root)) ||
-      // Foreign-home paths require current-device state for the exact id.
+      // Foreign-home paths require shared evidence for the exact id.
       extractIdsByPattern(command, LEGACY_ASB_ID_ANY_HOME_RE).some((id) => knownManagedIds.has(id))
   );
 }
@@ -139,8 +138,8 @@ function isLegacyOwnedGroup(
 /**
  * Owned via the neutral managed root only when every command-bearing handler
  * references a known bundle id under a managed root (and at least one does).
- * Foreign absolute homes count only when current-device state owns the trailing
- * id; an unknown id under `hooks/managed/` stays user-owned.
+ * Foreign absolute homes count when shared evidence owns the trailing id; an
+ * unknown id under `hooks/managed/` stays user-owned.
  */
 function isManagedPathOwnedGroup(
   group: unknown,

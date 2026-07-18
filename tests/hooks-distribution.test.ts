@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { deviceStateId } from '../src/config/device-id.js';
 import {
   getClaudeDir,
   getCodexConfigPath,
@@ -285,7 +286,7 @@ test('distributeHooks: user reordering does not duplicate or remove groups', () 
   });
 });
 
-test('distributeHooks: one device cannot clean another device ownership', () => {
+test('distributeHooks: one device can clean another device ownership', () => {
   withTempHomes(() => {
     const previous = process.env.ASB_DEVICE_ID;
     try {
@@ -300,12 +301,9 @@ test('distributeHooks: one device cannot clean another device ownership', () => 
       enableHooks([]);
       distributeHooks(undefined, ['claude-code']);
       const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-      assert.equal(settings.hooks.UserPromptSubmit.length, 1);
-      assert.equal(fs.existsSync(bundleDir), true);
-
-      process.env.ASB_DEVICE_ID = 'server-a';
-      distributeHooks(undefined, ['claude-code']);
-      assert.equal(fs.existsSync(bundleDir), false, 'owning device can clean its output');
+      assert.equal(settings.hooks, undefined);
+      assert.equal(fs.existsSync(bundleDir), false);
+      assert.equal(fs.existsSync(resolveHookStatePath('claude-code')), false);
     } finally {
       if (previous === undefined) delete process.env.ASB_DEVICE_ID;
       else process.env.ASB_DEVICE_ID = previous;
@@ -313,7 +311,7 @@ test('distributeHooks: one device cannot clean another device ownership', () => 
   });
 });
 
-test('distributeHooks: state loss duplicates safely and stabilizes', () => {
+test('distributeHooks: bundle identity survives state loss without duplication', () => {
   for (const kind of ['bundle', 'definition'] as const) {
     withTempHomes(() => {
       simulateAppsInstalled('claude-code');
@@ -326,7 +324,7 @@ test('distributeHooks: state loss duplicates safely and stabilizes', () => {
       fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
       distributeHooks(undefined, ['claude-code']);
       let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-      assert.equal(settings.hooks[event].length, 2);
+      assert.equal(settings.hooks[event].length, kind === 'bundle' ? 1 : 2);
       assert.ok(fs.existsSync(resolveHookStatePath('claude-code')));
       distributeHooks(undefined, ['claude-code']);
       settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
@@ -335,40 +333,129 @@ test('distributeHooks: state loss duplicates safely and stabilizes', () => {
   }
 });
 
-test('distributeHooks: shared predecessor state never becomes device ownership', () => {
-  withTempHomes(({ asbHome }) => {
+test('distributeHooks: definition ids do not authorize managed bundle cleanup', () => {
+  withTempHomes(() => {
     simulateAppsInstalled('claude-code', 'codex');
-    createBundleHook('upgrade-hook');
-    enableHooks(['upgrade-hook'], ['claude-code', 'codex']);
+    createHookEntry('definition-only');
+    enableHooks([], ['claude-code', 'codex']);
+
+    const targets = [
+      {
+        configPath: claudeSettingsPath(),
+        bundleDir: path.join(getClaudeDir(), 'hooks', 'managed', 'definition-only'),
+      },
+      {
+        configPath: getCodexHooksJsonPath(),
+        bundleDir: path.join(getCodexDir(), 'hooks', 'managed', 'definition-only'),
+      },
+    ];
+    for (const { configPath, bundleDir } of targets) {
+      fs.mkdirSync(bundleDir, { recursive: true });
+      const command = path.join(bundleDir, 'run.sh');
+      fs.writeFileSync(command, '#!/bin/sh\necho user\n');
+      fs.writeFileSync(
+        configPath,
+        JSON.stringify({ hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command }] }] } })
+      );
+    }
+
     distributeHooks(undefined, ['claude-code', 'codex']);
 
-    const stateDir = path.join(asbHome, 'state', 'hooks');
-    fs.renameSync(resolveHookStatePath('claude-code'), path.join(stateDir, 'claude-code.json'));
-    const codexState = readJson(resolveHookStatePath('codex')) as { events: unknown };
-    fs.writeFileSync(
-      path.join(stateDir, `codex-${HEX64_A}.json`),
-      JSON.stringify({ hooks: codexState.events })
-    );
-    fs.rmSync(resolveHookStatePath('codex'));
+    for (const { configPath, bundleDir } of targets) {
+      const config = readJson(configPath) as {
+        hooks: Record<string, Array<Record<string, unknown>>>;
+      };
+      assert.equal(groupCommands(config.hooks.UserPromptSubmit).length, 1);
+      assert.equal(fs.existsSync(bundleDir), true);
+    }
+  });
+});
 
+test('distributeHooks: migrates v0.4.32 device-scoped ownership to shared state', () => {
+  withTempHomes(({ asbHome }) => {
     const previous = process.env.ASB_DEVICE_ID;
     try {
-      for (const device of ['server-a', 'server-b']) {
-        process.env.ASB_DEVICE_ID = device;
-        distributeHooks(undefined, ['claude-code', 'codex']);
-        for (const target of ['claude-code', 'codex'] as const)
-          assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
+      process.env.ASB_DEVICE_ID = 'server-a';
+      simulateAppsInstalled('claude-code', 'codex');
+      createBundleHook('upgrade-hook');
+      enableHooks(['upgrade-hook'], ['claude-code', 'codex']);
+      distributeHooks(undefined, ['claude-code', 'codex']);
+
+      const stateDir = path.join(asbHome, 'state', 'hooks');
+      const deviceDir = path.join(stateDir, deviceStateId());
+      fs.mkdirSync(deviceDir, { recursive: true });
+      for (const target of ['claude-code', 'codex'] as const) {
+        const sharedPath = resolveHookStatePath(target);
+        const devicePath = path.join(deviceDir, path.basename(sharedPath));
+        if (target === 'claude-code') fs.copyFileSync(sharedPath, devicePath);
+        else fs.renameSync(sharedPath, devicePath);
       }
+
+      process.env.ASB_DEVICE_ID = 'server-b';
       enableHooks([], ['claude-code', 'codex']);
       distributeHooks(undefined, ['claude-code', 'codex']);
-      for (const [file, root] of [
-        [claudeSettingsPath(), getClaudeDir()],
-        [getCodexHooksJsonPath(), getCodexDir()],
-      ] as const) {
-        const preserved = readJson(file) as { hooks: Record<string, unknown[]> };
-        assert.equal(preserved.hooks.UserPromptSubmit.length, 1);
-        assert.ok(fs.existsSync(path.join(root, 'hooks', 'managed', 'upgrade-hook')));
+
+      const claudeSettings = readJson(claudeSettingsPath()) as { hooks?: unknown };
+      assert.equal(claudeSettings.hooks, undefined);
+      assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
+      for (const target of ['claude-code', 'codex'] as const) {
+        assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
+        assert.equal(
+          fs.existsSync(path.join(deviceDir, path.basename(resolveHookStatePath(target)))),
+          false
+        );
       }
+      assert.equal(
+        fs.existsSync(path.join(getClaudeDir(), 'hooks', 'managed', 'upgrade-hook')),
+        false
+      );
+      assert.equal(
+        fs.existsSync(path.join(getCodexDir(), 'hooks', 'managed', 'upgrade-hook')),
+        false
+      );
+    } finally {
+      if (previous === undefined) delete process.env.ASB_DEVICE_ID;
+      else process.env.ASB_DEVICE_ID = previous;
+    }
+  });
+});
+
+test('distributeHooks: migrated device ownership preserves duplicate removal counts', () => {
+  withTempHomes(({ asbHome }) => {
+    const previous = process.env.ASB_DEVICE_ID;
+    try {
+      simulateAppsInstalled('claude-code');
+      createHookEntry('upgrade-definition');
+      enableHooks(['upgrade-definition']);
+      process.env.ASB_DEVICE_ID = 'server-a';
+      distributeHooks(undefined, ['claude-code']);
+
+      const sharedPath = resolveHookStatePath('claude-code');
+      const devicePaths: string[] = [];
+      for (const device of ['server-a', 'server-b']) {
+        process.env.ASB_DEVICE_ID = device;
+        const deviceDir = path.join(asbHome, 'state', 'hooks', deviceStateId());
+        fs.mkdirSync(deviceDir, { recursive: true });
+        const devicePath = path.join(deviceDir, path.basename(sharedPath));
+        if (devicePaths.length === 0) fs.renameSync(sharedPath, devicePath);
+        else fs.copyFileSync(devicePaths[0], devicePath);
+        devicePaths.push(devicePath);
+      }
+
+      const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+      settings.hooks.PreToolUse.push(
+        JSON.parse(JSON.stringify(settings.hooks.PreToolUse[0])) as unknown
+      );
+      fs.writeFileSync(claudeSettingsPath(), JSON.stringify(settings));
+
+      process.env.ASB_DEVICE_ID = 'server-c';
+      enableHooks([]);
+      distributeHooks(undefined, ['claude-code']);
+
+      const cleaned = readJson(claudeSettingsPath()) as { hooks?: unknown };
+      assert.equal(cleaned.hooks, undefined);
+      assert.equal(fs.existsSync(sharedPath), false);
+      for (const devicePath of devicePaths) assert.equal(fs.existsSync(devicePath), false);
     } finally {
       if (previous === undefined) delete process.env.ASB_DEVICE_ID;
       else process.env.ASB_DEVICE_ID = previous;
@@ -622,7 +709,7 @@ test('distributeHooks: migrates legacy markers, tags, state files, and bundle di
       'library membership alone cannot authorize deletion'
     );
     const newStatePath = resolveHookStatePath('claude-code');
-    assert.ok(fs.existsSync(newStatePath), 'device-scoped state replaces legacy state');
+    assert.ok(fs.existsSync(newStatePath), 'shared state records current ownership');
     assert.equal(fs.existsSync(path.join(stateDir, `${hexName}.json`)), true);
     assert.equal(fs.existsSync(path.join(stateDir, `${hexName}.json.legacy-bundles`)), true);
     assert.equal(fs.existsSync(path.join(stateDir, `${hexName}.json.lock`)), true);
@@ -1454,7 +1541,7 @@ test('distributeHooks: codex bundle hook copies files and rewrites HOOK_DIR port
   });
 });
 
-test('distributeHooks: foreign-home paths survive without local ownership state', () => {
+test('distributeHooks: reclaims known foreign-home paths and preserves unknown hooks', () => {
   withTempHomes(({ asbHome }) => {
     const fakeHome = path.dirname(asbHome);
     withHome(fakeHome, () => {
@@ -1512,22 +1599,17 @@ test('distributeHooks: foreign-home paths survive without local ownership state'
       distributeHooks(undefined, ['claude-code', 'codex'], new Set(['claude-code', 'codex']));
 
       const claudeRaw = fs.readFileSync(claudeSettingsPath(), 'utf-8');
-      assert.ok(claudeRaw.includes(foreignClaude), 'foreign device group is preserved');
+      assert.ok(!claudeRaw.includes(foreignClaude), 'known foreign device group is reclaimed');
       const claudeSettings = readJson(claudeSettingsPath()) as {
         hooks: Record<string, Array<Record<string, unknown>>>;
       };
       assert.deepEqual(
         groupCommands(claudeSettings.hooks.UserPromptSubmit).sort(),
-        [
-          '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
-          '$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh',
-          foreignClaude,
-          'echo mine',
-        ].sort()
+        ['$HOME/agents-home/.claude/hooks/managed/bundle-test/run.sh', 'echo mine'].sort()
       );
 
       const codexRaw = fs.readFileSync(getCodexHooksJsonPath(), 'utf-8');
-      assert.ok(codexRaw.includes(foreignCodex), 'foreign device group is preserved');
+      assert.ok(!codexRaw.includes(foreignCodex), 'known foreign device group is reclaimed');
       const codexContent = readJson(getCodexHooksJsonPath()) as {
         hooks: Record<string, Array<Record<string, unknown>>>;
       };
@@ -1535,8 +1617,6 @@ test('distributeHooks: foreign-home paths survive without local ownership state'
         groupCommands(codexContent.hooks.UserPromptSubmit).sort(),
         [
           '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
-          '$HOME/agents-home/.codex/hooks/managed/bundle-test/run.sh',
-          foreignCodex,
           foreignUnknown,
           'echo mine',
         ].sort()
