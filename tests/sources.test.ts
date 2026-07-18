@@ -132,6 +132,17 @@ test('addLocalSource accepts dotted namespaces without empty segments', () => {
   });
 });
 
+test('configured source namespaces reject path segments before resolution', () => {
+  withTempAsbHome((asbHome) => {
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      '[plugins.sources."../outside"]\nurl = "https://example.invalid/repo.git"\ntype = "clone"\n'
+    );
+
+    assert.throws(() => getSourcesRecord(), /Invalid namespace/);
+  });
+});
+
 test('source config updates preserve a symlinked config carrier', () => {
   withTempAsbHome((asbHome) => {
     const configPath = path.join(asbHome, 'config.toml');
@@ -517,8 +528,8 @@ test('managed clone update rejects mismatched provenance without mutation', () =
   }
 });
 
-test('managed clone removal preserves local history and ignored files', () => {
-  for (const localChange of ['commit', 'ignored'] as const) {
+test('managed clone removal preserves local history and hidden files', () => {
+  for (const localChange of ['commit', 'ignored', 'hidden-index'] as const) {
     withTempAsbHome((asbHome) => {
       const parent = path.join(asbHome, `preserve-${localChange}-fixture`);
       fs.mkdirSync(parent, { recursive: true });
@@ -526,7 +537,10 @@ test('managed clone removal preserves local history and ignored files', () => {
       const namespace = `preserve-${localChange}`;
       addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
       const cloneDir = path.join(getPluginsDir(), namespace);
-      const localFile = path.join(cloneDir, `${localChange}.txt`);
+      const localFile =
+        localChange === 'hidden-index'
+          ? path.join(cloneDir, 'rules', 'v1.md')
+          : path.join(cloneDir, `${localChange}.txt`);
 
       fs.writeFileSync(localFile, `${localChange}\n`);
       if (localChange === 'commit') {
@@ -537,7 +551,14 @@ test('managed clone removal preserves local history and ignored files', () => {
           { cwd: cloneDir, stdio: 'pipe' }
         );
       } else {
-        fs.appendFileSync(path.join(cloneDir, '.git', 'info', 'exclude'), '\nignored.txt\n');
+        if (localChange === 'ignored') {
+          fs.appendFileSync(path.join(cloneDir, '.git', 'info', 'exclude'), '\nignored.txt\n');
+        } else {
+          execFileSync('git', ['update-index', '--assume-unchanged', 'rules/v1.md'], {
+            cwd: cloneDir,
+            stdio: 'pipe',
+          });
+        }
       }
 
       assert.throws(() => removeSource(namespace), /unverified or modified/);
