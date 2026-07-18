@@ -1,7 +1,7 @@
 /**
  * Project distribution manifest I/O and helpers.
  *
- * Manifests are stored at `~/.asb/state/manifests/<device>/<slug>.json`.
+ * Manifests are stored at `<ASB_HOME>/state/manifests/<device>/<slug>.json`.
  * The slug is the project path relative to home with `/` replaced by `--`;
  * projects outside home use an `_abs--` prefix.
  */

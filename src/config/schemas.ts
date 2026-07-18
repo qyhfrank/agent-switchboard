@@ -36,7 +36,7 @@ export const mcpServerSchema = z
   .passthrough(); // Allow unknown fields
 
 /**
- * Schema for MCP configuration file (~/.agent-switchboard/mcp.json)
+ * Schema for the MCP configuration file (<ASB_HOME>/mcp.json)
  */
 export const mcpConfigSchema = z.object({
   mcpServers: z.record(z.string(), mcpServerSchema).default({}),
@@ -391,7 +391,7 @@ export const extensionsSectionSchema = extensionsSectionBaseSchema;
 export const targetSpecSchema = z.object({}).passthrough();
 
 /**
- * Schema for Agent Switchboard configuration file (~/.agent-switchboard/config.toml)
+ * Schema for the Agent Switchboard configuration file (<ASB_HOME>/config.toml)
  */
 export const switchboardConfigSchema = z
   .object({

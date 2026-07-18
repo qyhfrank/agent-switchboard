@@ -10,7 +10,7 @@ export interface SwitchboardConfigLoadResult {
 }
 
 /**
- * Loads the Agent Switchboard configuration from ~/.agent-switchboard/config.toml.
+ * Loads the Agent Switchboard configuration from the resolved user config path.
  * Returns default empty applications list if file doesn't exist.
  */
 export function loadSwitchboardConfig(options?: SwitchboardConfigLoadOptions): SwitchboardConfig {

@@ -83,7 +83,7 @@ Preview without writing:
 asb sync --dry-run
 ```
 
-Library content lives under `~/.asb/` and agent configs are updated in place.
+Library content lives under the resolved ASB home, normally `~/.asb/`, and agent configs are updated in place.
 
 ## Command Reference
 
@@ -116,7 +116,7 @@ Library content lives under `~/.asb/` and agent configs are updated in place.
 
 ### `config.toml`
 
-The central config file at `~/.asb/config.toml` controls target applications, entry-level selections, and plugin sources:
+The central config file at `<ASB_HOME>/config.toml` controls target applications, entry-level selections, and plugin sources:
 
 ```toml
 [applications]
@@ -264,7 +264,7 @@ placement = "prepend"     # or: "append"
 | Mode        | Behavior |
 |:------------|:---------|
 | `exclusive` | ASB writes project-scoped outputs directly and cleans up inactive entries in target directories. |
-| `managed`   | Default. Uses a manifest at `<project>/.asb/state/distribution.json` so cleanup only removes files and directories previously written by ASB. Shared rule files use block merge instead of full replacement. |
+| `managed`   | Default. Uses a device-scoped manifest under `<ASB_HOME>/state/manifests/` so cleanup only removes matching files and directories previously written by this device. Shared rule files use block merge instead of full replacement. |
 | `none`      | Disables all project-scoped writes. Selections can still be edited in `.asb.toml`, but project distribution commands and `asb sync -P <project>` skip output generation. |
 
 Managed-mode collision policy controls what happens when ASB encounters a foreign file or directory at a target path:
@@ -383,7 +383,7 @@ Bundle scripts are copied under the target agent's managed hook root, one direct
 - Claude Code: `~/.claude/hooks/managed/<hook-id>/` or `<project>/.claude/hooks/managed/<hook-id>/`
 - Codex: `~/.codex/hooks/managed/<hook-id>/` or `<project>/.codex/hooks/managed/<hook-id>/`
 
-Distributed configs carry no ASB markers and no machine-absolute paths, so they stay portable across machines sharing the same dotfiles. Ownership of the written hook groups lives in `~/.asb/state/hooks/`; keep that directory intact, it is how sync recognizes and removes its own output.
+Distributed configs carry no ASB markers and no machine-absolute paths, so they stay portable across machines sharing the same dotfiles. Hook ownership lives under `<ASB_HOME>/state/hooks/<device-id>/`; keep it intact so each device can recognize and remove only its own output.
 
 Codex hook sync writes `~/.codex/hooks.json` for global scope or `<project>/.codex/hooks.json` for project scope. ASB emits synchronous command handlers for `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SessionStart`, `SubagentStart`, `SubagentStop`, `UserPromptSubmit`, and `Stop`; unsupported events, asynchronous handlers, and non-command handler types are filtered from Codex output and reported in sync results. Codex uses `[features].hooks` in `~/.codex/config.toml` (enabled by default when absent; legacy `[features].codex_hooks` is accepted for compatibility). Project-scoped hooks require the project to be trusted, and new or changed Codex hooks must be reviewed from `/hooks` in Codex before they run.
 
@@ -530,10 +530,15 @@ For project scope, sync honors `[distribution.project].mode`:
 
 ## Environment
 
-| Variable         | Default                    | Purpose                                      |
-|:-----------------|:---------------------------|:---------------------------------------------|
-| `ASB_HOME`       | `~/.asb`                   | Library, config, and state directory          |
-| `ASB_AGENTS_HOME`| OS user home               | Base path for agent config locations          |
+| Variable          | Default      | Purpose                                      |
+|:------------------|:-------------|:---------------------------------------------|
+| `ASB_HOME`        | `~/.asb`     | Library, config, and state directory         |
+| `ASB_AGENTS_HOME` | OS user home | Base path for agent config locations         |
+| `ASB_DEVICE_ID`   | Hostname     | Stable local identity for ownership state    |
+
+When Mackup synchronizes `ASB_HOME`, set a stable, distinct `ASB_DEVICE_ID` on every server or device. Ownership state is partitioned by that value and the resolved `ASB_AGENTS_HOME`, so one peer cannot use another peer's state as deletion authority. Configuration files remain shared and last-writer-wins: run mutating ASB commands on one peer at a time and let Mackup finish syncing before switching peers.
+
+When `ASB_HOME` is unset, ASB uses an existing `~/.asb`, then an existing legacy `~/.agent-switchboard`, and defaults new installations to `~/.asb`.
 
 ## Development
 

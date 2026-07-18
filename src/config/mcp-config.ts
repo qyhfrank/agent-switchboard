@@ -12,7 +12,7 @@ import { type McpConfig, type McpServer, mcpConfigSchema } from './schemas.js';
 import type { ConfigScope } from './scope.js';
 
 /**
- * Loads the MCP configuration from ~/.agent-switchboard/mcp.json
+ * Loads the MCP configuration from <ASB_HOME>/mcp.json
  * Parses JSONC (JSON with comments) format
  * Returns default empty config if file doesn't exist
  *
@@ -57,7 +57,7 @@ export function loadMcpConfig(): McpConfig {
 }
 
 /**
- * Loads MCP server definitions from both ~/.asb/mcp.json and discovered plugins.
+ * Loads MCP server definitions from <ASB_HOME>/mcp.json and discovered plugins.
  * Plugin-sourced servers use namespaced IDs (e.g. "context7:context7").
  * If a plugin server ID collides with a user-defined server, the user definition wins.
  */
@@ -79,7 +79,7 @@ export function loadMcpConfigWithPlugins(scope?: ConfigScope): McpConfig {
 }
 
 /**
- * Removes legacy `enabled` fields from ~/.agent-switchboard/mcp.json (definition-only file).
+ * Removes legacy `enabled` fields from <ASB_HOME>/mcp.json (definition-only file).
  * Returns true if the file was changed.
  */
 export function stripLegacyEnabledFlagsFromMcpJson(): boolean {

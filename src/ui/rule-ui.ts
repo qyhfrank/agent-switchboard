@@ -1,6 +1,7 @@
 import { confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 
+import { getRulesDir } from '../config/paths.js';
 import type { ConfigScope } from '../config/scope.js';
 import type { RuleSnippet } from '../rules/library.js';
 import { loadRuleRuntimeContext } from '../rules/runtime.js';
@@ -29,7 +30,7 @@ export async function showRuleSelector(
     console.log(chalk.yellow('⚠ No rule snippets found.'));
     console.log();
     console.log('Place Markdown files in:');
-    console.log(chalk.dim('  ~/.agent-switchboard/rules/'));
+    console.log(chalk.dim(`  ${getRulesDir()}`));
     console.log();
     console.log('Each file may include YAML frontmatter, e.g.');
     console.log(
