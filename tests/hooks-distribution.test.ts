@@ -390,6 +390,81 @@ test('distributeHooks: definition-only hook duplicates once after state loss, th
   });
 });
 
+test('distributeHooks: v0.4.31 root state avoids duplicate Claude and Codex groups', () => {
+  withTempHomes(({ asbHome }) => {
+    simulateAppsInstalled('claude-code', 'codex');
+    createHookEntry('upgrade-hook');
+    enableHooks(['upgrade-hook'], ['claude-code', 'codex']);
+    distributeHooks(undefined, ['claude-code', 'codex']);
+
+    const stateDir = path.join(asbHome, 'state', 'hooks');
+    for (const target of ['claude-code', 'codex'] as const) {
+      fs.renameSync(resolveHookStatePath(target), path.join(stateDir, `${target}.json`));
+    }
+
+    distributeHooks(undefined, ['claude-code', 'codex']);
+
+    const claude = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    const codex = readJson(getCodexHooksJsonPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(claude.hooks.PreToolUse.length, 1);
+    assert.equal(codex.hooks.PreToolUse.length, 1);
+    for (const target of ['claude-code', 'codex'] as const) {
+      assert.equal(fs.existsSync(path.join(stateDir, `${target}.json`)), true);
+      assert.equal(fs.existsSync(resolveHookStatePath(target)), true);
+    }
+
+    const previous = process.env.ASB_DEVICE_ID;
+    try {
+      process.env.ASB_DEVICE_ID = 'peer-without-ownership';
+      enableHooks([], ['claude-code', 'codex']);
+      distributeHooks(undefined, ['claude-code', 'codex']);
+      const preserved = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+      assert.equal(preserved.hooks.PreToolUse.length, 1);
+    } finally {
+      if (previous === undefined) delete process.env.ASB_DEVICE_ID;
+      else process.env.ASB_DEVICE_ID = previous;
+    }
+  });
+});
+
+test('distributeHooks: cleanup failure retains bundle ownership for retry', () => {
+  for (const target of ['claude-code', 'codex'] as const) {
+    withTempHomes(() => {
+      simulateAppsInstalled(target);
+      const hookId = `${target}-retry-bundle`;
+      createBundleHook(hookId);
+      enableHooks([hookId], [target]);
+      distributeHooks(undefined, [target], new Set([target]));
+      const root = target === 'claude-code' ? getClaudeDir() : getCodexDir();
+      const bundleDir = path.join(root, 'hooks', 'managed', hookId);
+      enableHooks([], [target]);
+
+      const originalRmdirSync = fs.rmdirSync;
+      try {
+        fs.rmdirSync = ((candidate: fs.PathLike) => {
+          if (path.resolve(String(candidate)) === bundleDir)
+            throw new Error('mock cleanup failure');
+          return originalRmdirSync(candidate);
+        }) as typeof fs.rmdirSync;
+        const outcome = distributeHooks(undefined, [target], new Set([target]));
+        assert.ok(
+          outcome.results.some(
+            (result) => result.status === 'error' && result.error?.includes('mock cleanup failure')
+          )
+        );
+      } finally {
+        fs.rmdirSync = originalRmdirSync;
+      }
+
+      const state = readJson(resolveHookStatePath(target)) as { bundles: string[] };
+      assert.deepEqual(state.bundles, [hookId]);
+      distributeHooks(undefined, [target], new Set([target]));
+      assert.equal(fs.existsSync(bundleDir), false);
+      assert.equal(fs.existsSync(resolveHookStatePath(target)), false);
+    });
+  }
+});
+
 test('distributeHooks: user group identical to a managed hook is never claimed', () => {
   withTempHomes(() => {
     simulateAppsInstalled('claude-code');
@@ -535,7 +610,7 @@ test('distributeHooks: migrates legacy markers, tags, state files, and bundle di
       hooks: Record<string, Array<Record<string, unknown>>>;
     };
     const commands = groupCommands(settings.hooks.PreToolUse);
-    assert.deepEqual(commands.sort(), ['echo mine', 'echo test']);
+    assert.deepEqual(commands.sort(), ['echo from-state', 'echo mine', 'echo test']);
     assert.equal(settings.theme, 'dark');
 
     assert.equal(fs.existsSync(path.join(legacyAsbDir, 'old-thing')), false);
@@ -546,7 +621,10 @@ test('distributeHooks: migrates legacy markers, tags, state files, and bundle di
     );
     const newStatePath = resolveHookStatePath('claude-code');
     assert.ok(fs.existsSync(newStatePath), 'device-scoped state replaces legacy state');
-    assert.deepEqual(fs.readdirSync(stateDir), [path.basename(path.dirname(newStatePath))]);
+    assert.equal(fs.existsSync(path.join(stateDir, `${hexName}.json`)), true);
+    assert.equal(fs.existsSync(path.join(stateDir, `${hexName}.json.legacy-bundles`)), true);
+    assert.equal(fs.existsSync(path.join(stateDir, `${hexName}.json.lock`)), true);
+    assert.equal(fs.existsSync(path.join(stateDir, 'locks')), true);
 
     const second = distributeHooks(undefined, ['claude-code']);
     assert.ok(
@@ -806,15 +884,15 @@ test('consumeLegacyManagedState: project scope never consumes global legacy stat
 
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'asb-proj-'));
     try {
-      const legacy = consumeLegacyManagedState('claude-code', { project: projectRoot }, false);
+      const legacy = consumeLegacyManagedState('claude-code', { project: projectRoot });
       assert.equal(legacy.found, false, 'project scope sees no global legacy state');
       assert.deepEqual(legacy.groups, []);
-      legacy.cleanup();
       assert.ok(fs.existsSync(globalLegacy), 'global legacy state untouched by project scope');
 
-      const globalScope = consumeLegacyManagedState('claude-code', undefined, false);
+      const globalScope = consumeLegacyManagedState('claude-code');
       assert.equal(globalScope.found, true, 'global scope still consumes it');
       assert.equal(globalScope.groups.length, 1);
+      assert.ok(fs.existsSync(globalLegacy), 'ambiguous shared state remains read-only evidence');
     } finally {
       fs.rmSync(projectRoot, { recursive: true, force: true });
     }
