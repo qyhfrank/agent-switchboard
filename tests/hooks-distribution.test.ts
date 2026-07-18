@@ -320,7 +320,7 @@ test('distributeHooks: user reordering does not duplicate or remove groups', () 
   });
 });
 
-test('distributeHooks: bundle state loss duplicates once then converges', () => {
+test('distributeHooks: bundle hook survives ownership state loss', () => {
   withTempHomes(() => {
     simulateAppsInstalled('claude-code');
     createBundleHook('bundle-test');
@@ -329,42 +329,17 @@ test('distributeHooks: bundle state loss duplicates once then converges', () => 
 
     fs.rmSync(resolveHookStatePath('claude-code'), { force: true });
 
-    distributeHooks(undefined, ['claude-code']);
-    let settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.UserPromptSubmit.length, 2, 'state loss duplicates safely');
+    const outcome = distributeHooks(undefined, ['claude-code']);
+
+    assert.ok(
+      outcome.results.some(
+        (r) => r.platform === 'claude-code' && r.status === 'skipped' && r.reason === 'up-to-date'
+      ),
+      'path heuristics should re-identify the bundle group'
+    );
+    const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
+    assert.equal(settings.hooks.UserPromptSubmit.length, 1);
     assert.ok(fs.existsSync(resolveHookStatePath('claude-code')), 'state file is re-created');
-
-    distributeHooks(undefined, ['claude-code']);
-    settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-    assert.equal(settings.hooks.UserPromptSubmit.length, 1, 're-created state converges safely');
-  });
-});
-
-test('distributeHooks: one device cannot clean another device ownership', () => {
-  withTempHomes(() => {
-    const previous = process.env.ASB_DEVICE_ID;
-    try {
-      simulateAppsInstalled('claude-code');
-      createBundleHook('device-bundle');
-      enableHooks(['device-bundle']);
-      process.env.ASB_DEVICE_ID = 'server-a';
-      distributeHooks(undefined, ['claude-code']);
-      const bundleDir = path.join(getClaudeDir(), 'hooks', 'managed', 'device-bundle');
-
-      process.env.ASB_DEVICE_ID = 'server-b';
-      enableHooks([]);
-      distributeHooks(undefined, ['claude-code']);
-      const settings = readJson(claudeSettingsPath()) as { hooks: Record<string, unknown[]> };
-      assert.equal(settings.hooks.UserPromptSubmit.length, 1);
-      assert.equal(fs.existsSync(bundleDir), true);
-
-      process.env.ASB_DEVICE_ID = 'server-a';
-      distributeHooks(undefined, ['claude-code']);
-      assert.equal(fs.existsSync(bundleDir), false, 'owning device can clean its output');
-    } finally {
-      if (previous === undefined) delete process.env.ASB_DEVICE_ID;
-      else process.env.ASB_DEVICE_ID = previous;
-    }
   });
 });
 

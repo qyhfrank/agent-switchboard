@@ -239,12 +239,13 @@ export function stripAsbOwnedClaudeGroups(
 ): Record<string, unknown[]> {
   const ownState = loadHookState('claude-code', scope);
   const legacy = consumeLegacyManagedState('claude-code', scope, true);
+  const allEntries = loadHookLibrary(scope);
   const managedParent = managedBundleParentDir(scope);
   const legacyParent = legacyAsbParentDir(scope);
   const removal = removeOwnedHookGroups(hooks, {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
-    knownManagedIds: new Set(ownState.bundles),
+    knownManagedIds: new Set([...allEntries.map((e) => e.id), ...ownState.bundles]),
     stateGroups: [ownState.events, ...legacy.groups],
   });
   return { ...removal.hooks };
@@ -373,7 +374,7 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
   const removal = removeOwnedHookGroups(existingHooks, {
     legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
     managedRoots: [managedParent, preferHomeVar(managedParent)],
-    knownManagedIds: new Set(ownState.bundles),
+    knownManagedIds: new Set([...ctx.allEntries.map((e) => e.id), ...ownState.bundles]),
     stateGroups: [ownState.events, ...legacy.groups],
   });
 
@@ -399,11 +400,16 @@ function distributeClaude(ctx: TargetDistributeContext): HookDistributionOutcome
       ...cleanManagedBundleDirs(
         cleanupOpts,
         new Set(bundleEntries.map((e) => e.id)),
-        new Set(ownState.bundles)
+        // Library-known ids count as deletable orphans too, so bundle dirs
+        // survive ownership-state loss without becoming permanent litter.
+        new Set([...ownState.bundles, ...ctx.allEntries.map((e) => e.id)])
       )
     );
     results.push(
-      ...cleanLegacyAsbDir({ ...cleanupOpts, parentDir: legacyParent }, removal.removedLegacyAsbIds)
+      ...cleanLegacyAsbDir(
+        { ...cleanupOpts, parentDir: legacyParent },
+        new Set([...ctx.allEntries.map((e) => e.id), ...removal.removedLegacyAsbIds])
+      )
     );
     const containRoots = [resolvedHomeDir()];
     for (const root of [claudeRoot(ctx.scope), ctx.scope?.project?.trim()]) {
@@ -510,6 +516,7 @@ function distributeCodex(ctx: TargetDistributeContext): HookDistributionOutcome[
   const outcome = distributeCodexHooks({
     scope: ctx.scope,
     selected,
+    allEntries: ctx.allEntries,
     dryRun: ctx.dryRun,
     projectMode: ctx.projectMode,
   });
