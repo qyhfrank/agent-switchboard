@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const testsDir = new URL('../tests/', import.meta.url);
+const testsDir = new URL('./', import.meta.url);
 const files = readdirSync(testsDir)
   .filter((name) => name.endsWith('.test.ts'))
   .sort()
