@@ -23,6 +23,23 @@ test('loadConfigLayers returns empty configs when files are missing', () => {
   });
 });
 
+test('getProfileConfigPath rejects traversal and the user config carrier', () => {
+  withTempAsbHome((asbHome) => {
+    for (const name of [
+      '.',
+      '..',
+      '../outside',
+      'nested/name',
+      'nested\\name',
+      'config',
+      'CONFIG',
+    ]) {
+      assert.throws(() => getProfileConfigPath(name), /Profile name/);
+    }
+    assert.equal(getProfileConfigPath('team.prod'), path.join(asbHome, 'team.prod.toml'));
+  });
+});
+
 test('loadConfigLayers reads user, profile, and project configs when present', () => {
   withTempAsbHome((asbHome) => {
     const userPath = path.join(asbHome, 'config.toml');

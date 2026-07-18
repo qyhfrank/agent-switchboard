@@ -1,6 +1,7 @@
 /**
  * Path utilities for Agent Switchboard configuration files
- * Resolves config directory as: ASB_HOME > ~/.asb > ~/.agent-switchboard > ~/.asb (default)
+ * Resolves the config directory from ASB_HOME, then existing ~/.asb or legacy
+ * ~/.agent-switchboard directories, defaulting to ~/.asb.
  */
 
 import fs from 'node:fs';
@@ -37,7 +38,7 @@ export function getConfigDir(): string {
  * Returns the absolute path to the MCP config file (mcp.json)
  * This file stores all MCP server configurations with enabled flags
  *
- * @returns {string} Absolute path to ~/.agent-switchboard/mcp.json
+ * @returns {string} Absolute path to <ASB_HOME>/mcp.json (default: ~/.asb/mcp.json)
  */
 export function getMcpConfigPath(): string {
   return path.join(getConfigDir(), 'mcp.json');
@@ -55,14 +56,26 @@ export function getSwitchboardConfigPath(): string {
 
 /**
  * Returns the absolute path to a profile-specific configuration file located under ASB_HOME.
- * Example: ~/.agent-switchboard/team.toml
+ * Example: ~/.asb/team.toml
  */
 export function getProfileConfigPath(profileName: string): string {
   const trimmed = profileName.trim();
-  if (trimmed.length === 0) {
-    throw new Error('Profile name must be a non-empty string.');
+  if (
+    !trimmed ||
+    trimmed === '.' ||
+    trimmed === '..' ||
+    trimmed.includes('\0') ||
+    trimmed.includes('/') ||
+    trimmed.includes('\\')
+  ) {
+    throw new Error('Profile name must be one safe path segment.');
   }
-  return path.join(getConfigDir(), `${trimmed}.toml`);
+  const profilePath = path.join(getConfigDir(), `${trimmed}.toml`);
+  const userPath = getSwitchboardConfigPath();
+  if (trimmed.toLowerCase() === 'config' || path.resolve(profilePath) === path.resolve(userPath)) {
+    throw new Error('Profile name must not alias the user configuration file.');
+  }
+  return profilePath;
 }
 
 /**
