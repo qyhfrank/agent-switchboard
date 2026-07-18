@@ -209,6 +209,31 @@ export function removeOwnedHookGroups(
   return { hooks, removed: removedGroups.length > 0, v0428Commands, removedLegacyAsbIds };
 }
 
+/** Omit desired groups already proven by matching shared predecessor evidence. */
+export function filterRecognizedDesiredGroups(
+  existing: Record<string, unknown[]>,
+  desired: Record<string, unknown[]>,
+  evidence: ReadonlyArray<Record<string, unknown[]>>
+): Record<string, unknown[]> {
+  const result: Record<string, unknown[]> = Object.create(null);
+  for (const [event, groups] of Object.entries(desired)) {
+    const remaining = [...(existing[event] ?? [])];
+    const proofs = evidence.flatMap((events) => events[event] ?? []);
+    for (const group of groups) {
+      const existingIndex = remaining.findIndex((value) => isDeepStrictEqual(value, group));
+      const proofIndex = proofs.findIndex((value) => isDeepStrictEqual(value, group));
+      if (existingIndex >= 0 && proofIndex >= 0) {
+        remaining.splice(existingIndex, 1);
+        proofs.splice(proofIndex, 1);
+      } else {
+        if (!result[event]) result[event] = [];
+        result[event].push(group);
+      }
+    }
+  }
+  return result;
+}
+
 /** Extract the v0.4.28 hash-directory paths referenced by removed commands. */
 export function collectV0428BundleDirs(commands: readonly string[]): Set<string> {
   const dirs = new Set<string>();
