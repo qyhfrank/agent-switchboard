@@ -284,7 +284,7 @@ test('bootstrap sync writes skills through a symlinked skill parent', () => {
   });
 });
 
-test('managed mode drift cleanup unlinks symlinked skill directory without following it', () => {
+test('managed mode cleanup preserves a symlinked skill directory', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('claude-code');
 
@@ -320,14 +320,14 @@ test('managed mode drift cleanup unlinks symlinked skill directory without follo
       (entry) => entry.platform === 'claude-code' && entry.entryId === 'stale-skill'
     );
 
-    assert.equal(fs.existsSync(targetDir), false);
+    assert.equal(fs.lstatSync(targetDir).isSymbolicLink(), true);
     assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
-    assert.equal(result?.status, 'deleted');
-    assert.ok(!manifest.sections.skills?.['stale-skill::claude-code']);
+    assert.equal(result?.status, 'conflict');
+    assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
   });
 });
 
-test('managed mode drift cleanup deletes owned entries through a symlinked ancestor', () => {
+test('managed mode cleanup preserves entries through a symlinked ancestor', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('claude-code');
 
@@ -363,10 +363,11 @@ test('managed mode drift cleanup deletes owned entries through a symlinked ances
     const result = outcome.results.find(
       (entry) => entry.platform === 'claude-code' && entry.entryId === 'stale-skill'
     );
-    assert.equal(result?.status, 'deleted');
-    assert.equal(fs.existsSync(outsideStaleDir), false);
+    assert.equal(result?.status, 'conflict');
+    assert.equal(fs.existsSync(outsideStaleDir), true);
+    assert.equal(fs.readFileSync(outsideFile, 'utf-8'), 'keep me\n');
     assert.equal(fs.lstatSync(skillsLink).isSymbolicLink(), true);
-    assert.ok(!manifest.sections.skills?.['stale-skill::claude-code']);
+    assert.ok(manifest.sections.skills?.['stale-skill::claude-code']);
   });
 });
 
@@ -482,7 +483,7 @@ test('exclusive bundle cleanup deletes orphans through a symlinked agents root',
   });
 });
 
-test('managed command sync reports error when collision policy is error', () => {
+test('managed command bootstrap preserves a foreign file', () => {
   withTempHomes(({ asbHome, agentsHome }) => {
     simulateAppsInstalled('claude-code');
 
@@ -503,12 +504,6 @@ test('managed command sync reports error when collision policy is error', () => 
     });
 
     const { manifest } = loadManifest(projectRoot);
-    recordLibraryEntry(manifest, 'commands', 'existing-managed', {
-      relativePath: '.claude/commands/existing-managed.md',
-      targetId: 'claude-code',
-      hash: 'existing',
-      updatedAt: '',
-    });
     const outcome = distributeCommands({ project: projectRoot }, ['claude-code'], undefined, {
       manifest,
       projectMode: 'managed',
@@ -519,6 +514,87 @@ test('managed command sync reports error when collision policy is error', () => 
     assert.ok(result);
     assert.equal(result?.status, 'error');
     assert.match(result?.error ?? '', /foreign file exists/);
+    assert.equal(
+      fs.readFileSync(path.join(projectRoot, '.claude', 'commands', 'demo.md'), 'utf-8'),
+      'foreign command\n'
+    );
+  });
+});
+
+test('managed command cleanup preserves modified owned content', () => {
+  withTempHomes(({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    fs.mkdirSync(path.join(asbHome, 'commands'), { recursive: true });
+    fs.writeFileSync(
+      path.join(asbHome, 'commands', 'demo.md'),
+      '---\ndescription: demo\n---\n/demo\n'
+    );
+    const projectRoot = path.join(agentsHome, 'modified-command-project');
+    updateLibraryStateSection('commands', (state) => ({ ...state, enabled: ['demo'] }), {
+      project: projectRoot,
+    });
+    const { manifest } = loadManifest(projectRoot);
+    distributeCommands({ project: projectRoot }, ['claude-code'], undefined, {
+      manifest,
+      projectMode: 'managed',
+    });
+    const target = path.join(projectRoot, '.claude', 'commands', 'demo.md');
+    const generated = fs.readFileSync(target, 'utf-8');
+    fs.writeFileSync(target, 'user edit\n');
+    updateLibraryStateSection('commands', (state) => ({ ...state, enabled: [] }), {
+      project: projectRoot,
+    });
+
+    const outcome = distributeCommands({ project: projectRoot }, ['claude-code'], undefined, {
+      manifest,
+      projectMode: 'managed',
+    });
+    const result = outcome.results.find((entry) => entry.entryId === 'demo');
+
+    assert.equal(fs.readFileSync(target, 'utf-8'), 'user edit\n');
+    assert.equal(result?.status, 'conflict');
+    assert.ok(manifest.sections.commands?.['demo::claude-code']);
+
+    fs.writeFileSync(target, generated);
+    distributeCommands({ project: projectRoot }, ['claude-code'], undefined, {
+      manifest,
+      projectMode: 'managed',
+    });
+    assert.equal(fs.existsSync(target), false, 'unchanged owned file is removed');
+  });
+});
+
+test('managed skill cleanup preserves modified owned content', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    createSkill('modified-skill');
+    const projectRoot = path.join(agentsHome, 'modified-skill-project');
+    updateLibraryStateSection('skills', (state) => ({ ...state, enabled: ['modified-skill'] }), {
+      project: projectRoot,
+    });
+    const { manifest } = loadManifest(projectRoot);
+    distributeSkills({ project: projectRoot }, { manifest, projectMode: 'managed' });
+    const targetDir = path.join(projectRoot, '.claude', 'skills', 'modified-skill');
+    const targetFile = path.join(targetDir, 'SKILL.md');
+    const generated = fs.readFileSync(targetFile, 'utf-8');
+    fs.writeFileSync(targetFile, 'user edit\n');
+    updateLibraryStateSection('skills', (state) => ({ ...state, enabled: [] }), {
+      project: projectRoot,
+    });
+
+    const outcome = distributeSkills(
+      { project: projectRoot },
+      { manifest, projectMode: 'managed' }
+    );
+    const result = outcome.results.find((entry) => entry.entryId === 'modified-skill');
+
+    assert.equal(fs.readFileSync(targetFile, 'utf-8'), 'user edit\n');
+    assert.equal(result?.status, 'conflict');
+    assert.ok(manifest.sections.skills?.['modified-skill::claude-code']);
+
+    fs.writeFileSync(targetFile, generated);
+    distributeSkills({ project: projectRoot }, { manifest, projectMode: 'managed' });
+    assert.equal(fs.existsSync(targetDir), false, 'unchanged owned directory is removed');
   });
 });
 
