@@ -120,6 +120,18 @@ test('addLocalSource creates local source and getSourcesRecord returns it', () =
   });
 });
 
+test('addLocalSource accepts dotted namespaces without empty segments', () => {
+  withTempAsbHome((asbHome) => {
+    const libDir = path.join(asbHome, 'dotted-lib');
+    fs.mkdirSync(path.join(libDir, 'rules'), { recursive: true });
+
+    addLocalSource('team.tools', libDir);
+
+    assert.equal(getSourcesRecord()['team.tools'], libDir);
+    assert.throws(() => addLocalSource('team..tools', libDir), /Invalid namespace/);
+  });
+});
+
 test('source config updates preserve a symlinked config carrier', () => {
   withTempAsbHome((asbHome) => {
     const configPath = path.join(asbHome, 'config.toml');
@@ -471,6 +483,68 @@ test('removeSource preserves a modified managed clone', () => {
     assert.equal(hasSource('modified-clone'), true);
     assert.equal(fs.readFileSync(userFile, 'utf-8'), 'keep me\n');
   });
+});
+
+test('managed clone update rejects mismatched provenance without mutation', () => {
+  for (const mismatch of ['marker', 'origin', 'ref'] as const) {
+    withTempAsbHome((asbHome) => {
+      const parent = path.join(asbHome, `provenance-${mismatch}-fixture`);
+      fs.mkdirSync(parent, { recursive: true });
+      const { bareRepo } = createBareRemote(parent);
+      const namespace = `guarded-${mismatch}`;
+      addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
+      const cloneDir = path.join(getPluginsDir(), namespace);
+      const markerPath = path.join(cloneDir, '.git', 'asb-source.json');
+      const marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8')) as Record<string, unknown>;
+      if (mismatch === 'origin') {
+        execFileSync('git', ['remote', 'set-url', 'origin', path.join(parent, 'foreign.git')], {
+          cwd: cloneDir,
+          stdio: 'pipe',
+        });
+      } else {
+        const changed =
+          mismatch === 'marker' ? { ...marker, namespace: 'foreign' } : { ...marker, ref: 'other' };
+        fs.writeFileSync(markerPath, `${JSON.stringify(changed)}\n`);
+      }
+
+      const [result] = updateRemoteSources();
+
+      assert.equal(result?.status, 'error');
+      assert.match(result?.error ?? '', /unverified or modified/);
+      assert.equal(fs.existsSync(cloneDir), true);
+      assert.equal(hasSource(namespace), true);
+    });
+  }
+});
+
+test('managed clone removal preserves local history and ignored files', () => {
+  for (const localChange of ['commit', 'ignored'] as const) {
+    withTempAsbHome((asbHome) => {
+      const parent = path.join(asbHome, `preserve-${localChange}-fixture`);
+      fs.mkdirSync(parent, { recursive: true });
+      const { bareRepo } = createBareRemote(parent);
+      const namespace = `preserve-${localChange}`;
+      addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
+      const cloneDir = path.join(getPluginsDir(), namespace);
+      const localFile = path.join(cloneDir, `${localChange}.txt`);
+
+      fs.writeFileSync(localFile, `${localChange}\n`);
+      if (localChange === 'commit') {
+        execFileSync('git', ['add', '.'], { cwd: cloneDir, stdio: 'pipe' });
+        execFileSync(
+          'git',
+          ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'local'],
+          { cwd: cloneDir, stdio: 'pipe' }
+        );
+      } else {
+        fs.appendFileSync(path.join(cloneDir, '.git', 'info', 'exclude'), '\nignored.txt\n');
+      }
+
+      assert.throws(() => removeSource(namespace), /unverified or modified/);
+      assert.equal(fs.readFileSync(localFile, 'utf-8'), `${localChange}\n`);
+      assert.equal(hasSource(namespace), true);
+    });
+  }
 });
 
 test('updateRemoteSources pulls latest changes', () => {
