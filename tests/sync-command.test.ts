@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import {
   getClaudeJsonPath,
   getCodexDir,
+  getMarketplacePluginCacheDir,
   getMcpConfigPath,
   getProfileConfigPath,
 } from '../src/config/paths.js';
@@ -47,6 +48,8 @@ async function withTempHomesAsync<T>(
 
   const previousAsbHome = setEnv('ASB_HOME', asbHome);
   const previousAgentsHome = setEnv('ASB_AGENTS_HOME', agentsHome);
+  const previousCacheHome = setEnv('ASB_CACHE_HOME', path.join(root, 'asb-cache'));
+  const previousXdgCacheHome = setEnv('XDG_CACHE_HOME', undefined);
 
   try {
     clearPluginIndexCache();
@@ -61,6 +64,8 @@ async function withTempHomesAsync<T>(
     resetAgentSyncCache();
     setEnv('ASB_HOME', previousAsbHome);
     setEnv('ASB_AGENTS_HOME', previousAgentsHome);
+    setEnv('ASB_CACHE_HOME', previousCacheHome);
+    setEnv('XDG_CACHE_HOME', previousXdgCacheHome);
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
@@ -557,7 +562,7 @@ test('runSyncCommand dry-run keeps source checkouts and marketplace cache unchan
 
     assert.equal(result, false);
     assert.equal(fs.existsSync(path.join(catalogCheckout, 'REMOTE-CHANGE')), false);
-    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(getMarketplacePluginCacheDir()), false);
   });
 });
 
@@ -1061,7 +1066,7 @@ test('Claude native distribution leaves external marketplace entries unmateriali
       ['plugin', 'install', '--scope', 'user', 'remote-native@claude-code-external'],
     ]);
     assert.equal(fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache')), false);
-    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(getMarketplacePluginCacheDir()), false);
   });
 });
 
@@ -1203,7 +1208,7 @@ test('Codex native distribution leaves external marketplace entries unmaterializ
     ]);
     assert.equal(fs.existsSync(path.join(asbHome, 'plugins', '.plugin-cache')), false);
     assert.equal(fs.existsSync(path.join(asbHome, 'state', 'native-plugins')), false);
-    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(getMarketplacePluginCacheDir()), false);
   });
 });
 
