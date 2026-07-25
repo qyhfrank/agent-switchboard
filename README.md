@@ -452,9 +452,9 @@ Source storage, marketplace inventory, and external entry materialization have s
 
 The cache is machine-local. Its root resolves from `ASB_CACHE_HOME`, then `XDG_CACHE_HOME/asb`, then `~/.cache/asb`, and holds one flat directory per managed source namespace plus the reserved `.entries` subtree. Keeping it outside `ASB_HOME` means dotfile synchronization never carries Git checkouts between machines: each device clones its own copy, and deleting the cache is safe because the next `asb sync --update` reconstructs it.
 
-Ownership decides placement. A local path stays where you put it, and a `type = "subtree"` source stays under `~/.asb/plugins/` because its files are committed into your library. Only ASB-created clones live in the cache, so a string source value is treated as a managed clone only when it is a transport URL (`https://`, `git@`, `ssh://`, `git://`, `file://`); any other string is a local path you own.
+Ownership decides placement. A local path stays where you put it, and a `type = "subtree"` source stays under `~/.asb/plugins/` because its files are committed into your library. Only ASB-created clones live in the cache, so a string source value is treated as a managed clone only when it is a transport URL (`https://`, `http://`, `git@`, `ssh://`, `git://`, `file://`); any other string is a local path you own.
 
-`asb sync --update` migrates an existing managed checkout from `~/.asb/plugins/<source>/` into the cache after verifying ASB created it and left it unmodified. A checkout carrying local changes, or one that fails verification, is preserved in place and reported as an error instead of being moved or deleted. While both locations hold the same namespace, commands stop and ask you to remove the copy you no longer need. Reads resolve from either location, so a source migrated by a newer ASB stays readable to an older client only until that migration runs.
+`asb sync --update` migrates an existing managed checkout from `~/.asb/plugins/<source>/` into the cache after verifying ASB created it and left it unmodified. A checkout carrying local changes, or one that fails verification, is preserved in place and reported as an error instead of being moved or deleted. While both locations hold the same namespace, commands stop and ask you to remove the copy you no longer need. After migration, an ASB version without cache support treats the legacy path as missing and clones the source back into `~/.asb/plugins/<source>/`; a cache-aware ASB then reports the two locations as a conflict. Use only cache-aware ASB versions with shared configuration after migration.
 
 External entries under `<ASB_HOME>/state/marketplace-plugins/` are compatibility cache state. After a replacement materializes and verifies under `.entries`, ASB removes only the matching verified predecessor; invalid entries and entries whose replacement fails remain untouched.
 
@@ -544,7 +544,7 @@ For project scope, sync honors `[distribution.project].mode`:
 | `ASB_HOME`        | `~/.asb`     | Library, config, and state directory         |
 | `ASB_AGENTS_HOME` | OS user home | Base path for agent config locations         |
 | `ASB_DEVICE_ID`   | Hostname     | Stable local identity for project manifests  |
-| `ASB_CACHE_HOME`  | `~/.cache/asb` | Machine-local managed source and entry cache; falls back to `XDG_CACHE_HOME/asb` |
+| `ASB_CACHE_HOME`  | `$XDG_CACHE_HOME/asb`, otherwise `~/.cache/asb` | Machine-local managed source and entry cache |
 
 When Mackup synchronizes `ASB_HOME`, set a stable, distinct `ASB_DEVICE_ID` on every server or device. Leave the cache out of that synchronization: it is machine-local by design, and pointing two devices at one shared cache root makes same-named sources from different repositories collide. Managed project manifests are partitioned by that value and the resolved `ASB_AGENTS_HOME`; hook ownership is shared so any peer can reconcile ASB-managed hook groups. Configuration files remain last-writer-wins: run mutating ASB commands on one peer at a time and let Mackup finish syncing before switching peers.
 
