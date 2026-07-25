@@ -149,12 +149,28 @@ export function getCacheDir(): string {
 }
 
 /**
+ * Returns the cache root only when ASB owns the directory it names.
+ * ASB creates, replaces, and recursively deletes whole subtrees under this
+ * root, so a symbolic link at the root itself would redirect every one of
+ * those writes outside the tree ASB owns. Ancestors above the root belong to
+ * the platform or the user, so a symlinked ancestor stays acceptable.
+ */
+function getOwnedCacheDir(): string {
+  const cacheDir = getCacheDir();
+  const resolved = path.resolve(cacheDir);
+  if (fs.lstatSync(resolved, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`ASB cache root contains a symbolic link: ${resolved}`);
+  }
+  return cacheDir;
+}
+
+/**
  * Returns the cache checkout directory for an ASB-managed source.
  * Managed sources are flat direct children of the cache root; dot-prefixed
  * names stay reserved for internal cache state.
  */
 export function getManagedSourceDir(namespace: string): string {
-  return path.join(getCacheDir(), namespace);
+  return path.join(getOwnedCacheDir(), namespace);
 }
 
 /**
@@ -163,7 +179,7 @@ export function getManagedSourceDir(namespace: string): string {
  * managed source namespace.
  */
 export function getMarketplacePluginCacheDir(): string {
-  return path.join(getCacheDir(), '.entries');
+  return path.join(getOwnedCacheDir(), '.entries');
 }
 
 /**

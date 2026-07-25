@@ -3,7 +3,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getMarketplacePluginCacheDir } from '../config/paths.js';
+import {
+  getConfigDir,
+  getManagedSourceDir,
+  getMarketplacePluginCacheDir,
+  getPluginsDir,
+} from '../config/paths.js';
 import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from './git-transport.js';
 
 export interface MarketplaceEntryCacheRequest {
@@ -139,20 +144,25 @@ function canonicalPath(value: string): string {
   }
 }
 
-function sourceCachePath(sourceName: string, marketplacePath: string): string {
+function sourceCachePath(
+  sourceName: string,
+  marketplacePath: string,
+  cacheRoot = configuredCacheRoot()
+): string {
   const normalized = sourceName.trim();
   const ownerIdentity = digest(
     JSON.stringify({ sourceName: normalized, marketplacePath: canonicalPath(marketplacePath) })
   );
-  return path.join(
-    configuredCacheRoot(),
-    `${safeSegment(normalized)}-${ownerIdentity.slice(0, 10)}`
-  );
+  return path.join(cacheRoot, `${safeSegment(normalized)}-${ownerIdentity.slice(0, 10)}`);
 }
 
-function entryCachePath(request: MarketplaceEntryCacheRequest, identity: string): string {
+function entryCachePath(
+  request: MarketplaceEntryCacheRequest,
+  identity: string,
+  cacheRoot = configuredCacheRoot()
+): string {
   return path.join(
-    sourceCachePath(request.sourceName, request.marketplacePath),
+    sourceCachePath(request.sourceName, request.marketplacePath, cacheRoot),
     `${safeSegment(request.pluginName)}-${identity.slice(0, 16)}`
   );
 }
@@ -176,23 +186,18 @@ function assertNoCacheSymlinks(root: string, target: string): void {
   }
 }
 
-function assertNotSymlink(candidate: string): void {
-  const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
-  if (stat?.isSymbolicLink()) {
-    throw new Error(`Marketplace cache root contains a symbolic link: ${candidate}`);
-  }
-}
-
 /**
- * ASB owns the cache root and the cache home holding it, so a symbolic link at
+ * ASB owns the entry root and the cache home holding it, so a symbolic link at
  * either one would redirect every cache write outside the tree ASB may replace.
- * A temporary cache root lives under the OS temp directory, whose own ancestors
- * are outside ASB's control and stay unchecked.
+ * The cache home is checked by the shared ownership rule every managed path
+ * resolves through; a temporary root lives under the OS temp directory, whose
+ * own ancestors are outside ASB's control and stay unchecked.
  */
 function safeCacheRoot(create: boolean): string {
   const cacheRoot = path.resolve(configuredCacheRoot());
-  assertNotSymlink(cacheRoot);
-  if (!temporaryCacheRoot.getStore()) assertNotSymlink(path.dirname(cacheRoot));
+  if (fs.lstatSync(cacheRoot, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`Marketplace cache root contains a symbolic link: ${cacheRoot}`);
+  }
   if (create) fs.mkdirSync(cacheRoot, { recursive: true });
   return cacheRoot;
 }
@@ -283,7 +288,8 @@ function readMetadata(entryPath: string): MarketplaceEntryCacheMetadata | null {
 function cachedMaterialization(
   request: MarketplaceEntryCacheRequest,
   identity: string,
-  entryPath: string
+  entryPath: string,
+  cacheRoot = configuredCacheRoot()
 ): MarketplaceEntryMaterialization | null {
   const metadata = readMetadata(entryPath);
   const repoPath = path.join(entryPath, 'repo');
@@ -297,7 +303,7 @@ function cachedMaterialization(
     return null;
   }
   try {
-    assertNoCacheSymlinks(configuredCacheRoot(), path.join(repoPath, '.git'));
+    assertNoCacheSymlinks(cacheRoot, path.join(repoPath, '.git'));
     if (runGit(['rev-parse', 'HEAD'], { cwd: repoPath }) !== metadata.commit) return null;
     if (
       runGit(['remote', 'get-url', 'origin'], { cwd: repoPath }) !==
@@ -347,6 +353,86 @@ function removeSupersededPluginEntries(
   }
 }
 
+function legacyCacheRoot(): string {
+  return path.join(getConfigDir(), 'state', 'marketplace-plugins');
+}
+
+/** Resolve the canonical form of a path whose leaf may no longer exist. */
+function canonicalMissingPath(value: string): string {
+  const resolved = path.resolve(value);
+  const segments: string[] = [];
+  let current = resolved;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return resolved;
+    segments.unshift(path.basename(current));
+    current = parent;
+  }
+  return path.join(canonicalPath(current), ...segments);
+}
+
+function legacyOwnerPaths(request: MarketplaceEntryCacheRequest): string[] {
+  const owners = [request.marketplacePath];
+  const managedDir = canonicalMissingPath(getManagedSourceDir(request.sourceName));
+  const relative = path.relative(managedDir, request.marketplacePath);
+  if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+    owners.push(canonicalMissingPath(path.join(getPluginsDir(), request.sourceName, relative)));
+  }
+  return owners;
+}
+
+/**
+ * Remove a verified predecessor only after its replacement is usable. Matching
+ * is limited to the exact source owner directories, and each entry must retain
+ * its metadata identity, commit, remote, and symlink-safe checkout shape.
+ */
+function retireLegacyEntries(request: MarketplaceEntryCacheRequest): void {
+  if (temporaryCacheRoot.getStore()) return;
+  const cacheRoot = legacyCacheRoot();
+  const rootStat = fs.lstatSync(cacheRoot, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return;
+
+  for (const owner of new Set(legacyOwnerPaths(request))) {
+    const sourcePath = sourceCachePath(request.sourceName, owner, cacheRoot);
+    const sourceStat = fs.lstatSync(sourcePath, { throwIfNoEntry: false });
+    if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink()) continue;
+    assertNoCacheSymlinks(cacheRoot, sourcePath);
+
+    for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const entryPath = path.join(sourcePath, entry.name);
+      const metadata = readMetadata(entryPath);
+      if (
+        metadata?.sourceName !== request.sourceName ||
+        metadata.pluginName !== request.pluginName ||
+        metadata.marketplacePath !== owner
+      ) {
+        continue;
+      }
+      const legacyRequest: MarketplaceEntryCacheRequest = {
+        ...request,
+        marketplacePath: metadata.marketplacePath,
+        ref: metadata.ref,
+        sha: metadata.sha,
+        subdir: metadata.subdir,
+      };
+      if (
+        cachedMaterialization(
+          legacyRequest,
+          requestIdentity(legacyRequest),
+          entryPath,
+          cacheRoot
+        ) === null
+      ) {
+        continue;
+      }
+      fs.rmSync(entryPath, { recursive: true, force: true });
+    }
+
+    if (fs.readdirSync(sourcePath).length === 0) fs.rmdirSync(sourcePath);
+  }
+}
+
 export function materializeMarketplaceEntry(
   input: MarketplaceEntryCacheRequest,
   options: { refresh?: boolean } = {}
@@ -361,7 +447,10 @@ export function materializeMarketplaceEntry(
   assertNoCacheSymlinks(cacheRoot, entryPath);
 
   const cached = cachedMaterialization(request, identity, entryPath);
-  if (cached && (!options.refresh || request.sha)) return cached;
+  if (cached && (!options.refresh || request.sha)) {
+    retireLegacyEntries(request);
+    return cached;
+  }
 
   const tempPath = fs.mkdtempSync(path.join(sourcePath, '.tmp-'));
   try {
@@ -384,6 +473,7 @@ export function materializeMarketplaceEntry(
 
     const materialized = cachedMaterialization(request, identity, entryPath);
     if (!materialized) throw new Error(`Marketplace cache verification failed: ${entryPath}`);
+    retireLegacyEntries(request);
     return materialized;
   } finally {
     if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { recursive: true, force: true });
