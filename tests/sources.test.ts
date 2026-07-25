@@ -1944,29 +1944,47 @@ test('local sources remain usable with a symlinked cache home', () => {
     addLocalSource('local-source', localDir);
 
     assert.equal(getSourcesRecord()['local-source'], localDir);
+    removeSource('local-source');
+    assert.equal(hasSource('local-source'), false);
+    assert.ok(fs.existsSync(localDir));
     assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
   });
 });
 
-test('subtree sources remain resolvable with a symlinked cache home', () => {
+test('subtree lifecycle remains usable with a symlinked cache home', () => {
   withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(
+      path.join(path.dirname(asbHome), 'linked-subtree-fixture')
+    );
+    initAsbAsGitRepo(asbHome);
     const outside = path.join(path.dirname(asbHome), 'outside-subtree-cache');
     fs.mkdirSync(outside, { recursive: true });
     fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
     const cacheHome = getCacheDir();
     fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
     fs.symlinkSync(outside, cacheHome);
-    fs.writeFileSync(
-      path.join(asbHome, 'config.toml'),
-      [
-        '[plugins.sources.vendor]',
-        'url = "file:///tmp/vendor.git"',
-        'type = "subtree"',
-        'ref = "main"',
-      ].join('\n')
-    );
 
-    assert.equal(getSourcesRecord().vendor, path.join(getPluginsDir(), 'vendor'));
+    addRemoteSource('vendor', { url: bareRepo, type: 'subtree', ref: 'main' });
+    const subtreeDir = path.join(getPluginsDir(), 'vendor');
+    assert.equal(getSourcesRecord().vendor, subtreeDir);
+    assert.ok(fs.existsSync(path.join(subtreeDir, 'rules', 'v1.md')));
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'add subtree config'], {
+      cwd: asbHome,
+      stdio: 'pipe',
+    });
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'v2'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+
+    const [result] = updateRemoteSources(undefined, 'vendor');
+    assert.equal(result?.status, 'updated', result?.error);
+    assert.ok(fs.existsSync(path.join(subtreeDir, 'rules', 'v2.md')));
+    removeSource('vendor');
+    assert.equal(hasSource('vendor'), false);
+    assert.equal(fs.existsSync(subtreeDir), false);
     assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
   });
 });
