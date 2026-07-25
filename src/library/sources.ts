@@ -414,17 +414,28 @@ function resolveLocalPath(expanded: string): string {
 }
 
 /**
- * Resolve the single directory an ASB-managed clone occupies.
- * The machine-local cache is the only location ASB writes; a checkout still
- * sitting at the pre-cache location stays readable until an update migrates it.
- * A namespace held in both locations, or a cache directory ASB never created,
- * is reported here so every read refuses the ambiguity a write would act on.
- * A missing cache directory resolves to the cache path so it can be rebuilt.
+ * Resolve the single directory an ASB-managed source occupies.
+ * A clone belongs in the machine-local cache, the only location ASB writes; a
+ * checkout still sitting at the pre-cache location stays readable until an
+ * update migrates it. A subtree belongs in the synchronized library because its
+ * files are committed there, so a cache checkout left by a former clone is a
+ * second generation of the same namespace. Every such ambiguity, and a cache
+ * directory ASB never created, is reported here so no read resolves onto state
+ * a write would then act on. A missing directory resolves to its owning
+ * location so it can be created.
  */
-function resolveManagedCheckoutDir(namespace: string): string {
+function resolveManagedCheckoutDir(namespace: string, type: RemoteSource['type']): string {
   const cacheDir = getManagedSourceDir(namespace);
   const legacyDir = legacyManagedCheckoutDir(namespace);
   const cacheExists = fs.existsSync(cacheDir);
+  if (type === 'subtree') {
+    if (cacheExists) {
+      throw new Error(
+        `Source "${namespace}" is configured as subtree but also has a managed cache checkout at ${cacheDir}. Remove that checkout first, then run this command again.`
+      );
+    }
+    return legacyDir;
+  }
   if (cacheExists && fs.existsSync(legacyDir)) {
     throw new Error(
       `Source "${namespace}" exists in both the managed cache (${cacheDir}) and ${legacyDir}. Remove the copy you no longer need, then run this command again.`
@@ -463,6 +474,25 @@ function isGitCheckout(dir: string): boolean {
 }
 
 /**
+ * Whether ASB may destructively act on a resolved managed checkout, by deleting
+ * it on removal or consuming it during migration.
+ * The cache is ASB's exclusive tree, so a verified checkout there qualifies. The
+ * pre-cache location is shared with directories the user places and owns, where
+ * a clone of the configured remote is indistinguishable from an ASB one until
+ * the ownership marker says so.
+ */
+function isDeletableManagedCheckout(
+  managedDir: string,
+  namespace: string,
+  remote: RemoteSource
+): boolean {
+  if (managedDir === legacyManagedCheckoutDir(namespace) && !hasCloneMarker(managedDir)) {
+    return false;
+  }
+  return verifyClone(managedDir, namespace, remote) !== undefined;
+}
+
+/**
  * Resolve the effective local path for a plugin source.
  * - Cloneable sources (object with git/file URL or .git suffix): resolve to the managed cache
  * - Subtree sources: resolve inside the synchronized ASB_HOME plugins tree
@@ -477,10 +507,7 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
       if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
       return effectivePath;
     }
-    let effectivePath =
-      value.type === 'subtree'
-        ? legacyManagedCheckoutDir(namespace)
-        : resolveManagedCheckoutDir(namespace);
+    let effectivePath = resolveManagedCheckoutDir(namespace, value.type);
     if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
     return effectivePath;
   }
@@ -572,6 +599,20 @@ export function getSourcesRecord(scope?: ConfigScope): Record<string, string> {
     result[namespace] = resolveEffectivePath(namespace, value);
   }
   return result;
+}
+
+/**
+ * Get the effective local path for one configured or discovered source.
+ * A command acting on a single namespace resolves it this way so an unrelated
+ * namespace ASB refuses cannot preempt that namespace's own validation and
+ * rollback.
+ */
+export function getSourcePath(namespace: string, scope?: ConfigScope): string {
+  const value = getRawSources(scope)[namespace];
+  if (value !== undefined) return resolveEffectivePath(namespace, value);
+  const discovered = discoverLocalSources()[namespace];
+  if (discovered === undefined) throw new Error(`Source "${namespace}" not found.`);
+  return discovered;
 }
 
 export function hasSource(namespace: string, scope?: ConfigScope): boolean {
@@ -692,13 +733,7 @@ export function removeSource(namespace: string): void {
   // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
     if (value.type === 'subtree') {
-      const subtreeDir = legacyManagedCheckoutDir(namespace);
-      const cacheDir = getManagedSourceDir(namespace);
-      if (fs.existsSync(cacheDir)) {
-        throw new Error(
-          `Source "${namespace}" is configured as subtree but also has a managed cache checkout at ${cacheDir}. Remove that checkout first, then run this command again.`
-        );
-      }
+      const subtreeDir = resolveManagedCheckoutDir(namespace, 'subtree');
       if (!isGitRepo(getConfigDir())) {
         throw new Error(
           `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
@@ -715,11 +750,14 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
-      const managedDir = resolveManagedCheckoutDir(namespace);
-      if (fs.existsSync(managedDir) && verifyClone(managedDir, namespace, value) !== undefined) {
+      const managedDir = resolveManagedCheckoutDir(namespace, 'clone');
+      if (fs.existsSync(managedDir)) {
+        if (!isDeletableManagedCheckout(managedDir, namespace, value)) {
+          throw new Error(
+            `Source directory is unverified or modified; preserving it: ${managedDir}`
+          );
+        }
         fs.rmSync(managedDir, { recursive: true, force: true });
-      } else if (fs.existsSync(managedDir)) {
-        throw new Error(`Source directory is unverified or modified; preserving it: ${managedDir}`);
       }
     }
   }
@@ -801,7 +839,7 @@ function migrateLegacyManagedCheckout(namespace: string, remote: RemoteSource): 
   if (!fs.existsSync(legacyDir)) return;
 
   const cacheDir = getManagedSourceDir(namespace);
-  if (!hasCloneMarker(legacyDir) || verifyClone(legacyDir, namespace, remote) === undefined) {
+  if (!isDeletableManagedCheckout(legacyDir, namespace, remote)) {
     throw new Error(`Source directory is unverified or modified; preserving it: ${legacyDir}`);
   }
 
@@ -810,13 +848,43 @@ function migrateLegacyManagedCheckout(namespace: string, remote: RemoteSource): 
     fs.renameSync(legacyDir, cacheDir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
-    gitClone(expandHome(remote.url), cacheDir, namespace, remote.ref);
-    if (verifyClone(cacheDir, namespace, remote) === undefined) {
-      fs.rmSync(cacheDir, { recursive: true, force: true });
-      throw error;
-    }
-    fs.rmSync(legacyDir, { recursive: true, force: true });
+    copyLegacyManagedCheckout(legacyDir, cacheDir, namespace, remote);
   }
+}
+
+/**
+ * Carry a verified legacy checkout across a filesystem boundary by copying it.
+ * The generation already on disk is what migration owes the user, so the copy
+ * reproduces it rather than fetching a new one: a remote that moved in the
+ * meantime is then handled by the ordinary update, which refuses to discard the
+ * old generation. The copy lands in a staging sibling and is verified, and the
+ * legacy checkout is verified again, before either is committed to, so a change
+ * arriving during the copy preserves the legacy directory instead of losing it.
+ */
+function copyLegacyManagedCheckout(
+  legacyDir: string,
+  cacheDir: string,
+  namespace: string,
+  remote: RemoteSource
+): void {
+  const stagedDir = path.join(
+    path.dirname(cacheDir),
+    `.${path.basename(cacheDir)}.${randomUUID()}`
+  );
+  try {
+    fs.cpSync(legacyDir, stagedDir, { recursive: true, verbatimSymlinks: true });
+    if (
+      verifyClone(stagedDir, namespace, remote) === undefined ||
+      verifyClone(legacyDir, namespace, remote) === undefined
+    ) {
+      throw new Error(`Source directory is unverified or modified; preserving it: ${legacyDir}`);
+    }
+    fs.renameSync(stagedDir, cacheDir);
+  } catch (error) {
+    fs.rmSync(stagedDir, { recursive: true, force: true });
+    throw error;
+  }
+  fs.rmSync(legacyDir, { recursive: true, force: true });
 }
 
 /**

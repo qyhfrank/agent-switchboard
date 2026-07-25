@@ -57,8 +57,8 @@ import {
 import {
   addLocalSource,
   addRemoteSource,
+  getSourcePath,
   getSources,
-  getSourcesRecord,
   inferSourceName,
   isGitUrl,
   parseGitUrl,
@@ -1881,7 +1881,7 @@ mktRoot
           throw err;
         }
 
-        const effectivePath = getSourcesRecord()[name];
+        const effectivePath = getSourcePath(name);
         const validation = validateSourcePath(effectivePath);
 
         if (!validation.valid) {

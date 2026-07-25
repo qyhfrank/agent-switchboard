@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -496,6 +497,118 @@ test('a symlinked cache home is rejected without touching its target', () => {
 });
 
 // ── Cache-root relocation ─────────────────────────────────────────
+
+function compatibilityCacheRoot(asbHome: string): string {
+  return path.join(asbHome, 'state', 'marketplace-plugins');
+}
+
+/** Move a materialized entry into the ASB_HOME compatibility cache layout. */
+function moveToCompatibilityCache(
+  asbHome: string,
+  request: MarketplaceEntryCacheRequest,
+  entryPath: string
+): string {
+  const digest = (value: string) => createHash('sha256').update(value).digest('hex');
+  const ownerIdentity = digest(
+    JSON.stringify({
+      sourceName: request.sourceName,
+      marketplacePath: fs.realpathSync.native(request.marketplacePath),
+    })
+  );
+  const retiredEntry = path.join(
+    compatibilityCacheRoot(asbHome),
+    `${request.sourceName}-${ownerIdentity.slice(0, 10)}`,
+    path.basename(entryPath)
+  );
+  fs.mkdirSync(path.dirname(retiredEntry), { recursive: true });
+  fs.renameSync(entryPath, retiredEntry);
+  fs.rmSync(getMarketplacePluginCacheDir(), { recursive: true, force: true });
+  return retiredEntry;
+}
+
+test('a verified predecessor in the ASB_HOME compatibility cache retires after successful replacement', () => {
+  for (const owner of ['unchanged-path', 'migrated-source'] as const) {
+    withTempAsbHome((asbHome) => {
+      const remote = createGitFixture(asbHome, 'retire-remote');
+      writePluginVersion(remote, 'v1');
+      const legacySourceDir = path.join(asbHome, 'plugins', 'retire-source');
+      const cacheSourceDir = path.join(getCacheDir(), 'retire-source');
+      const firstOwner =
+        owner === 'unchanged-path' ? path.join(asbHome, 'catalog') : legacySourceDir;
+      fs.mkdirSync(firstOwner, { recursive: true });
+      const base = {
+        sourceName: 'retire-source',
+        pluginName: 'remote-plugin',
+        url: remote.bareRepo,
+        ref: 'main',
+        subdir: 'packages/plugin',
+      };
+      const before = materializeMarketplaceEntry({ ...base, marketplacePath: firstOwner });
+      const retiredEntry = moveToCompatibilityCache(
+        asbHome,
+        { ...base, marketplacePath: firstOwner },
+        before.entryPath
+      );
+      const secondOwner = owner === 'unchanged-path' ? firstOwner : cacheSourceDir;
+      if (owner === 'migrated-source') {
+        fs.rmSync(legacySourceDir, { recursive: true, force: true });
+        fs.mkdirSync(secondOwner, { recursive: true });
+      }
+
+      const after = materializeMarketplaceEntry({ ...base, marketplacePath: secondOwner });
+
+      assert.equal(fs.readFileSync(path.join(after.pluginPath, 'VERSION'), 'utf-8').trim(), 'v1');
+      assert.equal(path.relative(getCacheDir(), after.entryPath).startsWith('..'), false);
+      assert.equal(fs.existsSync(retiredEntry), false);
+    });
+  }
+});
+
+test('the ASB_HOME compatibility cache preserves unsafe or unreplaced entries', () => {
+  for (const guard of ['materialization-failed', 'entry-unverified', 'root-symlink'] as const) {
+    withTempAsbHome((asbHome) => {
+      const remote = createGitFixture(asbHome, 'preserve-remote');
+      writePluginVersion(remote, 'v1');
+      const marketplacePath = path.join(asbHome, 'catalog');
+      fs.mkdirSync(marketplacePath, { recursive: true });
+      const request: MarketplaceEntryCacheRequest = {
+        sourceName: 'preserve-source',
+        marketplacePath,
+        pluginName: 'remote-plugin',
+        url: remote.bareRepo,
+        ref: 'main',
+        subdir: 'packages/plugin',
+      };
+      const before = materializeMarketplaceEntry(request);
+      const retiredEntry = moveToCompatibilityCache(asbHome, request, before.entryPath);
+
+      if (guard === 'materialization-failed') {
+        const offline = `${remote.bareRepo}.offline`;
+        fs.renameSync(remote.bareRepo, offline);
+        try {
+          assert.throws(() => materializeMarketplaceEntry(request), /git fetch failed/);
+        } finally {
+          fs.renameSync(offline, remote.bareRepo);
+        }
+      } else if (guard === 'entry-unverified') {
+        fs.writeFileSync(path.join(retiredEntry, 'entry.json'), '{ not json\n');
+        materializeMarketplaceEntry(request);
+      } else {
+        const compatibilityRoot = compatibilityCacheRoot(asbHome);
+        const outside = path.join(path.dirname(asbHome), 'linked-compatibility-cache');
+        fs.renameSync(compatibilityRoot, outside);
+        fs.symlinkSync(outside, compatibilityRoot);
+        materializeMarketplaceEntry(request);
+      }
+
+      assert.equal(fs.existsSync(retiredEntry), true);
+      assert.equal(
+        fs.existsSync(path.join(retiredEntry, 'repo', 'packages', 'plugin', 'VERSION')),
+        true
+      );
+    });
+  }
+});
 
 test('external marketplace entries materialize under the reserved cache subtree', () => {
   withTempAsbHome((asbHome) => {

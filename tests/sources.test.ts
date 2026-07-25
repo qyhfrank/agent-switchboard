@@ -19,6 +19,7 @@ import {
   isGitUrl,
   parseGitUrl,
   removeSource,
+  type SourceUpdateResult,
   updateRemoteSources,
   validateSourcePath,
 } from '../src/library/sources.js';
@@ -1489,6 +1490,144 @@ test('a verified clean legacy managed clone migrates into the cache on update', 
   });
 });
 
+/**
+ * Force only the legacy→cache rename to report a cross-filesystem boundary.
+ * Every other rename, including the staged placement, behaves normally.
+ */
+function withCrossDeviceRename<T>(namespace: string, fn: () => T): T {
+  const legacyDir = path.join(getPluginsDir(), namespace);
+  const cacheDir = getManagedSourceDir(namespace);
+  const original = fs.renameSync;
+  fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+    if (String(from) === legacyDir && String(to) === cacheDir) {
+      const error: NodeJS.ErrnoException = new Error(
+        `EXDEV: cross-device link not permitted, rename '${from}' -> '${to}'`
+      );
+      error.code = 'EXDEV';
+      throw error;
+    }
+    return original(from, to);
+  }) as typeof fs.renameSync;
+  try {
+    return fn();
+  } finally {
+    fs.renameSync = original;
+  }
+}
+
+/** Cache-root leftovers, ignoring the reserved entry subtree. */
+function strayCacheEntries(): string[] {
+  const cacheRoot = getCacheDir();
+  if (!fs.existsSync(cacheRoot)) return [];
+  return fs.readdirSync(cacheRoot).filter((entry) => entry !== '.entries' && entry.startsWith('.'));
+}
+
+// Filesystem stubs make these cases order-dependent, so they never run concurrently.
+test(
+  'a cross-filesystem migration moves the verified generation instead of re-cloning',
+  {
+    concurrency: false,
+  },
+  () => {
+    for (const remoteMove of ['fast-forward', 'force-moved'] as const) {
+      withTempAsbHome((asbHome) => {
+        const parent = path.join(asbHome, `exdev-${remoteMove}-fixture`);
+        fs.mkdirSync(parent, { recursive: true });
+        const { bareRepo, workDir } = createBareRemote(parent);
+        const namespace = `exdev-${remoteMove}`;
+        addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
+        const legacyDir = demoteToLegacyLayout(namespace);
+        const cacheDir = getManagedSourceDir(namespace);
+        // A file inside .git is invisible to clone verification, so it witnesses
+        // whether the migrated directory is the moved generation or a fresh clone.
+        fs.writeFileSync(path.join(legacyDir, '.git', 'exdev-witness'), 'moved\n');
+
+        if (remoteMove === 'fast-forward') {
+          fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+          execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+          execFileSync('git', ['commit', '-m', 'v2'], { cwd: workDir, stdio: 'pipe' });
+          execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+        } else {
+          execFileSync('git', ['checkout', '--orphan', 'replacement'], {
+            cwd: workDir,
+            stdio: 'pipe',
+          });
+          execFileSync('git', ['rm', '-rf', '.'], { cwd: workDir, stdio: 'pipe' });
+          fs.writeFileSync(path.join(workDir, 'forced.md'), 'forced\n');
+          execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+          execFileSync('git', ['commit', '-m', 'forced'], { cwd: workDir, stdio: 'pipe' });
+          execFileSync('git', ['push', '--force', 'origin', 'HEAD:refs/heads/main'], {
+            cwd: workDir,
+            stdio: 'pipe',
+          });
+        }
+
+        const [result] = withCrossDeviceRename(namespace, () => updateRemoteSources());
+
+        assert.equal(fs.existsSync(legacyDir), false);
+        assert.equal(
+          fs.readFileSync(path.join(cacheDir, '.git', 'exdev-witness'), 'utf-8'),
+          'moved\n'
+        );
+        assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+        assert.deepEqual(strayCacheEntries(), []);
+        if (remoteMove === 'fast-forward') {
+          assert.equal(result?.status, 'updated');
+          assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')));
+        } else {
+          assert.equal(result?.status, 'error');
+          assert.equal(fs.existsSync(path.join(cacheDir, 'forced.md')), false);
+        }
+      });
+    }
+  }
+);
+
+test(
+  'a failed cross-filesystem migration preserves the legacy checkout and stages nothing',
+  {
+    concurrency: false,
+  },
+  () => {
+    for (const failure of ['copy-error', 'staged-mismatch'] as const) {
+      withTempAsbHome((asbHome) => {
+        const parent = path.join(asbHome, `exdev-${failure}-fixture`);
+        fs.mkdirSync(parent, { recursive: true });
+        const { bareRepo } = createBareRemote(parent);
+        const namespace = `exdev-${failure}`;
+        addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
+        const legacyDir = demoteToLegacyLayout(namespace);
+        const cacheDir = getManagedSourceDir(namespace);
+        const originalCopy = fs.cpSync;
+        fs.cpSync = ((from: fs.PathLike, to: fs.PathLike, options?: fs.CopySyncOptions) => {
+          if (failure === 'copy-error') {
+            const error: NodeJS.ErrnoException = new Error(
+              `ENOSPC: no space left on device, copyfile '${from}' -> '${to}'`
+            );
+            error.code = 'ENOSPC';
+            throw error;
+          }
+          originalCopy(from, to, options);
+          fs.writeFileSync(path.join(String(to), 'raced.md'), 'raced\n');
+        }) as typeof fs.cpSync;
+
+        let result: SourceUpdateResult | undefined;
+        try {
+          [result] = withCrossDeviceRename(namespace, () => updateRemoteSources());
+        } finally {
+          fs.cpSync = originalCopy;
+        }
+
+        assert.equal(result?.status, 'error');
+        assert.ok(fs.existsSync(path.join(legacyDir, 'rules', 'v1.md')));
+        assert.ok(fs.existsSync(path.join(legacyDir, '.git', 'asb-source.json')));
+        assert.equal(fs.existsSync(cacheDir), false);
+        assert.deepEqual(strayCacheEntries(), []);
+      });
+    }
+  }
+);
+
 test('a modified legacy managed clone is preserved with an actionable error', () => {
   withTempAsbHome((asbHome) => {
     const { bareRepo } = createBareRemote(path.join(asbHome, 'modified-legacy-fixture'));
@@ -1687,6 +1826,144 @@ test('removing a subtree source reports a managed cache checkout left by a forme
     assert.throws(() => removeSource('flipped'), /managed cache/);
     assert.ok(fs.existsSync(path.join(cacheDir, '.git')));
   });
+});
+
+test('marketplace add CLI rolls back its own invalid source despite an unrelated ambiguity', () => {
+  withTempAsbHome((asbHome) => {
+    const ambiguous = createBareRemote(path.join(asbHome, 'ambiguous-fixture'));
+    addRemoteSource('ambiguous', { url: ambiguous.bareRepo, type: 'clone' });
+    const ambiguousLegacy = path.join(getPluginsDir(), 'ambiguous');
+    fs.mkdirSync(ambiguousLegacy, { recursive: true });
+    fs.writeFileSync(path.join(ambiguousLegacy, 'user-file.md'), '# mine\n');
+
+    const emptyBare = path.join(asbHome, 'structureless.git');
+    execFileSync('git', ['init', '--bare', '--initial-branch=main', emptyBare], { stdio: 'pipe' });
+    const emptyWork = path.join(asbHome, 'structureless-work');
+    execFileSync('git', ['clone', emptyBare, emptyWork], { stdio: 'pipe' });
+    fs.writeFileSync(path.join(emptyWork, 'notes.txt'), 'no library structure\n');
+    execFileSync('git', ['add', '.'], { cwd: emptyWork, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plain'],
+      { cwd: emptyWork, stdio: 'pipe' }
+    );
+    execFileSync('git', ['push', 'origin', 'main'], { cwd: emptyWork, stdio: 'pipe' });
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        path.join(process.cwd(), 'src', 'index.ts'),
+        'plugin',
+        'marketplace',
+        'add',
+        `file://${emptyBare}`,
+        'structureless',
+      ],
+      { env: { ...process.env, FORCE_COLOR: '0' }, encoding: 'utf-8' }
+    );
+
+    const output = `${result.stdout}${result.stderr}`;
+    assert.notEqual(result.status, 0);
+    assert.match(output, /does not contain any library folders/);
+    assert.doesNotMatch(output, /ambiguous/);
+    assert.equal(fs.existsSync(getManagedSourceDir('structureless')), false);
+    assert.doesNotMatch(
+      fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'),
+      /structureless/
+    );
+    assert.equal(fs.readFileSync(path.join(ambiguousLegacy, 'user-file.md'), 'utf-8'), '# mine\n');
+  });
+});
+
+test('a clone-to-subtree switch refuses the leftover managed cache before materializing', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource('flip-to-subtree', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('flip-to-subtree');
+    const subtreeDir = path.join(getPluginsDir(), 'flip-to-subtree');
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources.flip-to-subtree]',
+        `url = "${bareRepo}"`,
+        'type = "subtree"',
+        'ref = "main"',
+      ].join('\n')
+    );
+    execFileSync('git', ['add', 'config.toml'], { cwd: asbHome, stdio: 'pipe' });
+    execFileSync(
+      'git',
+      ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'flip to subtree'],
+      { cwd: asbHome, stdio: 'pipe' }
+    );
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /managed cache/);
+    assert.equal(fs.existsSync(subtreeDir), false);
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+    assert.throws(() => getSourcesRecord(), /managed cache/);
+  });
+});
+
+test('a markerless manual clone at the legacy plugins path is preserved on remove', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'manual-clone-fixture'));
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources]', `manual-clone = "file://${bareRepo}"`].join('\n')
+    );
+    const legacyDir = path.join(getPluginsDir(), 'manual-clone');
+    fs.mkdirSync(getPluginsDir(), { recursive: true });
+    execFileSync('git', ['clone', `file://${bareRepo}`, legacyDir], { stdio: 'pipe' });
+    assert.equal(fs.existsSync(path.join(legacyDir, '.git', 'asb-source.json')), false);
+
+    assert.throws(() => removeSource('manual-clone'), /unverified or modified/);
+
+    assert.ok(fs.existsSync(path.join(legacyDir, 'rules', 'v1.md')));
+    assert.ok(fs.existsSync(path.join(legacyDir, '.git')));
+    assert.match(fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'), /manual-clone/);
+  });
+});
+
+test('managed source lifecycle rejects a symlinked cache home without touching its target', () => {
+  for (const stage of ['add', 'update', 'remove'] as const) {
+    withTempAsbHome((asbHome) => {
+      const { bareRepo } = createBareRemote(path.join(asbHome, `linked-home-${stage}-fixture`));
+      const outside = path.join(path.dirname(asbHome), `outside-cache-${stage}`);
+      fs.mkdirSync(outside, { recursive: true });
+      fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+      const cacheHome = getCacheDir();
+      fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+      fs.symlinkSync(outside, cacheHome);
+      if (stage !== 'add') {
+        fs.writeFileSync(
+          path.join(asbHome, 'config.toml'),
+          ['[plugins.sources]', `linked-home = { url = "${bareRepo}", type = "clone" }`].join('\n')
+        );
+      }
+
+      if (stage === 'add') {
+        assert.throws(
+          () => addRemoteSource('linked-home', { url: bareRepo, type: 'clone' }),
+          /symbolic link/
+        );
+      } else if (stage === 'update') {
+        const [result] = updateRemoteSources();
+        assert.equal(result?.status, 'error');
+        assert.match(result?.error ?? '', /symbolic link/);
+      } else {
+        assert.throws(() => removeSource('linked-home'), /symbolic link/);
+      }
+
+      assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
+      assert.equal(fs.readFileSync(path.join(outside, 'sentinel'), 'utf-8'), 'keep');
+    });
+  }
 });
 
 test('marketplace add CLI validates the cached checkout for a file:// Git source', () => {
