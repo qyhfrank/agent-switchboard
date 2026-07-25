@@ -32,12 +32,16 @@ async function withTempHomesAsync<T>(
 
   const previousAsbHome = setEnv('ASB_HOME', asbHome);
   const previousAgentsHome = setEnv('ASB_AGENTS_HOME', agentsHome);
+  const previousCacheHome = setEnv('ASB_CACHE_HOME', path.join(root, 'asb-cache'));
+  const previousXdgCacheHome = setEnv('XDG_CACHE_HOME', undefined);
 
   try {
     return await fn({ asbHome, agentsHome });
   } finally {
     setEnv('ASB_HOME', previousAsbHome);
     setEnv('ASB_AGENTS_HOME', previousAgentsHome);
+    setEnv('ASB_CACHE_HOME', previousCacheHome);
+    setEnv('XDG_CACHE_HOME', previousXdgCacheHome);
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
