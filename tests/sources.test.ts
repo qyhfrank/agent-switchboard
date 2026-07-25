@@ -1596,6 +1596,99 @@ test('subtree sources stay under ASB_HOME/plugins and never enter the cache', ()
   });
 });
 
+// ── Ownership of a migrated or adopted checkout ────────────────────
+
+test('a markerless legacy clone is preserved and reported instead of migrated', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'markerless-fixture'));
+    addRemoteSource('markerless', { url: bareRepo, type: 'clone' });
+    const legacyDir = demoteToLegacyLayout('markerless');
+    fs.rmSync(path.join(legacyDir, '.git', 'asb-source.json'));
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /unverified or modified/);
+    assert.ok(fs.existsSync(path.join(legacyDir, 'rules', 'v1.md')));
+    assert.equal(fs.existsSync(getManagedSourceDir('markerless')), false);
+  });
+});
+
+test('a namespace held in both locations errors on read, not only on mutation', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'both-read-fixture'));
+    addRemoteSource('both-read', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('both-read');
+    const legacyDir = path.join(getPluginsDir(), 'both-read');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.writeFileSync(path.join(legacyDir, 'user-file.md'), '# mine\n');
+
+    assert.throws(() => getSourcesRecord(), /both the managed cache/);
+    assert.equal(fs.readFileSync(path.join(legacyDir, 'user-file.md'), 'utf-8'), '# mine\n');
+    assert.ok(fs.existsSync(cacheDir));
+  });
+});
+
+test('an unrelated cache child is never adopted as a managed checkout', () => {
+  withTempAsbHome((asbHome) => {
+    const foreignDir = getManagedSourceDir('foreign-tool');
+    fs.mkdirSync(path.join(foreignDir, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(foreignDir, 'commands', 'not-a-plugin.md'), '# other tool\n');
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources]', 'foreign-tool = { url = "https://example.com/org/repo.git" }'].join(
+        '\n'
+      )
+    );
+
+    assert.throws(() => getSourcesRecord(), /not an ASB-managed checkout/);
+    assert.equal(
+      fs.readFileSync(path.join(foreignDir, 'commands', 'not-a-plugin.md'), 'utf-8'),
+      '# other tool\n'
+    );
+    assert.equal(path.dirname(foreignDir), getCacheDir());
+  });
+});
+
+test('a documented GitHub tree URL string carries its ref and subdir', () => {
+  withTempAsbHome((asbHome) => {
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources]',
+        'mono-sub = "https://github.com/org/monorepo/tree/main/plugins/my-plugin"',
+      ].join('\n')
+    );
+
+    const [source] = getSources();
+    assert.equal(source?.remote?.url, 'https://github.com/org/monorepo.git');
+    assert.equal(source?.remote?.ref, 'main');
+    assert.equal(source?.remote?.subdir, 'plugins/my-plugin');
+    assert.equal(
+      getSourcesRecord()['mono-sub'],
+      path.join(getManagedSourceDir('mono-sub'), 'plugins/my-plugin')
+    );
+  });
+});
+
+test('removing a subtree source reports a managed cache checkout left by a former clone', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+    addRemoteSource('flipped', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('flipped');
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources.flipped]', `url = "${bareRepo}"`, 'type = "subtree"', 'ref = "main"'].join(
+        '\n'
+      )
+    );
+
+    assert.throws(() => removeSource('flipped'), /managed cache/);
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git')));
+  });
+});
+
 test('marketplace add CLI validates the cached checkout for a file:// Git source', () => {
   withTempAsbHome((asbHome) => {
     const { bareRepo } = createBareRemote(path.join(asbHome, 'cli-fixture'));
