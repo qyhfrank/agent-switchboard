@@ -1930,6 +1930,47 @@ test('a markerless manual clone at the legacy plugins path is preserved on remov
   });
 });
 
+test('local sources remain usable with a symlinked cache home', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(path.dirname(asbHome), 'outside-local-cache');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+    const cacheHome = getCacheDir();
+    fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+    fs.symlinkSync(outside, cacheHome);
+    const localDir = path.join(asbHome, 'local-source');
+    fs.mkdirSync(path.join(localDir, 'rules'), { recursive: true });
+
+    addLocalSource('local-source', localDir);
+
+    assert.equal(getSourcesRecord()['local-source'], localDir);
+    assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
+  });
+});
+
+test('subtree sources remain resolvable with a symlinked cache home', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(path.dirname(asbHome), 'outside-subtree-cache');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+    const cacheHome = getCacheDir();
+    fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+    fs.symlinkSync(outside, cacheHome);
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources.vendor]',
+        'url = "file:///tmp/vendor.git"',
+        'type = "subtree"',
+        'ref = "main"',
+      ].join('\n')
+    );
+
+    assert.equal(getSourcesRecord().vendor, path.join(getPluginsDir(), 'vendor'));
+    assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
+  });
+});
+
 test('managed source lifecycle rejects a symlinked cache home without touching its target', () => {
   for (const stage of ['add', 'update', 'remove'] as const) {
     withTempAsbHome((asbHome) => {

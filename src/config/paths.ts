@@ -149,19 +149,17 @@ export function getCacheDir(): string {
 }
 
 /**
- * Returns the cache root only when ASB owns the directory it names.
+ * Rejects a symbolic link at the cache root before ASB mutates owned cache state.
  * ASB creates, replaces, and recursively deletes whole subtrees under this
  * root, so a symbolic link at the root itself would redirect every one of
  * those writes outside the tree ASB owns. Ancestors above the root belong to
  * the platform or the user, so a symlinked ancestor stays acceptable.
  */
-function getOwnedCacheDir(): string {
-  const cacheDir = getCacheDir();
-  const resolved = path.resolve(cacheDir);
-  if (fs.lstatSync(resolved, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    throw new Error(`ASB cache root contains a symbolic link: ${resolved}`);
+export function assertCacheRootOwned(): void {
+  const cacheDir = path.resolve(getCacheDir());
+  if (fs.lstatSync(cacheDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new Error(`ASB cache root contains a symbolic link: ${cacheDir}`);
   }
-  return cacheDir;
 }
 
 /**
@@ -170,7 +168,7 @@ function getOwnedCacheDir(): string {
  * names stay reserved for internal cache state.
  */
 export function getManagedSourceDir(namespace: string): string {
-  return path.join(getOwnedCacheDir(), namespace);
+  return path.join(getCacheDir(), namespace);
 }
 
 /**
@@ -179,7 +177,8 @@ export function getManagedSourceDir(namespace: string): string {
  * managed source namespace.
  */
 export function getMarketplacePluginCacheDir(): string {
-  return path.join(getOwnedCacheDir(), '.entries');
+  assertCacheRootOwned();
+  return path.join(getCacheDir(), '.entries');
 }
 
 /**
