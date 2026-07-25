@@ -326,12 +326,17 @@ function isCloneableSource(url: string): boolean {
 
 /**
  * Normalize a configured source value. A string carrying a Git transport scheme
- * is the documented shorthand for a default clone source; every other string
- * stays a user-owned local path.
+ * is the documented shorthand for a default clone source, parsed so a GitHub
+ * tree URL keeps its ref and subdirectory; every other string stays a
+ * user-owned local path.
  */
 function normalizeSourceValue(value: SourceValue): SourceValue {
   if (typeof value === 'string' && isGitUrl(expandHome(value))) {
-    return { url: value, type: 'clone' };
+    const parsed = parseGitUrl(value);
+    const remote: RemoteSource = { url: parsed.url, type: 'clone' };
+    if (parsed.ref) remote.ref = parsed.ref;
+    if (parsed.subdir) remote.subdir = parsed.subdir;
+    return remote;
   }
   return value;
 }
@@ -412,11 +417,27 @@ function resolveLocalPath(expanded: string): string {
  * Resolve the single directory an ASB-managed clone occupies.
  * The machine-local cache is the only location ASB writes; a checkout still
  * sitting at the pre-cache location stays readable until an update migrates it.
+ * A namespace held in both locations, or a cache directory ASB never created,
+ * is reported here so every read refuses the ambiguity a write would act on.
+ * A missing cache directory resolves to the cache path so it can be rebuilt.
  */
 function resolveManagedCheckoutDir(namespace: string): string {
   const cacheDir = getManagedSourceDir(namespace);
-  if (fs.existsSync(cacheDir)) return cacheDir;
   const legacyDir = legacyManagedCheckoutDir(namespace);
+  const cacheExists = fs.existsSync(cacheDir);
+  if (cacheExists && fs.existsSync(legacyDir)) {
+    throw new Error(
+      `Source "${namespace}" exists in both the managed cache (${cacheDir}) and ${legacyDir}. Remove the copy you no longer need, then run this command again.`
+    );
+  }
+  if (cacheExists) {
+    if (!isGitCheckout(cacheDir)) {
+      throw new Error(
+        `Cache directory for source "${namespace}" is not an ASB-managed checkout; preserving it: ${cacheDir}`
+      );
+    }
+    return cacheDir;
+  }
   if (fs.existsSync(legacyDir)) return legacyDir;
   return cacheDir;
 }
@@ -426,19 +447,19 @@ function legacyManagedCheckoutDir(namespace: string): string {
   return path.join(getPluginsDir(), namespace);
 }
 
+/** Whether a directory carries the ownership marker ASB writes into every clone. */
+function hasCloneMarker(repoDir: string): boolean {
+  const stat = fs.lstatSync(cloneMarkerPath(repoDir), { throwIfNoEntry: false });
+  return stat?.isFile() === true;
+}
+
 /**
- * Reject a namespace occupying both the managed cache and the pre-cache location.
- * Acting on one copy would leave the other live through auto-discovery, so the
- * ambiguity is reported instead of resolved by guesswork.
+ * Whether a directory holds a Git checkout, the shape every managed clone has.
+ * A cache child failing this never came from ASB, so no read resolves onto it.
  */
-function ensureSingleManagedCheckout(namespace: string): void {
-  const cacheDir = getManagedSourceDir(namespace);
-  const legacyDir = legacyManagedCheckoutDir(namespace);
-  if (fs.existsSync(cacheDir) && fs.existsSync(legacyDir)) {
-    throw new Error(
-      `Source "${namespace}" exists in both the managed cache (${cacheDir}) and ${legacyDir}. Remove the copy you no longer need, then run this command again.`
-    );
-  }
+function isGitCheckout(dir: string): boolean {
+  const stat = fs.lstatSync(path.join(dir, '.git'), { throwIfNoEntry: false });
+  return stat?.isDirectory() === true;
 }
 
 /**
@@ -672,6 +693,12 @@ export function removeSource(namespace: string): void {
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
     if (value.type === 'subtree') {
       const subtreeDir = legacyManagedCheckoutDir(namespace);
+      const cacheDir = getManagedSourceDir(namespace);
+      if (fs.existsSync(cacheDir)) {
+        throw new Error(
+          `Source "${namespace}" is configured as subtree but also has a managed cache checkout at ${cacheDir}. Remove that checkout first, then run this command again.`
+        );
+      }
       if (!isGitRepo(getConfigDir())) {
         throw new Error(
           `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
@@ -688,7 +715,6 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
-      ensureSingleManagedCheckout(namespace);
       const managedDir = resolveManagedCheckoutDir(namespace);
       if (fs.existsSync(managedDir) && verifyClone(managedDir, namespace, value) !== undefined) {
         fs.rmSync(managedDir, { recursive: true, force: true });
@@ -766,17 +792,16 @@ export function validateSourcePath(libraryPath: string): {
 
 /**
  * Move a managed clone left at the pre-cache location into the machine-local cache.
- * Only a checkout whose ownership marker, remote identity, and working tree all
- * verify is moved. Unverifiable, locally modified, and user-owned directories are
- * preserved and reported, as is a namespace already present in both locations.
+ * Only a checkout carrying ASB's ownership marker whose remote identity and
+ * working tree also verify is moved. Markerless, unverifiable, locally modified,
+ * and user-owned directories are preserved and reported.
  */
 function migrateLegacyManagedCheckout(namespace: string, remote: RemoteSource): void {
   const legacyDir = legacyManagedCheckoutDir(namespace);
   if (!fs.existsSync(legacyDir)) return;
 
-  ensureSingleManagedCheckout(namespace);
   const cacheDir = getManagedSourceDir(namespace);
-  if (verifyClone(legacyDir, namespace, remote) === undefined) {
+  if (!hasCloneMarker(legacyDir) || verifyClone(legacyDir, namespace, remote) === undefined) {
     throw new Error(`Source directory is unverified or modified; preserving it: ${legacyDir}`);
   }
 
@@ -812,9 +837,11 @@ export function updateRemoteSources(
     if (typeof value === 'string') continue;
     if (!isCloneableSource(expandHome(value.url))) continue;
     attemptedUpdate = true;
-    const previousCacheOwnerPath = canonicalCacheOwnerPath(resolveEffectivePath(namespace, value));
 
     try {
+      const previousCacheOwnerPath = canonicalCacheOwnerPath(
+        resolveEffectivePath(namespace, value)
+      );
       if (!gitChecked) {
         ensureGitAvailable();
         gitChecked = true;
