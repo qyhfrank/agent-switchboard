@@ -1933,7 +1933,9 @@ test('a markerless manual clone at the legacy plugins path is preserved on remov
 test('local sources remain usable with a symlinked cache home', () => {
   withTempAsbHome((asbHome) => {
     const outside = path.join(path.dirname(asbHome), 'outside-local-cache');
-    fs.mkdirSync(outside, { recursive: true });
+    const foreignCacheChild = path.join(outside, 'local-source');
+    fs.mkdirSync(foreignCacheChild, { recursive: true });
+    fs.writeFileSync(path.join(foreignCacheChild, 'keep.txt'), 'keep');
     fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
     const cacheHome = getCacheDir();
     fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
@@ -1947,7 +1949,59 @@ test('local sources remain usable with a symlinked cache home', () => {
     removeSource('local-source');
     assert.equal(hasSource('local-source'), false);
     assert.ok(fs.existsSync(localDir));
-    assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
+    assert.equal(fs.readFileSync(path.join(foreignCacheChild, 'keep.txt'), 'utf-8'), 'keep');
+    assert.deepEqual(fs.readdirSync(outside).sort(), ['local-source', 'sentinel']);
+  });
+});
+
+test('subtree source resolution ignores cache children behind a symlinked cache home', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(path.dirname(asbHome), 'outside-subtree-resolution-cache');
+    const foreignCacheChild = path.join(outside, 'vendor');
+    fs.mkdirSync(foreignCacheChild, { recursive: true });
+    fs.writeFileSync(path.join(foreignCacheChild, 'keep.txt'), 'keep');
+    const cacheHome = getCacheDir();
+    fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+    fs.symlinkSync(outside, cacheHome);
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources.vendor]',
+        'url = "https://example.invalid/vendor.git"',
+        'type = "subtree"',
+        'ref = "main"',
+      ].join('\n')
+    );
+
+    assert.equal(getSourcesRecord().vendor, path.join(getPluginsDir(), 'vendor'));
+    assert.equal(fs.readFileSync(path.join(foreignCacheChild, 'keep.txt'), 'utf-8'), 'keep');
+  });
+});
+
+test('managed source reads reject cache children behind a symlinked cache home', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(path.dirname(asbHome), 'outside-managed-read-cache');
+    const foreignCacheChild = path.join(outside, 'managed-read');
+    fs.mkdirSync(path.join(foreignCacheChild, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(foreignCacheChild, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(foreignCacheChild, 'rules', 'foreign.md'), '# Foreign');
+    const cacheHome = getCacheDir();
+    fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+    fs.symlinkSync(outside, cacheHome);
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources.managed-read]',
+        'url = "https://example.invalid/managed-read.git"',
+        'type = "clone"',
+      ].join('\n')
+    );
+
+    assert.throws(() => getSourcesRecord(), /symbolic link/);
+    assert.equal(
+      fs.readFileSync(path.join(foreignCacheChild, 'rules', 'foreign.md'), 'utf-8'),
+      '# Foreign'
+    );
   });
 });
 
@@ -1956,6 +2010,14 @@ test('subtree lifecycle remains usable with a symlinked cache home', () => {
     const { bareRepo, workDir } = createBareRemote(
       path.join(path.dirname(asbHome), 'linked-subtree-fixture')
     );
+    fs.mkdirSync(path.join(workDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({ name: 'linked-subtree-catalog', plugins: [] })
+    );
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'add marketplace'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
     initAsbAsGitRepo(asbHome);
     const outside = path.join(path.dirname(asbHome), 'outside-subtree-cache');
     fs.mkdirSync(outside, { recursive: true });
@@ -1988,6 +2050,54 @@ test('subtree lifecycle remains usable with a symlinked cache home', () => {
     assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
   });
 });
+
+test(
+  'clone add rollback preserves foreign content if the cache root changes',
+  { concurrency: false },
+  () => {
+    withTempAsbHome((asbHome) => {
+      const { bareRepo } = createBareRemote(path.join(asbHome, 'rollback-root-swap-fixture'));
+      const namespace = 'rollback-root-swap';
+      const cacheHome = getCacheDir();
+      const movedCacheHome = `${cacheHome}.moved`;
+      const outside = path.join(path.dirname(asbHome), 'outside-rollback-cache');
+      const foreignCacheChild = path.join(outside, namespace);
+      fs.mkdirSync(foreignCacheChild, { recursive: true });
+      fs.writeFileSync(path.join(foreignCacheChild, 'keep.txt'), 'keep');
+      const configPath = path.join(asbHome, 'config.toml');
+      const originalWrite = fs.writeFileSync;
+      let swapped = false;
+      fs.writeFileSync = ((
+        file: fs.PathOrFileDescriptor,
+        data: string | NodeJS.ArrayBufferView,
+        options?: fs.WriteFileOptions
+      ) => {
+        if (!swapped && String(file) === configPath) {
+          swapped = true;
+          fs.renameSync(cacheHome, movedCacheHome);
+          fs.symlinkSync(outside, cacheHome);
+          const error: NodeJS.ErrnoException = new Error('simulated config write failure');
+          error.code = 'EACCES';
+          throw error;
+        }
+        return originalWrite(file, data, options);
+      }) as typeof fs.writeFileSync;
+
+      try {
+        assert.throws(
+          () => addRemoteSource(namespace, { url: bareRepo, type: 'clone' }),
+          /simulated config write failure/
+        );
+      } finally {
+        fs.writeFileSync = originalWrite;
+      }
+
+      assert.equal(fs.readFileSync(path.join(foreignCacheChild, 'keep.txt'), 'utf-8'), 'keep');
+      assert.ok(fs.existsSync(path.join(movedCacheHome, namespace, '.git', 'asb-source.json')));
+      assert.equal(fs.existsSync(configPath), false);
+    });
+  }
+);
 
 test('managed source lifecycle rejects a symlinked cache home without touching its target', () => {
   for (const stage of ['add', 'update', 'remove'] as const) {
