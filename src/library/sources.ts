@@ -427,6 +427,21 @@ function legacyManagedCheckoutDir(namespace: string): string {
 }
 
 /**
+ * Reject a namespace occupying both the managed cache and the pre-cache location.
+ * Acting on one copy would leave the other live through auto-discovery, so the
+ * ambiguity is reported instead of resolved by guesswork.
+ */
+function ensureSingleManagedCheckout(namespace: string): void {
+  const cacheDir = getManagedSourceDir(namespace);
+  const legacyDir = legacyManagedCheckoutDir(namespace);
+  if (fs.existsSync(cacheDir) && fs.existsSync(legacyDir)) {
+    throw new Error(
+      `Source "${namespace}" exists in both the managed cache (${cacheDir}) and ${legacyDir}. Remove the copy you no longer need, then run this command again.`
+    );
+  }
+}
+
+/**
  * Resolve the effective local path for a plugin source.
  * - Cloneable sources (object with git/file URL or .git suffix): resolve to the managed cache
  * - Subtree sources: resolve inside the synchronized ASB_HOME plugins tree
@@ -673,6 +688,7 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
+      ensureSingleManagedCheckout(namespace);
       const managedDir = resolveManagedCheckoutDir(namespace);
       if (fs.existsSync(managedDir) && verifyClone(managedDir, namespace, value) !== undefined) {
         fs.rmSync(managedDir, { recursive: true, force: true });
@@ -758,12 +774,8 @@ function migrateLegacyManagedCheckout(namespace: string, remote: RemoteSource): 
   const legacyDir = legacyManagedCheckoutDir(namespace);
   if (!fs.existsSync(legacyDir)) return;
 
+  ensureSingleManagedCheckout(namespace);
   const cacheDir = getManagedSourceDir(namespace);
-  if (fs.existsSync(cacheDir)) {
-    throw new Error(
-      `Source "${namespace}" exists in both the managed cache (${cacheDir}) and ${legacyDir}. Remove the copy you no longer need, then update again.`
-    );
-  }
   if (verifyClone(legacyDir, namespace, remote) === undefined) {
     throw new Error(`Source directory is unverified or modified; preserving it: ${legacyDir}`);
   }

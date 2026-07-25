@@ -34,6 +34,7 @@ test('isGitUrl classifies remote URLs and local paths', () => {
     ['git@github.com:org/repo.git', true],
     ['ssh://git@github.com/org/repo', true],
     ['git://example.com/repo.git', true],
+    ['file:///srv/git/repo.git', true],
     ['/usr/local/lib', false],
     ['./relative/path', false],
     ['relative/path', false],
@@ -1542,6 +1543,23 @@ test('a user-owned directory at the legacy path is never moved or deleted', () =
     assert.equal(fs.existsSync(getManagedSourceDir('user-owned-ns')), false);
     assert.throws(() => removeSource('user-owned-ns'), /unverified or modified/);
     assert.equal(fs.readFileSync(path.join(userDir, 'rules', 'mine.md'), 'utf-8'), '# Mine');
+  });
+});
+
+test('removeSource refuses a namespace held in both the cache and ASB_HOME/plugins', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'remove-conflict-fixture'));
+    addRemoteSource('two-copies', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('two-copies');
+    const legacyDir = path.join(getPluginsDir(), 'two-copies');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.cpSync(cacheDir, legacyDir, { recursive: true });
+
+    assert.throws(() => removeSource('two-copies'), /both/i);
+
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+    assert.ok(fs.existsSync(path.join(legacyDir, 'rules', 'v1.md')));
+    assert.equal(hasSource('two-copies'), true);
   });
 });
 
