@@ -1930,6 +1930,45 @@ test('a markerless manual clone at the legacy plugins path is preserved on remov
   });
 });
 
+test('mixed source reads ignore an empty symlinked cache home', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(path.dirname(asbHome), 'outside-mixed-source-cache');
+    fs.mkdirSync(outside, { recursive: true });
+    const cacheHome = getCacheDir();
+    fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+    fs.symlinkSync(outside, cacheHome);
+
+    for (const namespace of ['legacy-clone', 'vendor', 'local-source']) {
+      fs.mkdirSync(path.join(getPluginsDir(), namespace), { recursive: true });
+    }
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources.missing-clone]',
+        'url = "https://example.invalid/missing-clone.git"',
+        'type = "clone"',
+        '',
+        '[plugins.sources.legacy-clone]',
+        'url = "https://example.invalid/legacy-clone.git"',
+        'type = "clone"',
+        '',
+        '[plugins.sources.vendor]',
+        'url = "https://example.invalid/vendor.git"',
+        'type = "subtree"',
+        'ref = "main"',
+      ].join('\n')
+    );
+
+    assert.deepEqual(getSourcesRecord(), {
+      'legacy-clone': path.join(getPluginsDir(), 'legacy-clone'),
+      vendor: path.join(getPluginsDir(), 'vendor'),
+      'local-source': path.join(getPluginsDir(), 'local-source'),
+      'missing-clone': getManagedSourceDir('missing-clone'),
+    });
+    assert.deepEqual(fs.readdirSync(outside), []);
+  });
+});
+
 test('local sources remain usable with a symlinked cache home', () => {
   withTempAsbHome((asbHome) => {
     const outside = path.join(path.dirname(asbHome), 'outside-local-cache');
