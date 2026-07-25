@@ -8,6 +8,7 @@ import {
   resolveScopedSectionConfig,
 } from '../src/config/application-config.js';
 import { loadMcpConfigWithPlugins } from '../src/config/mcp-config.js';
+import { getMarketplacePluginCacheDir } from '../src/config/paths.js';
 import { loadMcpEnabledState } from '../src/library/state.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
 import { loadRuleLibrary } from '../src/rules/library.js';
@@ -454,7 +455,7 @@ test('buildPluginIndex reuses a same-origin git-subdir marketplace checkout', ()
     assert.deepEqual(index.expand([plugin.id]).skills, ['ppt-master@self-catalog:ppt-master']);
     assert.equal(fs.realpathSync(plugin.meta.sourcePath), fs.realpathSync(pluginRoot));
     assert.deepEqual(plugin.components.skills, ['ppt-master@self-catalog:ppt-master']);
-    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(getMarketplacePluginCacheDir()), false);
   });
 });
 
@@ -743,7 +744,7 @@ test('application removals do not materialize unselected external plugin aliases
       false
     );
     assert.deepEqual(resolveScopedSectionConfig('skills', 'codex').enabled, []);
-    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+    assert.equal(fs.existsSync(getMarketplacePluginCacheDir()), false);
   });
 });
 

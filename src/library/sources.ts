@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
-import { expandHome, getConfigDir, getPluginsDir } from '../config/paths.js';
+import { expandHome, getConfigDir, getManagedSourceDir, getPluginsDir } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
@@ -310,7 +310,7 @@ function ensureCleanTree(dir: string): void {
 }
 
 export function isGitUrl(source: string): boolean {
-  return /^(https?:\/\/|git@|ssh:\/\/|git:\/\/)/.test(source);
+  return /^(https?:\/\/|git@|ssh:\/\/|git:\/\/|file:\/\/)/.test(source);
 }
 
 /**
@@ -320,9 +320,20 @@ export function isGitUrl(source: string): boolean {
  */
 function isCloneableSource(url: string): boolean {
   if (isGitUrl(url)) return true;
-  if (/^file:\/\//.test(url)) return true;
   if (url.endsWith('.git')) return true;
   return false;
+}
+
+/**
+ * Normalize a configured source value. A string carrying a Git transport scheme
+ * is the documented shorthand for a default clone source; every other string
+ * stays a user-owned local path.
+ */
+function normalizeSourceValue(value: SourceValue): SourceValue {
+  if (typeof value === 'string' && isGitUrl(expandHome(value))) {
+    return { url: value, type: 'clone' };
+  }
+  return value;
 }
 
 /**
@@ -375,8 +386,12 @@ export function inferSourceName(location: string): string {
 
 function getRawSources(scope?: ConfigScope): Record<string, SourceValue> {
   const config = loadMergedSwitchboardConfig(scopeToLayerOptions(scope)).config;
-  for (const namespace of Object.keys(config.plugins.sources)) validateNamespace(namespace);
-  return config.plugins.sources;
+  const sources: Record<string, SourceValue> = {};
+  for (const [namespace, value] of Object.entries(config.plugins.sources)) {
+    validateNamespace(namespace);
+    sources[namespace] = normalizeSourceValue(value);
+  }
+  return sources;
 }
 
 /**
@@ -394,8 +409,27 @@ function resolveLocalPath(expanded: string): string {
 }
 
 /**
+ * Resolve the single directory an ASB-managed clone occupies.
+ * The machine-local cache is the only location ASB writes; a checkout still
+ * sitting at the pre-cache location stays readable until an update migrates it.
+ */
+function resolveManagedCheckoutDir(namespace: string): string {
+  const cacheDir = getManagedSourceDir(namespace);
+  if (fs.existsSync(cacheDir)) return cacheDir;
+  const legacyDir = legacyManagedCheckoutDir(namespace);
+  if (fs.existsSync(legacyDir)) return legacyDir;
+  return cacheDir;
+}
+
+/** The pre-cache managed clone location, still owned by ASB for migration only. */
+function legacyManagedCheckoutDir(namespace: string): string {
+  return path.join(getPluginsDir(), namespace);
+}
+
+/**
  * Resolve the effective local path for a plugin source.
- * - Cloneable sources (object with git/file URL or .git suffix): resolve to cache dir
+ * - Cloneable sources (object with git/file URL or .git suffix): resolve to the managed cache
+ * - Subtree sources: resolve inside the synchronized ASB_HOME plugins tree
  * - Object sources with local path URL: resolve using shared local path rules
  * - String sources: resolve using shared local path rules
  */
@@ -407,7 +441,10 @@ function resolveEffectivePath(namespace: string, value: SourceValue): string {
       if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
       return effectivePath;
     }
-    let effectivePath = path.join(getPluginsDir(), namespace);
+    let effectivePath =
+      value.type === 'subtree'
+        ? legacyManagedCheckoutDir(namespace)
+        : resolveManagedCheckoutDir(namespace);
     if (value.subdir) effectivePath = path.join(effectivePath, value.subdir);
     return effectivePath;
   }
@@ -423,7 +460,11 @@ function validateNamespace(namespace: string): void {
 }
 
 function ensureNamespaceAvailable(namespace: string): void {
-  if (namespace in getRawSources() || fs.existsSync(path.join(getPluginsDir(), namespace))) {
+  if (
+    namespace in getRawSources() ||
+    fs.existsSync(legacyManagedCheckoutDir(namespace)) ||
+    fs.existsSync(getManagedSourceDir(namespace))
+  ) {
     throw new Error(
       `Source "${namespace}" already exists. Use a different name or remove it first.`
     );
@@ -562,8 +603,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
     headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
     gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
   } else {
-    const cloneDir = path.join(getPluginsDir(), namespace);
-    gitClone(expandHome(remote.url), cloneDir, namespace, remote.ref);
+    gitClone(expandHome(remote.url), getManagedSourceDir(namespace), namespace, remote.ref);
   }
 
   const configValue: RemoteSource = {
@@ -594,7 +634,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
         /* best-effort rollback */
       }
     } else {
-      const cloneDir = path.join(getPluginsDir(), namespace);
+      const cloneDir = getManagedSourceDir(namespace);
       if (fs.existsSync(cloneDir)) {
         fs.rmSync(cloneDir, { recursive: true, force: true });
       }
@@ -615,14 +655,14 @@ export function removeSource(namespace: string): void {
 
   // For subtree sources, perform git rm first to avoid split-brain on failure
   if (typeof value !== 'string' && isCloneableSource(expandHome(value.url))) {
-    const pluginDir = path.join(getPluginsDir(), namespace);
     if (value.type === 'subtree') {
+      const subtreeDir = legacyManagedCheckoutDir(namespace);
       if (!isGitRepo(getConfigDir())) {
         throw new Error(
           `Source "${namespace}" is configured as subtree but ASB_HOME is not a git repo root. Cannot safely remove.`
         );
       }
-      if (fs.existsSync(pluginDir)) {
+      if (fs.existsSync(subtreeDir)) {
         ensureCleanTree(getConfigDir());
         try {
           runGit(['rm', '-r', `plugins/${namespace}`], { cwd: getConfigDir() });
@@ -633,10 +673,11 @@ export function removeSource(namespace: string): void {
         }
       }
     } else {
-      if (fs.existsSync(pluginDir) && verifyClone(pluginDir, namespace, value) !== undefined) {
-        fs.rmSync(pluginDir, { recursive: true, force: true });
-      } else if (fs.existsSync(pluginDir)) {
-        throw new Error(`Source directory is unverified or modified; preserving it: ${pluginDir}`);
+      const managedDir = resolveManagedCheckoutDir(namespace);
+      if (fs.existsSync(managedDir) && verifyClone(managedDir, namespace, value) !== undefined) {
+        fs.rmSync(managedDir, { recursive: true, force: true });
+      } else if (fs.existsSync(managedDir)) {
+        throw new Error(`Source directory is unverified or modified; preserving it: ${managedDir}`);
       }
     }
   }
@@ -708,6 +749,40 @@ export function validateSourcePath(libraryPath: string): {
 }
 
 /**
+ * Move a managed clone left at the pre-cache location into the machine-local cache.
+ * Only a checkout whose ownership marker, remote identity, and working tree all
+ * verify is moved. Unverifiable, locally modified, and user-owned directories are
+ * preserved and reported, as is a namespace already present in both locations.
+ */
+function migrateLegacyManagedCheckout(namespace: string, remote: RemoteSource): void {
+  const legacyDir = legacyManagedCheckoutDir(namespace);
+  if (!fs.existsSync(legacyDir)) return;
+
+  const cacheDir = getManagedSourceDir(namespace);
+  if (fs.existsSync(cacheDir)) {
+    throw new Error(
+      `Source "${namespace}" exists in both the managed cache (${cacheDir}) and ${legacyDir}. Remove the copy you no longer need, then update again.`
+    );
+  }
+  if (verifyClone(legacyDir, namespace, remote) === undefined) {
+    throw new Error(`Source directory is unverified or modified; preserving it: ${legacyDir}`);
+  }
+
+  fs.mkdirSync(path.dirname(cacheDir), { recursive: true });
+  try {
+    fs.renameSync(legacyDir, cacheDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EXDEV') throw error;
+    gitClone(expandHome(remote.url), cacheDir, namespace, remote.ref);
+    if (verifyClone(cacheDir, namespace, remote) === undefined) {
+      fs.rmSync(cacheDir, { recursive: true, force: true });
+      throw error;
+    }
+    fs.rmSync(legacyDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * Pull latest changes for all remote sources.
  * Re-clones if the cache directory is missing or corrupted.
  */
@@ -759,7 +834,8 @@ export function updateRemoteSources(
           }
         }
       } else {
-        const cloneDir = path.join(getPluginsDir(), namespace);
+        migrateLegacyManagedCheckout(namespace, value);
+        const cloneDir = getManagedSourceDir(namespace);
         const gitDir = path.join(cloneDir, '.git');
         if (!fs.existsSync(gitDir)) {
           gitClone(expandHome(value.url), cloneDir, namespace, value.ref);

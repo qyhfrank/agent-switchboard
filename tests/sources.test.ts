@@ -3,7 +3,12 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { getMarketplacePluginCacheDir, getPluginsDir } from '../src/config/paths.js';
+import {
+  getCacheDir,
+  getManagedSourceDir,
+  getMarketplacePluginCacheDir,
+  getPluginsDir,
+} from '../src/config/paths.js';
 import {
   addLocalSource,
   addRemoteSource,
@@ -18,7 +23,7 @@ import {
   validateSourcePath,
 } from '../src/library/sources.js';
 import { buildPluginIndex, clearPluginIndexCache } from '../src/plugins/index.js';
-import { withTempAsbHome } from './helpers/tmp.js';
+import { withCacheEnv, withTempAsbHome, withTempDir } from './helpers/tmp.js';
 
 // ── URL detection ──────────────────────────────────────────────────
 
@@ -255,7 +260,7 @@ test('getSourcesRecord resolves remote sources to cache paths', () => {
     const record = getSourcesRecord();
     assert.equal(record.local, '/some/local/path');
 
-    const expectedCachePath = path.join(getPluginsDir(), 'remote-team');
+    const expectedCachePath = getManagedSourceDir('remote-team');
     assert.equal(record['remote-team'], expectedCachePath);
   });
 });
@@ -272,7 +277,7 @@ test('getSourcesRecord includes subdir in resolved path for remote sources', () 
     );
 
     const record = getSourcesRecord();
-    const expectedPath = path.join(path.join(getPluginsDir(), 'with-subdir'), 'lib/asb');
+    const expectedPath = path.join(getManagedSourceDir('with-subdir'), 'lib/asb');
     assert.equal(record['with-subdir'], expectedPath);
   });
 });
@@ -327,7 +332,7 @@ test('addRemoteSource clones a local git repo and saves config', () => {
 
     assert.equal(hasSource('test-remote'), true);
 
-    const cacheDir = path.join(getPluginsDir(), 'test-remote');
+    const cacheDir = getManagedSourceDir('test-remote');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
     assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
 
@@ -406,7 +411,7 @@ test('removeSource cleans up cache for remote sources', () => {
     const { bareRepo } = createBareRemote(path.join(asbHome, 'remove-fixture'));
     addRemoteSource('cleanup-test', { url: bareRepo, type: 'clone' });
 
-    const cacheDir = path.join(getPluginsDir(), 'cleanup-test');
+    const cacheDir = getManagedSourceDir('cleanup-test');
     assert.ok(fs.existsSync(cacheDir));
     fs.rmSync(path.join(cacheDir, '.git', 'asb-source.json'));
 
@@ -423,7 +428,7 @@ test('removeSource preserves a modified managed clone', () => {
     fs.mkdirSync(parent, { recursive: true });
     const { bareRepo } = createBareRemote(parent);
     addRemoteSource('modified-clone', { url: bareRepo, type: 'clone' });
-    const cloneDir = path.join(getPluginsDir(), 'modified-clone');
+    const cloneDir = getManagedSourceDir('modified-clone');
     const userFile = path.join(cloneDir, 'keep.txt');
     fs.writeFileSync(userFile, 'keep me\n');
 
@@ -442,7 +447,7 @@ test('managed clone update rejects mismatched provenance without fetching', () =
       const { bareRepo, workDir } = createBareRemote(parent);
       const namespace = `guarded-${mismatch}`;
       addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
-      const cloneDir = path.join(getPluginsDir(), namespace);
+      const cloneDir = getManagedSourceDir(namespace);
       fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
       execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
       execFileSync('git', ['commit', '-m', 'advance'], { cwd: workDir, stdio: 'pipe' });
@@ -500,7 +505,7 @@ test('managed clone adopts and repeatedly updates a force-moved detached tag', (
     execFileSync('git', ['push', 'origin', 'v1'], { cwd: workDir, stdio: 'pipe' });
 
     addRemoteSource('tagged-clone', { url: bareRepo, type: 'clone', ref: 'v1' });
-    const cloneDir = path.join(getPluginsDir(), 'tagged-clone');
+    const cloneDir = getManagedSourceDir('tagged-clone');
     fs.rmSync(path.join(cloneDir, '.git', 'asb-source.json'));
     execFileSync('git', ['checkout', '--orphan', 'replacement'], { cwd: workDir, stdio: 'pipe' });
     execFileSync('git', ['rm', '-rf', '.'], { cwd: workDir, stdio: 'pipe' });
@@ -533,7 +538,7 @@ test('managed clone removal preserves local history and hidden files', () => {
       const { bareRepo } = createBareRemote(parent);
       const namespace = `preserve-${localChange}`;
       addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
-      const cloneDir = path.join(getPluginsDir(), namespace);
+      const cloneDir = getManagedSourceDir(namespace);
       const localFile =
         localChange === 'hidden-index'
           ? path.join(cloneDir, 'rules', 'v1.md')
@@ -582,7 +587,7 @@ test('managed clone rejects symlinked clone and git roots', () => {
       const { bareRepo, workDir } = createBareRemote(parent);
       const namespace = `linked-${linkedRoot}`;
       addRemoteSource(namespace, { url: bareRepo, type: 'clone' });
-      const cloneDir = path.join(getPluginsDir(), namespace);
+      const cloneDir = getManagedSourceDir(namespace);
       const moved = path.join(parent, `external-${linkedRoot}`);
       const link = linkedRoot === 'clone' ? cloneDir : path.join(cloneDir, '.git');
       fs.renameSync(link, moved);
@@ -608,7 +613,7 @@ test('updateRemoteSources pulls latest changes', () => {
     const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'update-fixture'));
 
     addRemoteSource('update-test', { url: bareRepo, type: 'clone' });
-    const cacheDir = path.join(getPluginsDir(), 'update-test');
+    const cacheDir = getManagedSourceDir('update-test');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
     fs.rmSync(path.join(cacheDir, '.git', 'asb-source.json'));
 
@@ -639,7 +644,7 @@ test('updateRemoteSources aborts its conflicting clone merge despite rebase conf
     fs.mkdirSync(parent, { recursive: true });
     const { bareRepo, workDir } = createBareRemote(parent);
     addRemoteSource('conflict-source', { url: bareRepo, type: 'clone' });
-    const cloneDir = path.join(getPluginsDir(), 'conflict-source');
+    const cloneDir = getManagedSourceDir('conflict-source');
     execFileSync('git', ['config', 'user.name', 'test'], { cwd: cloneDir, stdio: 'pipe' });
     execFileSync('git', ['config', 'user.email', 'test@test.com'], {
       cwd: cloneDir,
@@ -676,7 +681,7 @@ test('updateRemoteSources preserves a merge that existed before the pull', () =>
     fs.mkdirSync(parent, { recursive: true });
     const { bareRepo, workDir } = createBareRemote(parent);
     addRemoteSource('existing-merge-source', { url: bareRepo, type: 'clone' });
-    const cloneDir = path.join(getPluginsDir(), 'existing-merge-source');
+    const cloneDir = getManagedSourceDir('existing-merge-source');
     execFileSync('git', ['config', 'user.name', 'test'], { cwd: cloneDir, stdio: 'pipe' });
     execFileSync('git', ['config', 'user.email', 'test@test.com'], {
       cwd: cloneDir,
@@ -720,7 +725,7 @@ test('updateRemoteSources re-clones when cache is missing', () => {
     const { bareRepo } = createBareRemote(path.join(asbHome, 'reclone-fixture'));
 
     addRemoteSource('reclone-test', { url: bareRepo, type: 'clone' });
-    const cacheDir = path.join(getPluginsDir(), 'reclone-test');
+    const cacheDir = getManagedSourceDir('reclone-test');
 
     fs.rmSync(cacheDir, { recursive: true, force: true });
     assert.equal(fs.existsSync(cacheDir), false);
@@ -785,9 +790,12 @@ test('updateRemoteSources can target one namespace without updating others', () 
       results.map((result) => result.namespace),
       ['first']
     );
-    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'first', 'rules', 'first-v2.md')), true);
     assert.equal(
-      fs.existsSync(path.join(getPluginsDir(), 'second', 'rules', 'second-v2.md')),
+      fs.existsSync(path.join(getManagedSourceDir('first'), 'rules', 'first-v2.md')),
+      true
+    );
+    assert.equal(
+      fs.existsSync(path.join(getManagedSourceDir('second'), 'rules', 'second-v2.md')),
       false
     );
   });
@@ -866,7 +874,7 @@ test('updateRemoteSources refreshes materialized marketplace entries', () => {
     assert.equal(results[0]?.status, 'updated');
     assert.notEqual(refreshedIndex, index);
     assert.equal(fs.readFileSync(path.join(materializedPath, 'VERSION'), 'utf-8').trim(), 'v2');
-    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'catalog-source', '.git')), true);
+    assert.equal(fs.existsSync(path.join(getManagedSourceDir('catalog-source'), '.git')), true);
   });
 });
 
@@ -927,7 +935,7 @@ test('updateRemoteSources removes derived cache when a source stops being a mark
     assert.equal(results[0]?.status, 'updated');
     assert.equal(fs.existsSync(materializedPath), false);
     assert.equal(
-      fs.existsSync(path.join(getPluginsDir(), 'catalog-source', 'rules', 'ordinary.md')),
+      fs.existsSync(path.join(getManagedSourceDir('catalog-source'), 'rules', 'ordinary.md')),
       true
     );
   });
@@ -1143,7 +1151,7 @@ test('addRemoteSource with subdir resolves effective path correctly', () => {
     addRemoteSource('subdir-test', { url: bareRepo, subdir: 'nested/lib', type: 'clone' });
 
     const record = getSourcesRecord();
-    const expectedPath = path.join(path.join(getPluginsDir(), 'subdir-test'), 'nested/lib');
+    const expectedPath = path.join(getManagedSourceDir('subdir-test'), 'nested/lib');
     assert.equal(record['subdir-test'], expectedPath);
 
     assert.ok(fs.existsSync(path.join(expectedPath, 'rules', 'deep.md')));
@@ -1292,5 +1300,304 @@ test('subtree fallback persists type as requested when subtree succeeds', () => 
     const src = sources.find((s) => s.namespace === 'persist-test');
     assert.ok(src?.remote);
     assert.equal(src.remote.type, 'subtree');
+  });
+});
+
+// ── Managed cache root resolution ─────────────────────────────────
+
+test('cache root resolves explicit ASB_CACHE_HOME, then XDG, then ~/.cache/asb', () => {
+  withTempDir((root) => {
+    const explicit = path.join(root, 'explicit-cache');
+    const xdg = path.join(root, 'xdg-cache');
+    const home = path.join(root, 'home');
+
+    withCacheEnv({ ASB_CACHE_HOME: explicit, XDG_CACHE_HOME: xdg, HOME: home }, () => {
+      assert.equal(getCacheDir(), explicit);
+    });
+    withCacheEnv({ XDG_CACHE_HOME: xdg, HOME: home }, () => {
+      assert.equal(getCacheDir(), path.join(xdg, 'asb'));
+    });
+    withCacheEnv({ HOME: home }, () => {
+      assert.equal(getCacheDir(), path.join(home, '.cache', 'asb'));
+    });
+  });
+});
+
+test('managed source directory is a flat cache child outside the synchronized config dir', () => {
+  withTempAsbHome((asbHome) => {
+    const managed = getManagedSourceDir('ppt-master');
+    assert.equal(path.basename(managed), 'ppt-master');
+    assert.equal(path.dirname(managed), getCacheDir());
+    assert.equal(path.relative(asbHome, managed).startsWith('..'), true);
+    assert.equal(path.relative(getPluginsDir(), managed).startsWith('..'), true);
+  });
+});
+
+// ── Managed clone lives in the cache, not ASB_HOME/plugins ────────
+
+test('addRemoteSource materializes a managed clone in the cache and not under ASB_HOME/plugins', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'cache-layout-fixture'));
+
+    addRemoteSource('cached-source', { url: bareRepo, type: 'clone' });
+
+    const cacheDir = getManagedSourceDir('cached-source');
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'cached-source')), false);
+    assert.equal(getSourcesRecord()['cached-source'], cacheDir);
+  });
+});
+
+test('a documented string Git URL resolves to a managed cache clone and updates', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'string-url-fixture'));
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources]', `string-remote = "file://${bareRepo}"`].join('\n')
+    );
+
+    const cacheDir = getManagedSourceDir('string-remote');
+    assert.equal(getSourcesRecord()['string-remote'], cacheDir);
+
+    const [created] = updateRemoteSources();
+    assert.equal(created?.status, 'updated');
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'string-remote')), false);
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'v2'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+
+    const [updated] = updateRemoteSources();
+    assert.equal(updated?.status, 'updated');
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')));
+  });
+});
+
+test('a local path string source stays user-owned and is never cache-resolved', () => {
+  withTempAsbHome((asbHome) => {
+    const bare = path.join(asbHome, 'user-managed.git');
+    fs.mkdirSync(path.join(bare, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(bare, 'rules', 'user.md'), '# User');
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources]', `path-like = "${bare}"`].join('\n')
+    );
+
+    assert.equal(getSourcesRecord()['path-like'], bare);
+    assert.deepEqual(updateRemoteSources(), []);
+    assert.equal(fs.existsSync(getManagedSourceDir('path-like')), false);
+    assert.equal(fs.readFileSync(path.join(bare, 'rules', 'user.md'), 'utf-8'), '# User');
+  });
+});
+
+test('cache directories never become auto-discovered sources', () => {
+  withTempAsbHome(() => {
+    const stray = path.join(getCacheDir(), 'undeclared');
+    fs.mkdirSync(path.join(stray, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(stray, 'rules', 'stray.md'), '# Stray');
+
+    assert.equal(hasSource('undeclared'), false);
+    assert.equal(getSourcesRecord().undeclared, undefined);
+    assert.equal(
+      getSources().some((source) => source.namespace === 'undeclared'),
+      false
+    );
+  });
+});
+
+test('an ASB_HOME/plugins directory is still auto-discovered next to a cached managed source', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'coexist-fixture'));
+    addRemoteSource('managed', { url: bareRepo, type: 'clone' });
+    const userPlugin = path.join(getPluginsDir(), 'my-dev-plugin');
+    fs.mkdirSync(path.join(userPlugin, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(userPlugin, 'rules', 'dev.md'), '# Dev');
+
+    const record = getSourcesRecord();
+    assert.equal(record['my-dev-plugin'], userPlugin);
+    assert.equal(record.managed, getManagedSourceDir('managed'));
+  });
+});
+
+test('removeSource cleans the managed cache checkout and leaves the cache root usable', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'remove-cache-fixture'));
+    addRemoteSource('remove-cached', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('remove-cached');
+    assert.ok(fs.existsSync(cacheDir));
+
+    removeSource('remove-cached');
+
+    assert.equal(fs.existsSync(cacheDir), false);
+    assert.equal(hasSource('remove-cached'), false);
+    assert.equal(fs.existsSync(getCacheDir()), true);
+  });
+});
+
+test('updateRemoteSources reconstructs a deleted managed cache from config', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'reconstruct-fixture'));
+    addRemoteSource('reconstruct', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('reconstruct');
+
+    fs.rmSync(getCacheDir(), { recursive: true, force: true });
+    assert.equal(fs.existsSync(cacheDir), false);
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'updated');
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+  });
+});
+
+// ── Legacy managed clone migration ────────────────────────────────
+
+/** Relocate a managed cache checkout back to the pre-cache ASB_HOME/plugins layout. */
+function demoteToLegacyLayout(namespace: string): string {
+  const legacyDir = path.join(getPluginsDir(), namespace);
+  fs.mkdirSync(path.dirname(legacyDir), { recursive: true });
+  fs.renameSync(getManagedSourceDir(namespace), legacyDir);
+  return legacyDir;
+}
+
+test('a verified clean legacy managed clone migrates into the cache on update', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'migrate-fixture'));
+    addRemoteSource('migrate-me', { url: bareRepo, type: 'clone' });
+    const legacyDir = demoteToLegacyLayout('migrate-me');
+    const cacheDir = getManagedSourceDir('migrate-me');
+    assert.equal(getSourcesRecord()['migrate-me'], legacyDir);
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'v2'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'updated');
+    assert.equal(fs.existsSync(legacyDir), false);
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')));
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+    assert.equal(getSourcesRecord()['migrate-me'], cacheDir);
+  });
+});
+
+test('a modified legacy managed clone is preserved with an actionable error', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'modified-legacy-fixture'));
+    addRemoteSource('modified-legacy', { url: bareRepo, type: 'clone' });
+    const legacyDir = demoteToLegacyLayout('modified-legacy');
+    fs.writeFileSync(path.join(legacyDir, 'keep.txt'), 'keep me\n');
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /unverified or modified/);
+    assert.equal(fs.readFileSync(path.join(legacyDir, 'keep.txt'), 'utf-8'), 'keep me\n');
+    assert.ok(fs.existsSync(path.join(legacyDir, '.git')));
+    assert.equal(fs.existsSync(getManagedSourceDir('modified-legacy')), false);
+  });
+});
+
+test('an unverifiable legacy managed clone is preserved with an actionable error', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'unverified-legacy-fixture'));
+    addRemoteSource('unverified-legacy', { url: bareRepo, type: 'clone' });
+    const legacyDir = demoteToLegacyLayout('unverified-legacy');
+    const markerPath = path.join(legacyDir, '.git', 'asb-source.json');
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf-8')) as Record<string, unknown>;
+    fs.writeFileSync(markerPath, `${JSON.stringify({ ...marker, namespace: 'foreign' })}\n`);
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /unverified or modified/);
+    assert.ok(fs.existsSync(path.join(legacyDir, '.git')));
+    assert.equal(fs.existsSync(getManagedSourceDir('unverified-legacy')), false);
+  });
+});
+
+test('a user-owned directory at the legacy path is never moved or deleted', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'user-legacy-fixture'));
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources]', `user-owned-ns = { url = "${bareRepo}", type = "clone" }`].join('\n')
+    );
+    const userDir = path.join(getPluginsDir(), 'user-owned-ns');
+    fs.mkdirSync(path.join(userDir, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(userDir, 'rules', 'mine.md'), '# Mine');
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /unverified or modified/);
+    assert.equal(fs.readFileSync(path.join(userDir, 'rules', 'mine.md'), 'utf-8'), '# Mine');
+    assert.equal(fs.existsSync(getManagedSourceDir('user-owned-ns')), false);
+    assert.throws(() => removeSource('user-owned-ns'), /unverified or modified/);
+    assert.equal(fs.readFileSync(path.join(userDir, 'rules', 'mine.md'), 'utf-8'), '# Mine');
+  });
+});
+
+test('a legacy checkout conflicting with an existing cache checkout preserves both', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'conflict-legacy-fixture'));
+    addRemoteSource('both-paths', { url: bareRepo, type: 'clone' });
+    const cacheDir = getManagedSourceDir('both-paths');
+    const legacyDir = path.join(getPluginsDir(), 'both-paths');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    fs.cpSync(cacheDir, legacyDir, { recursive: true });
+    fs.writeFileSync(path.join(legacyDir, 'legacy-marker.txt'), 'legacy\n');
+
+    const [result] = updateRemoteSources();
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /both/i);
+    assert.equal(fs.readFileSync(path.join(legacyDir, 'legacy-marker.txt'), 'utf-8'), 'legacy\n');
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+  });
+});
+
+test('subtree sources stay under ASB_HOME/plugins and never enter the cache', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.dirname(asbHome));
+    initAsbAsGitRepo(asbHome);
+
+    addRemoteSource('subtree-ns', { url: bareRepo, type: 'subtree', ref: 'main' });
+
+    const subtreeDir = path.join(getPluginsDir(), 'subtree-ns');
+    assert.ok(fs.existsSync(path.join(subtreeDir, 'rules', 'v1.md')));
+    assert.equal(getSourcesRecord()['subtree-ns'], subtreeDir);
+    assert.equal(fs.existsSync(getManagedSourceDir('subtree-ns')), false);
+  });
+});
+
+test('marketplace add CLI validates the cached checkout for a file:// Git source', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'cli-fixture'));
+    const result = spawnSync(
+      process.execPath,
+      [
+        '--import',
+        'tsx',
+        path.join(process.cwd(), 'src', 'index.ts'),
+        'plugin',
+        'marketplace',
+        'add',
+        `file://${bareRepo}`,
+        'cli-cached',
+      ],
+      { env: { ...process.env, FORCE_COLOR: '0' }, encoding: 'utf-8' }
+    );
+
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    assert.ok(fs.existsSync(path.join(getManagedSourceDir('cli-cached'), 'rules', 'v1.md')));
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'cli-cached')), false);
   });
 });

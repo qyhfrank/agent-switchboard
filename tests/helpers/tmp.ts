@@ -29,19 +29,56 @@ function setEnv(key: string, value: string | undefined): string | undefined {
   return prev;
 }
 
+/**
+ * Point the machine-local cache root at `root/asb-cache` and drop XDG_CACHE_HOME
+ * so isolated tests never read or write the real user cache. The directory is
+ * left uncreated so reconstruction cases can observe a missing cache.
+ */
+function isolateCacheHome(root: string): { restore: () => void; cacheHome: string } {
+  const cacheHome = path.join(root, 'asb-cache');
+  const prevCache = setEnv('ASB_CACHE_HOME', cacheHome);
+  const prevXdg = setEnv('XDG_CACHE_HOME', undefined);
+  return {
+    cacheHome,
+    restore: () => {
+      setEnv('ASB_CACHE_HOME', prevCache);
+      setEnv('XDG_CACHE_HOME', prevXdg);
+    },
+  };
+}
+
 export function withTempAsbHome<T>(fn: (asbHome: string) => T): T {
   return withTempDir((root) => {
     const asbHome = path.join(root, 'asb-home');
     fs.mkdirSync(asbHome, { recursive: true });
     const prevAsb = setEnv('ASB_HOME', asbHome);
     const prevAgents = setEnv('ASB_AGENTS_HOME', asbHome);
+    const cache = isolateCacheHome(root);
     try {
       return fn(asbHome);
     } finally {
+      cache.restore();
       setEnv('ASB_HOME', prevAsb);
       setEnv('ASB_AGENTS_HOME', prevAgents);
     }
   });
+}
+
+/**
+ * Run `fn` with the cache-root environment set to exact values. A key left out
+ * is deleted so resolution falls through to the next rule.
+ */
+export function withCacheEnv<T>(
+  env: { ASB_CACHE_HOME?: string; XDG_CACHE_HOME?: string; HOME?: string },
+  fn: () => T
+): T {
+  const keys = ['ASB_CACHE_HOME', 'XDG_CACHE_HOME', 'HOME'] as const;
+  const previous = keys.map((key) => [key, setEnv(key, env[key])] as const);
+  try {
+    return fn();
+  } finally {
+    for (const [key, value] of previous) setEnv(key, value);
+  }
 }
 
 export function withTempAgentsHome<T>(fn: (agentsHome: string) => T): T {
@@ -49,9 +86,11 @@ export function withTempAgentsHome<T>(fn: (agentsHome: string) => T): T {
     const agentsHome = path.join(root, 'agents-home');
     fs.mkdirSync(agentsHome, { recursive: true });
     const prev = setEnv('ASB_AGENTS_HOME', agentsHome);
+    const cache = isolateCacheHome(root);
     try {
       return fn(agentsHome);
     } finally {
+      cache.restore();
       setEnv('ASB_AGENTS_HOME', prev);
     }
   });
@@ -65,9 +104,11 @@ export function withTempHomes<T>(fn: (ctx: { asbHome: string; agentsHome: string
     fs.mkdirSync(agentsHome, { recursive: true });
     const prevAsb = setEnv('ASB_HOME', asbHome);
     const prevAgents = setEnv('ASB_AGENTS_HOME', agentsHome);
+    const cache = isolateCacheHome(root);
     try {
       return fn({ asbHome, agentsHome });
     } finally {
+      cache.restore();
       setEnv('ASB_HOME', prevAsb);
       setEnv('ASB_AGENTS_HOME', prevAgents);
     }
