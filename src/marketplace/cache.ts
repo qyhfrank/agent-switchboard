@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { getConfigDir, getMarketplacePluginCacheDir } from '../config/paths.js';
+import { getMarketplacePluginCacheDir } from '../config/paths.js';
 import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from './git-transport.js';
 
 export interface MarketplaceEntryCacheRequest {
@@ -176,17 +176,15 @@ function assertNoCacheSymlinks(root: string, target: string): void {
   }
 }
 
+/**
+ * The cache root is the deepest path ASB owns. Its parent is the caller-selected
+ * cache home, which may legitimately be a symlink to another volume, so only the
+ * root itself is checked before ASB writes through it.
+ */
 function safeCacheRoot(create: boolean): string {
-  const override = temporaryCacheRoot.getStore();
-  const trustedRoot = path.resolve(override ? path.dirname(override) : getConfigDir());
   const cacheRoot = path.resolve(configuredCacheRoot());
-  assertInside(trustedRoot, cacheRoot);
-  let current = trustedRoot;
-  for (const segment of path.relative(trustedRoot, cacheRoot).split(path.sep).filter(Boolean)) {
-    current = path.join(current, segment);
-    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) {
-      throw new Error(`Marketplace cache root contains a symbolic link: ${current}`);
-    }
+  if (fs.existsSync(cacheRoot) && fs.lstatSync(cacheRoot).isSymbolicLink()) {
+    throw new Error(`Marketplace cache root contains a symbolic link: ${cacheRoot}`);
   }
   if (create) fs.mkdirSync(cacheRoot, { recursive: true });
   return cacheRoot;

@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { getCacheDir, getMarketplacePluginCacheDir } from '../src/config/paths.js';
 import {
   type MarketplaceEntryCacheRequest,
   materializeMarketplaceEntry,
@@ -115,7 +116,7 @@ test('git-subdir entries use a state-owned sparse checkout', () => {
     writeMarketplace(asbHome, remote.bareRepo);
 
     const pluginPath = materializePlugin();
-    const cacheRoot = path.join(asbHome, 'state', 'marketplace-plugins');
+    const cacheRoot = getMarketplacePluginCacheDir();
     const relative = path.relative(cacheRoot, pluginPath);
     const repoRoot = findGitRoot(pluginPath);
 
@@ -451,7 +452,8 @@ test('cache root symlinks are rejected without touching their target', () => {
     const outside = path.join(path.dirname(asbHome), 'outside-state');
     fs.mkdirSync(outside, { recursive: true });
     fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
-    fs.symlinkSync(outside, path.join(asbHome, 'state'));
+    fs.mkdirSync(getCacheDir(), { recursive: true });
+    fs.symlinkSync(outside, getMarketplacePluginCacheDir());
 
     assert.throws(
       () =>
@@ -466,5 +468,40 @@ test('cache root symlinks are rejected without touching their target', () => {
     );
     assert.equal(fs.readFileSync(path.join(outside, 'sentinel'), 'utf-8'), 'keep');
     assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
+  });
+});
+
+// ── Cache-root relocation ─────────────────────────────────────────
+
+test('external marketplace entries materialize under the reserved cache subtree', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const remote = createGitFixture(asbHome, 'entries-remote');
+    writePluginVersion(remote, 'v1');
+    writeMarketplace(asbHome, remote.bareRepo);
+
+    const pluginPath = materializePlugin();
+
+    const entriesRoot = getMarketplacePluginCacheDir();
+    assert.equal(entriesRoot, path.join(getCacheDir(), '.entries'));
+    assert.equal(path.relative(entriesRoot, pluginPath).startsWith('..'), false);
+    assert.equal(path.relative(asbHome, pluginPath).startsWith('..'), true);
+    assert.equal(fs.existsSync(path.join(asbHome, 'state', 'marketplace-plugins')), false);
+  });
+});
+
+test('the reserved entries subtree is a dot directory the cache never exposes as a source', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const remote = createGitFixture(asbHome, 'dot-remote');
+    writePluginVersion(remote, 'v1');
+    writeMarketplace(asbHome, remote.bareRepo);
+    materializePlugin();
+
+    assert.equal(path.basename(getMarketplacePluginCacheDir()).startsWith('.'), true);
+    assert.equal(
+      fs.readdirSync(getCacheDir()).every((entry) => entry.startsWith('.')),
+      true
+    );
   });
 });
