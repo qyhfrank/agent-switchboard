@@ -181,7 +181,7 @@ scope = "user"
 
 Keep a native plugin out of the same target's effective portable plugin selection. Portable selection includes `[plugins].enabled` plus `[applications.<app>.plugins]` overrides.
 
-When a remote source is written directly into `config.toml`, run `asb sync --update` once so the checkout exists under `~/.asb/plugins/`. If the marketplace is already present at `~/.asb/plugins/openai-codex`, the `[plugins.sources.openai-codex]` table is optional.
+When a remote source is written directly into `config.toml`, run `asb sync --update` once so ASB clones it into the machine-local cache. If the marketplace is already present at `~/.asb/plugins/openai-codex`, the `[plugins.sources.openai-codex]` table is optional.
 
 ### Per-Application Overrides
 
@@ -445,11 +445,18 @@ Source storage, marketplace inventory, and external entry materialization have s
 
 | Layer | Meaning | Storage |
 |:------|:--------|:--------|
-| Source | A user-managed or ASB-managed plugin or marketplace checkout | `~/.asb/plugins/<source>/` or a configured local path |
+| User-owned source | A plugin or marketplace directory you place and maintain, including `type = "subtree"` checkouts | `~/.asb/plugins/<source>/` or a configured local path |
+| Managed source | A plugin or marketplace clone ASB creates and updates from a Git URL | `<cache>/<source>/` |
 | Catalog | Plugin identities and source metadata read from a marketplace manifest | In memory; discovery does not fetch external entries |
-| Materialized entry | Files needed by a selected portable plugin or component whose Git source is outside the marketplace checkout | `ASB_HOME/state/marketplace-plugins/` |
+| Materialized entry | Files needed by a selected portable plugin or component whose Git source is outside the marketplace checkout | `<cache>/.entries/` |
 
-A relative marketplace entry resolves inside its source checkout. A `git-subdir` entry that points to the same repository and compatible pin also reuses that checkout. Other selected Git entries use the state-owned materialization cache. The cache is derived runtime state, not a plugin source and not an enablement surface, so it cannot create duplicate plugin identities through auto-discovery.
+The cache is machine-local. Its root resolves from `ASB_CACHE_HOME`, then `XDG_CACHE_HOME/asb`, then `~/.cache/asb`, and holds one flat directory per managed source namespace plus the reserved `.entries` subtree. Keeping it outside `ASB_HOME` means dotfile synchronization never carries Git checkouts between machines: each device clones its own copy, and deleting the cache is safe because the next `asb sync --update` reconstructs it.
+
+Ownership decides placement. A local path stays where you put it, and a `type = "subtree"` source stays under `~/.asb/plugins/` because its files are committed into your library. Only ASB-created clones live in the cache, so a string source value is treated as a managed clone only when it is a transport URL (`https://`, `git@`, `ssh://`, `git://`, `file://`); any other string is a local path you own.
+
+`asb sync --update` migrates an existing managed checkout from `~/.asb/plugins/<source>/` into the cache after verifying ASB created it and left it unmodified. A checkout carrying local changes, or one that fails verification, is preserved in place and reported as an error instead of being moved or deleted. While both locations hold the same namespace, commands stop and ask you to remove the copy you no longer need. Reads resolve from either location, so a source migrated by a newer ASB stays readable to an older client only until that migration runs.
+
+A relative marketplace entry resolves inside its source checkout. A `git-subdir` entry that points to the same repository and compatible pin also reuses that checkout. Other selected Git entries materialize under `.entries`. That subtree is derived runtime state, not a plugin source and not an enablement surface, and its dot-prefixed name keeps it outside both source discovery and the namespace space, so it cannot create duplicate plugin identities.
 
 `asb plugin list` reads catalog metadata without fetching external entries. ASB materializes an external entry when portable plugin expansion or a directly selected component requires its files. A short `ref` selects a same-named branch before a tag; a fully qualified ref is used exactly. Full commit SHA pins are reused as immutable entries, and subdirectory sources use sparse checkout. Refresh replaces a verified entry atomically so a failed fetch leaves the previous materialization usable.
 
@@ -535,8 +542,9 @@ For project scope, sync honors `[distribution.project].mode`:
 | `ASB_HOME`        | `~/.asb`     | Library, config, and state directory         |
 | `ASB_AGENTS_HOME` | OS user home | Base path for agent config locations         |
 | `ASB_DEVICE_ID`   | Hostname     | Stable local identity for project manifests  |
+| `ASB_CACHE_HOME`  | `~/.cache/asb` | Machine-local managed source and entry cache; falls back to `XDG_CACHE_HOME/asb` |
 
-When Mackup synchronizes `ASB_HOME`, set a stable, distinct `ASB_DEVICE_ID` on every server or device. Managed project manifests are partitioned by that value and the resolved `ASB_AGENTS_HOME`; hook ownership is shared so any peer can reconcile ASB-managed hook groups. Configuration files remain last-writer-wins: run mutating ASB commands on one peer at a time and let Mackup finish syncing before switching peers.
+When Mackup synchronizes `ASB_HOME`, set a stable, distinct `ASB_DEVICE_ID` on every server or device. Leave the cache out of that synchronization: it is machine-local by design, and pointing two devices at one shared cache root makes same-named sources from different repositories collide. Managed project manifests are partitioned by that value and the resolved `ASB_AGENTS_HOME`; hook ownership is shared so any peer can reconcile ASB-managed hook groups. Configuration files remain last-writer-wins: run mutating ASB commands on one peer at a time and let Mackup finish syncing before switching peers.
 
 When `ASB_HOME` is unset, ASB uses an existing `~/.asb`, then an existing legacy `~/.agent-switchboard`, and defaults new installations to `~/.asb`.
 

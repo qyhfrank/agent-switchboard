@@ -1559,7 +1559,7 @@ test('removeSource refuses a namespace held in both the cache and ASB_HOME/plugi
 
     assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
     assert.ok(fs.existsSync(path.join(legacyDir, 'rules', 'v1.md')));
-    assert.equal(hasSource('two-copies'), true);
+    assert.match(fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8'), /two-copies/);
   });
 });
 

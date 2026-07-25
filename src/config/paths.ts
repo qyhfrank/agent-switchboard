@@ -157,9 +157,13 @@ export function getManagedSourceDir(namespace: string): string {
   return path.join(getCacheDir(), namespace);
 }
 
-/** Returns the ASB-owned cache for selected external marketplace entries. */
+/**
+ * Returns the ASB-owned cache for selected external marketplace entries.
+ * Lives in the reserved dot-prefixed cache subtree so it never collides with a
+ * managed source namespace.
+ */
 export function getMarketplacePluginCacheDir(): string {
-  return path.join(getConfigDir(), 'state', 'marketplace-plugins');
+  return path.join(getCacheDir(), '.entries');
 }
 
 /**
