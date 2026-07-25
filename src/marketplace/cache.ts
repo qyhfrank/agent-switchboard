@@ -8,6 +8,7 @@ import {
   getManagedSourceDir,
   getMarketplacePluginCacheDir,
   getPluginsDir,
+  isCacheRootOwned,
 } from '../config/paths.js';
 import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from './git-transport.js';
 
@@ -481,6 +482,7 @@ export function materializeMarketplaceEntry(
 }
 
 export function removeMarketplaceEntryCache(sourceName: string, marketplacePath: string): void {
+  if (!temporaryCacheRoot.getStore() && !isCacheRootOwned()) return;
   const cacheRoot = safeCacheRoot(false);
   const sourcePath = sourceCachePath(sourceName, marketplacePath);
   if (!fs.existsSync(sourcePath)) return;

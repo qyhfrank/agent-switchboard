@@ -148,6 +148,12 @@ export function getCacheDir(): string {
   return path.join(os.homedir(), '.cache', CACHE_DIR_NAME);
 }
 
+/** Reports whether the configured cache root is safe for ASB-owned mutations. */
+export function isCacheRootOwned(): boolean {
+  const cacheDir = path.resolve(getCacheDir());
+  return !fs.lstatSync(cacheDir, { throwIfNoEntry: false })?.isSymbolicLink();
+}
+
 /**
  * Rejects a symbolic link at the cache root before ASB mutates owned cache state.
  * ASB creates, replaces, and recursively deletes whole subtrees under this
@@ -156,9 +162,8 @@ export function getCacheDir(): string {
  * the platform or the user, so a symlinked ancestor stays acceptable.
  */
 export function assertCacheRootOwned(): void {
-  const cacheDir = path.resolve(getCacheDir());
-  if (fs.lstatSync(cacheDir, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    throw new Error(`ASB cache root contains a symbolic link: ${cacheDir}`);
+  if (!isCacheRootOwned()) {
+    throw new Error(`ASB cache root contains a symbolic link: ${path.resolve(getCacheDir())}`);
   }
 }
 
