@@ -176,16 +176,23 @@ function assertNoCacheSymlinks(root: string, target: string): void {
   }
 }
 
+function assertNotSymlink(candidate: string): void {
+  const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+  if (stat?.isSymbolicLink()) {
+    throw new Error(`Marketplace cache root contains a symbolic link: ${candidate}`);
+  }
+}
+
 /**
- * The cache root is the deepest path ASB owns. Its parent is the caller-selected
- * cache home, which may legitimately be a symlink to another volume, so only the
- * root itself is checked before ASB writes through it.
+ * ASB owns the cache root and the cache home holding it, so a symbolic link at
+ * either one would redirect every cache write outside the tree ASB may replace.
+ * A temporary cache root lives under the OS temp directory, whose own ancestors
+ * are outside ASB's control and stay unchecked.
  */
 function safeCacheRoot(create: boolean): string {
   const cacheRoot = path.resolve(configuredCacheRoot());
-  if (fs.existsSync(cacheRoot) && fs.lstatSync(cacheRoot).isSymbolicLink()) {
-    throw new Error(`Marketplace cache root contains a symbolic link: ${cacheRoot}`);
-  }
+  assertNotSymlink(cacheRoot);
+  if (!temporaryCacheRoot.getStore()) assertNotSymlink(path.dirname(cacheRoot));
   if (create) fs.mkdirSync(cacheRoot, { recursive: true });
   return cacheRoot;
 }

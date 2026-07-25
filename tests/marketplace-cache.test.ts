@@ -471,6 +471,30 @@ test('cache root symlinks are rejected without touching their target', () => {
   });
 });
 
+test('a symlinked cache home is rejected without touching its target', () => {
+  withTempAsbHome((asbHome) => {
+    const outside = path.join(path.dirname(asbHome), 'outside-cache-home');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+    const cacheHome = getCacheDir();
+    fs.mkdirSync(path.dirname(cacheHome), { recursive: true });
+    fs.symlinkSync(outside, cacheHome);
+
+    assert.throws(
+      () =>
+        materializeMarketplaceEntry({
+          sourceName: 'catalog',
+          marketplacePath: path.join(asbHome, 'catalog'),
+          pluginName: 'remote-plugin',
+          url: path.join(asbHome, 'remote.git'),
+          ref: 'main',
+        }),
+      /cache root contains a symbolic link/
+    );
+    assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
+  });
+});
+
 // ── Cache-root relocation ─────────────────────────────────────────
 
 test('external marketplace entries materialize under the reserved cache subtree', () => {
