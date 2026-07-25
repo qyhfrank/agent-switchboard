@@ -425,11 +425,13 @@ type ManagedCacheOwnership = 'ignore-unowned' | 'require-owned';
 /**
  * Observe a managed-cache child only through a root ASB owns. Local and subtree
  * lifecycles ignore occupancy behind an unowned root; managed-clone reads reject
- * that root instead of treating foreign content as configured state.
+ * a same-named child there instead of treating foreign content as configured state.
  */
 function managedCacheChildExists(namespace: string, ownership: ManagedCacheOwnership): boolean {
   if (!isCacheRootOwned()) {
-    if (ownership === 'require-owned') assertCacheRootOwned();
+    if (ownership === 'require-owned' && fs.existsSync(getManagedSourceDir(namespace))) {
+      assertCacheRootOwned();
+    }
     return false;
   }
   return fs.existsSync(getManagedSourceDir(namespace));
