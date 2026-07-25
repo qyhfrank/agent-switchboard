@@ -12,6 +12,8 @@ import path from 'node:path';
 const CONFIG_DIR_SHORT = '.asb';
 /** Legacy config directory name */
 const CONFIG_DIR_LEGACY = '.agent-switchboard';
+/** Directory name Agent Switchboard owns inside a cache parent */
+const CACHE_DIR_NAME = 'asb';
 
 /**
  * Returns the absolute path to the Agent Switchboard config directory.
@@ -126,6 +128,33 @@ export function getHooksDir(): string {
  */
 export function getPluginsDir(): string {
   return path.join(getConfigDir(), 'plugins');
+}
+
+/**
+ * Returns the machine-local cache root Agent Switchboard owns exclusively.
+ * Reconstructible content lives here instead of the synchronized config directory.
+ * Resolution order:
+ *  1. ASB_CACHE_HOME env var (explicit override)
+ *  2. $XDG_CACHE_HOME/asb
+ *  3. ~/.cache/asb
+ */
+export function getCacheDir(): string {
+  const override = process.env.ASB_CACHE_HOME?.trim();
+  if (override && override.length > 0) return override;
+
+  const xdgCacheHome = process.env.XDG_CACHE_HOME?.trim();
+  if (xdgCacheHome && xdgCacheHome.length > 0) return path.join(xdgCacheHome, CACHE_DIR_NAME);
+
+  return path.join(os.homedir(), '.cache', CACHE_DIR_NAME);
+}
+
+/**
+ * Returns the cache checkout directory for an ASB-managed source.
+ * Managed sources are flat direct children of the cache root; dot-prefixed
+ * names stay reserved for internal cache state.
+ */
+export function getManagedSourceDir(namespace: string): string {
+  return path.join(getCacheDir(), namespace);
 }
 
 /** Returns the ASB-owned cache for selected external marketplace entries. */

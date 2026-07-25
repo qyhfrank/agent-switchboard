@@ -39,7 +39,6 @@ import {
   getGeminiDir,
   getHooksDir,
   getOpencodePath,
-  getPluginsDir,
   getSkillsDir,
 } from './config/paths.js';
 import { loadConfiguredPortableSelections } from './config/plugin-selection.js';
@@ -59,6 +58,7 @@ import {
   addLocalSource,
   addRemoteSource,
   getSources,
+  getSourcesRecord,
   inferSourceName,
   isGitUrl,
   parseGitUrl,
@@ -1881,8 +1881,7 @@ mktRoot
           throw err;
         }
 
-        let effectivePath = path.join(getPluginsDir(), name);
-        if (parsed.subdir) effectivePath = path.join(effectivePath, parsed.subdir);
+        const effectivePath = getSourcesRecord()[name];
         const validation = validateSourcePath(effectivePath);
 
         if (!validation.valid) {
