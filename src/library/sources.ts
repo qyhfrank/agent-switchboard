@@ -2,7 +2,13 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadMergedSwitchboardConfig, updateConfigLayer } from '../config/layered-config.js';
-import { expandHome, getConfigDir, getManagedSourceDir, getPluginsDir } from '../config/paths.js';
+import {
+  assertCacheRootOwned,
+  expandHome,
+  getConfigDir,
+  getManagedSourceDir,
+  getPluginsDir,
+} from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
@@ -680,6 +686,7 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
     headBefore = runGit(['rev-parse', 'HEAD'], { cwd: repoRoot });
     gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
   } else {
+    assertCacheRootOwned();
     gitClone(expandHome(remote.url), getManagedSourceDir(namespace), namespace, remote.ref);
   }
 
@@ -727,6 +734,13 @@ export function removeSource(namespace: string): void {
   }
 
   const value = raw[namespace];
+  if (
+    typeof value !== 'string' &&
+    value.type === 'clone' &&
+    isCloneableSource(expandHome(value.url))
+  ) {
+    assertCacheRootOwned();
+  }
   const effectivePath = resolveEffectivePath(namespace, value);
   const cacheOwnerPath = canonicalCacheOwnerPath(effectivePath);
 
@@ -907,6 +921,7 @@ export function updateRemoteSources(
     attemptedUpdate = true;
 
     try {
+      if (value.type === 'clone') assertCacheRootOwned();
       const previousCacheOwnerPath = canonicalCacheOwnerPath(
         resolveEffectivePath(namespace, value)
       );
