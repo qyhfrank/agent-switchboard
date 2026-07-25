@@ -8,6 +8,7 @@ import {
   getConfigDir,
   getManagedSourceDir,
   getPluginsDir,
+  isCacheRootOwned,
 } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
@@ -419,6 +420,21 @@ function resolveLocalPath(expanded: string): string {
   return path.resolve(expanded);
 }
 
+type ManagedCacheOwnership = 'ignore-unowned' | 'require-owned';
+
+/**
+ * Observe a managed-cache child only through a root ASB owns. Local and subtree
+ * lifecycles ignore occupancy behind an unowned root; managed-clone reads reject
+ * that root instead of treating foreign content as configured state.
+ */
+function managedCacheChildExists(namespace: string, ownership: ManagedCacheOwnership): boolean {
+  if (!isCacheRootOwned()) {
+    if (ownership === 'require-owned') assertCacheRootOwned();
+    return false;
+  }
+  return fs.existsSync(getManagedSourceDir(namespace));
+}
+
 /**
  * Resolve the single directory an ASB-managed source occupies.
  * A clone belongs in the machine-local cache, the only location ASB writes; a
@@ -433,7 +449,10 @@ function resolveLocalPath(expanded: string): string {
 function resolveManagedCheckoutDir(namespace: string, type: RemoteSource['type']): string {
   const cacheDir = getManagedSourceDir(namespace);
   const legacyDir = legacyManagedCheckoutDir(namespace);
-  const cacheExists = fs.existsSync(cacheDir);
+  const cacheExists = managedCacheChildExists(
+    namespace,
+    type === 'clone' ? 'require-owned' : 'ignore-unowned'
+  );
   if (type === 'subtree') {
     if (cacheExists) {
       throw new Error(
@@ -498,6 +517,37 @@ function isDeletableManagedCheckout(
   return verifyClone(managedDir, namespace, remote) !== undefined;
 }
 
+type ManagedCloneIdentity = { dev: number; ino: number };
+
+function readManagedCloneIdentity(repoDir: string): ManagedCloneIdentity | undefined {
+  const stat = fs.lstatSync(repoDir, { throwIfNoEntry: false });
+  return stat?.isDirectory() && !stat.isSymbolicLink()
+    ? { dev: stat.dev, ino: stat.ino }
+    : undefined;
+}
+
+function rollbackManagedCloneAdd(
+  namespace: string,
+  remote: RemoteSource,
+  createdIdentity: ManagedCloneIdentity | undefined
+): void {
+  if (!createdIdentity || !isCacheRootOwned()) return;
+  const cloneDir = getManagedSourceDir(namespace);
+  const matchesCreatedClone = (): boolean => {
+    const current = readManagedCloneIdentity(cloneDir);
+    return current?.dev === createdIdentity.dev && current.ino === createdIdentity.ino;
+  };
+  if (
+    !matchesCreatedClone() ||
+    !hasCloneMarker(cloneDir) ||
+    verifyClone(cloneDir, namespace, remote) === undefined
+  ) {
+    return;
+  }
+  if (!isCacheRootOwned() || !matchesCreatedClone()) return;
+  fs.rmSync(cloneDir, { recursive: true, force: true });
+}
+
 /**
  * Resolve the effective local path for a plugin source.
  * - Cloneable sources (object with git/file URL or .git suffix): resolve to the managed cache
@@ -528,11 +578,14 @@ function validateNamespace(namespace: string): void {
   }
 }
 
-function ensureNamespaceAvailable(namespace: string): void {
+function ensureNamespaceAvailable(
+  namespace: string,
+  cacheOwnership: ManagedCacheOwnership = 'ignore-unowned'
+): void {
   if (
     namespace in getRawSources() ||
     fs.existsSync(legacyManagedCheckoutDir(namespace)) ||
-    fs.existsSync(getManagedSourceDir(namespace))
+    managedCacheChildExists(namespace, cacheOwnership)
   ) {
     throw new Error(
       `Source "${namespace}" already exists. Use a different name or remove it first.`
@@ -666,10 +719,11 @@ export function addLocalSource(namespace: string, libraryPath: string): void {
  */
 export function addRemoteSource(namespace: string, remote: RemoteSource): void {
   validateNamespace(namespace);
-  ensureNamespaceAvailable(namespace);
+  ensureNamespaceAvailable(namespace, remote.type === 'clone' ? 'require-owned' : 'ignore-unowned');
   ensureGitAvailable();
 
   let headBefore: string | undefined;
+  let createdCloneIdentity: ManagedCloneIdentity | undefined;
 
   if (remote.type === 'subtree') {
     if (!isGitRepo(getConfigDir())) {
@@ -687,7 +741,9 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
     gitSubtreeAdd(repoRoot, prefix, expandHome(remote.url), remote.ref);
   } else {
     assertCacheRootOwned();
-    gitClone(expandHome(remote.url), getManagedSourceDir(namespace), namespace, remote.ref);
+    const cloneDir = getManagedSourceDir(namespace);
+    gitClone(expandHome(remote.url), cloneDir, namespace, remote.ref);
+    createdCloneIdentity = readManagedCloneIdentity(cloneDir);
   }
 
   const configValue: RemoteSource = {
@@ -717,11 +773,8 @@ export function addRemoteSource(namespace: string, remote: RemoteSource): void {
       } catch {
         /* best-effort rollback */
       }
-    } else {
-      const cloneDir = getManagedSourceDir(namespace);
-      if (fs.existsSync(cloneDir)) {
-        fs.rmSync(cloneDir, { recursive: true, force: true });
-      }
+    } else if (remote.type === 'clone') {
+      rollbackManagedCloneAdd(namespace, remote, createdCloneIdentity);
     }
     throw configErr;
   }

@@ -54,6 +54,10 @@ function configuredCacheRoot(): string {
   return temporaryCacheRoot.getStore() ?? getMarketplacePluginCacheDir();
 }
 
+function canMaintainDerivedCache(): boolean {
+  return temporaryCacheRoot.getStore() !== undefined || isCacheRootOwned();
+}
+
 function digest(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
@@ -482,7 +486,7 @@ export function materializeMarketplaceEntry(
 }
 
 export function removeMarketplaceEntryCache(sourceName: string, marketplacePath: string): void {
-  if (!temporaryCacheRoot.getStore() && !isCacheRootOwned()) return;
+  if (!canMaintainDerivedCache()) return;
   const cacheRoot = safeCacheRoot(false);
   const sourcePath = sourceCachePath(sourceName, marketplacePath);
   if (!fs.existsSync(sourcePath)) return;
@@ -495,6 +499,7 @@ export function refreshMarketplaceEntryCache(
   marketplacePath: string,
   currentRequests: MarketplaceEntryCacheRequest[]
 ): MarketplaceEntryCacheRefreshResult {
+  if (!canMaintainDerivedCache()) return { refreshed: 0, removed: 0 };
   const cacheRoot = safeCacheRoot(false);
   const canonicalMarketplacePath = canonicalPath(marketplacePath);
   const sourcePath = sourceCachePath(sourceName, canonicalMarketplacePath);

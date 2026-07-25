@@ -1951,15 +1951,9 @@ mktRoot
   .argument('<name>', 'Source namespace to remove')
   .action((name: string) => {
     try {
-      const sources = getSources();
-      const source = sources.find((s) => s.namespace === name);
       removeSource(name);
       clearPluginIndexCache();
-      if (source?.remote) {
-        console.log(chalk.green(`\n✓ Removed source "${name}" and cleaned up cache`));
-      } else {
-        console.log(chalk.green(`\n✓ Removed source "${name}"`));
-      }
+      console.log(chalk.green(`\n✓ Removed source "${name}"`));
     } catch (error) {
       if (error instanceof Error) {
         console.error(chalk.red(`\n✗ Error: ${error.message}`));
