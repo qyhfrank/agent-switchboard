@@ -494,6 +494,36 @@ export function removeMarketplaceEntryCache(sourceName: string, marketplacePath:
   fs.rmSync(sourcePath, { recursive: true, force: true });
 }
 
+export function removeMarketplaceEntryCachesForSource(sourceName: string): void {
+  if (!canMaintainDerivedCache()) return;
+  const cacheRoot = safeCacheRoot(false);
+  if (!fs.existsSync(cacheRoot)) return;
+  const normalizedSourceName = sourceName.trim();
+
+  for (const sourceEntry of fs.readdirSync(cacheRoot, { withFileTypes: true })) {
+    const sourcePath = path.join(cacheRoot, sourceEntry.name);
+    if (sourceEntry.isSymbolicLink()) {
+      throw new Error(`Marketplace cache path contains a symbolic link: ${sourcePath}`);
+    }
+    if (!sourceEntry.isDirectory()) continue;
+    assertNoCacheSymlinks(cacheRoot, sourcePath);
+
+    for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+      if (entry.name.startsWith('.')) continue;
+      const entryPath = path.join(sourcePath, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`Marketplace cache path contains a symbolic link: ${entryPath}`);
+      }
+      if (!entry.isDirectory()) continue;
+      assertNoCacheSymlinks(cacheRoot, entryPath);
+      if (readMetadata(entryPath)?.sourceName !== normalizedSourceName) continue;
+      fs.rmSync(entryPath, { recursive: true, force: true });
+    }
+
+    if (fs.readdirSync(sourcePath).length === 0) fs.rmdirSync(sourcePath);
+  }
+}
+
 export function refreshMarketplaceEntryCache(
   sourceName: string,
   marketplacePath: string,

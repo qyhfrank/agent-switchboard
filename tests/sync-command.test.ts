@@ -7,10 +7,13 @@ import { test } from 'node:test';
 import {
   getClaudeJsonPath,
   getCodexDir,
+  getManagedSourceDir,
   getMarketplacePluginCacheDir,
   getMcpConfigPath,
+  getPluginsDir,
   getProfileConfigPath,
 } from '../src/config/paths.js';
+import { addRemoteSource } from '../src/library/sources.js';
 import { resetAgentSyncCache } from '../src/library/state.js';
 import { resolveManifestPath } from '../src/manifest/store.js';
 import {
@@ -78,6 +81,26 @@ function writeMcpConfig(servers: Record<string, unknown>): void {
   const configPath = getMcpConfigPath();
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`, 'utf-8');
+}
+
+function createRemotePluginRepo(root: string): string {
+  const bareRepo = path.join(root, 'remote-plugin.git');
+  const workDir = path.join(root, 'remote-plugin-work');
+  execFileSync('git', ['init', '--bare', '--initial-branch=main', bareRepo], { stdio: 'pipe' });
+  execFileSync('git', ['clone', bareRepo, workDir], { stdio: 'pipe' });
+  fs.mkdirSync(path.join(workDir, 'commands'), { recursive: true });
+  fs.writeFileSync(
+    path.join(workDir, 'commands', 'remote-command.md'),
+    '---\ndescription: Remote command\n---\nRemote command\n'
+  );
+  execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+  execFileSync(
+    'git',
+    ['-c', 'user.name=test', '-c', 'user.email=test@test.com', 'commit', '-m', 'plugin'],
+    { cwd: workDir, stdio: 'pipe' }
+  );
+  execFileSync('git', ['push', 'origin', 'main'], { cwd: workDir, stdio: 'pipe' });
+  return bareRepo;
 }
 
 function createClaudeMarketplaceFixture(
@@ -198,6 +221,80 @@ test('runSyncCommand syncs global config through extracted orchestration', async
     assert.match(output, /Distribution:/);
     assert.match(output, /mcp/);
     assert.deepEqual(Object.keys(applied.mcpServers), ['alpha']);
+  });
+});
+
+test('runSyncCommand materializes a configured clone before distribution', async () => {
+  await withTempHomesAsync(async ({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const bareRepo = createRemotePluginRepo(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins]',
+      'enabled = ["remote-source"]',
+      '',
+      '[plugins.sources.remote-source]',
+      `url = "${bareRepo}"`,
+      'type = "clone"',
+    ]);
+
+    const first = await captureConsoleOutput(() => runSyncCommand({ updateSources: false }));
+    const cacheDir = getManagedSourceDir('remote-source');
+    const distributedCommand = path.join(
+      agentsHome,
+      '.claude',
+      'commands',
+      'remote-source:remote-command.md'
+    );
+    assert.equal(first.result, false);
+    assert.match(first.output, /remote-source.*cloned/);
+    assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+    assert.equal(fs.existsSync(path.join(getPluginsDir(), 'remote-source')), false);
+    assert.ok(fs.existsSync(distributedCommand));
+
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+    fs.renameSync(bareRepo, `${bareRepo}.offline`);
+    const failed = await captureConsoleOutput(() => runSyncCommand({ updateSources: false }));
+
+    assert.equal(failed.result, true);
+    assert.match(failed.output, /remote-source/);
+    assert.ok(fs.existsSync(distributedCommand));
+  });
+});
+
+test('runSyncCommand dry-run reports missing clone readiness without previewing distribution', async () => {
+  await withTempHomesAsync(async ({ asbHome, agentsHome }) => {
+    simulateAppsInstalled('claude-code');
+    const bareRepo = createRemotePluginRepo(asbHome);
+    writeConfig(path.join(asbHome, 'config.toml'), [
+      '[applications]',
+      'enabled = ["claude-code"]',
+      '',
+      '[plugins]',
+      'enabled = ["remote-source"]',
+      '',
+      '[plugins.sources.remote-source]',
+      `url = "${bareRepo}"`,
+      'type = "clone"',
+    ]);
+
+    const { result, output } = await captureConsoleOutput(() =>
+      runSyncCommand({ updateSources: false, dryRun: true })
+    );
+
+    assert.equal(result, false);
+    assert.match(output, /\[dry-run\] would clone/);
+    assert.doesNotMatch(output, /Distribution:/);
+    assert.match(output, /\[dry-run\] No files were modified\./);
+    assert.equal(fs.existsSync(getManagedSourceDir('remote-source')), false);
+    assert.equal(
+      fs.existsSync(
+        path.join(agentsHome, '.claude', 'commands', 'remote-source:remote-command.md')
+      ),
+      false
+    );
   });
 });
 
@@ -508,7 +605,7 @@ test('runSyncCommand dry-run keeps source checkouts and marketplace cache unchan
 
     const catalogBare = path.join(asbHome, 'catalog.git');
     const catalogWork = path.join(asbHome, 'catalog-work');
-    const catalogCheckout = path.join(asbHome, 'plugins', 'catalog');
+    const catalogCheckout = getManagedSourceDir('catalog');
     execFileSync('git', ['init', '--bare', '--initial-branch=main', catalogBare], {
       stdio: 'pipe',
     });
@@ -533,8 +630,7 @@ test('runSyncCommand dry-run keeps source checkouts and marketplace cache unchan
       { cwd: catalogWork, stdio: 'pipe' }
     );
     execFileSync('git', ['push', 'origin', 'main'], { cwd: catalogWork, stdio: 'pipe' });
-    fs.mkdirSync(path.dirname(catalogCheckout), { recursive: true });
-    execFileSync('git', ['clone', catalogBare, catalogCheckout], { stdio: 'pipe' });
+    addRemoteSource('catalog', { url: catalogBare, type: 'clone' });
 
     fs.writeFileSync(path.join(catalogWork, 'REMOTE-CHANGE'), 'change');
     execFileSync('git', ['add', '.'], { cwd: catalogWork, stdio: 'pipe' });

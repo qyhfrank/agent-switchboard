@@ -12,7 +12,10 @@ import {
 } from '../config/paths.js';
 import type { RemoteSource, SourceValue } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
-import { removeMarketplaceEntryCache } from '../marketplace/cache.js';
+import {
+  removeMarketplaceEntryCache,
+  removeMarketplaceEntryCachesForSource,
+} from '../marketplace/cache.js';
 import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from '../marketplace/git-transport.js';
 import {
   getMarketplaceManifestInfo,
@@ -30,6 +33,15 @@ export interface SourceUpdateResult {
   namespace: string;
   url: string;
   status: 'updated' | 'error';
+  phase?: 'readiness';
+  error?: string;
+}
+
+export interface SourceReadinessResult {
+  namespace: string;
+  path: string;
+  status: 'ready' | 'error';
+  action?: 'clone' | 'migrate';
   error?: string;
 }
 
@@ -295,7 +307,16 @@ function isMergeInProgress(repoDir: string): boolean {
 }
 
 function canonicalCacheOwnerPath(value: string): string {
-  return fs.existsSync(value) ? fs.realpathSync.native(value) : path.resolve(value);
+  const resolved = path.resolve(value);
+  const missing: string[] = [];
+  let existing = resolved;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) return resolved;
+    missing.unshift(path.basename(existing));
+    existing = parent;
+  }
+  return path.join(fs.realpathSync.native(existing), ...missing);
 }
 
 function isGitRepo(dir: string): boolean {
@@ -956,6 +977,126 @@ function copyLegacyManagedCheckout(
   fs.rmSync(legacyDir, { recursive: true, force: true });
 }
 
+interface ManagedClonePreparation extends SourceReadinessResult {
+  previousCacheOwnerPath?: string;
+  sourceChanged: boolean;
+}
+
+function prepareManagedCloneSources(
+  scope: ConfigScope | undefined,
+  dryRun: boolean,
+  invalidateDerivedCache: boolean,
+  onlyNamespace?: string
+): ManagedClonePreparation[] {
+  const preparations: ManagedClonePreparation[] = [];
+  let gitChecked = false;
+
+  for (const [namespace, value] of Object.entries(getRawSources(scope))) {
+    if (onlyNamespace && namespace !== onlyNamespace) continue;
+    if (
+      typeof value === 'string' ||
+      value.type !== 'clone' ||
+      !isCloneableSource(expandHome(value.url))
+    ) {
+      continue;
+    }
+
+    const targetPath = getManagedSourceDir(namespace);
+    let action: SourceReadinessResult['action'];
+    let previousCacheOwnerPath: string | undefined;
+    let sourceChanged = false;
+    try {
+      assertCacheRootOwned();
+      previousCacheOwnerPath = canonicalCacheOwnerPath(resolveEffectivePath(namespace, value));
+      if (fs.existsSync(targetPath)) {
+        preparations.push({
+          namespace,
+          path: targetPath,
+          status: 'ready',
+          previousCacheOwnerPath,
+          sourceChanged,
+        });
+        continue;
+      }
+
+      action = fs.existsSync(legacyManagedCheckoutDir(namespace)) ? 'migrate' : 'clone';
+      if (!gitChecked) {
+        ensureGitAvailable();
+        gitChecked = true;
+      }
+      if (dryRun) {
+        if (
+          action === 'migrate' &&
+          !isDeletableManagedCheckout(legacyManagedCheckoutDir(namespace), namespace, value)
+        ) {
+          throw new Error(
+            `Source directory is unverified or modified; preserving it: ${legacyManagedCheckoutDir(namespace)}`
+          );
+        }
+      } else {
+        if (invalidateDerivedCache) {
+          removeMarketplaceEntryCachesForSource(namespace);
+        }
+        if (action === 'migrate') {
+          migrateLegacyManagedCheckout(namespace, value);
+        } else {
+          gitClone(expandHome(value.url), targetPath, namespace, value.ref);
+        }
+        sourceChanged = true;
+        assertCacheRootOwned();
+        if (verifyClone(targetPath, namespace, value) === undefined) {
+          throw new Error(
+            `Source directory is unverified or modified after ${action}: ${targetPath}`
+          );
+        }
+      }
+
+      preparations.push({
+        namespace,
+        path: targetPath,
+        status: 'ready',
+        action,
+        previousCacheOwnerPath,
+        sourceChanged,
+      });
+    } catch (error) {
+      preparations.push({
+        namespace,
+        path: targetPath,
+        status: 'error',
+        action,
+        error: error instanceof Error ? error.message : String(error),
+        previousCacheOwnerPath,
+        sourceChanged,
+      });
+    }
+  }
+
+  return preparations;
+}
+
+/**
+ * Materialize or migrate configured managed clones without refreshing a ready
+ * checkout. Dry runs return the pending action without changing source state.
+ */
+export function ensureRemoteSourcesReady(
+  scope?: ConfigScope,
+  dryRun = false
+): SourceReadinessResult[] {
+  const preparations = prepareManagedCloneSources(scope, dryRun, !dryRun);
+  if (preparations.some((preparation) => preparation.sourceChanged)) markSourcesChanged();
+
+  return preparations
+    .filter((preparation) => preparation.action || preparation.status === 'error')
+    .map(({ namespace, path: targetPath, status, action, error }) => ({
+      namespace,
+      path: targetPath,
+      status,
+      action,
+      error,
+    }));
+}
+
 /**
  * Pull latest changes for all remote sources.
  * Re-clones if the cache directory is missing or corrupted.
@@ -966,6 +1107,10 @@ export function updateRemoteSources(
 ): SourceUpdateResult[] {
   const raw = getRawSources(scope);
   const results: SourceUpdateResult[] = [];
+  const preparations = prepareManagedCloneSources(scope, false, false, onlyNamespace);
+  const preparationsByNamespace = new Map(
+    preparations.map((preparation) => [preparation.namespace, preparation])
+  );
   let gitChecked = false;
   let attemptedUpdate = false;
 
@@ -976,10 +1121,21 @@ export function updateRemoteSources(
     attemptedUpdate = true;
 
     try {
-      if (value.type === 'clone') assertCacheRootOwned();
-      const previousCacheOwnerPath = canonicalCacheOwnerPath(
-        resolveEffectivePath(namespace, value)
-      );
+      const preparation = preparationsByNamespace.get(namespace);
+      if (value.type === 'clone' && !preparation) continue;
+      if (preparation?.status === 'error') {
+        results.push({
+          namespace,
+          url: credentialFreeGitUrl(value.url),
+          status: 'error',
+          phase: 'readiness',
+          error: preparation.error,
+        });
+        continue;
+      }
+      const previousCacheOwnerPath =
+        preparation?.previousCacheOwnerPath ??
+        canonicalCacheOwnerPath(resolveEffectivePath(namespace, value));
       if (!gitChecked) {
         ensureGitAvailable();
         gitChecked = true;
@@ -1010,22 +1166,14 @@ export function updateRemoteSources(
             throw pullErr;
           }
         }
-      } else {
-        migrateLegacyManagedCheckout(namespace, value);
+      } else if (preparation?.action !== 'clone') {
         const cloneDir = getManagedSourceDir(namespace);
-        const gitDir = path.join(cloneDir, '.git');
-        if (!fs.existsSync(gitDir)) {
-          gitClone(expandHome(value.url), cloneDir, namespace, value.ref);
-        } else {
-          const verification = verifyClone(cloneDir, namespace, value);
-          if (verification === undefined) {
-            throw new Error(
-              `Source directory is unverified or modified; preserving it: ${cloneDir}`
-            );
-          }
-          gitUpdate(cloneDir, value.url, value.ref, verification === 'detached');
-          writeCloneMarker(cloneDir, namespace, value);
+        const verification = verifyClone(cloneDir, namespace, value);
+        if (verification === undefined) {
+          throw new Error(`Source directory is unverified or modified; preserving it: ${cloneDir}`);
         }
+        gitUpdate(cloneDir, value.url, value.ref, verification === 'detached');
+        writeCloneMarker(cloneDir, namespace, value);
       }
       const effectivePath = resolveEffectivePath(namespace, value);
       const cacheOwnerPath = canonicalCacheOwnerPath(effectivePath);

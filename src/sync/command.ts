@@ -9,7 +9,11 @@ import { type ConfigLayers, loadMergedSwitchboardConfig } from '../config/layere
 import type { SwitchboardConfig } from '../config/schemas.js';
 import { type ConfigScope, scopeToLayerOptions } from '../config/scope.js';
 import { distributeHooks } from '../hooks/distribution.js';
-import { updateRemoteSources } from '../library/sources.js';
+import {
+  ensureRemoteSourcesReady,
+  type SourceReadinessResult,
+  updateRemoteSources,
+} from '../library/sources.js';
 import { loadManifest, saveManifest } from '../manifest/store.js';
 import type { ProjectDistributionManifest } from '../manifest/types.js';
 import { withTemporaryMarketplaceEntryCache } from '../marketplace/cache.js';
@@ -60,6 +64,24 @@ export interface RunSyncCommandOptions {
   dryRun?: boolean;
 }
 
+function printSourceReadiness(results: SourceReadinessResult[], dryRun: boolean): void {
+  if (results.length === 0) return;
+  console.log(chalk.blue('Sources:'));
+  for (const result of results) {
+    if (result.status === 'error') {
+      console.log(
+        `  ${chalk.yellow('⚠')} ${chalk.cyan(result.namespace)} ${chalk.yellow(result.error ?? 'readiness failed')}`
+      );
+    } else {
+      const verb = result.action === 'migrate' ? 'migrate' : 'clone';
+      const label = dryRun ? `[dry-run] would ${verb}` : `${verb}d`;
+      console.log(
+        `  ${chalk.green(dryRun ? '○' : '✓')} ${chalk.cyan(result.namespace)} ${chalk.dim(`${label} → ${result.path}`)}`
+      );
+    }
+  }
+}
+
 export async function runSyncCommand(options: RunSyncCommandOptions): Promise<boolean> {
   const { scope, updateSources, dryRun = false } = options;
 
@@ -69,7 +91,15 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
   const shouldUpdate = updateSources ?? config.plugins.auto_update;
 
   let sourceUpdateFailed = false;
-  if (shouldUpdate && !dryRun) {
+  if (dryRun) {
+    const readinessResults = ensureRemoteSourcesReady(scope, true);
+    printSourceReadiness(readinessResults, true);
+    if (readinessResults.length > 0) {
+      console.log();
+      console.log(chalk.yellow('[dry-run] No files were modified.'));
+      return readinessResults.some((result) => result.status === 'error');
+    }
+  } else if (shouldUpdate) {
     const remoteResults = updateRemoteSources(scope);
     clearPluginIndexCache();
     sourceUpdateFailed = remoteResults.some((result) => result.status === 'error');
@@ -87,6 +117,14 @@ export async function runSyncCommand(options: RunSyncCommandOptions): Promise<bo
         }
       }
     }
+    if (remoteResults.some((result) => result.status === 'error' && result.phase === 'readiness')) {
+      return true;
+    }
+  } else {
+    const readinessResults = ensureRemoteSourcesReady(scope);
+    printSourceReadiness(readinessResults, false);
+    if (readinessResults.length > 0) clearPluginIndexCache();
+    if (readinessResults.some((result) => result.status === 'error')) return true;
   }
   await initTargets(config);
 
