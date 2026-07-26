@@ -1693,6 +1693,232 @@ test('distributeHooks: codex bundle copy failure aborts hooks.json merge', () =>
   });
 });
 
+test('distributeHooks: codex reports dangling hooks ancestor without modifying user state', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    const logicalCodexDir = getCodexDir();
+    const physicalCodexDir = path.join(agentsHome, 'mounted-codex', 'config');
+    fs.mkdirSync(path.dirname(physicalCodexDir), { recursive: true });
+    fs.renameSync(logicalCodexDir, physicalCodexDir);
+    fs.symlinkSync(physicalCodexDir, logicalCodexDir);
+    const resolvedCodexDir = fs.realpathSync(logicalCodexDir);
+
+    const entryId = 'dangling-ancestor-hook';
+    createBundleHook(entryId);
+    enableHooks([entryId], ['codex']);
+
+    const sourceScript = path.join(ensureHooksDirectory(), entryId, 'run.sh');
+    const sourceBytes = fs.readFileSync(sourceScript);
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const hooksJsonBytes = Buffer.from(
+      `${JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            { matcher: '', hooks: [{ type: 'command', command: 'echo user-managed' }] },
+          ],
+        },
+        preferredNotifChannel: 'notifications_disabled',
+      })}\n`
+    );
+    fs.writeFileSync(hooksJsonPath, hooksJsonBytes);
+
+    const hooksLink = path.join(logicalCodexDir, 'hooks');
+    const rawTarget = '../disconnected-codex-hooks';
+    const resolvedTarget = path.resolve(resolvedCodexDir, rawTarget);
+    const incorrectLogicalTarget = path.resolve(logicalCodexDir, rawTarget);
+    const targetDir = path.join(hooksLink, 'managed', entryId);
+    const ownershipStatePath = resolveHookStatePath('codex');
+    const ownershipStateBytes = Buffer.from(
+      `${JSON.stringify({
+        version: 1,
+        events: {},
+        bundles: ['existing-owned-bundle'],
+        legacyBundles: [],
+      })}\n`
+    );
+    fs.mkdirSync(path.dirname(ownershipStatePath), { recursive: true });
+    fs.writeFileSync(ownershipStatePath, ownershipStateBytes);
+    fs.symlinkSync(rawTarget, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find(
+      (candidate) => candidate.platform === 'codex' && candidate.targetDir === targetDir
+    );
+
+    const error = result?.error;
+    assert.equal(result?.status, 'error');
+    assert.ok(error?.includes('Failed to prepare'), error);
+    assert.equal(result?.entryId, entryId);
+    assert.ok(error.includes(`link: ${hooksLink}`));
+    assert.ok(error.includes(`raw target: ${rawTarget}`));
+    assert.ok(error.includes(`resolved target: ${resolvedTarget}`), error);
+    assert.ok(!error.includes(`resolved target: ${incorrectLogicalTarget}`));
+    const restoreIndex = error.indexOf('Restore or reconnect the expected target');
+    const removeIndex = error.indexOf('If the link is obsolete');
+    assert.ok(restoreIndex >= 0 && removeIndex > restoreIndex, 'restore guidance comes first');
+    assert.ok(error.includes('ASB did not modify the link or create its target'));
+
+    assert.equal(fs.lstatSync(logicalCodexDir).isSymbolicLink(), true);
+    assert.equal(fs.realpathSync(logicalCodexDir), resolvedCodexDir);
+    assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(hooksLink), rawTarget);
+    assert.equal(fs.existsSync(resolvedTarget), false);
+    assert.equal(fs.existsSync(targetDir), false);
+    assert.deepEqual(fs.readFileSync(hooksJsonPath), hooksJsonBytes);
+    assert.deepEqual(fs.readFileSync(ownershipStatePath), ownershipStateBytes);
+    assert.deepEqual(fs.readFileSync(sourceScript), sourceBytes);
+  });
+});
+
+test('distributeHooks: codex reports dangling hooks ancestor without modifying user state when target parent is a file', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    const entryId = 'enotdir-ancestor-hook';
+    createBundleHook(entryId);
+    enableHooks([entryId], ['codex']);
+
+    const sourceScript = path.join(ensureHooksDirectory(), entryId, 'run.sh');
+    const sourceBytes = fs.readFileSync(sourceScript);
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const hooksJsonBytes = Buffer.from('{"hooks":{"UserPromptSubmit":[]}}\n');
+    fs.writeFileSync(hooksJsonPath, hooksJsonBytes);
+    const ownershipStatePath = resolveHookStatePath('codex');
+    const ownershipStateBytes = Buffer.from(
+      '{"version":1,"events":{},"bundles":["existing-owned-bundle"],"legacyBundles":[]}\n'
+    );
+    fs.mkdirSync(path.dirname(ownershipStatePath), { recursive: true });
+    fs.writeFileSync(ownershipStatePath, ownershipStateBytes);
+
+    const hooksLink = path.join(getCodexDir(), 'hooks');
+    const rawTarget = '../blocked/child';
+    const blockedParent = path.join(agentsHome, 'blocked');
+    const blockedBytes = Buffer.from('regular file\n');
+    const resolvedTarget = path.resolve(fs.realpathSync(path.dirname(hooksLink)), rawTarget);
+    const targetDir = path.join(hooksLink, 'managed', entryId);
+    fs.writeFileSync(blockedParent, blockedBytes);
+    fs.symlinkSync(rawTarget, hooksLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find(
+      (candidate) => candidate.platform === 'codex' && candidate.targetDir === targetDir
+    );
+
+    const error = result?.error;
+    assert.equal(result?.status, 'error');
+    assert.ok(error?.includes(`link: ${hooksLink}`), error);
+    assert.ok(error.includes(`raw target: ${rawTarget}`));
+    assert.ok(error.includes(`resolved target: ${resolvedTarget}`));
+    assert.ok(error.includes('Restore or reconnect the expected target'));
+    assert.ok(error.includes('ASB did not modify the link or create its target'));
+    assert.equal(fs.lstatSync(hooksLink).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(hooksLink), rawTarget);
+    assert.deepEqual(fs.readFileSync(blockedParent), blockedBytes);
+    assert.equal(fs.existsSync(targetDir), false);
+    assert.deepEqual(fs.readFileSync(hooksJsonPath), hooksJsonBytes);
+    assert.deepEqual(fs.readFileSync(ownershipStatePath), ownershipStateBytes);
+    assert.deepEqual(fs.readFileSync(sourceScript), sourceBytes);
+  });
+});
+
+test('distributeHooks: codex reports dangling hooks ancestor without modifying user state when a parent link resolves to a file', () => {
+  withTempHomes(() => {
+    simulateAppsInstalled('codex');
+    const entryId = 'file-target-ancestor-hook';
+    createBundleHook(entryId);
+    enableHooks([entryId], ['codex']);
+
+    const sourceScript = path.join(ensureHooksDirectory(), entryId, 'run.sh');
+    const sourceBytes = fs.readFileSync(sourceScript);
+    const hooksJsonPath = getCodexHooksJsonPath();
+    const hooksJsonBytes = Buffer.from('{"hooks":{"UserPromptSubmit":[]}}\n');
+    fs.writeFileSync(hooksJsonPath, hooksJsonBytes);
+    const ownershipStatePath = resolveHookStatePath('codex');
+    const ownershipStateBytes = Buffer.from(
+      '{"version":1,"events":{},"bundles":["existing-owned-bundle"],"legacyBundles":[]}\n'
+    );
+    fs.mkdirSync(path.dirname(ownershipStatePath), { recursive: true });
+    fs.writeFileSync(ownershipStatePath, ownershipStateBytes);
+
+    const parentLink = path.join(getCodexDir(), 'hooks', 'managed');
+    fs.mkdirSync(path.dirname(parentLink), { recursive: true });
+    const rawTarget = '../../blocked-existing-file';
+    const resolvedTarget = path.resolve(fs.realpathSync(path.dirname(parentLink)), rawTarget);
+    const blockedBytes = Buffer.from('regular file\n');
+    const targetDir = path.join(parentLink, entryId);
+    fs.writeFileSync(resolvedTarget, blockedBytes);
+    fs.symlinkSync(rawTarget, parentLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find(
+      (candidate) => candidate.platform === 'codex' && candidate.targetDir === targetDir
+    );
+
+    const error = result?.error;
+    assert.equal(result?.status, 'error');
+    assert.ok(error?.includes(`link: ${parentLink}`), error);
+    assert.ok(error.includes(`raw target: ${rawTarget}`));
+    assert.ok(error.includes(`resolved target: ${resolvedTarget}`));
+    assert.ok(error.includes('target is not a directory'));
+    assert.ok(error.includes('ASB did not modify the link or its target'));
+    assert.equal(fs.lstatSync(parentLink).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(parentLink), rawTarget);
+    assert.deepEqual(fs.readFileSync(resolvedTarget), blockedBytes);
+    assert.equal(fs.existsSync(targetDir), false);
+    assert.deepEqual(fs.readFileSync(hooksJsonPath), hooksJsonBytes);
+    assert.deepEqual(fs.readFileSync(ownershipStatePath), ownershipStateBytes);
+    assert.deepEqual(fs.readFileSync(sourceScript), sourceBytes);
+  });
+});
+
+test('distributeHooks: codex reports dangling hooks ancestor without modifying user state when the bundle root target parent is a file', () => {
+  withTempHomes(({ agentsHome }) => {
+    simulateAppsInstalled('codex');
+    const entryId = 'enotdir-root-hook';
+    createBundleHook(entryId);
+    enableHooks([entryId], ['codex']);
+
+    const sourceScript = path.join(ensureHooksDirectory(), entryId, 'run.sh');
+    const sourceBytes = fs.readFileSync(sourceScript);
+    const ownershipStatePath = resolveHookStatePath('codex');
+    const ownershipStateBytes = Buffer.from(
+      '{"version":1,"events":{},"bundles":["existing-owned-bundle"],"legacyBundles":[]}\n'
+    );
+    fs.mkdirSync(path.dirname(ownershipStatePath), { recursive: true });
+    fs.writeFileSync(ownershipStatePath, ownershipStateBytes);
+
+    const bundleRootLink = getCodexDir();
+    const rawTarget = '../blocked-root/child';
+    const blockedParent = path.join(path.dirname(agentsHome), 'blocked-root');
+    const blockedBytes = Buffer.from('regular file\n');
+    const resolvedTarget = path.resolve(fs.realpathSync(path.dirname(bundleRootLink)), rawTarget);
+    const targetDir = path.join(bundleRootLink, 'hooks', 'managed', entryId);
+    fs.rmSync(bundleRootLink, { recursive: true, force: true });
+    fs.writeFileSync(blockedParent, blockedBytes);
+    fs.symlinkSync(rawTarget, bundleRootLink);
+
+    const outcome = distributeHooks(undefined, ['codex'], new Set(['codex']));
+    const result = outcome.results.find(
+      (candidate) => candidate.platform === 'codex' && candidate.targetDir === targetDir
+    );
+
+    const error = result?.error;
+    assert.equal(result?.status, 'error');
+    assert.ok(error?.includes(`link: ${bundleRootLink}`), error);
+    assert.ok(error.includes(`raw target: ${rawTarget}`));
+    assert.ok(error.includes(`resolved target: ${resolvedTarget}`));
+    assert.ok(error.includes('Restore or reconnect the expected target'));
+    assert.ok(error.includes('ASB did not modify the link or create its target'));
+    assert.equal(fs.lstatSync(bundleRootLink).isSymbolicLink(), true);
+    assert.equal(fs.readlinkSync(bundleRootLink), rawTarget);
+    assert.deepEqual(fs.readFileSync(blockedParent), blockedBytes);
+    assert.equal(fs.existsSync(resolvedTarget), false);
+    assert.equal(fs.existsSync(targetDir), false);
+    assert.equal(fs.existsSync(getCodexHooksJsonPath()), false);
+    assert.deepEqual(fs.readFileSync(ownershipStatePath), ownershipStateBytes);
+    assert.deepEqual(fs.readFileSync(sourceScript), sourceBytes);
+  });
+});
+
 test('distributeHooks: codex writes bundles through a symlinked bundle parent', () => {
   withTempHomes(({ agentsHome }) => {
     simulateAppsInstalled('codex');
