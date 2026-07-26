@@ -1,7 +1,7 @@
 ---
-status: executing
+status: delivered
 owner: .harness/runtime/tasks/004-diagnose-dangling-bundle-symlink
-evidence: null
+evidence: .harness/runtime/tasks/004-diagnose-dangling-bundle-symlink/state.jsonl
 goal: null
 ---
 
