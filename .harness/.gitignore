@@ -1,0 +1,14 @@
+# .harness manages its own git policy: records/ is the tracked account,
+# everything else under the umbrella is machine state or checkouts.
+/*
+!/.gitignore
+!/records/
+
+# inside records: projections, locks, and captures are generated, not account
+/records/board.json
+/records/board.html
+/records/plans/**/*.html
+/records/tasks/.write.lock
+/records/tasks/.dispatcher.lock
+/records/topics/*/evidence/
+/records/brainstorm/
