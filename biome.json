@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!.harness", "!.worktree"]
+    "includes": ["**", "!.harness"]
   },
   "formatter": {
     "enabled": true,
