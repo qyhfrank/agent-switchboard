@@ -337,9 +337,9 @@ Hook bundle scripts are copied under each target's managed hook root, one direct
 
 ### ASB Source and Materialization Lifecycle
 
-Each immediate non-dotfile directory under `~/.asb/plugins/` is a first-class ASB source. A source can be a standalone plugin or a marketplace. `[plugins.sources]` registers sources elsewhere on disk or lets ASB manage a remote checkout at `~/.asb/plugins/<source>/`.
+Each immediate non-dotfile directory under `~/.asb/plugins/` is a first-class ASB source. A source can be a standalone plugin or a marketplace. `[plugins.sources]` registers user-owned sources elsewhere on disk or lets ASB manage a remote checkout at `<cache>/<source>/`. The cache root resolves from `ASB_CACHE_HOME`, then `XDG_CACHE_HOME/asb`, then `~/.cache/asb`. Keep the resolved cache root outside `ASB_HOME` to avoid synchronizing managed checkouts.
 
-Marketplace discovery reads identities and source metadata without fetching external entries. Relative entries resolve within the marketplace checkout. A Git entry that names the same repository and a compatible ref or full SHA reuses that checkout, including its requested subdirectory. Files for another selected Git entry materialize under `ASB_HOME/state/marketplace-plugins/`; this derived state is outside `ASB_HOME/plugins/` and cannot participate in source discovery.
+Marketplace discovery reads identities and source metadata without fetching external entries. Relative entries resolve within the marketplace checkout. A Git entry that names the same repository and a compatible ref or full SHA reuses that checkout, including its requested subdirectory. Files for another selected Git entry materialize under `<cache>/.entries/`. When the cache root is outside `ASB_HOME`, this derived state is not synchronized and cannot participate in source discovery.
 
 Portable plugin selection and direct component selection are materialization boundaries. Metadata-only inventory and native metadata lookup do not materialize external entries. ASB supports portable materialization for relative entries, GitHub sources, Git URL forms (`url`, `git`, or `github`), and `git-subdir`. Other declared source kinds remain visible as catalog or native metadata but fail with a materialization error if portable expansion requires files ASB cannot acquire.
 
