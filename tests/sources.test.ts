@@ -12,6 +12,7 @@ import {
 import {
   addLocalSource,
   addRemoteSource,
+  ensureRemoteSourcesReady,
   getSources,
   getSourcesRecord,
   hasSource,
@@ -1453,6 +1454,282 @@ test('updateRemoteSources reconstructs a deleted managed cache from config', () 
     assert.equal(result?.status, 'updated');
     assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
     assert.ok(fs.existsSync(path.join(cacheDir, '.git', 'asb-source.json')));
+  });
+});
+
+test('source readiness materializes a configured clone once without refreshing it', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'readiness-fixture'));
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      ['[plugins.sources]', `ready-source = "file://${bareRepo}"`].join('\n')
+    );
+
+    const [prepared] = ensureRemoteSourcesReady();
+    const cacheDir = getManagedSourceDir('ready-source');
+    assert.equal(prepared?.status, 'ready');
+    assert.equal(prepared?.action, 'clone');
+    assert.equal(prepared?.path, cacheDir);
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'v2'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+
+    assert.deepEqual(ensureRemoteSourcesReady(), []);
+    assert.equal(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')), false);
+  });
+});
+
+test('source readiness migrates the verified generation without fetching', () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo, workDir } = createBareRemote(path.join(asbHome, 'ready-migrate-fixture'));
+    addRemoteSource('ready-migrate', { url: bareRepo, type: 'clone' });
+    const legacyDir = demoteToLegacyLayout('ready-migrate');
+    const cacheDir = getManagedSourceDir('ready-migrate');
+
+    fs.writeFileSync(path.join(workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'v2'], { cwd: workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: workDir, stdio: 'pipe' });
+
+    const [prepared] = ensureRemoteSourcesReady();
+    assert.equal(prepared?.status, 'ready');
+    assert.equal(prepared?.action, 'migrate');
+    assert.equal(fs.existsSync(legacyDir), false);
+    assert.ok(fs.existsSync(path.join(cacheDir, 'rules', 'v1.md')));
+    assert.equal(fs.existsSync(path.join(cacheDir, 'rules', 'v2.md')), false);
+  });
+});
+
+test('source readiness rejects a cache-root swap after clone', { concurrency: false }, () => {
+  withTempAsbHome((asbHome) => {
+    const { bareRepo } = createBareRemote(path.join(asbHome, 'ready-root-swap-fixture'));
+    const namespace = 'ready-root-swap';
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [`[plugins.sources.${namespace}]`, `url = "${bareRepo}"`, 'type = "clone"'].join('\n')
+    );
+    const cacheHome = getCacheDir();
+    const targetPath = getManagedSourceDir(namespace);
+    const movedCacheHome = `${cacheHome}.moved`;
+    const outside = path.join(path.dirname(asbHome), 'outside-ready-root-swap');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'sentinel'), 'keep');
+    const originalRename = fs.renameSync;
+    let swapped = false;
+    fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
+      originalRename(from, to);
+      if (!swapped && String(to) === targetPath) {
+        swapped = true;
+        originalRename(cacheHome, movedCacheHome);
+        fs.symlinkSync(outside, cacheHome);
+      }
+    }) as typeof fs.renameSync;
+
+    let result: ReturnType<typeof ensureRemoteSourcesReady>[number] | undefined;
+    try {
+      [result] = ensureRemoteSourcesReady();
+    } finally {
+      fs.renameSync = originalRename;
+    }
+
+    assert.equal(result?.status, 'error');
+    assert.match(result?.error ?? '', /symbolic link|unverified or modified/);
+    assert.ok(fs.existsSync(path.join(movedCacheHome, namespace, '.git', 'asb-source.json')));
+    assert.equal(fs.readFileSync(path.join(outside, 'sentinel'), 'utf-8'), 'keep');
+  });
+});
+
+test(
+  'source readiness retries derived-cache invalidation before cloning',
+  { concurrency: false },
+  () => {
+    withTempAsbHome((asbHome) => {
+      clearPluginIndexCache();
+      const entryRemote = createBareRemote(path.join(asbHome, 'ready-entry-remote'));
+      const catalogRemote = createBareRemote(path.join(asbHome, 'ready-catalog-remote'));
+      const pluginRoot = path.join(entryRemote.workDir, 'plugin');
+      const skillDir = path.join(pluginRoot, 'skills', 'remote-skill');
+      fs.mkdirSync(skillDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: remote-skill\ndescription: remote\n---\nBody'
+      );
+      execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+      execFileSync('git', ['commit', '-m', 'plugin'], {
+        cwd: entryRemote.workDir,
+        stdio: 'pipe',
+      });
+      execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+      fs.mkdirSync(path.join(catalogRemote.workDir, '.claude-plugin'), { recursive: true });
+      fs.writeFileSync(
+        path.join(catalogRemote.workDir, '.claude-plugin', 'marketplace.json'),
+        JSON.stringify({
+          name: 'ready-catalog',
+          plugins: [
+            {
+              name: 'remote-plugin',
+              source: { source: 'url', url: entryRemote.bareRepo, path: 'plugin' },
+            },
+          ],
+        })
+      );
+      execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+      execFileSync('git', ['commit', '-m', 'catalog'], {
+        cwd: catalogRemote.workDir,
+        stdio: 'pipe',
+      });
+      execFileSync('git', ['push'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+
+      addRemoteSource('ready-catalog', { url: catalogRemote.bareRepo, type: 'clone' });
+      const index = buildPluginIndex();
+      const plugin = index.get('remote-plugin@ready-catalog');
+      assert.ok(plugin);
+      index.expand([plugin.id]);
+      const entryCacheRoot = getMarketplacePluginCacheDir();
+      const sourceCacheDir = path.join(
+        entryCacheRoot,
+        path.relative(entryCacheRoot, plugin.meta.sourcePath).split(path.sep)[0] ?? ''
+      );
+      assert.ok(fs.existsSync(sourceCacheDir));
+
+      const checkout = getManagedSourceDir('ready-catalog');
+      fs.rmSync(checkout, { recursive: true, force: true });
+      const originalRemove = fs.rmSync;
+      let failed = false;
+      fs.rmSync = ((target: fs.PathLike, options?: fs.RmDirOptions) => {
+        if (!failed && String(target).includes(`${path.sep}.entries${path.sep}`)) {
+          failed = true;
+          throw new Error('simulated derived-cache removal failure');
+        }
+        return originalRemove(target, options);
+      }) as typeof fs.rmSync;
+
+      let first: ReturnType<typeof ensureRemoteSourcesReady>[number] | undefined;
+      try {
+        [first] = ensureRemoteSourcesReady();
+      } finally {
+        fs.rmSync = originalRemove;
+      }
+
+      assert.equal(first?.status, 'error');
+      assert.match(first?.error ?? '', /simulated derived-cache removal failure/);
+      assert.equal(failed, true);
+      assert.equal(fs.existsSync(checkout), false);
+      const [retried] = ensureRemoteSourcesReady();
+      assert.equal(retried?.status, 'ready');
+      assert.equal(retried?.action, 'clone');
+      assert.equal(fs.existsSync(sourceCacheDir), false);
+    });
+  }
+);
+
+test('source readiness invalidates caches owned by a missing symlinked subdir', () => {
+  withTempAsbHome((asbHome) => {
+    clearPluginIndexCache();
+    const entryRemote = createBareRemote(path.join(asbHome, 'ready-symlink-entry'));
+    const catalogRemote = createBareRemote(path.join(asbHome, 'ready-symlink-catalog'));
+    const pluginRoot = path.join(entryRemote.workDir, 'plugin');
+    fs.mkdirSync(path.join(pluginRoot, 'skills', 'remote-skill'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pluginRoot, 'skills', 'remote-skill', 'SKILL.md'),
+      '---\nname: remote-skill\ndescription: remote\n---\nBody'
+    );
+    fs.writeFileSync(path.join(pluginRoot, 'VERSION'), 'v1\n');
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'plugin-v1'], {
+      cwd: entryRemote.workDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    const catalogDir = path.join(catalogRemote.workDir, 'catalog');
+    fs.mkdirSync(path.join(catalogDir, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(catalogDir, '.claude-plugin', 'marketplace.json'),
+      JSON.stringify({
+        name: 'ready-symlink-catalog',
+        plugins: [
+          {
+            name: 'remote-plugin',
+            source: { source: 'url', url: entryRemote.bareRepo, path: 'plugin' },
+          },
+        ],
+      })
+    );
+    fs.symlinkSync('catalog', path.join(catalogRemote.workDir, 'catalog-link'));
+    execFileSync('git', ['add', '.'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'catalog'], {
+      cwd: catalogRemote.workDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['push'], { cwd: catalogRemote.workDir, stdio: 'pipe' });
+
+    addRemoteSource('ready-symlink', {
+      url: catalogRemote.bareRepo,
+      subdir: 'catalog-link',
+      type: 'clone',
+    });
+    const index = buildPluginIndex();
+    const plugin = index.get('remote-plugin@ready-symlink');
+    assert.ok(plugin);
+    index.expand([plugin.id]);
+    assert.equal(fs.readFileSync(path.join(plugin.meta.sourcePath, 'VERSION'), 'utf-8'), 'v1\n');
+
+    fs.writeFileSync(path.join(pluginRoot, 'VERSION'), 'v2\n');
+    execFileSync('git', ['add', '.'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'plugin-v2'], {
+      cwd: entryRemote.workDir,
+      stdio: 'pipe',
+    });
+    execFileSync('git', ['push'], { cwd: entryRemote.workDir, stdio: 'pipe' });
+
+    fs.rmSync(getManagedSourceDir('ready-symlink'), { recursive: true, force: true });
+    const [prepared] = ensureRemoteSourcesReady();
+    assert.equal(prepared?.status, 'ready');
+    assert.equal(prepared?.action, 'clone');
+
+    const refreshedIndex = buildPluginIndex();
+    const refreshedPlugin = refreshedIndex.get('remote-plugin@ready-symlink');
+    assert.ok(refreshedPlugin);
+    refreshedIndex.expand([refreshedPlugin.id]);
+    assert.equal(
+      fs.readFileSync(path.join(refreshedPlugin.meta.sourcePath, 'VERSION'), 'utf-8'),
+      'v2\n'
+    );
+  });
+});
+
+test('a readiness error does not block refresh for healthy sources', () => {
+  withTempAsbHome((asbHome) => {
+    const good = createBareRemote(path.join(asbHome, 'healthy-update-fixture'));
+    addRemoteSource('good', { url: good.bareRepo, type: 'clone' });
+    fs.writeFileSync(path.join(good.workDir, 'rules', 'v2.md'), '# V2');
+    execFileSync('git', ['add', '.'], { cwd: good.workDir, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'v2'], { cwd: good.workDir, stdio: 'pipe' });
+    execFileSync('git', ['push'], { cwd: good.workDir, stdio: 'pipe' });
+
+    fs.writeFileSync(
+      path.join(asbHome, 'config.toml'),
+      [
+        '[plugins.sources.bad]',
+        `url = "${path.join(asbHome, 'missing.git')}"`,
+        'type = "clone"',
+        '',
+        '[plugins.sources.good]',
+        `url = "${good.bareRepo}"`,
+        'type = "clone"',
+      ].join('\n')
+    );
+
+    const results = updateRemoteSources();
+
+    assert.equal(results.find((result) => result.namespace === 'bad')?.phase, 'readiness');
+    assert.equal(results.find((result) => result.namespace === 'good')?.status, 'updated');
+    assert.ok(fs.existsSync(path.join(getManagedSourceDir('good'), 'rules', 'v2.md')));
   });
 });
 
