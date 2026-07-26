@@ -171,8 +171,63 @@ export function assertUsableBundleRoot(rootPath: string): void {
 }
 
 function assertSafeBundleTarget(rootPath: string, targetPath: string): void {
-  assertUsableBundleRoot(rootPath);
+  try {
+    assertUsableBundleRoot(rootPath);
+  } catch (error) {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ENOTDIR' &&
+      lstatIfExists(rootPath)?.isSymbolicLink()
+    ) {
+      assertNoDanglingBundleAncestor(rootPath, targetPath);
+    }
+    throw error;
+  }
   assertTargetWithinRoot(rootPath, targetPath);
+}
+
+function assertNoDanglingBundleAncestor(rootPath: string, targetPath: string): void {
+  const resolvedRoot = path.resolve(rootPath);
+  const resolvedParent = path.dirname(path.resolve(targetPath));
+  const parentRelative = path.relative(resolvedRoot, resolvedParent);
+  if (parentRelative.startsWith('..') || path.isAbsolute(parentRelative)) return;
+
+  let current = resolvedRoot;
+  while (true) {
+    const entryStat = lstatIfExists(current);
+    if (!entryStat) return;
+    if (entryStat.isSymbolicLink()) {
+      let targetStat: fs.Stats;
+      try {
+        targetStat = fs.statSync(current);
+      } catch (error) {
+        if (
+          typeof error !== 'object' ||
+          error === null ||
+          !('code' in error) ||
+          (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+        ) {
+          throw error;
+        }
+        const rawTarget = fs.readlinkSync(current);
+        const resolvedTarget = path.resolve(fs.realpathSync(path.dirname(current)), rawTarget);
+        throw new Error(
+          `dangling symbolic link blocks bundle preparation (link: ${current}; raw target: ${rawTarget}; resolved target: ${resolvedTarget}). Restore or reconnect the expected target before retrying. If the link is obsolete, remove it only after confirming it is no longer needed. ASB did not modify the link or create its target.`
+        );
+      }
+      if (!targetStat.isDirectory()) {
+        const rawTarget = fs.readlinkSync(current);
+        const resolvedTarget = path.resolve(fs.realpathSync(path.dirname(current)), rawTarget);
+        throw new Error(
+          `symbolic link target is not a directory and blocks bundle preparation (link: ${current}; raw target: ${rawTarget}; resolved target: ${resolvedTarget}). Restore or reconnect the expected directory before retrying. If the link is obsolete, remove it only after confirming it is no longer needed. ASB did not modify the link or its target.`
+        );
+      }
+    }
+    if (current === resolvedParent) return;
+    current = path.join(current, path.relative(current, resolvedParent).split(path.sep)[0]);
+  }
 }
 
 function resolveBundleRootDir<TEntry, Platform extends string>(
@@ -361,6 +416,7 @@ export function distributeBundle<TEntry, Platform extends string>(
       if (bundleRootDir) {
         try {
           assertSafeBundleTarget(bundleRootDir, targetDir);
+          assertNoDanglingBundleAncestor(bundleRootDir, targetDir);
         } catch (error) {
           const msg = error instanceof Error ? error.message : String(error);
           results.push({
