@@ -1,7 +1,7 @@
 ---
-status: executing
+status: dropped
 owner: .harness/runtime/tasks/003-agent-switchboard-lean-release
-evidence: null
+evidence: .harness/runtime/tasks/003-agent-switchboard-lean-release/state.jsonl
 goal: 019f715a-413c-7e20-8274-0dbe0a3485da
 ---
 
