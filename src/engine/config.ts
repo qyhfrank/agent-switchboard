@@ -71,7 +71,15 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
       ? path.join(xdgState, 'asb')
       : path.join(home, '.local', 'state', 'asb');
 
-  return { asbHome, agentsHome, cacheHome, stateHome };
+  // Resolved once against the invocation cwd: a relative override (e.g.
+  // ASB_AGENTS_HOME=agents) must not let the same ledger key point at a
+  // different physical file per working directory.
+  return {
+    asbHome: path.resolve(asbHome),
+    agentsHome: path.resolve(agentsHome),
+    cacheHome: path.resolve(cacheHome),
+    stateHome: path.resolve(stateHome),
+  };
 }
 
 export function userConfigPath(homes: Homes, env: NodeJS.ProcessEnv = process.env): string {
@@ -805,6 +813,13 @@ function spliceInto(content: string, span: ArraySpan, additions: readonly string
   const elements = arrayElements(content, span);
   const lastElement = elements[elements.length - 1];
 
+  // Closing bracket on the last element's own line: append inline after the
+  // element so additions land after existing ids, never before them.
+  if (lastElement && lastElement.end >= closingLineStart) {
+    const rendered = additions.map((value) => JSON.stringify(value)).join(', ');
+    return `${content.slice(0, lastElement.end)}, ${rendered}${content.slice(lastElement.end)}`;
+  }
+
   let indent = '  ';
   if (lastElement) {
     const lineStart = content.lastIndexOf('\n', lastElement.start) + 1;
@@ -947,11 +962,22 @@ export function editSelection(options: EditSelectionOptions): void {
     );
   }
 
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  // Write through a symlinked config to its backing file, keeping the
+  // original permission bits (a 0600 config must not relax under the umask).
+  let resolved = filePath;
+  let mode: number | null = null;
+  try {
+    resolved = fs.realpathSync(filePath);
+    mode = fs.statSync(resolved).mode & 0o777;
+  } catch {
+    // new file: no link to follow, default creation mode
+  }
+  fs.mkdirSync(path.dirname(resolved), { recursive: true });
   const temp = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.asb-tmp-${process.pid}`
+    path.dirname(resolved),
+    `.${path.basename(resolved)}.asb-tmp-${process.pid}`
   );
   fs.writeFileSync(temp, content, 'utf-8');
-  fs.renameSync(temp, filePath);
+  if (mode !== null) fs.chmodSync(temp, mode);
+  fs.renameSync(temp, resolved);
 }

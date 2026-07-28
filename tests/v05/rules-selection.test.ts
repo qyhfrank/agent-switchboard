@@ -96,3 +96,37 @@ test('legacy selection spellings still load', async () => {
     assert.deepEqual(loadConfig().selection.rules, ['alpha']);
   });
 });
+
+test('enable appends after the last element when ] shares its line', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[rules]\nenabled = [\n  "alpha"]\n');
+
+    editSelection({ type: 'rules', enable: ['beta'] });
+
+    const content = fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8');
+    const parsed = parse(content) as { rules?: { enabled?: string[] } };
+    assert.deepEqual(
+      parsed.rules?.enabled,
+      ['alpha', 'beta'],
+      'additions never jump ahead of existing ids'
+    );
+  });
+});
+
+test('editing a symlinked config writes through the link and keeps its mode', async () => {
+  await withScratchHomes(async (homes) => {
+    const backing = path.join(homes.root, 'dotfiles', 'asb-config.toml');
+    fs.mkdirSync(path.dirname(backing), { recursive: true });
+    fs.writeFileSync(backing, '[rules]\nenabled = ["alpha"]\n');
+    fs.chmodSync(backing, 0o600);
+    const configPath = path.join(homes.asbHome, 'config.toml');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.symlinkSync(backing, configPath);
+
+    editSelection({ type: 'rules', enable: ['beta'] });
+
+    assert.ok(fs.lstatSync(configPath).isSymbolicLink(), 'the link survives the edit');
+    assert.match(fs.readFileSync(backing, 'utf-8'), /"beta"/);
+    assert.equal(fs.statSync(backing).mode & 0o777, 0o600, 'permission bits preserved');
+  });
+});
