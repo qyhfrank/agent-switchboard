@@ -676,6 +676,13 @@ export function updateSources(
   return results;
 }
 
+/** Namespaces a refresh would reach over the network, in config order. */
+export function refreshableSources(config: ResolvedConfig): string[] {
+  return Object.entries(rawSources(config))
+    .filter(([, value]) => typeof value !== 'string' && isCloneableSource(expandHome(value.url)))
+    .map(([namespace]) => namespace);
+}
+
 function updateSubtree(homes: Homes, namespace: string, value: RemoteSource): void {
   if (!isGitRepoRoot(homes.asbHome)) {
     throw new Error(
@@ -1033,7 +1040,29 @@ export interface PluginDescriptor {
   description?: string;
   version?: string;
   /** Native plugin manager metadata, for sources an app's own manager installs. */
-  native?: { target: NativeTarget; manifestPath: string };
+  native?: NativeMeta;
+}
+
+/**
+ * What an app's own plugin manager needs to know. `manifestPath` is the
+ * plugin's own manifest, when it ships one; `install` is present exactly when
+ * the manager can register and install this plugin — a catalogued entry of a
+ * marketplace the manager understands.
+ */
+export interface NativeMeta {
+  target: NativeTarget;
+  manifestPath?: string;
+  install?: {
+    /** Registration name: the marketplace manifest's own `name`. */
+    marketplaceName: string;
+    /** Directory holding the marketplace manifest. */
+    marketplacePath: string;
+    pluginName: string;
+    /** `<plugin>@<marketplace>` — how the manager is told to install it. */
+    ref: string;
+    /** Credential-free remote declaration, when the marketplace is a clone. */
+    remote?: RemoteSource;
+  };
 }
 
 export interface SourcePlugins {
@@ -1168,6 +1197,13 @@ export function readSourcePlugins(homes: Homes, namespace: string, root: string)
     typeof record(manifest?.metadata)?.pluginRoot === 'string'
       ? (record(manifest?.metadata)?.pluginRoot as string)
       : '';
+  // The manager registers a marketplace under the name its manifest declares,
+  // which is not always the namespace asb files it under.
+  const marketplace = {
+    target: manifestInfo.target,
+    name: typeof manifest?.name === 'string' ? manifest.name : namespace,
+    path: root,
+  };
 
   const plugins: PluginDescriptor[] = [];
   const failed: SourceFailure[] = [];
@@ -1178,7 +1214,15 @@ export function readSourcePlugins(homes: Homes, namespace: string, root: string)
       failed.push({ namespace, path: manifestInfo.path, error: 'marketplace entry has no name' });
       continue;
     }
-    const descriptor = readCatalogEntry(homes, namespace, root, pluginRoot, entry, name);
+    const descriptor = readCatalogEntry(
+      homes,
+      namespace,
+      root,
+      pluginRoot,
+      entry,
+      name,
+      marketplace
+    );
     if (descriptor instanceof Error) {
       failed.push({ namespace, path: manifestInfo.path, error: descriptor.message });
       continue;
@@ -1217,7 +1261,8 @@ function readCatalogEntry(
   marketplaceRoot: string,
   pluginRoot: string,
   entry: Record<string, unknown>,
-  name: string
+  name: string,
+  marketplace: { target: NativeTarget; name: string; path: string }
 ): PluginDescriptor | Error {
   const source = entry.source;
   const id = `${name}@${namespace}`;
@@ -1291,11 +1336,31 @@ function readCatalogEntry(
   if (typeof description === 'string') descriptor.description = description;
   const version = entry.version ?? manifest?.version;
   if (typeof version === 'string') descriptor.version = version;
-  if (root) {
-    const native = pluginManifest(root);
-    if (native) descriptor.native = { target: native.target, manifestPath: native.path };
-  }
+
+  // Every catalogued entry is installable by the manager whose marketplace
+  // family this is, whether or not it has been fetched: the manager fetches
+  // its own copy. A plugin manifest in a materialized root adds to that.
+  descriptor.native = {
+    target: marketplace.target,
+    install: {
+      marketplaceName: marketplace.name,
+      marketplacePath: marketplace.path,
+      pluginName: name,
+      ref: `${name}@${marketplace.name}`,
+    },
+  };
+  const native = root ? pluginManifest(root) : undefined;
+  if (native) descriptor.native.manifestPath = native.path;
   return descriptor;
+}
+
+/** A plugin whose content root is not on disk, and where asb looked for it. */
+export interface AbsentPlugin {
+  id: string;
+  source: string;
+  path: string;
+  /** Credential-free remote the source declares, when it has one. */
+  url?: string;
 }
 
 export interface SourceCatalog {
@@ -1304,6 +1369,8 @@ export interface SourceCatalog {
   plugins: PluginDescriptor[];
   /** Sources and catalog entries that could not be read. */
   failed: SourceFailure[];
+  /** Catalogued plugins whose content is not there — enabled or not. */
+  absent: AbsentPlugin[];
 }
 
 /**
@@ -1315,12 +1382,28 @@ export function readSourceCatalog(config: ResolvedConfig): SourceCatalog {
   const resolution = resolveSources(config);
   const plugins: PluginDescriptor[] = [];
   const failed = [...resolution.failed];
+  const absent: AbsentPlugin[] = [];
   for (const source of resolution.sources) {
     const read = readSourcePlugins(config.homes, source.namespace, source.path);
+    for (const plugin of read.plugins) {
+      if (plugin.native?.install && source.remote) plugin.native.install.remote = source.remote;
+      // A configured source whose directory is gone still contributes its
+      // descriptor, so what the user enabled stays visible with the place asb
+      // expected to find it.
+      if (plugin.root !== undefined && !fs.existsSync(plugin.root)) {
+        const row: AbsentPlugin = {
+          id: plugin.id,
+          source: source.namespace,
+          path: plugin.root,
+        };
+        if (source.remote) row.url = source.remote.url;
+        absent.push(row);
+      }
+    }
     plugins.push(...read.plugins);
     failed.push(...read.failed);
   }
-  return { sources: resolution.sources, plugins, failed };
+  return { sources: resolution.sources, plugins, failed, absent };
 }
 
 /** Fetch every external entry a source declares that the caller selected. */

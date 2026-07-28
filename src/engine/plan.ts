@@ -1,10 +1,16 @@
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { AGENTS_SKILLS_UNION, type AppRow, type HooksTargetRow } from './apps.js';
-import { effectiveIncludeDelimiters, effectiveSelection, type ResolvedConfig } from './config.js';
+import {
+  effectiveIncludeDelimiters,
+  effectivePlugins,
+  effectiveSelection,
+  type ResolvedConfig,
+} from './config.js';
 import { preferHomeVar } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, HookEventMap, LibraryInventory } from './library.js';
+import type { NativeWork } from './native.js';
 import { type HookTarget, type PeerState, peerStateHasContent } from './peer.js';
 import type { Outcome } from './report.js';
 import {
@@ -14,6 +20,7 @@ import {
   type TargetFile,
   targetModeMatchesSourceExecutableBits,
 } from './shapes.js';
+import type { ReadinessRow, SourceCatalog, UpdateRow } from './sources.js';
 
 /**
  * The pure planner: selection × inventory × table × ledger × captured fs
@@ -115,6 +122,11 @@ export interface Action {
    * with this record instead of a ledger entry.
    */
   peer?: { asbHome: string; target: HookTarget; state: PeerState };
+  /**
+   * Native-manager work: the app's own plugin manager owns the result, so
+   * there is no path, hash, or ledger entry — the commands are the apply.
+   */
+  native?: NativeWork;
 }
 
 export interface PlanInput {
@@ -1412,6 +1424,136 @@ export function planHooks(input: PlanInput): Action[] {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Source-level rows
+// ---------------------------------------------------------------------------
+
+export interface SourcePlanInput {
+  config: ResolvedConfig;
+  catalog: SourceCatalog;
+  /** What the readiness phase did, or would do on a preview. */
+  readiness: readonly ReadinessRow[];
+  /** Refresh outcomes, empty when no refresh was requested or on a preview. */
+  updates: readonly UpdateRow[];
+  /** Sources a preview would refresh; empty on a real run. */
+  pendingRefresh: readonly string[];
+  dryRun: boolean;
+}
+
+function sourceRow(
+  id: string,
+  targetPath: string | null,
+  outcome: Outcome,
+  detail: string | undefined,
+  reason: string
+): Action {
+  const action: Action = {
+    app: null,
+    // Source-level rows carry no component type, so no `--type` filter can
+    // hide a source that failed.
+    type: null,
+    id,
+    path: targetPath,
+    op: 'none',
+    outcome,
+    reason,
+  };
+  if (detail !== undefined) action.detail = detail;
+  return action;
+}
+
+/**
+ * Everything the sources phase has to say: what it materialized or would
+ * materialize, what it could not read, and what a selection points at that is
+ * not there. These rows are reports, never work — readiness runs before the
+ * planner, so nothing here is left for the executor to do.
+ */
+export function planSources(input: SourcePlanInput): Action[] {
+  const { config, catalog, readiness, updates, pendingRefresh, dryRun } = input;
+  const actions: Action[] = [];
+
+  for (const row of readiness) {
+    if (row.status === 'error') {
+      actions.push(
+        sourceRow(row.namespace, row.path, 'failed', 'source-error', row.error ?? 'unknown error')
+      );
+      continue;
+    }
+    if (!row.action) continue;
+    const migrating = row.action === 'migrate';
+    actions.push(
+      dryRun
+        ? sourceRow(
+            row.namespace,
+            row.path,
+            'pending',
+            'clone',
+            migrating
+              ? `would migrate the existing checkout into ${row.path}`
+              : `would clone into ${row.path}`
+          )
+        : sourceRow(
+            row.namespace,
+            row.path,
+            'written',
+            undefined,
+            migrating ? `migrated into ${row.path}` : `cloned into ${row.path}`
+          )
+    );
+  }
+
+  for (const namespace of pendingRefresh) {
+    actions.push(sourceRow(namespace, null, 'pending', 'refresh', 'would refresh from its remote'));
+  }
+
+  // A refresh that changed nothing is silent, like a source that was already
+  // ready; only what failed is worth a row.
+  for (const row of updates) {
+    if (row.status !== 'error') continue;
+    const where = row.phase === 'readiness' ? 'before it could refresh: ' : '';
+    actions.push(
+      sourceRow(
+        row.namespace,
+        null,
+        'failed',
+        'source-error',
+        `${where}${row.error ?? 'unknown error'}`
+      )
+    );
+  }
+
+  // A source asb cannot read is reported rather than skipped: its plugins are
+  // absent from the scan, and silence there would look like a source that
+  // contributes nothing.
+  for (const failure of catalog.failed) {
+    actions.push(
+      sourceRow(failure.namespace, failure.path, 'failed', 'source-error', failure.error)
+    );
+  }
+
+  // An enabled plugin whose content is not on disk names where asb looked, so
+  // the fix is visible without a second command. It never authorizes removal:
+  // absent content is not deselection.
+  const enabledPlugins = new Set(
+    config.apps.enabled.flatMap((appId) => effectivePlugins(config, appId))
+  );
+  for (const absent of catalog.absent) {
+    if (!enabledPlugins.has(absent.id)) continue;
+    const declared = absent.url ? ` (declared as ${absent.url})` : '';
+    actions.push(
+      sourceRow(
+        absent.id,
+        absent.path,
+        'missing',
+        undefined,
+        `enabled but its source content is not there${declared}; expected ${absent.path}`
+      )
+    );
+  }
+
+  return actions;
+}
+
 export interface ExplainSlice {
   /** Owning app, or null for library-level rows (missing, parse failures). */
   app: string | null;
@@ -1446,6 +1588,13 @@ function librarySlice(action: Action): ExplainSlice {
   if (action.detail !== undefined) slice.detail = action.detail;
   if (action.reason !== undefined) slice.reason = action.reason;
   return slice;
+}
+
+/** Source rows for one target: a namespace, a plugin id, or a source path. */
+export function explainSources(input: SourcePlanInput, target: string): ExplainSlice[] {
+  return planSources(input)
+    .filter((action) => action.id === target || action.path === target)
+    .map(librarySlice);
 }
 
 /**

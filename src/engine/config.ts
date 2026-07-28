@@ -536,14 +536,74 @@ export function mergeIncrementalSelection(
   return result;
 }
 
-/** Per-app effective selection: the global list overlaid by the app's override, deduplicated in order. */
+/**
+ * What each enabled plugin contributes, and which spellings of a plugin or
+ * component ref name the same thing. Attached to a resolved config after the
+ * library scan; without it a selection is the global list alone.
+ */
+export interface PluginExpansion {
+  /** Component ids each plugin id contributes, by type. */
+  byPlugin: Record<string, Partial<Record<ComponentType, readonly string[]>>>;
+  /** Canonical plugin id per accepted plugin ref, bare names included. */
+  pluginAliases: Record<string, string>;
+  /** Canonical component id per accepted component ref. */
+  componentAliases: Record<string, string>;
+}
+
+/** The scan's expansion, attached without mutating the loaded configuration. */
+export function withPluginExpansion(
+  config: ResolvedConfig,
+  expansion: PluginExpansion
+): ResolvedConfig {
+  return { ...config, plugins: { ...config.plugins, expansion } };
+}
+
+function dedupe(ids: readonly string[]): string[] {
+  return [...new Set(ids)];
+}
+
+/** Plugin ids this app enables, in order, with every ref resolved to its canonical id. */
+export function effectivePlugins(config: ResolvedConfig, appId: string): string[] {
+  const aliases = config.plugins.expansion?.pluginAliases ?? {};
+  const merged = mergeIncrementalSelection(
+    config.selection.plugins,
+    config.apps.overrides[appId]?.plugins
+  );
+  return dedupe(merged.map((ref) => aliases[ref] ?? ref));
+}
+
+/**
+ * Per-app effective selection. Two channels feed it: the global `enabled`
+ * list, and the components the app's enabled plugins expand to minus
+ * `[plugins.exclude]` — which filters plugin-expanded ids only, so an id the
+ * user enabled explicitly survives its own plugin's exclusion. The app's
+ * override applies to the merge of both, and every ref is canonicalized on the
+ * way in and on the way out.
+ */
 export function effectiveSelection(
   config: ResolvedConfig,
   appId: string,
   type: ComponentType
 ): string[] {
   const override = config.apps.overrides[appId]?.[type];
-  return [...new Set(mergeIncrementalSelection(config.selection[type], override))];
+  const expansion = config.plugins.expansion;
+  if (!expansion) {
+    return dedupe(mergeIncrementalSelection(config.selection[type], override));
+  }
+
+  const canonical = (id: string): string => expansion.componentAliases[id] ?? id;
+  const excluded = new Set((config.plugins.exclude[type] ?? []).map(canonical));
+  const expanded = effectivePlugins(config, appId)
+    .flatMap((id) => expansion.byPlugin[id]?.[type] ?? [])
+    .filter((id) => !excluded.has(id));
+
+  const merged = dedupe([...config.selection[type].map(canonical), ...expanded]);
+  const normalized = override && {
+    enabled: override.enabled?.map(canonical),
+    add: override.add?.map(canonical),
+    remove: override.remove?.map(canonical),
+  };
+  return dedupe(mergeIncrementalSelection(merged, normalized).map(canonical));
 }
 
 export function effectiveIncludeDelimiters(config: ResolvedConfig, appId: string): boolean {
@@ -563,6 +623,8 @@ export interface ResolvedConfig {
     sources: Record<string, z.infer<typeof sourceValue>>;
     exclude: z.infer<typeof pluginExclude>;
     autoUpdate: boolean;
+    /** Present once the library scan has said what the sources contribute. */
+    expansion?: PluginExpansion;
   };
   rules: { includeDelimiters: boolean };
   distribution: {

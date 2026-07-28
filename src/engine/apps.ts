@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { Homes } from './config.js';
 import { filterCodexHooks, rawBody, wrapMdcFrontmatter } from './dialects.js';
 import type { HookEventMap } from './library.js';
+import type { NativeTarget } from './sources.js';
 
 /**
  * The app × type table. Variation that fits a column is a column: detect
@@ -60,12 +61,27 @@ export interface HooksTargetRow {
   stateTarget: 'claude-code' | 'codex';
 }
 
+/**
+ * Apps that ship their own plugin manager. There is no file to own: the
+ * manager's reported state stands in for ownership, and asb speaks to it
+ * through its own CLI.
+ */
+export interface NativeManagerRow {
+  /** Manager CLI, found on the run's PATH. */
+  bin: string;
+  /** Marketplace manifest family this manager reads. */
+  target: NativeTarget;
+  /** Document carrying the portable-marketplace declaration. */
+  settings(homes: Homes): string;
+}
+
 export interface AppRow {
   id: string;
   detectDir(homes: Homes): string;
   rules?: RulesTargetRow;
   skills?: SkillsTargetRow;
   hooks?: HooksTargetRow;
+  native?: NativeManagerRow;
 }
 
 /**
@@ -107,6 +123,11 @@ export const APP_ROWS: readonly AppRow[] = [
       bundleDir: (homes) => path.join(homes.agentsHome, '.claude', 'hooks', 'managed'),
       deleteWhenEmpty: false,
       stateTarget: 'claude-code',
+    },
+    native: {
+      bin: 'claude',
+      target: 'claude-code',
+      settings: (homes) => path.join(homes.agentsHome, '.claude', 'settings.json'),
     },
   },
   {

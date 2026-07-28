@@ -2,7 +2,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import { AGENTS_SKILLS_UNION, APP_ROWS } from './apps.js';
-import { ConfigError, effectiveSelection, loadConfig } from './config.js';
+import {
+  ConfigError,
+  effectiveSelection,
+  loadConfig,
+  type ResolvedConfig,
+  withPluginExpansion,
+} from './config.js';
+import { expandHome, type RemoteSource } from './git.js';
 import {
   acquireRunLock,
   type Ledger,
@@ -12,7 +19,8 @@ import {
   type RunLock,
   saveLedger,
 } from './ledger.js';
-import { scanLibrary } from './library.js';
+import { buildPluginExpansion, scanLibrary } from './library.js';
+import { applyNative, captureNative, planNative } from './native.js';
 import { loadPeerState, savePeerState } from './peer.js';
 import {
   type Action,
@@ -21,9 +29,11 @@ import {
   explainHooks,
   explainRules,
   explainSkills,
+  explainSources,
   planHooks,
   planRules,
   planSkills,
+  planSources,
   type SyncCapture,
 } from './plan.js';
 import {
@@ -31,6 +41,7 @@ import {
   FAILING_OUTCOMES,
   type Report,
   type ReportEntry,
+  redactCredentials,
   renderExplain,
   renderReport,
 } from './report.js';
@@ -44,7 +55,22 @@ import {
   targetEscapesRoot,
   writeFileAtomic,
 } from './shapes.js';
-import { readSourceCatalog, type SourceCatalog } from './sources.js';
+import {
+  addLocalSource,
+  addRemoteSource,
+  ensureSourcesReady,
+  inferSourceName,
+  isGitUrl,
+  parseGitUrl,
+  type ReadinessRow,
+  readSourceCatalog,
+  refreshableSources,
+  removeSource,
+  type SourceCatalog,
+  type UpdateRow,
+  updateSources,
+  validateSourcePath,
+} from './sources.js';
 
 /**
  * Command bodies. `runSync` is the one reconciliation: load → capture →
@@ -60,6 +86,10 @@ export interface SyncOptions {
   profile?: string;
   project?: string;
   sources?: readonly string[];
+  /** Refresh managed clones over the network before planning. */
+  update?: boolean;
+  /** Explicit suppression, including of `[plugins].auto_update`. */
+  noUpdate?: boolean;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -236,6 +266,22 @@ function applyLedgerMutation(ledger: Ledger, action: Action): boolean {
 }
 
 export function executeAction(action: Action, ledger: Ledger): ReportEntry {
+  // Native rows own no file: the manager's own verbs are the apply, and its
+  // reported state is the proof, so nothing here reaches the ledger.
+  if (action.native) {
+    const failure = applyNative(action.native);
+    if (failure === undefined) return toEntry(action);
+    return {
+      app: action.app,
+      type: action.type,
+      id: action.id,
+      path: action.path,
+      outcome: 'failed',
+      detail: 'write-error',
+      reason: failure,
+    };
+  }
+
   if (action.op === 'write' || action.op === 'remove') {
     const failure = (
       outcome: 'blocked' | 'conflict' | 'left-behind' | 'failed',
@@ -439,32 +485,62 @@ function reconcile(
   return entries;
 }
 
-/**
- * A source asb cannot read is reported rather than skipped: its plugins are
- * absent from the scan, and silence there would look like a source that
- * contributes nothing.
- */
-function sourceFailureRows(catalog: SourceCatalog): Action[] {
-  return catalog.failed.map((failure) => ({
-    app: null,
-    type: null,
-    id: failure.namespace,
-    path: failure.path,
-    op: 'none' as const,
-    outcome: 'failed' as const,
-    detail: 'source-error',
-    reason: failure.error,
-  }));
-}
-
 /** Scope flags whose engine wiring lands with a later cell fail closed. */
 function rejectUnwiredScope(opts: SyncOptions): void {
   if (opts.project) {
     throw new ConfigError('project scope is not available in this engine build');
   }
-  if (opts.sources && opts.sources.length > 0) {
-    throw new ConfigError('the --source filter is not available in this engine build');
+}
+
+/**
+ * Which source a row belongs to, for `--source`. Component ids carry their
+ * plugin as a prefix, so attribution is a lookup, not a guess. A row nothing
+ * attributes to a source — an app-level skip, an aggregate target, a ledger
+ * failure — is never hidden by the filter.
+ */
+function sourceAttribution(catalog: SourceCatalog): (action: Action) => string | null {
+  const owners = new Map<string, string>();
+  for (const source of catalog.sources) owners.set(source.namespace, source.namespace);
+  for (const plugin of catalog.plugins) {
+    owners.set(plugin.id, plugin.source);
+    if (plugin.native?.install) owners.set(plugin.native.install.ref, plugin.source);
   }
+  return (action) => {
+    if (action.id === null) return null;
+    const direct = owners.get(action.id);
+    if (direct !== undefined) return direct;
+    const cut = action.id.lastIndexOf(':');
+    if (cut < 0) return 'library';
+    return owners.get(action.id.slice(0, cut)) ?? 'library';
+  };
+}
+
+/**
+ * The sources phase: materialize configured clones, then refresh them when the
+ * run asked for it. It runs before the scan and produces no components of its
+ * own — the scan reads whatever it left on disk.
+ *
+ * Refresh is the one place a filter reaches an input rather than an action:
+ * `--source` names what to fetch, because fetching is the request. Readiness
+ * is never filtered, so a narrowed run still plans against the whole library.
+ */
+function runSourcesPhase(
+  config: ResolvedConfig,
+  opts: SyncOptions,
+  dryRun: boolean
+): { readiness: ReadinessRow[]; updates: UpdateRow[]; pendingRefresh: string[] } {
+  const readiness = ensureSourcesReady(config, { dryRun });
+  const refreshing = opts.update === true || (config.plugins.autoUpdate && opts.noUpdate !== true);
+  if (!refreshing) return { readiness, updates: [], pendingRefresh: [] };
+
+  const only = opts.sources && opts.sources.length > 0 ? opts.sources : undefined;
+  if (dryRun) {
+    const scoped = refreshableSources(config).filter(
+      (namespace) => !only || only.includes(namespace)
+    );
+    return { readiness, updates: [], pendingRefresh: scoped };
+  }
+  return { readiness, updates: updateSources(config, only ? { only } : {}), pendingRefresh: [] };
 }
 
 export async function runSync(opts: SyncOptions = {}): Promise<Report> {
@@ -480,12 +556,18 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   const lock: RunLock | null = dryRun ? null : acquireRunLock(config.homes.stateHome);
   try {
     const ledger = loadLedger(config.homes.stateHome);
+    const sources = runSourcesPhase(config, opts, dryRun);
     const catalog = readSourceCatalog(config);
     const inventory = scanLibrary({ env, plugins: catalog.plugins });
-    const capture = captureFor(config, ledger);
+
+    // What the sources contribute is only known after the scan, so the
+    // expansion joins the configuration here rather than at load time.
+    const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+    const capture = captureFor(resolved, ledger);
+    const nativeState = captureNative(resolved, catalog, APP_ROWS, env, capture.installed);
 
     const planInput = {
-      config,
+      config: resolved,
       inventory,
       ledger,
       capture,
@@ -493,10 +575,21 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       now: new Date().toISOString(),
     };
     let actions = [
-      ...sourceFailureRows(catalog),
+      ...planSources({ config: resolved, catalog, ...sources, dryRun }),
       ...planRules(planInput),
       ...planSkills(planInput),
       ...planHooks(planInput),
+      // Native rows run last: their registration setting shares a document
+      // with the hooks target, and this one re-reads it after that write.
+      ...planNative({
+        config: resolved,
+        catalog,
+        capture: nativeState,
+        table: APP_ROWS,
+        env,
+        installed: capture.installed,
+        dryRun,
+      }),
     ];
 
     // Filters select which actions execute, never which inputs the planner saw.
@@ -507,6 +600,14 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     if (opts.types && opts.types.length > 0) {
       const wanted = new Set(opts.types);
       actions = actions.filter((action) => action.type === null || wanted.has(action.type));
+    }
+    if (opts.sources && opts.sources.length > 0) {
+      const wanted = new Set(opts.sources);
+      const owner = sourceAttribution(catalog);
+      actions = actions.filter((action) => {
+        const source = owner(action);
+        return source === null || wanted.has(source);
+      });
     }
 
     const scope = {
@@ -567,18 +668,32 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   rejectUnwiredScope(opts);
   const config = loadConfig({ profile: opts.profile, env });
   const ledger = loadLedger(config.homes.stateHome);
-  const inventory = scanLibrary({ env, plugins: readSourceCatalog(config).plugins });
-  const capture = captureFor(config, ledger);
+  const catalog = readSourceCatalog(config);
+  const inventory = scanLibrary({ env, plugins: catalog.plugins });
+  const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+  const capture = captureFor(resolved, ledger);
 
   const planInput = {
-    config,
+    config: resolved,
     inventory,
     ledger,
     capture,
     table: APP_ROWS,
     now: new Date().toISOString(),
   };
+  // Explain never clones or fetches: it reads what a preview would report.
   let slices = [
+    ...explainSources(
+      {
+        config: resolved,
+        catalog,
+        readiness: ensureSourcesReady(resolved, { dryRun: true }),
+        updates: [],
+        pendingRefresh: [],
+        dryRun: true,
+      },
+      target
+    ),
     ...explainRules(planInput, target),
     ...explainSkills(planInput, target),
     ...explainHooks(planInput, target),
@@ -587,7 +702,118 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     const wanted = new Set(opts.apps);
     slices = slices.filter((slice) => slice.app === null || wanted.has(slice.app));
   }
-  return slices;
+  return slices.map((slice) =>
+    slice.reason ? { ...slice, reason: redactCredentials(slice.reason) } : slice
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Source lifecycle commands
+// ---------------------------------------------------------------------------
+
+export interface AddSourceOptions extends SyncOptions {
+  /** Namespace to file the source under; inferred from the location otherwise. */
+  as?: string;
+  ref?: string;
+  subtree?: boolean;
+}
+
+/**
+ * Declare a source. A git transport clones (or subtrees) into asb's own tree
+ * first and is declared only once that succeeded; anything else is a local
+ * directory the user keeps owning. The persisted declaration is always
+ * credential-free, so a token in the argument never reaches config.toml.
+ */
+export async function runAddSource(location: string, opts: AddSourceOptions = {}): Promise<Report> {
+  const env = opts.env ?? process.env;
+  const config = loadConfig({ profile: opts.profile, env });
+  const namespace = opts.as?.trim() || inferSourceName(location);
+  const scope = { profile: config.profile, project: config.project, dryRun: false };
+
+  const expanded = expandHome(location);
+  if (isGitUrl(expanded) || expanded.endsWith('.git')) {
+    const parsed = parseGitUrl(location);
+    const remote: RemoteSource = { url: parsed.url, type: opts.subtree ? 'subtree' : 'clone' };
+    const ref = opts.ref?.trim() || parsed.ref;
+    if (ref) remote.ref = ref;
+    if (parsed.subdir) remote.subdir = parsed.subdir;
+    addRemoteSource(config, namespace, remote, env);
+  } else {
+    addLocalSource(config, namespace, location, env);
+  }
+
+  // Read back through the same path every other command uses, so what `add`
+  // reports is what the next `sync` will see.
+  const catalog = readSourceCatalog(loadConfig({ profile: opts.profile, env }));
+  const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
+  const plugins = catalog.plugins.filter((plugin) => plugin.source === namespace);
+  const contents = source ? validateSourcePath(source.path) : undefined;
+  const detail =
+    contents && !contents.valid
+      ? '; it holds no rules, commands, agents, skills, or hooks yet'
+      : contents?.kind === 'marketplace'
+        ? `; ${plugins.length} plugin(s) catalogued`
+        : contents
+          ? `; contributes ${contents.found.join(', ')}`
+          : '';
+
+  return buildReport(scope, [
+    {
+      app: null,
+      type: null,
+      id: namespace,
+      path: source?.path ?? null,
+      outcome: 'written',
+      reason: `added as "${namespace}"${detail}`,
+    },
+  ]);
+}
+
+/**
+ * Retire a source: its managed content, its declaration, its derived caches,
+ * and every enabled entry it put there. The retired ids are reported one per
+ * row — a config edit the user did not type is never silent.
+ */
+export async function runRemoveSource(namespace: string, opts: SyncOptions = {}): Promise<Report> {
+  const env = opts.env ?? process.env;
+  const config = loadConfig({ profile: opts.profile, env });
+  const scope = { profile: config.profile, project: config.project, dryRun: false };
+
+  const catalog = readSourceCatalog(config);
+  const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
+  const inventory = scanLibrary({ env, plugins: catalog.plugins });
+  const expansion = buildPluginExpansion(catalog.plugins, inventory);
+  const pluginIds = catalog.plugins
+    .filter((plugin) => plugin.source === namespace)
+    .map((plugin) => plugin.id);
+  const componentIds = pluginIds.flatMap((id) =>
+    Object.values(expansion.byPlugin[id] ?? {}).flat()
+  );
+
+  const { retired } = removeSource(config, namespace, { componentIds, pluginIds, env });
+
+  const entries: ReportEntry[] = [
+    {
+      app: null,
+      type: null,
+      id: namespace,
+      path: source?.path ?? null,
+      outcome: 'removed',
+      reason: 'source removed; run asb sync to retire what it distributed',
+    },
+  ];
+  for (const row of retired) {
+    entries.push({
+      app: null,
+      type: row.type,
+      id: row.id,
+      path: null,
+      outcome: 'removed',
+      detail: 'retired',
+      reason: `disabled in [${row.type}] because source "${namespace}" provided it`,
+    });
+  }
+  return buildReport(scope, entries);
 }
 
 // ---------------------------------------------------------------------------
@@ -604,7 +830,9 @@ export type CliOptions = SyncOptions & {
 
 export type CliInvocation =
   | { command: 'sync' | 'status'; options: CliOptions }
-  | { command: 'explain'; target: string; options: CliOptions };
+  | { command: 'explain'; target: string; options: CliOptions }
+  | { command: 'add'; location: string; options: CliOptions & AddSourceOptions }
+  | { command: 'remove'; namespace: string; options: CliOptions };
 
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
@@ -674,6 +902,36 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     parsed = { command: 'explain', target, options: scopeOptions(cmd) };
   });
 
+  registerScopeFlags(
+    program
+      .command('add')
+      .description('add a plugin source: a git URL or a local directory')
+      .argument('<location>', 'git URL or local directory')
+      .option('--as <name>', 'namespace to file the source under')
+      .option('--ref <ref>', 'branch, tag, or commit to track')
+      .option('--subtree', 'commit the source into the library repository')
+  ).action((location: string, args: Record<string, unknown>, cmd: Command) => {
+    parsed = {
+      command: 'add',
+      location,
+      options: {
+        ...scopeOptions(cmd),
+        as: args.as as string | undefined,
+        ref: args.ref as string | undefined,
+        subtree: args.subtree === true,
+      },
+    };
+  });
+
+  registerScopeFlags(
+    program
+      .command('remove')
+      .description('remove a plugin source and retire what it enabled')
+      .argument('<name>', 'source namespace')
+  ).action((namespace: string, _args: unknown, cmd: Command) => {
+    parsed = { command: 'remove', namespace, options: scopeOptions(cmd) };
+  });
+
   program.parse([...argv], { from: 'user' });
 
   if (!parsed) {
@@ -712,17 +970,24 @@ export async function main(argv: readonly string[]): Promise<number> {
       return slices.length > 0 ? 0 : 1;
     }
 
-    const report = await runSync({
-      ...invocation.options,
-      dryRun: invocation.command === 'status' ? true : invocation.options.dryRun,
-    });
+    const report =
+      invocation.command === 'add'
+        ? await runAddSource(invocation.location, invocation.options)
+        : invocation.command === 'remove'
+          ? await runRemoveSource(invocation.namespace, invocation.options)
+          : await runSync({
+              ...invocation.options,
+              dryRun: invocation.command === 'status' ? true : invocation.options.dryRun,
+            });
     process.stdout.write(
       invocation.options.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report)
     );
     return report.exitCode;
   } catch (error) {
+    // Anything a source operation throws can carry the remote it was reaching,
+    // and a remote can carry a token. Nothing leaves here unredacted.
     const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`${message}\n`);
+    process.stderr.write(`${redactCredentials(message)}\n`);
     const exitCode = (error as { exitCode?: number }).exitCode;
     return exitCode === 2 ? 2 : 1;
   }

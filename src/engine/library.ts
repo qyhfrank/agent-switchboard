@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
-import { type ComponentType, resolveHomes } from './config.js';
+import { type ComponentType, type PluginExpansion, resolveHomes } from './config.js';
 import { type BundleFile, listBundleFiles } from './shapes.js';
 import type { PluginDescriptor } from './sources.js';
 
@@ -500,6 +500,55 @@ function dropDuplicates(inventory: LibraryInventory): void {
     survivors.push(component);
   }
   inventory.components = survivors;
+}
+
+/**
+ * What the scanned plugins contribute and how their refs spell out. A plugin
+ * is nameable by its bare name only while exactly one plugin carries it; an
+ * ambiguous bare name resolves to nothing rather than to an arbitrary source,
+ * and the ref then reports as missing instead of silently selecting the wrong
+ * plugin. Component refs follow their plugin: `<bare-plugin>:<id>` names the
+ * canonical `<plugin-id>:<id>` on the same condition.
+ */
+export function buildPluginExpansion(
+  plugins: readonly PluginDescriptor[],
+  inventory: LibraryInventory
+): PluginExpansion {
+  const byPlugin: Record<string, Partial<Record<ComponentType, string[]>>> = {};
+  for (const component of inventory.components) {
+    if (component.source === LIBRARY.source) continue;
+    const types = byPlugin[component.source] ?? {};
+    byPlugin[component.source] = types;
+    const ids = types[component.type] ?? [];
+    types[component.type] = ids;
+    ids.push(component.id);
+  }
+
+  const claimants = new Map<string, string[]>();
+  for (const plugin of plugins) {
+    const bucket = claimants.get(plugin.name);
+    if (bucket) bucket.push(plugin.id);
+    else claimants.set(plugin.name, [plugin.id]);
+  }
+
+  const pluginAliases: Record<string, string> = {};
+  const componentAliases: Record<string, string> = {};
+  for (const plugin of plugins) {
+    pluginAliases[plugin.id] = plugin.id;
+    const unambiguous = claimants.get(plugin.name)?.length === 1;
+    if (unambiguous && plugin.name !== plugin.id) pluginAliases[plugin.name] = plugin.id;
+    for (const ids of Object.values(byPlugin[plugin.id] ?? {})) {
+      for (const id of ids) {
+        componentAliases[id] = id;
+        if (!unambiguous) continue;
+        const bare = id.slice(plugin.id.length + 1);
+        const alias = `${plugin.name}:${bare}`;
+        if (alias !== id) componentAliases[alias] = id;
+      }
+    }
+  }
+
+  return { byPlugin, pluginAliases, componentAliases };
 }
 
 export interface ScanOptions {
