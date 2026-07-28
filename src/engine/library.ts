@@ -91,7 +91,10 @@ function parseFrontmatterMarkdown(
       throw new Error(`Failed to parse ${label.toLowerCase()} frontmatter: ${message}`);
     }
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error(`${label} frontmatter must evaluate to an object`);
+      // 0.4 funnels this through the same parse-error prefix as YAML failures.
+      throw new Error(
+        `Failed to parse ${label.toLowerCase()} frontmatter: ${label} frontmatter must evaluate to an object`
+      );
     }
     metadataInput = parsed as Record<string, unknown>;
     bodyStart = match[0].length;

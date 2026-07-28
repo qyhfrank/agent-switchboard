@@ -103,6 +103,25 @@ test('a malformed SKILL.md fails that entry only and keeps the frozen error stri
   });
 });
 
+test('non-object frontmatter carries the full 0.4 parse-error prefix chain', async () => {
+  await withScratchHomes(async (homes) => {
+    const dir = path.join(homes.asbHome, 'skills', 'arr');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'SKILL.md'),
+      '---\n- not\n- an\n- object\n---\nBody.\n',
+      'utf-8'
+    );
+
+    const inventory = scanLibrary({ types: ['skills'] });
+    const failure = inventory.failed.find((entry) => entry.id === 'arr');
+    assert.equal(
+      failure?.error,
+      'Failed to parse skill "arr": Failed to parse skill frontmatter: Skill frontmatter must evaluate to an object'
+    );
+  });
+});
+
 test('a SKILL.md without frontmatter fails because name and description are required', async () => {
   await withScratchHomes(async (homes) => {
     const dir = path.join(homes.asbHome, 'skills', 'bare');
