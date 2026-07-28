@@ -1009,21 +1009,23 @@ function renderHookGroups(
 function spliceRecordedGroups(
   existing: Record<string, unknown[]>,
   recorded: Record<string, unknown[]>
-): { hooks: Record<string, unknown[]>; removed: boolean } {
+): { hooks: Record<string, unknown[]>; removed: boolean; taken: Record<string, unknown[]> } {
   const hooks: Record<string, unknown[]> = {};
+  const taken: Record<string, unknown[]> = {};
   let removed = false;
   for (const [event, groups] of Object.entries(existing)) {
     const remaining = [...groups];
     for (const group of recorded[event] ?? []) {
       const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, group));
       if (index >= 0) {
+        taken[event] = [...(taken[event] ?? []), remaining[index]];
         remaining.splice(index, 1);
         removed = true;
       }
     }
     if (remaining.length > 0) hooks[event] = remaining;
   }
-  return { hooks, removed };
+  return { hooks, removed, taken };
 }
 
 /** The shape asb can merge into, or the reason it cannot. */
@@ -1130,7 +1132,11 @@ export function planHooks(input: PlanInput): Action[] {
     }
 
     const state = captured.state;
-    const { hooks: remainder, removed } = spliceRecordedGroups(
+    const {
+      hooks: remainder,
+      removed,
+      taken,
+    } = spliceRecordedGroups(
       (captured.config.hooks ?? {}) as Record<string, unknown[]>,
       state.events
     );
@@ -1222,11 +1228,25 @@ export function planHooks(input: PlanInput): Action[] {
 
     // Recorded groups no resolvable entry re-renders belong to the unresolved
     // ones: they go straight back into the config and stay in the record.
+    // Sourced from what the splice actually took out of THIS config, never
+    // from state.events directly — device-copy merges over-count there.
     if (unresolved.length > 0) {
-      for (const [event, groups] of Object.entries(
-        spliceRecordedGroups(state.events, desired).hooks
-      )) {
+      let stranded = 0;
+      for (const [event, groups] of Object.entries(spliceRecordedGroups(taken, desired).hooks)) {
         desired[event] = [...(desired[event] ?? []), ...groups];
+        stranded += groups.length;
+      }
+      if (stranded > 0) {
+        actions.push({
+          app,
+          type: 'hooks',
+          id: null,
+          path: configPath,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'not-selected',
+          reason: `${stranded} recorded group(s) kept until the library resolves ${unresolved.join(', ')}; fix or deselect, then run asb sync again`,
+        });
       }
     }
 
@@ -1245,9 +1265,20 @@ export function planHooks(input: PlanInput): Action[] {
       if (!live?.exists) continue;
       // With an unresolved selection this run cannot tell a deselected bundle
       // from one whose library entry merely went missing, so it removes
-      // neither and reclaims both once the library is whole again.
+      // neither and reclaims both once the library is whole again. The
+      // deferral is named: silence would freeze removals with no diagnosis.
       if (unresolved.length > 0) {
         retained.push(id);
+        actions.push({
+          app,
+          type: 'hooks',
+          id,
+          path: bundlePath,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'not-selected',
+          reason: `kept until the library resolves ${unresolved.join(', ')}; fix or deselect, then run asb sync again`,
+        });
         continue;
       }
       if (live.files === null || live.fingerprint === null) {

@@ -452,3 +452,76 @@ test('explain resolves hooks by id, app, and path with a peer-record owner', asy
     assert.equal(ghost[0]?.outcome, 'missing');
   });
 });
+
+test('a deferred removal is named, never silent, while the library is unresolved', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const alphaDir = path.join(homes.asbHome, 'hooks', 'alpha');
+    fs.mkdirSync(alphaDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(alphaDir, 'hook.json'),
+      JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${HOOK_DIR}/run.sh` }] }],
+        },
+      })
+    );
+    fs.writeFileSync(path.join(alphaDir, 'run.sh'), RUN_SH);
+    fs.chmodSync(path.join(alphaDir, 'run.sh'), 0o755);
+    const betaPath = seedHook(homes, 'beta', {
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo beta' }] }],
+    });
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["alpha", "beta"]\n'
+    );
+    assert.equal((await runSync()).exitCode, 0, 'both distributed');
+
+    fs.writeFileSync(betaPath, '{ not json', 'utf-8');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["beta"]\n'
+    );
+    const report = await runSync();
+
+    // The deferral itself is by design; silence about it is not.
+    const row = report.entries.find(
+      (entry) => entry.app === 'claude-code' && entry.type === 'hooks' && entry.id === 'alpha'
+    );
+    assert.equal(row?.outcome, 'skipped');
+    assert.equal(row?.detail, 'not-selected');
+    assert.match(row?.reason ?? '', /beta/);
+    assert.equal(fs.existsSync(managedDir(homes, 'claude-code', 'alpha')), true, 'deferred, kept');
+    assert.equal(report.exitCode, 1);
+  });
+});
+
+test('a device-scoped duplicate does not double the config while the entry is broken', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const d1 = seedHook(homes, 'd1', {
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo d1' }] }],
+    });
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["d1"]\n'
+    );
+    assert.equal((await runSync()).exitCode, 0);
+
+    // A v0.4.32 device-scoped copy holds the same group; merges concatenate
+    // by design so count-bounded removal can strip N — re-merge must not.
+    const deviceDir = path.join(homes.asbHome, 'state', 'hooks', '0123456789abcdef');
+    fs.mkdirSync(deviceDir, { recursive: true });
+    fs.copyFileSync(statePath(homes, 'claude-code'), path.join(deviceDir, 'claude-code.json'));
+    fs.writeFileSync(d1, '{ not json', 'utf-8');
+    const report = await runSync();
+
+    const settings = JSON.parse(fs.readFileSync(configPath(homes, 'claude-code'), 'utf-8'));
+    assert.equal(
+      settings.hooks.UserPromptSubmit.length,
+      1,
+      'the retained group appears once, not once per device copy'
+    );
+    assert.equal(report.exitCode, 1, 'the broken entry still reports');
+  });
+});
