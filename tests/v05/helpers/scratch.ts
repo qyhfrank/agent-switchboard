@@ -180,3 +180,60 @@ export function seedRule(homes: ScratchHomes, fileName: string, body: string): s
   fs.writeFileSync(filePath, body, 'utf-8');
   return filePath;
 }
+
+/** Global-scope skills parent directory per app (frozen 0.4.35 table values). */
+export function skillsParentDir(homes: ScratchHomes, app: RuleAppId | 'agents'): string {
+  const home = homes.agentsHome;
+  switch (app) {
+    case 'claude-code':
+      return path.join(home, '.claude', 'skills');
+    case 'codex':
+      return path.join(home, '.codex', 'skills');
+    case 'gemini':
+      return path.join(home, '.gemini', 'skills');
+    case 'opencode':
+      return path.join(opencodeRoot(home), 'skills');
+    case 'cursor':
+      return path.join(home, '.cursor', 'skills');
+    case 'trae':
+      return path.join(home, '.trae', 'skills');
+    case 'trae-cn':
+      return path.join(home, '.trae-cn', 'skills');
+    case 'agents':
+      return path.join(home, '.agents', 'skills');
+  }
+}
+
+export interface SeedSkillOptions {
+  name?: string;
+  description?: string;
+  body?: string;
+  /** Extra files inside the bundle, keyed by relative path. */
+  files?: Record<string, string | Buffer>;
+}
+
+/** Seed a library skill bundle at <asbHome>/skills/<dirName>/ with a valid SKILL.md. */
+export function seedSkill(
+  homes: ScratchHomes,
+  dirName: string,
+  opts: SeedSkillOptions = {}
+): string {
+  const dir = path.join(homes.asbHome, 'skills', dirName);
+  fs.mkdirSync(dir, { recursive: true });
+  const doc = [
+    '---',
+    `name: ${opts.name ?? dirName}`,
+    `description: ${opts.description ?? `${dirName} does a thing`}`,
+    '---',
+    '',
+    opts.body ?? `Use ${dirName} when the trigger holds.`,
+    '',
+  ].join('\n');
+  fs.writeFileSync(path.join(dir, 'SKILL.md'), doc, 'utf-8');
+  for (const [rel, content] of Object.entries(opts.files ?? {})) {
+    const filePath = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, content);
+  }
+  return dir;
+}

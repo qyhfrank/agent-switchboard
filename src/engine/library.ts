@@ -12,6 +12,8 @@ import { type ComponentType, resolveHomes } from './config.js';
 
 export interface RuleMetadata {
   title?: string;
+  /** Skills: required frontmatter display name (the directory name is the id). */
+  name?: string;
   description?: string;
   tags: string[];
   requires: string[];
@@ -51,15 +53,27 @@ const ruleMetadataSchema = z
   })
   .passthrough();
 
+const skillMetadataSchema = z
+  .object({
+    name: z.string().trim().min(1),
+    description: z.string().trim().min(1),
+  })
+  .passthrough();
+
 // Frozen 0.4.35 frontmatter grammar: ---\n...\n---\n(optional newline)
 const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
 
-function parseRuleMarkdown(source: string): { metadata: RuleMetadata; content: string } {
+/** Shared frontmatter parse with per-kind schema and frozen error strings. */
+function parseFrontmatterMarkdown(
+  source: string,
+  schema: z.ZodTypeAny,
+  label: 'Rule' | 'Skill'
+): { metadata: RuleMetadata; content: string } {
   const sanitized = source.replace(/^\uFEFF/, '');
   const match = sanitized.match(FRONTMATTER_PATTERN);
 
   if (sanitized.trimStart().startsWith('---') && !match) {
-    throw new Error('Rule frontmatter is missing a closing delimiter (---)');
+    throw new Error(`${label} frontmatter is missing a closing delimiter (---)`);
   }
 
   let metadataInput: Record<string, unknown> = {};
@@ -71,20 +85,24 @@ function parseRuleMarkdown(source: string): { metadata: RuleMetadata; content: s
       parsed = parseYaml(match[1] ?? '') ?? {};
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`Failed to parse rule frontmatter: ${message}`);
+      throw new Error(`Failed to parse ${label.toLowerCase()} frontmatter: ${message}`);
     }
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Rule frontmatter must evaluate to an object');
+      throw new Error(`${label} frontmatter must evaluate to an object`);
     }
     metadataInput = parsed as Record<string, unknown>;
     bodyStart = match[0].length;
   }
 
-  const metadata = ruleMetadataSchema.parse(metadataInput) as RuleMetadata;
+  const metadata = { tags: [], requires: [], ...schema.parse(metadataInput) } as RuleMetadata;
   let body = sanitized.slice(bodyStart);
   if (body.startsWith('\r\n')) body = body.slice(2);
   else if (body.startsWith('\n')) body = body.slice(1);
   return { metadata, content: body };
+}
+
+function parseRuleMarkdown(source: string): { metadata: RuleMetadata; content: string } {
+  return parseFrontmatterMarkdown(source, ruleMetadataSchema, 'Rule');
 }
 
 function isMarkdownFile(fileName: string): boolean {
@@ -148,6 +166,53 @@ function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): vo
   }
 }
 
+const SKILL_FILE = 'SKILL.md';
+
+/**
+ * Skills scan: each non-dot child directory of <asbHome>/skills/ holding a
+ * SKILL.md is one component whose id is the directory name; the component
+ * path is the bundle directory. Directories without a SKILL.md are not
+ * skills and are skipped silently. A malformed SKILL.md fails that entry
+ * with the frozen 0.4.35 error string (0.4 aborted the whole run instead).
+ */
+function scanSkillsDirectory(directory: string, inventory: LibraryInventory): void {
+  if (!fs.existsSync(directory)) return;
+
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+
+    const dirPath = path.join(directory, entry.name);
+    const skillPath = path.join(dirPath, SKILL_FILE);
+    if (!fs.existsSync(skillPath)) continue;
+
+    try {
+      const parsed = parseFrontmatterMarkdown(
+        fs.readFileSync(skillPath, 'utf-8'),
+        skillMetadataSchema,
+        'Skill'
+      );
+      inventory.components.push({
+        type: 'skills',
+        id: entry.name,
+        source: 'library',
+        path: dirPath,
+        content: parsed.content,
+        metadata: parsed.metadata,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      inventory.failed.push({
+        type: 'skills',
+        id: entry.name,
+        source: 'library',
+        path: skillPath,
+        error: `Failed to parse skill "${entry.name}": ${message}`,
+      });
+    }
+  }
+}
+
 export interface ScanOptions {
   types?: readonly ComponentType[];
   env?: NodeJS.ProcessEnv;
@@ -155,11 +220,14 @@ export interface ScanOptions {
 
 export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   const homes = resolveHomes(opts.env ?? process.env);
-  const wanted = new Set<ComponentType>(opts.types ?? ['rules']);
+  const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills']);
   const inventory: LibraryInventory = { components: [], failed: [] };
 
   if (wanted.has('rules')) {
     scanRulesDirectory({ type: 'rules', directory: path.join(homes.asbHome, 'rules') }, inventory);
+  }
+  if (wanted.has('skills')) {
+    scanSkillsDirectory(path.join(homes.asbHome, 'skills'), inventory);
   }
 
   inventory.components.sort((a, b) =>

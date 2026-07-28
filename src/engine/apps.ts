@@ -35,11 +35,33 @@ export interface RulesTargetRow {
   dedicated: boolean;
 }
 
+export interface SkillsTargetRow {
+  /** Directory whose resolved tree contains the skills parent; the containment root. */
+  root(homes: Homes): string;
+  /** Managed parent directory: each distributed skill is a child bundle of this. */
+  dir(homes: Homes): string;
+  /** Child directory names that belong to the app itself, never scanned or claimed. */
+  reserved: readonly string[];
+}
+
 export interface AppRow {
   id: string;
   detectDir(homes: Homes): string;
   rules?: RulesTargetRow;
+  skills?: SkillsTargetRow;
 }
+
+/**
+ * With `distribution.use_agents_dir`, codex/gemini/opencode read skills from
+ * the shared open-agent standard directory instead of their own rows; the
+ * union row distributes the union of the active members' effective selections.
+ */
+export const AGENTS_SKILLS_UNION = {
+  members: ['codex', 'gemini', 'opencode'] as readonly string[],
+  root: (homes: Homes): string => path.join(homes.agentsHome, '.agents'),
+  dir: (homes: Homes): string => path.join(homes.agentsHome, '.agents', 'skills'),
+  reserved: ['.system'] as readonly string[],
+};
 
 export const APP_ROWS: readonly AppRow[] = [
   {
@@ -50,6 +72,11 @@ export const APP_ROWS: readonly AppRow[] = [
       path: (homes) => path.join(homes.agentsHome, '.claude', 'CLAUDE.md'),
       render: rawBody,
       dedicated: false,
+    },
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.claude'),
+      dir: (homes) => path.join(homes.agentsHome, '.claude', 'skills'),
+      reserved: [],
     },
   },
   {
@@ -65,6 +92,11 @@ export const APP_ROWS: readonly AppRow[] = [
       render: rawBody,
       dedicated: false,
     },
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.codex'),
+      dir: (homes) => path.join(homes.agentsHome, '.codex', 'skills'),
+      reserved: ['.system'],
+    },
   },
   {
     id: 'gemini',
@@ -74,6 +106,11 @@ export const APP_ROWS: readonly AppRow[] = [
       path: (homes) => path.join(homes.agentsHome, '.gemini', 'AGENTS.md'),
       render: rawBody,
       dedicated: false,
+    },
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.gemini'),
+      dir: (homes) => path.join(homes.agentsHome, '.gemini', 'skills'),
+      reserved: [],
     },
   },
   {
@@ -85,6 +122,11 @@ export const APP_ROWS: readonly AppRow[] = [
       render: rawBody,
       dedicated: false,
     },
+    skills: {
+      root: (homes) => opencodeRoot(homes.agentsHome),
+      dir: (homes) => path.join(opencodeRoot(homes.agentsHome), 'skills'),
+      reserved: [],
+    },
   },
   {
     id: 'cursor',
@@ -94,6 +136,11 @@ export const APP_ROWS: readonly AppRow[] = [
       path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'asb-rules.mdc'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+    },
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.cursor'),
+      dir: (homes) => path.join(homes.agentsHome, '.cursor', 'skills'),
+      reserved: [],
     },
   },
   {
@@ -105,6 +152,11 @@ export const APP_ROWS: readonly AppRow[] = [
       render: wrapMdcFrontmatter,
       dedicated: true,
     },
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.trae'),
+      dir: (homes) => path.join(homes.agentsHome, '.trae', 'skills'),
+      reserved: [],
+    },
   },
   {
     id: 'trae-cn',
@@ -114,6 +166,11 @@ export const APP_ROWS: readonly AppRow[] = [
       path: (homes) => path.join(homes.agentsHome, '.trae-cn', 'user_rules', 'asb-rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+    },
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.trae-cn'),
+      dir: (homes) => path.join(homes.agentsHome, '.trae-cn', 'skills'),
+      reserved: [],
     },
   },
 ];

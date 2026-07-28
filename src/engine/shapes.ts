@@ -158,6 +158,110 @@ export function isDedicatedFile(filePath: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Own-dir shape (skill bundles): source walk, tree fingerprint, mode repair
+// ---------------------------------------------------------------------------
+
+export interface BundleFile {
+  /** Path relative to the bundle root, '/'-separated. */
+  rel: string;
+  bytes: Buffer;
+  /** Permission bits (mode & 0o777) of the source file. */
+  mode: number;
+}
+
+/**
+ * Desired bundle content from a library source directory. Dot-prefixed
+ * entries are skipped at every level (source-side convention), symlinks and
+ * non-regular files are skipped, and entries sort per level for determinism.
+ */
+export function listBundleFiles(root: string): BundleFile[] {
+  const files: BundleFile[] = [];
+  const walk = (dir: string, prefix: string): void => {
+    const entries = fs
+      .readdirSync(dir, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const filePath = path.join(dir, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        walk(filePath, rel);
+      } else if (entry.isFile()) {
+        files.push({
+          rel,
+          bytes: fs.readFileSync(filePath),
+          mode: fs.lstatSync(filePath).mode & 0o777,
+        });
+      }
+    }
+  };
+  walk(path.resolve(root), '');
+  return files;
+}
+
+/**
+ * Frozen 0.4.35 tree hash over a target bundle: `tree:<sha256>` covering
+ * every entry (dot files included), its rel path, and its permission bits.
+ * Any symlink, non-regular entry, or non-directory root makes the tree
+ * unprovable → undefined. Byte-compatible with 0.4 per-device manifests.
+ */
+export function bundleFingerprint(dir: string): string | undefined {
+  let root: fs.Stats;
+  try {
+    root = fs.lstatSync(dir);
+  } catch {
+    return undefined;
+  }
+  if (!root.isDirectory() || root.isSymbolicLink()) return undefined;
+  const hash = createHash('sha256');
+  const visit = (current: string, prefix = ''): boolean => {
+    for (const entry of fs
+      .readdirSync(current, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const filePath = path.join(current, entry.name);
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink()) return false;
+      if (stat.isDirectory()) {
+        hash.update(`d\0${relativePath}\0${stat.mode & 0o777}\0`);
+        if (!visit(filePath, relativePath)) return false;
+      } else if (stat.isFile()) {
+        hash.update(`f\0${relativePath}\0${stat.mode & 0o777}\0`);
+        hash.update(fs.readFileSync(filePath));
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+  if (!visit(path.resolve(dir))) return undefined;
+  return `tree:${hash.digest('hex')}`;
+}
+
+export function executableBits(mode: number): number {
+  return mode & 0o111;
+}
+
+/**
+ * Frozen 0.4 mode contract: an executable source demands the exact source
+ * mode on the target; a non-executable source only demands no exec bits.
+ */
+export function targetModeMatchesSourceExecutableBits(srcMode: number, dstMode: number): boolean {
+  if (executableBits(srcMode) !== 0) {
+    return dstMode === srcMode;
+  }
+  return executableBits(dstMode) === 0;
+}
+
+/** The mode a written target file should end up with (frozen 0.4 repair rule). */
+export function desiredTargetMode(srcMode: number, currentMode: number): number {
+  if (executableBits(srcMode) !== 0) {
+    return srcMode;
+  }
+  return currentMode & 0o666;
+}
+
+// ---------------------------------------------------------------------------
 // Write mechanics (symlink-through, atomic, contained)
 // ---------------------------------------------------------------------------
 
