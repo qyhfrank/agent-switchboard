@@ -25,9 +25,7 @@ function seedHook(asbHome: string, id: string): void {
     `${JSON.stringify(
       {
         hooks: {
-          UserPromptSubmit: [
-            { matcher: '*', hooks: [{ type: 'command', command: `echo ${id}` }] },
-          ],
+          UserPromptSubmit: [{ matcher: '*', hooks: [{ type: 'command', command: `echo ${id}` }] }],
         },
       },
       null,

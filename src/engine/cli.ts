@@ -18,6 +18,7 @@ import {
   type Action,
   type CapturedHookApp,
   type ExplainSlice,
+  explainHooks,
   explainRules,
   explainSkills,
   planHooks,
@@ -27,6 +28,7 @@ import {
 } from './plan.js';
 import {
   buildReport,
+  FAILING_OUTCOMES,
   type Report,
   type ReportEntry,
   renderExplain,
@@ -290,7 +292,17 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
         if (action.op === 'write') {
           applyBundleFiles(action.path, action.bundle.files, action.bundle.stale);
         } else {
-          removeBundleSlice(action.path, action.bundle.stale);
+          // A deletion that did not happen is never reported as one: the
+          // claim stays with the ledger or the peer record, so the payload
+          // remains reclaimable instead of orphaned by a false success.
+          const leftBehind = removeBundleSlice(action.path, action.bundle.stale);
+          if (leftBehind.length > 0) {
+            return failure(
+              'left-behind',
+              'remove-failed',
+              `could not delete ${leftBehind.length} recorded file(s) under ${action.path}; it is still installed — fix its permissions or delete it yourself, then re-run asb sync`
+            );
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -336,7 +348,7 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
       if (action.op === 'write') {
         writeFileAtomic(action.path, action.content ?? '');
       } else {
-        removeManagedFile(action.path);
+        removeManagedFile(action.path, action.content);
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -363,6 +375,67 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
     }
   }
   return toEntry(action);
+}
+
+const NO_FAILURES: ReadonlySet<string> = new Set();
+
+/**
+ * One gated pass over the plan. An action whose required bundles did not land
+ * is skipped instead of executed — an app config may not point at payload
+ * this run failed to distribute, and the record that authorizes deleting it
+ * may not claim it. The record also goes out still claiming anything whose
+ * removal failed, so shared state never says less than what remains on disk.
+ * Preview walks the same gate, so a dry run cannot promise a write the real
+ * run refuses.
+ */
+function reconcile(
+  actions: readonly Action[],
+  run: (action: Action) => ReportEntry
+): ReportEntry[] {
+  const entries: ReportEntry[] = [];
+  const failed = new Map<string, Set<string>>();
+
+  for (const action of actions) {
+    const slotKey = `${action.app}\0${action.type}`;
+    const slot = failed.get(slotKey) ?? NO_FAILURES;
+
+    const blocker = action.requires?.find((id) => slot.has(id));
+    if (blocker !== undefined) {
+      entries.push({
+        ...toEntry(action),
+        outcome: 'skipped',
+        detail: 'bundle-failed',
+        reason: `hook bundle ${blocker} did not land this run; leaving this alone until it does`,
+      });
+      continue;
+    }
+
+    // A failed write blocks its own config through `requires` above, so an id
+    // that reaches a peer publish failed to be REMOVED: it is still
+    // distributed, and the record must keep saying so.
+    const entry = run(
+      action.peer && slot.size > 0
+        ? {
+            ...action,
+            peer: {
+              ...action.peer,
+              state: {
+                ...action.peer.state,
+                bundles: [...new Set([...action.peer.state.bundles, ...slot])],
+              },
+            },
+          }
+        : action
+    );
+    entries.push(entry);
+
+    if (entry.id !== null && FAILING_OUTCOMES.has(entry.outcome)) {
+      const bucket = failed.get(slotKey);
+      if (bucket) bucket.add(entry.id);
+      else failed.set(slotKey, new Set([entry.id]));
+    }
+  }
+  return entries;
 }
 
 /** Scope flags whose engine wiring lands with a later cell fail closed. */
@@ -418,15 +491,12 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     };
 
     if (dryRun) {
-      const preview = buildReport(scope, actions.map(toEntry));
+      const preview = buildReport(scope, reconcile(actions, toEntry));
       if (ledger.lastRun) preview.lastRun = ledger.lastRun;
       return preview;
     }
 
-    const entries: ReportEntry[] = [];
-    for (const action of actions) {
-      entries.push(executeAction(action, ledger));
-    }
+    const entries = reconcile(actions, (action) => executeAction(action, ledger));
 
     // Every real run stamps the last-run fact; `status` (dry) reports it.
     const previousLastRun = ledger.lastRun;
@@ -483,7 +553,11 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     table: APP_ROWS,
     now: new Date().toISOString(),
   };
-  let slices = [...explainRules(planInput, target), ...explainSkills(planInput, target)];
+  let slices = [
+    ...explainRules(planInput, target),
+    ...explainSkills(planInput, target),
+    ...explainHooks(planInput, target),
+  ];
   if (opts.apps && opts.apps.length > 0) {
     const wanted = new Set(opts.apps);
     slices = slices.filter((slice) => slice.app === null || wanted.has(slice.app));

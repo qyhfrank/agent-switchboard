@@ -82,8 +82,17 @@ export interface Action {
   outcome: Outcome;
   detail?: string;
   reason?: string;
-  /** Desired bytes for `write`. */
+  /**
+   * Desired bytes for `write`; on a `remove` whose target must survive as an
+   * empty document, the form written through a symlinked target.
+   */
   content?: string;
+  /**
+   * Component ids in this app whose own actions must land before this one may
+   * run. A config may not point at payload the run failed to distribute, and
+   * the record that authorizes deleting it may not claim it either.
+   */
+  requires?: string[];
   /**
    * Own-dir payload: files to reconcile and the recorded rels no longer
    * desired. Present ⇒ the executor treats path as a bundle directory. For
@@ -1077,7 +1086,7 @@ export function planHooks(input: PlanInput): Action[] {
       path: null,
       op: 'none',
       outcome: 'missing',
-      reason: `enabled but not in the library (expected ${config.homes.asbHome}/hooks/${id}.json)`,
+      reason: `enabled but not in the library (expected ${config.homes.asbHome}/hooks/${id}.json or ${config.homes.asbHome}/hooks/${id}/hook.json)`,
     });
   }
 
@@ -1125,6 +1134,13 @@ export function planHooks(input: PlanInput): Action[] {
       (captured.config.hooks ?? {}) as Record<string, unknown[]>,
       state.events
     );
+
+    // A selected id the library cannot resolve — absent file, parse failure —
+    // reports at library level and nothing more: removal is authorized by
+    // deselection alone, so a half-arrived library sync cannot cascade into
+    // one (design: a component still enabled whose source files are absent is
+    // `missing` and never triggers removal).
+    const unresolved = selected.filter((id) => byId.get(id)?.hooks === undefined);
 
     // Bundle files land before the config that points at them.
     const writes: Action[] = [];
@@ -1187,14 +1203,31 @@ export function planHooks(input: PlanInput): Action[] {
               detail: live.exists ? 'updated' : 'created',
               bundle: {
                 files,
-                stale: (live.files ?? [])
-                  .map((file) => file.rel)
-                  .filter((rel) => !desiredRels.has(rel)),
+                // Deleting needs proof asb put the directory there, and the
+                // loaded record is the only carrier. A name-colliding
+                // directory asb has never distributed is adopted for update
+                // only: its other files stay, the id enters the record with
+                // this write, and later syncs reconcile the tree normally.
+                stale: state.bundles.includes(id)
+                  ? (live.files ?? [])
+                      .map((file) => file.rel)
+                      .filter((rel) => !desiredRels.has(rel))
+                  : [],
               },
               root,
               expectedHash: live.fingerprint,
             }
       );
+    }
+
+    // Recorded groups no resolvable entry re-renders belong to the unresolved
+    // ones: they go straight back into the config and stay in the record.
+    if (unresolved.length > 0) {
+      for (const [event, groups] of Object.entries(
+        spliceRecordedGroups(state.events, desired).hooks
+      )) {
+        desired[event] = [...(desired[event] ?? []), ...groups];
+      }
     }
 
     // Nothing selected, nothing of ours in the config, no record: the run has
@@ -1210,6 +1243,13 @@ export function planHooks(input: PlanInput): Action[] {
       const bundlePath = path.join(row.bundleDir(config.homes), id);
       const live = capture.bundles[bundlePath];
       if (!live?.exists) continue;
+      // With an unresolved selection this run cannot tell a deselected bundle
+      // from one whose library entry merely went missing, so it removes
+      // neither and reclaims both once the library is whole again.
+      if (unresolved.length > 0) {
+        retained.push(id);
+        continue;
+      }
       if (live.files === null || live.fingerprint === null) {
         retained.push(id);
         removals.push({
@@ -1267,6 +1307,10 @@ export function planHooks(input: PlanInput): Action[] {
             op: 'remove',
             outcome: 'removed',
             detail: 'cleared',
+            // A symlinked config keeps its link and receives the empty
+            // document instead, or the managed groups stay behind in the
+            // dotfiles store with no record on any machine to reclaim them.
+            content,
             root,
             expectedHash: currentHash,
             peer,
@@ -1287,7 +1331,17 @@ export function planHooks(input: PlanInput): Action[] {
       };
     }
 
-    actions.push(...writes, configAction, ...removals);
+    // Bundles land first, then the removals they authorize, and only then the
+    // config and the record that point at both: a config naming payload this
+    // run failed to write is a broken hook, and a record claiming it hands
+    // every peer authority to delete a directory asb never wrote. The record
+    // is published last so a removal that could not delete can put its id
+    // back before it goes out.
+    const gate = owned.length > 0 ? { requires: [...owned] } : {};
+    actions.push(...writes, ...removals.map((removal) => ({ ...removal, ...gate })), {
+      ...configAction,
+      ...gate,
+    });
   }
 
   return actions.map((action) => {
@@ -1394,6 +1448,67 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
       components: component ? [{ id: component.id, path: component.path }] : [],
     };
     if (action.detail !== undefined) slice.detail = action.detail;
+    slices.push(slice);
+  }
+  return slices;
+}
+
+/**
+ * Hooks view over the same planner. Hook groups carry no ledger entry, so the
+ * owner is the peer record: a bundle it lists, or an app config it holds
+ * groups for, is owned by proof (4) and nothing else. A definition entry owns
+ * no directory, so its slice is the app config it merged into.
+ */
+export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
+  const { config, inventory, capture } = input;
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === 'hooks')
+      .map((component) => [component.id, component])
+  );
+
+  const slices: ExplainSlice[] = [];
+  for (const action of planHooks(input)) {
+    if (action.app === null) {
+      if (action.id === target || action.path === target) {
+        slices.push(librarySlice(action));
+      }
+      continue;
+    }
+    if (action.path === null) continue;
+    // A definition entry owns no directory of its own, so a library id the
+    // app actually carries also matches that app's config slice.
+    const carried =
+      byId.has(target) && effectiveSelection(config, action.app, 'hooks').includes(target);
+    const idMatch = action.id === target || (action.id === null && carried);
+    const pathMatch = action.path === target || action.path.endsWith(`${path.sep}${target}`);
+    if (!idMatch && action.app !== target && !pathMatch) continue;
+
+    const captured = capture.hooks[action.app];
+    const component = byId.get(action.id ?? target);
+    const claimed =
+      action.id === null
+        ? Object.keys(captured?.state.events ?? {}).length > 0
+        : (captured?.state.bundles.includes(action.id) ?? false);
+
+    const slice: ExplainSlice = {
+      app: action.app,
+      path: action.path,
+      outcome: action.outcome,
+      provenance: claimed ? 'peer-record' : null,
+      recordedHash: null,
+      currentHash:
+        action.id === null
+          ? captured?.content != null
+            ? hashContent(captured.content)
+            : null
+          : (capture.bundles[action.path]?.fingerprint ?? null),
+      desiredHash: null,
+      desired: null,
+      components: component ? [{ id: component.id, path: component.path }] : [],
+    };
+    if (action.detail !== undefined) slice.detail = action.detail;
+    if (action.reason !== undefined) slice.reason = action.reason;
     slices.push(slice);
   }
   return slices;

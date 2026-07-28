@@ -46,7 +46,8 @@ export interface Report {
   lastRun?: { at: string; summary: string };
 }
 
-const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
+/** Outcomes that mean the slice did not reach its declared state. */
+export const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
   'failed',
   'blocked',
   'left-behind',
@@ -125,11 +126,15 @@ export function renderExplain(slices: readonly ExplainSlice[], target: string): 
     lines.push(`${slice.app ?? 'library'}: ${slice.path ?? '(no target file)'}`);
     lines.push(`  outcome: ${slice.detail ? `${slice.outcome} (${slice.detail})` : slice.outcome}`);
     if (slice.reason) lines.push(`  reason: ${slice.reason}`);
+    // A peer-record proof names the slice, not its bytes, so there is no
+    // recorded hash to print beside it.
     lines.push(
       `  owner: ${
         slice.provenance
-          ? `${slice.provenance} (recorded ${slice.recordedHash?.slice(0, 12)})`
-          : 'no ledger record'
+          ? slice.recordedHash
+            ? `${slice.provenance} (recorded ${slice.recordedHash.slice(0, 12)})`
+            : slice.provenance
+          : 'no ownership record'
       }`
     );
     lines.push(`  current: ${slice.currentHash?.slice(0, 12) ?? 'absent'}`);

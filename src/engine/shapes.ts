@@ -372,27 +372,29 @@ export function applyBundleFiles(
 /**
  * Remove an owned bundle's recorded files, prune emptied directories, and
  * drop the bundle directory itself only when nothing foreign remains.
- * Returns true when the directory is fully gone.
+ * Returns the recorded rels still on disk afterwards: a deletion that could
+ * not happen must never be reported as one, and the caller keeps its claim so
+ * the payload stays reclaimable. An empty result means asb's whole slice is
+ * gone, whether or not foreign files kept the directory alive.
  */
-export function removeBundleSlice(bundleRoot: string, recorded: readonly string[]): boolean {
+export function removeBundleSlice(bundleRoot: string, recorded: readonly string[]): string[] {
   const root = path.resolve(bundleRoot);
+  const leftBehind: string[] = [];
   for (const rel of recorded) {
+    const filePath = path.join(root, rel);
     try {
-      fs.unlinkSync(path.join(root, rel));
+      fs.unlinkSync(filePath);
     } catch {
-      // already gone
+      if (fs.existsSync(filePath)) leftBehind.push(rel);
     }
     pruneEmptyParents(root, rel);
   }
   try {
-    if (fs.readdirSync(root).length === 0) {
-      fs.rmdirSync(root);
-      return true;
-    }
+    if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
   } catch {
-    return !fs.existsSync(root);
+    // Gone already, or holding files this record never covered.
   }
-  return false;
+  return leftBehind;
 }
 
 // ---------------------------------------------------------------------------
@@ -504,8 +506,16 @@ export function writeFileAtomic(targetPath: string, content: string | Buffer): v
 /**
  * Remove the managed file at its declared path. A symlinked target loses the
  * link only — the user's backing file (Mackup store) is never deleted, and no
- * dangling link is left behind by removing the destination instead.
+ * dangling link is left behind by removing the destination instead. Targets
+ * whose emptied form must survive removal (a config asb only holds a slice of)
+ * pass that form: the link keeps pointing at a file the store still owns,
+ * emptied through the link rather than orphaned behind a deleted link.
  */
-export function removeManagedFile(targetPath: string): void {
-  fs.unlinkSync(path.resolve(targetPath));
+export function removeManagedFile(targetPath: string, emptyForm?: string): void {
+  const absolute = path.resolve(targetPath);
+  if (emptyForm !== undefined && fs.lstatSync(absolute).isSymbolicLink()) {
+    writeFileAtomic(absolute, emptyForm);
+    return;
+  }
+  fs.unlinkSync(absolute);
 }
