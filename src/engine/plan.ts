@@ -1,6 +1,6 @@
 import type { AppRow } from './apps.js';
 import type { ResolvedConfig } from './config.js';
-import { type Ledger, type LedgerEntry, ledgerKey } from './ledger.js';
+import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, LibraryInventory } from './library.js';
 import type { Outcome } from './report.js';
 import { composeRules, hashContent } from './shapes.js';
@@ -321,4 +321,72 @@ export function planRules(input: PlanInput): Action[] {
   }
 
   return actions;
+}
+
+export interface ExplainSlice {
+  app: string;
+  path: string | null;
+  outcome: Outcome;
+  detail?: string;
+  /** Recorded ownership proof, or null when no ledger record exists. */
+  provenance: Provenance | null;
+  recordedHash: string | null;
+  currentHash: string | null;
+  desiredHash: string | null;
+  /** Rendered desired bytes; null when nothing is selected or the aggregate is blocked. */
+  desired: string | null;
+  /** Library components composing the slice. */
+  components: { id: string; path: string }[];
+}
+
+/**
+ * One-target view over the same planner: match a component id, app id, or
+ * target path (exact or basename) and join each matched slice with its
+ * ledger record, captured bytes, and freshly rendered desired content.
+ */
+export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
+  const { config, inventory, ledger, capture, table } = input;
+  const { present, missing } = selectedRules(config, inventory);
+  const composed = composeRules(present, {
+    includeDelimiters: config.rules.includeDelimiters,
+  });
+  const components = present.map((component) => ({ id: component.id, path: component.path }));
+  const componentMatch = present.some((component) => component.id === target);
+  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
+
+  const slices: ExplainSlice[] = [];
+  for (const action of planRules(input)) {
+    if (action.app === null) continue;
+    const pathMatch =
+      action.path !== null && (action.path === target || action.path.endsWith(`/${target}`));
+    if (action.app !== target && !pathMatch && !componentMatch) continue;
+
+    const row = table.find((candidate) => candidate.id === action.app);
+    const desired =
+      action.path !== null && row?.rules && missing.length === 0 && composed.content.length > 0
+        ? row.rules.render(composed.content)
+        : null;
+    const recorded =
+      action.path !== null
+        ? (ledgerByKey.get(
+            ledgerKey({ app: action.app, type: 'rules', id: null, path: action.path })
+          ) ?? null)
+        : null;
+    const current = action.path !== null ? capture.targets[action.path] : undefined;
+
+    const slice: ExplainSlice = {
+      app: action.app,
+      path: action.path,
+      outcome: action.outcome,
+      provenance: recorded?.provenance ?? null,
+      recordedHash: recorded?.hash ?? null,
+      currentHash: current?.content != null ? hashContent(current.content) : null,
+      desiredHash: desired !== null ? hashContent(desired) : null,
+      desired,
+      components,
+    };
+    if (action.detail !== undefined) slice.detail = action.detail;
+    slices.push(slice);
+  }
+  return slices;
 }

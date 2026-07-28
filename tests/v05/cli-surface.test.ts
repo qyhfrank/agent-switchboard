@@ -30,6 +30,11 @@ const EQUIVALENCE_CLASSES: string[][][] = [
     ['sync', '--update', '--source', 'main', '-P', '/tmp/repo'],
     ['--update', '-P', '/tmp/repo', 'sync', '--source', 'main'],
   ],
+  [
+    ['explain', 'base', '-n', '--app', 'codex'],
+    ['-n', '--app', 'codex', 'explain', 'base'],
+    ['explain', '--app', 'codex', 'base', '-n'],
+  ],
 ];
 
 test('flag position never changes the parsed invocation', () => {
@@ -75,9 +80,16 @@ test('parsed fields carry the frozen semantics', () => {
   );
 });
 
+test('explain carries its target through parsing', () => {
+  const invocation = parseCliArgs(['explain', 'base']);
+  assert.equal(invocation.command, 'explain');
+  if (invocation.command === 'explain') assert.equal(invocation.target, 'base');
+});
+
 test('unknown flags and missing commands are rejected, never half-parsed', () => {
   assert.throws(() => parseCliArgs(['sync', '--bogus']));
   assert.throws(() => parseCliArgs(['explode']));
+  assert.throws(() => parseCliArgs(['explain']));
   assert.throws(() => parseCliArgs([]));
 });
 

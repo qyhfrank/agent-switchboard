@@ -1,3 +1,5 @@
+import type { ExplainSlice } from './plan.js';
+
 /**
  * Outcome vocabulary and report assembly. The closed per-entry vocabulary is
  * identical in human and JSON output; exit codes derive from it and nothing
@@ -103,6 +105,40 @@ export function renderReport(report: Report): string {
     .map(([outcome, count]) => `${count} ${outcome}`)
     .join(', ');
   lines.push(tally);
+
+  return `${lines.join('\n')}\n`;
+}
+
+export function renderExplain(slices: readonly ExplainSlice[], target: string): string {
+  if (slices.length === 0) {
+    return `Nothing matches "${target}" — \`asb status\` shows every component, app, and target.\n`;
+  }
+
+  const lines: string[] = [];
+  for (const slice of slices) {
+    lines.push(`${slice.app}: ${slice.path ?? '(no target file)'}`);
+    lines.push(`  outcome: ${slice.detail ? `${slice.outcome} (${slice.detail})` : slice.outcome}`);
+    lines.push(
+      `  owner: ${
+        slice.provenance
+          ? `${slice.provenance} (recorded ${slice.recordedHash?.slice(0, 12)})`
+          : 'no ledger record'
+      }`
+    );
+    lines.push(`  current: ${slice.currentHash?.slice(0, 12) ?? 'absent'}`);
+    lines.push(`  desired: ${slice.desiredHash?.slice(0, 12) ?? 'empty'}`);
+    if (slice.components.length > 0) {
+      lines.push('  components:');
+      for (const component of slice.components) {
+        lines.push(`    ${component.id}  ${component.path}`);
+      }
+    }
+  }
+
+  const withContent = slices.find((slice) => slice.desired !== null);
+  if (withContent?.desired) {
+    lines.push('', `--- desired content (${withContent.app}) ---`, withContent.desired.trimEnd());
+  }
 
   return `${lines.join('\n')}\n`;
 }

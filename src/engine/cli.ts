@@ -4,8 +4,20 @@ import { APP_ROWS } from './apps.js';
 import { loadConfig } from './config.js';
 import { acquireRunLock, type Ledger, ledgerKey, loadLedger, saveLedger } from './ledger.js';
 import { scanLibrary } from './library.js';
-import { type Action, planRules, type SyncCapture } from './plan.js';
-import { buildReport, type Report, type ReportEntry, renderReport } from './report.js';
+import {
+  type Action,
+  type ExplainSlice,
+  explainRules,
+  planRules,
+  type SyncCapture,
+} from './plan.js';
+import {
+  buildReport,
+  type Report,
+  type ReportEntry,
+  renderExplain,
+  renderReport,
+} from './report.js';
 import { isContainedIn, removeFileResolved, resolveWritePath, writeFileAtomic } from './shapes.js';
 
 /**
@@ -176,15 +188,39 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   return buildReport(scope, entries);
 }
 
+export async function runExplain(target: string, opts: SyncOptions = {}): Promise<ExplainSlice[]> {
+  const env = opts.env ?? process.env;
+  const config = loadConfig({ profile: opts.profile, project: opts.project, env });
+  const ledger = loadLedger(config.homes.stateHome);
+  const inventory = scanLibrary({ env });
+  const capture = captureFor(config);
+
+  let slices = explainRules(
+    { config, inventory, ledger, capture, table: APP_ROWS, now: new Date().toISOString() },
+    target
+  );
+  if (opts.apps && opts.apps.length > 0) {
+    const wanted = new Set(opts.apps);
+    slices = slices.filter((slice) => wanted.has(slice.app));
+  }
+  return slices;
+}
+
 // ---------------------------------------------------------------------------
 // Argument parsing: scope flags are registered chain-wide and resolved once,
 // so any flag ordering yields identical behavior.
 // ---------------------------------------------------------------------------
 
-export interface CliInvocation {
-  command: 'sync' | 'status';
-  options: SyncOptions & { json: boolean; update: boolean; noUpdate: boolean; sources: string[] };
-}
+export type CliOptions = SyncOptions & {
+  json: boolean;
+  update: boolean;
+  noUpdate: boolean;
+  sources: string[];
+};
+
+export type CliInvocation =
+  | { command: 'sync' | 'status'; options: CliOptions }
+  | { command: 'explain'; target: string; options: CliOptions };
 
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
@@ -211,38 +247,48 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
   registerScopeFlags(program);
 
-  const capture = (command: 'sync' | 'status') => (_args: unknown, cmd: Command) => {
-    // Merge by hand: optsWithGlobals lets a subcommand's [] defaults shadow
-    // values collected before the subcommand name. Arrays concatenate in argv
-    // order; scalars prefer the later (subcommand) position.
+  // Merge by hand: optsWithGlobals lets a subcommand's [] defaults shadow
+  // values collected before the subcommand name. Arrays concatenate in argv
+  // order; scalars prefer the later (subcommand) position.
+  const scopeOptions = (cmd: Command): CliOptions => {
     const local = cmd.opts();
     const global = cmd.parent?.opts() ?? {};
     const update = local.update ?? global.update;
-    parsed = {
-      command,
-      options: {
-        dryRun: local.dryRun === true || global.dryRun === true,
-        update: update === true,
-        // Commander maps --no-update onto `update: false`; `noUpdate` reports
-        // the explicit suppression distinctly from "flag absent".
-        noUpdate: update === false,
-        sources: [...(global.source ?? []), ...(local.source ?? [])],
-        apps: [...(global.app ?? []), ...(local.app ?? [])],
-        types: [...(global.type ?? []), ...(local.type ?? [])],
-        profile: (local.profile ?? global.profile) as string | undefined,
-        project: (local.project ?? global.project) as string | undefined,
-        json: local.json === true || global.json === true,
-      },
+    return {
+      dryRun: local.dryRun === true || global.dryRun === true,
+      update: update === true,
+      // Commander maps --no-update onto `update: false`; `noUpdate` reports
+      // the explicit suppression distinctly from "flag absent".
+      noUpdate: update === false,
+      sources: [...(global.source ?? []), ...(local.source ?? [])],
+      apps: [...(global.app ?? []), ...(local.app ?? [])],
+      types: [...(global.type ?? []), ...(local.type ?? [])],
+      profile: (local.profile ?? global.profile) as string | undefined,
+      project: (local.project ?? global.project) as string | undefined,
+      json: local.json === true || global.json === true,
     };
   };
 
   registerScopeFlags(
     program.command('sync').description('reconcile every installed app to the library')
-  ).action(capture('sync'));
+  ).action((_args: unknown, cmd: Command) => {
+    parsed = { command: 'sync', options: scopeOptions(cmd) };
+  });
 
   registerScopeFlags(
     program.command('status').description('inventory × selection × per-app reality')
-  ).action(capture('status'));
+  ).action((_args: unknown, cmd: Command) => {
+    parsed = { command: 'status', options: scopeOptions(cmd) };
+  });
+
+  registerScopeFlags(
+    program
+      .command('explain')
+      .description('one target: owner, recorded and current hashes, desired content')
+      .argument('<target>', 'component id, app id, or target path')
+  ).action((target: string, _args: unknown, cmd: Command) => {
+    parsed = { command: 'explain', target, options: scopeOptions(cmd) };
+  });
 
   program.parse([...argv], { from: 'user' });
 
@@ -272,6 +318,16 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   try {
+    if (invocation.command === 'explain') {
+      const slices = await runExplain(invocation.target, invocation.options);
+      process.stdout.write(
+        invocation.options.json
+          ? `${JSON.stringify(slices, null, 2)}\n`
+          : renderExplain(slices, invocation.target)
+      );
+      return slices.length > 0 ? 0 : 1;
+    }
+
     const report = await runSync({
       ...invocation.options,
       dryRun: invocation.command === 'status' ? true : invocation.options.dryRun,
