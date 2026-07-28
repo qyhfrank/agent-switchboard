@@ -1,8 +1,21 @@
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { Homes } from './config.js';
-import { filterCodexHooks, rawBody, wrapMdcFrontmatter } from './dialects.js';
+import {
+  codexServer,
+  filterCodexHooks,
+  geminiServer,
+  type McpServerValue,
+  opencodeServer,
+  rawBody,
+  renderCodexTable,
+  traeServer,
+  verbatimServer,
+  wrapMdcFrontmatter,
+} from './dialects.js';
 import type { HookEventMap } from './library.js';
+import type { KeysFormat } from './shapes.js';
 import type { NativeTarget } from './sources.js';
 
 /**
@@ -75,14 +88,54 @@ export interface NativeManagerRow {
   settings(homes: Homes): string;
 }
 
+/**
+ * An MCP server map inside a document the app and the user also own. Every
+ * per-app difference that is data lives here; only the four real value
+ * transforms are functions.
+ */
+export interface McpTargetRow {
+  /** Directory whose resolved tree contains the host document. */
+  root(homes: Homes): string;
+  /**
+   * Host document. Resolved once per run during capture — opencode's probe
+   * reads the disk, so the planner takes the path from the capture.
+   */
+  path(homes: Homes): string;
+  format: KeysFormat;
+  /** Container key holding the server map. */
+  rootKey: string;
+  /** The app rejects names outside `[a-zA-Z0-9_-]`, so keys are rewritten. */
+  sanitize: boolean;
+  /** Server-value transform; `verbatimServer` writes the definition as authored. */
+  dialect(server: McpServerValue): McpServerValue | null;
+  /** TOML hosts: how one addressed table serializes. JSON writes the value. */
+  render?(keyPath: readonly string[], value: McpServerValue): string;
+  /** A minimal host may be materialized when the document is absent. */
+  create: boolean;
+}
+
 export interface AppRow {
   id: string;
   detectDir(homes: Homes): string;
   rules?: RulesTargetRow;
   skills?: SkillsTargetRow;
   hooks?: HooksTargetRow;
+  mcp?: McpTargetRow;
   native?: NativeManagerRow;
 }
+
+/** Frozen 0.4.35 probe: a commented opencode.jsonc wins over opencode.json. */
+function opencodeConfigPath(root: string): string {
+  const jsonc = path.join(root, 'opencode.jsonc');
+  return fs.existsSync(jsonc) ? jsonc : path.join(root, 'opencode.json');
+}
+
+const JSON_MCP_ROW = {
+  format: 'json',
+  rootKey: 'mcpServers',
+  dialect: verbatimServer,
+  create: true,
+} as const;
 
 /**
  * With `distribution.use_agents_dir`, codex/gemini/opencode read skills from
@@ -124,6 +177,14 @@ export const APP_ROWS: readonly AppRow[] = [
       deleteWhenEmpty: false,
       stateTarget: 'claude-code',
     },
+    mcp: {
+      ...JSON_MCP_ROW,
+      // Claude Code reads ~/.claude.json, not a file under .claude/.
+      root: (homes) => homes.agentsHome,
+      path: (homes) => path.join(homes.agentsHome, '.claude.json'),
+      // Claude Code accepts colons and dots in server names.
+      sanitize: false,
+    },
     native: {
       bin: 'claude',
       target: 'claude-code',
@@ -131,8 +192,16 @@ export const APP_ROWS: readonly AppRow[] = [
     },
   },
   {
+    // MCP is the only type Claude Desktop takes, and only at global scope.
     id: 'claude-desktop',
     detectDir: (homes) => vendorDataDir(homes.agentsHome, 'Claude'),
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => vendorDataDir(homes.agentsHome, 'Claude'),
+      path: (homes) =>
+        path.join(vendorDataDir(homes.agentsHome, 'Claude'), 'claude_desktop_config.json'),
+      sanitize: false,
+    },
   },
   {
     id: 'codex',
@@ -156,6 +225,16 @@ export const APP_ROWS: readonly AppRow[] = [
       filter: filterCodexHooks,
       stateTarget: 'codex',
     },
+    mcp: {
+      root: (homes) => path.join(homes.agentsHome, '.codex'),
+      path: (homes) => path.join(homes.agentsHome, '.codex', 'config.toml'),
+      format: 'toml',
+      rootKey: 'mcp_servers',
+      sanitize: true,
+      dialect: codexServer,
+      render: renderCodexTable,
+      create: true,
+    },
   },
   {
     id: 'gemini',
@@ -170,6 +249,15 @@ export const APP_ROWS: readonly AppRow[] = [
       root: (homes) => path.join(homes.agentsHome, '.gemini'),
       dir: (homes) => path.join(homes.agentsHome, '.gemini', 'skills'),
       reserved: [],
+    },
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => path.join(homes.agentsHome, '.gemini'),
+      // settings.json carries every other Gemini CLI setting; only the
+      // addressed slice is ever rewritten.
+      path: (homes) => path.join(homes.agentsHome, '.gemini', 'settings.json'),
+      sanitize: false,
+      dialect: geminiServer,
     },
   },
   {
@@ -186,6 +274,14 @@ export const APP_ROWS: readonly AppRow[] = [
       dir: (homes) => path.join(opencodeRoot(homes.agentsHome), 'skills'),
       reserved: [],
     },
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => opencodeRoot(homes.agentsHome),
+      path: (homes) => opencodeConfigPath(opencodeRoot(homes.agentsHome)),
+      rootKey: 'mcp',
+      sanitize: false,
+      dialect: opencodeServer,
+    },
   },
   {
     id: 'cursor',
@@ -200,6 +296,12 @@ export const APP_ROWS: readonly AppRow[] = [
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
       dir: (homes) => path.join(homes.agentsHome, '.cursor', 'skills'),
       reserved: [],
+    },
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => path.join(homes.agentsHome, '.cursor'),
+      path: (homes) => path.join(homes.agentsHome, '.cursor', 'mcp.json'),
+      sanitize: true,
     },
   },
   {
@@ -216,6 +318,15 @@ export const APP_ROWS: readonly AppRow[] = [
       dir: (homes) => path.join(homes.agentsHome, '.trae', 'skills'),
       reserved: [],
     },
+    mcp: {
+      ...JSON_MCP_ROW,
+      // The MCP host lives in the vendor data dir, not the ~/.trae dotdir
+      // the rules row writes.
+      root: (homes) => vendorDataDir(homes.agentsHome, 'Trae'),
+      path: (homes) => path.join(vendorDataDir(homes.agentsHome, 'Trae'), 'User', 'mcp.json'),
+      sanitize: true,
+      dialect: traeServer,
+    },
   },
   {
     id: 'trae-cn',
@@ -230,6 +341,13 @@ export const APP_ROWS: readonly AppRow[] = [
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),
       dir: (homes) => path.join(homes.agentsHome, '.trae-cn', 'skills'),
       reserved: [],
+    },
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => vendorDataDir(homes.agentsHome, 'Trae CN'),
+      path: (homes) => path.join(vendorDataDir(homes.agentsHome, 'Trae CN'), 'User', 'mcp.json'),
+      sanitize: true,
+      dialect: traeServer,
     },
   },
 ];

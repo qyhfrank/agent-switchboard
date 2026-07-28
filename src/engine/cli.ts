@@ -25,12 +25,15 @@ import { loadPeerState, savePeerState } from './peer.js';
 import {
   type Action,
   type CapturedHookApp,
+  type CapturedMcpHost,
   type ExplainSlice,
   explainHooks,
+  explainMcp,
   explainRules,
   explainSkills,
   explainSources,
   planHooks,
+  planMcp,
   planRules,
   planSkills,
   planSources,
@@ -50,6 +53,7 @@ import {
   bundleFingerprint,
   hashContent,
   listTargetFiles,
+  parseStructured,
   removeBundleSlice,
   removeManagedFile,
   targetEscapesRoot,
@@ -101,6 +105,7 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
     bundles: {},
     bundleDirs: {},
     hooks: {},
+    mcp: {},
   };
   for (const appId of config.apps.enabled) {
     const row = APP_ROWS.find((candidate) => candidate.id === appId);
@@ -235,6 +240,38 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
       };
     }
   }
+
+  // MCP hosts: the document each app keeps its server map in. The path is
+  // resolved here (opencode prefers an existing .jsonc) so the planner reads
+  // one settled location rather than probing the disk itself.
+  for (const appId of config.apps.enabled) {
+    const row = APP_ROWS.find((candidate) => candidate.id === appId)?.mcp;
+    if (!row) continue;
+    const hostPath = row.path(config.homes);
+    const captured: CapturedMcpHost = {
+      path: hostPath,
+      exists: fs.existsSync(hostPath),
+      content: null,
+      root: {},
+      tables: [],
+      escapes: targetEscapesRoot(row.root(config.homes), hostPath),
+    };
+    if (captured.exists) {
+      try {
+        captured.content = fs.readFileSync(hostPath, 'utf-8');
+      } catch (error) {
+        captured.root = null;
+        captured.error = error instanceof Error ? error.message : String(error);
+      }
+      if (captured.content !== null) {
+        const document = parseStructured(captured.content, row.format);
+        captured.root = document.root;
+        captured.tables = document.tables;
+        if (document.error !== undefined) captured.error = document.error;
+      }
+    }
+    capture.mcp[appId] = captured;
+  }
   return capture;
 }
 
@@ -253,17 +290,21 @@ function toEntry(action: Action): ReportEntry {
 
 function applyLedgerMutation(ledger: Ledger, action: Action): boolean {
   if (!action.ledger) return false;
-  if (action.ledger.op === 'put') {
-    const key = ledgerKey(action.ledger.entry);
-    const index = ledger.entries.findIndex((entry) => ledgerKey(entry) === key);
-    if (index >= 0) ledger.entries[index] = action.ledger.entry;
-    else ledger.entries.push(action.ledger.entry);
-    return true;
+  let changed = false;
+  for (const mutation of Array.isArray(action.ledger) ? action.ledger : [action.ledger]) {
+    if (mutation.op === 'put') {
+      const key = ledgerKey(mutation.entry);
+      const index = ledger.entries.findIndex((entry) => ledgerKey(entry) === key);
+      if (index >= 0) ledger.entries[index] = mutation.entry;
+      else ledger.entries.push(mutation.entry);
+      changed = true;
+      continue;
+    }
+    const before = ledger.entries.length;
+    ledger.entries = ledger.entries.filter((entry) => ledgerKey(entry) !== mutation.key);
+    changed = changed || ledger.entries.length !== before;
   }
-  const key = action.ledger.key;
-  const before = ledger.entries.length;
-  ledger.entries = ledger.entries.filter((entry) => ledgerKey(entry) !== key);
-  return ledger.entries.length !== before;
+  return changed;
 }
 
 export function executeAction(action: Action, ledger: Ledger): ReportEntry {
@@ -359,7 +400,7 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
 
       // The recorded proof is the measured post-write tree, foreign extras
       // included; an unprovable result records no ownership at all.
-      if (action.op === 'write' && action.ledger?.op === 'put') {
+      if (action.op === 'write' && !Array.isArray(action.ledger) && action.ledger?.op === 'put') {
         const measured = bundleFingerprint(action.path);
         if (measured === undefined) {
           return failure(
@@ -621,6 +662,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       ...planRules(planInput),
       ...planSkills(planInput),
       ...planHooks(planInput),
+      ...planMcp(planInput),
       // Native rows run last: their registration setting shares a document
       // with the hooks target, and this one re-reads it after that write.
       ...planNative({
@@ -734,6 +776,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     ...explainRules(planInput, target),
     ...explainSkills(planInput, target),
     ...explainHooks(planInput, target),
+    ...explainMcp(planInput, target),
   ];
   if (opts.apps && opts.apps.length > 0) {
     const wanted = new Set(opts.apps);

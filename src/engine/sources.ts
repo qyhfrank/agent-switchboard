@@ -1173,6 +1173,7 @@ export function readSourcePlugins(homes: Homes, namespace: string, root: string)
       root,
     };
     const native = pluginManifest(root);
+    let manifestServers: unknown;
     if (native) {
       descriptor.native = { target: native.target, manifestPath: native.path };
       const manifest = record(safeReadJson(native.path));
@@ -1181,9 +1182,10 @@ export function readSourcePlugins(homes: Homes, namespace: string, root: string)
       if (typeof manifest?.version === 'string') descriptor.version = manifest.version;
       const custom = customPathsOf(manifest);
       if (custom) descriptor.customPaths = custom;
-      const servers = record(manifest?.mcpServers);
-      if (servers && Object.keys(servers).length > 0) descriptor.mcpServers = servers;
+      manifestServers = manifest?.mcpServers;
     }
+    const servers = pluginMcpServers(root, manifestServers);
+    if (servers) descriptor.mcpServers = servers;
     return { plugins: [descriptor], failed: [] };
   }
 
@@ -1248,6 +1250,29 @@ function safeReadJson(filePath: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+/**
+ * A plugin's own MCP servers, from its directory file and its manifest field.
+ * `<pluginRoot>/.mcp.json` takes both the wrapped `{ mcpServers: {...} }` and
+ * the flat `{ <name>: {...} }` form, and it wins: for a bare source it is the
+ * only place servers can come from, so a manifest field only adds names it
+ * does not already carry. An unreadable file contributes nothing.
+ */
+function pluginMcpServers(
+  root: string | undefined,
+  manifestField: unknown
+): Record<string, unknown> | undefined {
+  const merged: Record<string, unknown> = {};
+  const raw = root ? record(safeReadJson(path.join(root, '.mcp.json'))) : undefined;
+  const fromFile = raw ? (record(raw.mcpServers) ?? raw) : undefined;
+  for (const [name, definition] of Object.entries(fromFile ?? {})) {
+    if (record(definition)) merged[name] = definition;
+  }
+  for (const [name, definition] of Object.entries(record(manifestField) ?? {})) {
+    if (!(name in merged) && record(definition)) merged[name] = definition;
+  }
+  return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
 function customPathsOf(
@@ -1340,8 +1365,8 @@ function readCatalogEntry(
   if (request) descriptor.request = request;
   const custom = customPathsOf(primary) ?? customPathsOf(fallback);
   if (custom) descriptor.customPaths = custom;
-  const servers = record(primary.mcpServers) ?? record(fallback.mcpServers);
-  if (servers && Object.keys(servers).length > 0) descriptor.mcpServers = servers;
+  const servers = pluginMcpServers(root, primary.mcpServers ?? fallback.mcpServers);
+  if (servers) descriptor.mcpServers = servers;
   const description = entry.description ?? manifest?.description;
   if (typeof description === 'string') descriptor.description = description;
   const version = entry.version ?? manifest?.version;

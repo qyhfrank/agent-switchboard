@@ -1,8 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { type ParseError, parse as parseJsonc } from 'jsonc-parser';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { type ComponentType, type PluginExpansion, resolveHomes } from './config.js';
+import { inferServerType, type McpServerValue } from './dialects.js';
 import { type BundleFile, listBundleFiles } from './shapes.js';
 import type { PluginDescriptor } from './sources.js';
 
@@ -41,6 +43,8 @@ export interface Component {
   files?: BundleFile[];
   /** Hooks: the app-native event map this entry contributes. */
   hooks?: HookEventMap;
+  /** MCP: the server definition, with its transport type inferred. */
+  server?: McpServerValue;
 }
 
 export interface FailedComponent {
@@ -402,6 +406,91 @@ function scanHooksDirectory(directory: string, owner: Owner, inventory: LibraryI
   }
 }
 
+/** Frozen 0.4.35 MCP server grammar: unknown fields reach the target verbatim. */
+const mcpServerSchema = z
+  .object({
+    command: z.string().optional(),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string()).optional(),
+    url: z.string().url().optional(),
+    type: z.enum(['stdio', 'sse', 'http']).optional(),
+  })
+  .passthrough();
+
+/**
+ * MCP is the one type whose components come from a map inside one document
+ * rather than a directory of files: `<ASB_HOME>/mcp.json` (JSONC, so comments
+ * are legal) and each plugin's server map. Each server becomes a component
+ * whose path is the document that defines it. A malformed server fails alone;
+ * an unreadable document fails once, under its own name.
+ */
+function scanMcpServers(
+  servers: Record<string, unknown>,
+  documentPath: string,
+  owner: Owner,
+  inventory: LibraryInventory
+): void {
+  for (const [name, definition] of Object.entries(servers)) {
+    const id = owner.prefix + name;
+    try {
+      inventory.components.push({
+        type: 'mcp',
+        id,
+        source: owner.source,
+        path: documentPath,
+        content: '',
+        metadata: { tags: [], requires: [] },
+        server: inferServerType(mcpServerSchema.parse(definition) as McpServerValue),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      inventory.failed.push({
+        type: 'mcp',
+        id,
+        source: owner.source,
+        path: documentPath,
+        error: `Failed to parse MCP server "${name}": ${message}`,
+      });
+    }
+  }
+}
+
+function scanMcpDocument(filePath: string, owner: Owner, inventory: LibraryInventory): void {
+  if (!fs.existsSync(filePath)) return;
+  const name = path.basename(filePath);
+  const fail = (reason: string): void => {
+    inventory.failed.push({
+      type: 'mcp',
+      id: name,
+      source: owner.source,
+      path: filePath,
+      error: `Failed to parse ${name}: ${reason}`,
+    });
+  };
+
+  const errors: ParseError[] = [];
+  let parsed: unknown;
+  try {
+    parsed = parseJsonc(fs.readFileSync(filePath, 'utf-8'), errors, { allowTrailingComma: true });
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+    return;
+  }
+  if (errors.length > 0) {
+    fail(`invalid JSON at offset ${errors[0].offset}`);
+    return;
+  }
+  const servers =
+    parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as { mcpServers?: unknown }).mcpServers
+      : undefined;
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) {
+    fail('no "mcpServers" object');
+    return;
+  }
+  scanMcpServers(servers as Record<string, unknown>, filePath, owner, inventory);
+}
+
 /**
  * A plugin's own paths stay inside the plugin: a path that leaves it
  * lexically, or leaves it once symlinks are followed, is refused rather than
@@ -472,6 +561,15 @@ function scanPlugin(
 
   if (wanted.has('hooks')) {
     scanHooksDirectory(path.join(root, 'hooks'), owner, inventory);
+  }
+
+  if (wanted.has('mcp') && plugin.mcpServers) {
+    // The reader in sources.ts merges the plugin's `.mcp.json` over its
+    // manifest field, so that file is the defining document whenever it is
+    // there and the manifest is the document otherwise.
+    const file = path.join(root, '.mcp.json');
+    const documentPath = fs.existsSync(file) ? file : (plugin.native?.manifestPath ?? root);
+    scanMcpServers(plugin.mcpServers, documentPath, owner, inventory);
   }
 }
 
@@ -565,7 +663,7 @@ export interface ScanOptions {
 
 export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   const homes = resolveHomes(opts.env ?? process.env);
-  const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills', 'hooks']);
+  const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills', 'hooks', 'mcp']);
   const inventory: LibraryInventory = { components: [], failed: [], duplicates: [] };
 
   if (wanted.has('rules')) {
@@ -577,6 +675,9 @@ export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   }
   if (wanted.has('hooks')) {
     scanHooksDirectory(path.join(homes.asbHome, 'hooks'), LIBRARY, inventory);
+  }
+  if (wanted.has('mcp')) {
+    scanMcpDocument(path.join(homes.asbHome, 'mcp.json'), LIBRARY, inventory);
   }
 
   for (const plugin of opts.plugins ?? []) {

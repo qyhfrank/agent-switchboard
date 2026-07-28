@@ -1,24 +1,33 @@
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { AGENTS_SKILLS_UNION, type AppRow, type HooksTargetRow } from './apps.js';
+import {
+  AGENTS_SKILLS_UNION,
+  type AppRow,
+  type HooksTargetRow,
+  type McpTargetRow,
+} from './apps.js';
 import {
   effectiveIncludeDelimiters,
   effectivePlugins,
   effectiveSelection,
   type ResolvedConfig,
 } from './config.js';
-import { preferHomeVar } from './dialects.js';
+import { preferHomeVar, sanitizeMcpName } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, HookEventMap, LibraryInventory } from './library.js';
 import type { NativeWork } from './native.js';
 import { type HookTarget, type PeerState, peerStateHasContent } from './peer.js';
 import type { Outcome } from './report.js';
 import {
+  applyKeysEdits,
   type BundleFile,
   composeRules,
   hashContent,
+  type KeysEdit,
+  sliceHash,
   type TargetFile,
   targetModeMatchesSourceExecutableBits,
+  valueAtKeyPath,
 } from './shapes.js';
 import type { EntryRow, ReadinessRow, SourceCatalog, UpdateRow } from './sources.js';
 
@@ -67,6 +76,21 @@ export interface CapturedHookApp {
   state: PeerState;
 }
 
+export interface CapturedMcpHost {
+  /** Resolved host document; opencode's jsonc probe is settled here. */
+  path: string;
+  exists: boolean;
+  content: string | null;
+  /** Parsed document root; null when it is unreadable or not an object. */
+  root: Record<string, unknown> | null;
+  /** Why the document could not be parsed, when it could not. */
+  error?: string;
+  /** TOML table headers the byte-splice writer can address, dotted. */
+  tables: string[];
+  /** Parent chain of the host path resolves outside the app root. */
+  escapes?: boolean;
+}
+
 export interface SyncCapture {
   /** Detection probe results per app id. */
   installed: Record<string, boolean>;
@@ -78,7 +102,11 @@ export interface SyncCapture {
   bundleDirs: Record<string, string[]>;
   /** Hook config and peer ownership state per app id. */
   hooks: Record<string, CapturedHookApp>;
+  /** MCP host document per app id. */
+  mcp: Record<string, CapturedMcpHost>;
 }
+
+export type LedgerMutation = { op: 'put'; entry: LedgerEntry } | { op: 'delete'; key: string };
 
 export interface Action {
   app: string | null;
@@ -114,8 +142,12 @@ export interface Action {
    * the executor re-reads and refuses on drift since planning.
    */
   expectedHash?: string | null;
-  /** Ledger mutation carried by this action. */
-  ledger?: { op: 'put'; entry: LedgerEntry } | { op: 'delete'; key: string };
+  /**
+   * Ledger mutation carried by this action. A grouped write over several
+   * owned slices of one host carries one mutation per slice: they land
+   * together or not at all, because one write is what put them there.
+   */
+  ledger?: LedgerMutation | LedgerMutation[];
   /**
    * Peer ownership record to publish once the action's own write succeeds.
    * Hook groups live in a file every peer reads, so their ownership travels
@@ -1422,6 +1454,439 @@ export function planHooks(input: PlanInput): Action[] {
     }
     return action;
   });
+}
+
+// ---------------------------------------------------------------------------
+// MCP: named slices inside a structured document the user also owns
+// ---------------------------------------------------------------------------
+
+interface McpSlice {
+  /** Library component id: the key as authored. */
+  id: string;
+  /** Key path the value occupies on disk, sanitized per the app's grammar. */
+  keyPath: string[];
+  outcome: Outcome;
+  detail?: string;
+  reason?: string;
+  /** Rendered value, for explain. */
+  desired: unknown;
+  current: unknown;
+  recorded: LedgerEntry | null;
+  /** Present when this slice contributes to the host's grouped write. */
+  edit?: KeysEdit;
+  ledger?: LedgerMutation;
+}
+
+interface McpHostPlan {
+  slices: McpSlice[];
+  /** Set when nothing about this host can be planned. */
+  failure?: { outcome: Outcome; detail: string; reason: string };
+}
+
+/**
+ * One app's MCP host, slice by slice. Proofs available here: (1) the ledger
+ * entry whose hash matches the value now at that key path, and (3)
+ * byte-identity with the value asb would write. Convention grants nothing —
+ * a key inside a document asb does not own is the user's server until one of
+ * those two proofs holds, so an unrecorded occupied key blocks rather than
+ * being overwritten the way 0.4 did.
+ */
+function planMcpHost(
+  app: string,
+  row: McpTargetRow,
+  captured: CapturedMcpHost,
+  selected: readonly string[],
+  byId: ReadonlyMap<string, Component>,
+  ledger: Ledger,
+  now: string
+): McpHostPlan {
+  const slices: McpSlice[] = [];
+  const keyPathFor = (id: string): string[] => [
+    row.rootKey,
+    row.sanitize ? sanitizeMcpName(id) : id,
+  ];
+
+  // Two ids that sanitize to one key would take turns owning it and silently
+  // erase each other; 0.4 threw, and the run reports it as this app's failure.
+  const claimed = new Map<string, string>();
+  for (const id of selected) {
+    if (!byId.has(id)) continue;
+    const key = keyPathFor(id)[1];
+    const first = claimed.get(key);
+    if (first !== undefined && first !== id) {
+      return {
+        slices,
+        failure: {
+          outcome: 'failed',
+          detail: 'render-error',
+          reason: `MCP name collision: "${first}" and "${id}" both become "${key}" for ${app}; rename one of them`,
+        },
+      };
+    }
+    claimed.set(key, id);
+  }
+
+  const addressable = (keyPath: readonly string[]): boolean =>
+    row.format !== 'toml' || captured.tables.includes(keyPath.join('.'));
+  const recordFor = (id: string, keyPath: string[]): LedgerEntry => ({
+    app,
+    type: 'mcp',
+    id,
+    path: captured.path,
+    shape: 'keys',
+    hash: '',
+    keys: keyPath,
+    provenance: 'written',
+    updatedAt: now,
+  });
+
+  const desiredIds = new Set<string>();
+  for (const id of selected) {
+    const component = byId.get(id);
+    if (!component?.server) continue;
+    const keyPath = keyPathFor(id);
+    const recorded =
+      ledger.entries.find(
+        (entry) => ledgerKey(entry) === ledgerKey({ app, type: 'mcp', id, path: captured.path })
+      ) ?? null;
+    const value = row.dialect(component.server);
+    if (value === null) {
+      slices.push({
+        id,
+        keyPath,
+        outcome: 'skipped',
+        detail: 'unsupported',
+        reason: `${app} does not support this server's transport`,
+        desired: null,
+        current: valueAtKeyPath(captured.root, keyPath),
+        recorded,
+      });
+      continue;
+    }
+    desiredIds.add(id);
+
+    const current = valueAtKeyPath(captured.root, keyPath);
+    const base = { id, keyPath, desired: value, current, recorded };
+    const edit: KeysEdit = row.render
+      ? { keyPath, value, text: row.render(keyPath, value) }
+      : { keyPath, value };
+    const put = (provenance: Provenance): LedgerMutation => ({
+      op: 'put',
+      entry: { ...recordFor(id, keyPath), hash: sliceHash(value), provenance },
+    });
+
+    if (current === undefined) {
+      if (!captured.exists && !row.create) {
+        slices.push({
+          ...base,
+          outcome: 'skipped',
+          detail: 'host-file-absent',
+          reason: `${captured.path} does not exist and this app's host is never created by asb`,
+        });
+        continue;
+      }
+      slices.push({
+        ...base,
+        outcome: 'written',
+        detail: captured.exists ? 'updated' : 'created',
+        edit,
+        ledger: put('written'),
+      });
+      continue;
+    }
+
+    if (!addressable(keyPath)) {
+      slices.push({
+        ...base,
+        outcome: recorded ? 'conflict' : 'blocked',
+        detail: recorded ? undefined : 'foreign',
+        reason: `${keyPath.join('.')} is not written as a table in ${captured.path}; asb edits tables only — move it or remove it by hand`,
+      });
+      continue;
+    }
+
+    const currentHash = sliceHash(current);
+    if (recorded) {
+      if (currentHash !== recorded.hash) {
+        slices.push({
+          ...base,
+          outcome: 'conflict',
+          reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand, or disable this server for ${app}`,
+        });
+        continue;
+      }
+      if (currentHash === sliceHash(value)) {
+        slices.push({ ...base, outcome: 'unchanged' });
+        continue;
+      }
+      slices.push({ ...base, outcome: 'written', detail: 'updated', edit, ledger: put('written') });
+      continue;
+    }
+
+    if (currentHash === sliceHash(value)) {
+      slices.push({ ...base, outcome: 'adopted', detail: 'identity', ledger: put('identity') });
+      continue;
+    }
+    slices.push({
+      ...base,
+      outcome: 'blocked',
+      detail: 'foreign',
+      reason: `${keyPath[1]} is already in ${captured.path} and asb never wrote it; rename yours, or delete that entry to let asb own the key`,
+    });
+  }
+
+  // Recorded keys nothing selects any more. Removal needs the recorded hash
+  // to still match: an edited value is the user's now, so the claim goes and
+  // the value stays.
+  for (const recorded of ledger.entries) {
+    if (recorded.app !== app || recorded.type !== 'mcp' || recorded.path !== captured.path)
+      continue;
+    const id = recorded.id;
+    if (id === null || desiredIds.has(id)) continue;
+    const keyPath = recorded.keys ?? keyPathFor(id);
+    const current = valueAtKeyPath(captured.root, keyPath);
+    const base = { id, keyPath: [...keyPath], desired: null, current, recorded };
+    const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
+    if (current === undefined) {
+      slices.push({ ...base, outcome: 'removed', detail: 'already-absent', ledger: drop });
+      continue;
+    }
+    if (!addressable(keyPath)) {
+      slices.push({
+        ...base,
+        outcome: 'left-behind',
+        detail: 'modified',
+        reason: `${keyPath.join('.')} is no longer written as a table in ${captured.path}; delete it yourself`,
+        ledger: drop,
+      });
+      continue;
+    }
+    if (sliceHash(current) !== recorded.hash) {
+      slices.push({
+        ...base,
+        outcome: 'left-behind',
+        detail: 'modified',
+        reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${sliceHash(current).slice(0, 12)}); delete it yourself or re-enable the server`,
+        ledger: drop,
+      });
+      continue;
+    }
+    slices.push({
+      ...base,
+      outcome: 'removed',
+      edit: { keyPath: [...keyPath], remove: true },
+      ledger: drop,
+    });
+  }
+
+  return { slices };
+}
+
+/**
+ * MCP planner. A server is a key inside a document the app and the user also
+ * write, so the unit of ownership is the key path, not the file: every edit to
+ * one host in one run becomes a single read-modify-write, and everything
+ * outside the owned key paths round-trips byte for byte.
+ *
+ * Zero selected servers plan no MCP file anywhere — an empty desired set never
+ * creates a host, which is where 0.4 wrote an empty server map instead.
+ */
+export function planMcp(input: PlanInput): Action[] {
+  const { config, inventory, ledger, capture, table, now } = input;
+  const actions: Action[] = [];
+
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === 'mcp')
+      .map((component) => [component.id, component])
+  );
+  const failedIds = new Set(
+    inventory.failed.filter((failure) => failure.type === 'mcp').map((failure) => failure.id)
+  );
+  const assumeInstalled = new Set(config.apps.assumeInstalled);
+
+  const rows: { app: string; row: McpTargetRow; selected: string[] }[] = [];
+  const missingUnion = new Set<string>();
+  for (const appId of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === appId)?.mcp;
+    if (!row) continue;
+    if (capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
+    const selected = effectiveSelection(config, appId, 'mcp');
+    for (const id of selected) {
+      if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
+    }
+    rows.push({ app: appId, row, selected });
+  }
+
+  for (const id of missingUnion) {
+    actions.push({
+      app: null,
+      type: 'mcp',
+      id,
+      path: null,
+      op: 'none',
+      outcome: 'missing',
+      reason: `enabled but not defined (expected a "${id}" entry in ${config.homes.asbHome}/mcp.json or a plugin's servers)`,
+    });
+  }
+
+  for (const { app, row, selected } of rows) {
+    const captured = capture.mcp[app];
+    if (!captured) continue;
+    const base = { app, type: 'mcp', id: null, path: captured.path };
+
+    if (captured.escapes === true) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'path-escape',
+        reason: `parent directory of ${captured.path} resolves outside the app root; not touching it`,
+      });
+      continue;
+    }
+    if (captured.root === null) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: `cannot read ${path.basename(captured.path)}, MCP servers not merged: ${captured.error ?? 'document root must be an object'}`,
+      });
+      continue;
+    }
+
+    const { slices, failure } = planMcpHost(app, row, captured, selected, byId, ledger, now);
+    if (failure) {
+      actions.push({ ...base, op: 'none', ...failure });
+      continue;
+    }
+
+    const edits: KeysEdit[] = [];
+    const mutations: LedgerMutation[] = [];
+    const wrote: string[] = [];
+    const retired: string[] = [];
+    for (const slice of slices) {
+      if (!slice.edit) {
+        // Adoptions and relinquished claims are their own rows: each carries
+        // the record it changes, and none of them touch the host.
+        if (slice.outcome === 'unchanged') {
+          actions.push({
+            app,
+            type: 'mcp',
+            id: slice.id,
+            path: captured.path,
+            op: 'none',
+            outcome: 'unchanged',
+          });
+          continue;
+        }
+        const action: Action = {
+          app,
+          type: 'mcp',
+          id: slice.id,
+          path: captured.path,
+          op: slice.outcome === 'adopted' ? 'adopt' : 'none',
+          outcome: slice.outcome,
+        };
+        if (slice.detail !== undefined) action.detail = slice.detail;
+        if (slice.reason !== undefined) action.reason = slice.reason;
+        if (slice.ledger) action.ledger = slice.ledger;
+        actions.push(action);
+        continue;
+      }
+      edits.push(slice.edit);
+      if (slice.ledger) mutations.push(slice.ledger);
+      if (slice.outcome === 'removed') retired.push(slice.id);
+      else wrote.push(slice.id);
+    }
+
+    if (edits.length === 0) continue;
+
+    const content = applyKeysEdits(captured.content ?? '', row.format, edits);
+    const summary = [
+      wrote.length > 0 ? `wrote ${wrote.join(', ')}` : '',
+      retired.length > 0 ? `retired ${retired.join(', ')}` : '',
+    ]
+      .filter((part) => part.length > 0)
+      .join('; ');
+
+    if (content === captured.content) {
+      actions.push({ ...base, op: 'none', outcome: 'unchanged', ledger: mutations });
+      continue;
+    }
+    actions.push({
+      ...base,
+      op: 'write',
+      outcome: 'written',
+      detail: captured.exists ? 'merged' : 'created',
+      reason: summary,
+      content,
+      root: row.root(config.homes),
+      expectedHash: captured.content !== null ? hashContent(captured.content) : null,
+      ledger: mutations,
+    });
+  }
+
+  return actions;
+}
+
+/**
+ * MCP view over the same planner. A server is identified by its key, so a
+ * target matches a library id, an app id, or a host path, and each matched
+ * slice reports the value asb would write beside the one on disk.
+ */
+export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
+  const { config, inventory, ledger, capture, table, now } = input;
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === 'mcp')
+      .map((component) => [component.id, component])
+  );
+  const assumeInstalled = new Set(config.apps.assumeInstalled);
+
+  const slices: ExplainSlice[] = [];
+  for (const action of planMcp(input)) {
+    if (action.app === null && (action.id === target || action.path === target)) {
+      slices.push(librarySlice(action));
+    }
+  }
+
+  for (const appId of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === appId)?.mcp;
+    const captured = capture.mcp[appId];
+    if (!row || !captured) continue;
+    if (capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
+    const { slices: hostSlices } = planMcpHost(
+      appId,
+      row,
+      captured,
+      effectiveSelection(config, appId, 'mcp'),
+      byId,
+      ledger,
+      now
+    );
+    for (const slice of hostSlices) {
+      const pathMatch = captured.path === target || captured.path.endsWith(`${path.sep}${target}`);
+      if (slice.id !== target && appId !== target && !pathMatch) continue;
+      const component = byId.get(slice.id);
+      const explained: ExplainSlice = {
+        app: appId,
+        path: captured.path,
+        outcome: slice.outcome,
+        provenance: slice.recorded?.provenance ?? null,
+        recordedHash: slice.recorded?.hash ?? null,
+        currentHash: slice.current === undefined ? null : sliceHash(slice.current),
+        desiredHash: slice.desired === null ? null : sliceHash(slice.desired),
+        desired: slice.desired === null ? null : `${JSON.stringify(slice.desired, null, 2)}\n`,
+        components: component ? [{ id: component.id, path: component.path }] : [],
+      };
+      if (slice.detail !== undefined) explained.detail = slice.detail;
+      if (slice.reason !== undefined) explained.reason = slice.reason;
+      slices.push(explained);
+    }
+  }
+  return slices;
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { parse as parseToml } from '@iarna/toml';
+import { applyEdits, modify, type ParseError, parse as parseJsonc } from 'jsonc-parser';
 
 /**
  * Write shapes and slice renderers. Every owned slice is defined here in
@@ -395,6 +397,274 @@ export function removeBundleSlice(bundleRoot: string, recorded: readonly string[
     // Gone already, or holding files this record never covered.
   }
   return leftBehind;
+}
+
+// ---------------------------------------------------------------------------
+// Keys shape (structured hosts): addressed slices, byte-preserving elsewhere
+// ---------------------------------------------------------------------------
+
+export type KeysFormat = 'json' | 'toml';
+
+export interface StructuredDocument {
+  /** Parsed root, or null when the document is unreadable or not an object. */
+  root: Record<string, unknown> | null;
+  /** Why the document could not be used. */
+  error?: string;
+  /**
+   * TOML only: dotted names of the table headers the byte-splice writer can
+   * address. A key the document expresses some other way (inline table,
+   * dotted assignment) is readable but not editable, so it is never spliced.
+   */
+  tables: string[];
+}
+
+/** Read a structured host. JSON hosts are parsed as JSONC: comments are legal. */
+export function parseStructured(content: string, format: KeysFormat): StructuredDocument {
+  if (content.trim().length === 0) return { root: {}, tables: [] };
+  if (format === 'toml') {
+    try {
+      const parsed = parseToml(content) as Record<string, unknown>;
+      return { root: parsed, tables: scanTomlTables(content).map((table) => table.name) };
+    } catch (error) {
+      return {
+        root: null,
+        error: error instanceof Error ? error.message : String(error),
+        tables: [],
+      };
+    }
+  }
+  const errors: ParseError[] = [];
+  const parsed = parseJsonc(content, errors, { allowTrailingComma: true }) as unknown;
+  if (errors.length > 0) {
+    return { root: null, error: `invalid JSON at offset ${errors[0].offset}`, tables: [] };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { root: null, error: 'document root must be an object', tables: [] };
+  }
+  return { root: parsed as Record<string, unknown>, tables: [] };
+}
+
+/** The value a key path addresses, or undefined when nothing is there. */
+export function valueAtKeyPath(
+  root: Record<string, unknown> | null,
+  keyPath: readonly string[]
+): unknown {
+  let current: unknown = root;
+  for (const segment of keyPath) {
+    if (current === null || typeof current !== 'object' || Array.isArray(current)) return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+/**
+ * Ownership hash of one owned slice: the value asb renders there, order
+ * included. Reformatting the host leaves it alone; editing the value inside
+ * asb's key does not.
+ */
+export function sliceHash(value: unknown): string {
+  return hashContent(JSON.stringify(value ?? null));
+}
+
+/** Upsert (`value`) or reclaim (`remove`) one addressed slice. */
+export interface KeysEdit {
+  keyPath: readonly string[];
+  value?: unknown;
+  /** TOML: the fully rendered table block, header included. */
+  text?: string;
+  remove?: true;
+}
+
+/**
+ * The document's own indentation and line ending, so a written slice reads
+ * like the file it lands in rather than imposing asb's defaults on it.
+ */
+function jsonFormatting(content: string): { tabSize: number; insertSpaces: boolean; eol: string } {
+  const indent = content.match(/^([ \t]+)"/m)?.[1] ?? '  ';
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
+  return indent.startsWith('\t')
+    ? { tabSize: 2, insertSpaces: false, eol }
+    : { tabSize: indent.length, insertSpaces: true, eol };
+}
+
+/**
+ * Apply every edit to one host in one pass. JSON goes through jsonc-parser's
+ * modify/applyEdits, so comments, key order and untouched formatting survive;
+ * TOML is spliced by byte span and never re-serialized, so a value asb cannot
+ * render can never take the rest of the document with it.
+ */
+export function applyKeysEdits(
+  content: string,
+  format: KeysFormat,
+  edits: readonly KeysEdit[]
+): string {
+  if (edits.length === 0) return content;
+  const next = format === 'toml' ? applyTomlEdits(content, edits) : applyJsonEdits(content, edits);
+  return next.endsWith('\n') ? next : `${next}\n`;
+}
+
+function applyJsonEdits(content: string, edits: readonly KeysEdit[]): string {
+  const formattingOptions = jsonFormatting(content);
+  let text = content.trim().length === 0 ? '{}\n' : content;
+  for (const edit of edits) {
+    text = applyEdits(
+      text,
+      modify(text, [...edit.keyPath], edit.remove ? undefined : edit.value, { formattingOptions })
+    );
+  }
+  return text;
+}
+
+interface TomlTable {
+  /** Dotted, unquoted header name. */
+  name: string;
+  /** Offset of the header's opening bracket. */
+  start: number;
+  /** Offset where the next header starts, or the end of the document. */
+  end: number;
+}
+
+const TOML_BARE_KEY = /^[A-Za-z0-9_-]+$/;
+
+/** Quote a TOML key exactly as 0.4.35 did: bare when it can be, else escaped. */
+export function tomlKey(key: string): string {
+  if (TOML_BARE_KEY.test(key)) return key;
+  return `"${key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function skipTomlString(content: string, from: number, quote: string): number {
+  for (let i = from; i < content.length; i++) {
+    if (content[i] === '\\' && quote === '"') {
+      i++;
+      continue;
+    }
+    if (content[i] === quote) return i + 1;
+    if (content[i] === '\n') return i;
+  }
+  return content.length;
+}
+
+function skipTomlMultiline(content: string, from: number, fence: string): number {
+  const close = content.indexOf(fence, from);
+  return close === -1 ? content.length : close + 3;
+}
+
+/** Read a `[a.b."c"]` header, returning its dotted name and the offset after `]`. */
+function readTomlHeader(content: string, from: number): { name: string; after: number } | null {
+  let i = from;
+  const parts: string[] = [];
+  while (i < content.length) {
+    while (content[i] === ' ' || content[i] === '\t') i++;
+    if (content[i] === ']') return { name: parts.join('.'), after: i + 1 };
+    if (content[i] === '"' || content[i] === "'") {
+      const quote = content[i];
+      const end = skipTomlString(content, i + 1, quote);
+      if (content[end - 1] !== quote) return null;
+      parts.push(
+        content
+          .slice(i + 1, end - 1)
+          .replace(/\\"/g, '"')
+          .replace(/\\\\/g, '\\')
+      );
+      i = end;
+    } else {
+      const start = i;
+      while (i < content.length && /[A-Za-z0-9_-]/.test(content[i])) i++;
+      if (i === start) return null;
+      parts.push(content.slice(start, i));
+    }
+    while (content[i] === ' ' || content[i] === '\t') i++;
+    if (content[i] === '.') i++;
+    else if (content[i] !== ']') return null;
+  }
+  return null;
+}
+
+/**
+ * Every table header in a TOML document with the byte span it owns, tracking
+ * strings, comments and bracket depth so a `[` inside a multi-line string or a
+ * nested array is never mistaken for a header.
+ */
+function scanTomlTables(content: string): TomlTable[] {
+  const tables: TomlTable[] = [];
+  let lineStart = true;
+  let depth = 0;
+  let i = 0;
+  const close = (end: number): void => {
+    const last = tables[tables.length - 1];
+    if (last) last.end = end;
+  };
+  while (i < content.length) {
+    const ch = content[i];
+    if (ch === '#') {
+      while (i < content.length && content[i] !== '\n') i++;
+      continue;
+    }
+    if (content.startsWith('"""', i) || content.startsWith("'''", i)) {
+      i = skipTomlMultiline(content, i + 3, content.slice(i, i + 3));
+      lineStart = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      i = skipTomlString(content, i + 1, ch);
+      lineStart = false;
+      continue;
+    }
+    if (ch === '\n') {
+      lineStart = true;
+      i++;
+      continue;
+    }
+    if (ch === ' ' || ch === '\t' || ch === '\r') {
+      i++;
+      continue;
+    }
+    if (lineStart && depth === 0 && ch === '[') {
+      const arrayOfTables = content[i + 1] === '[';
+      const header = readTomlHeader(content, i + (arrayOfTables ? 2 : 1));
+      if (header) {
+        close(i);
+        // An array-of-tables entry is a repeated name; it is scanned so its
+        // span closes the table before it, never addressed as a slice.
+        tables.push({
+          name: arrayOfTables ? `${header.name}[]` : header.name,
+          start: i,
+          end: content.length,
+        });
+        i = header.after + (arrayOfTables ? 1 : 0);
+        lineStart = false;
+        continue;
+      }
+    }
+    if (ch === '[') depth++;
+    else if (ch === ']') depth = Math.max(0, depth - 1);
+    lineStart = false;
+    i++;
+  }
+  return tables;
+}
+
+function applyTomlEdits(content: string, edits: readonly KeysEdit[]): string {
+  let text = content;
+  for (const edit of edits) {
+    const name = edit.keyPath.join('.');
+    const table = scanTomlTables(text).find((candidate) => candidate.name === name);
+    if (edit.remove) {
+      if (table) text = text.slice(0, table.start) + text.slice(table.end);
+      continue;
+    }
+    const block = `${(edit.text ?? '').trimEnd()}\n`;
+    if (table) {
+      // The span's own trailing blank lines are its separation from what
+      // follows; the replacement keeps them so unrelated spacing survives.
+      const trailing = text.slice(table.start, table.end).match(/\n*$/)?.[0] ?? '\n';
+      text = text.slice(0, table.start) + block.trimEnd() + trailing + text.slice(table.end);
+      continue;
+    }
+    const head = text.trimEnd();
+    text = head.length === 0 ? block : `${head}\n\n${block}`;
+  }
+  return text;
 }
 
 // ---------------------------------------------------------------------------

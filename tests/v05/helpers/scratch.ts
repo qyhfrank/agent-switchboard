@@ -2,6 +2,8 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parse as parseToml } from '@iarna/toml';
+import { parse as parseJsonc } from 'jsonc-parser';
 
 /**
  * Scratch homes for 0.5 engine tests. Every environment root the engine
@@ -245,6 +247,75 @@ export function skillsParentDir(homes: ScratchHomes, app: RuleAppId | 'agents'):
     case 'agents':
       return path.join(home, '.agents', 'skills');
   }
+}
+
+export type McpAppId = RuleAppId | 'claude-desktop';
+
+export const MCP_APPS: readonly McpAppId[] = [
+  'claude-code',
+  'claude-desktop',
+  'codex',
+  'cursor',
+  'gemini',
+  'opencode',
+  'trae',
+  'trae-cn',
+];
+
+/** Global-scope MCP host document per app (frozen 0.4.35 table values). */
+export function mcpHostPath(homes: ScratchHomes, app: McpAppId): string {
+  const home = homes.agentsHome;
+  switch (app) {
+    case 'claude-code':
+      return path.join(home, '.claude.json');
+    case 'claude-desktop':
+      return path.join(vendorDataDir(home, 'Claude'), 'claude_desktop_config.json');
+    case 'codex':
+      return path.join(home, '.codex', 'config.toml');
+    case 'cursor':
+      return path.join(home, '.cursor', 'mcp.json');
+    case 'gemini':
+      return path.join(home, '.gemini', 'settings.json');
+    case 'opencode': {
+      const root = opencodeRoot(home);
+      const jsonc = path.join(root, 'opencode.jsonc');
+      return fs.existsSync(jsonc) ? jsonc : path.join(root, 'opencode.json');
+    }
+    case 'trae':
+      return path.join(vendorDataDir(home, 'Trae'), 'User', 'mcp.json');
+    case 'trae-cn':
+      return path.join(vendorDataDir(home, 'Trae CN'), 'User', 'mcp.json');
+  }
+}
+
+/** The container key each app keeps its server map under. */
+export function mcpRootKey(app: McpAppId): string {
+  if (app === 'codex') return 'mcp_servers';
+  if (app === 'opencode') return 'mcp';
+  return 'mcpServers';
+}
+
+/** Seed `<asbHome>/mcp.json` with a server map. */
+export function seedMcpLibrary(homes: ScratchHomes, servers: Record<string, unknown>): string {
+  const filePath = path.join(homes.asbHome, 'mcp.json');
+  fs.mkdirSync(homes.asbHome, { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify({ mcpServers: servers }, null, 2)}\n`, 'utf-8');
+  return filePath;
+}
+
+/** Parse an app's MCP host and return its server map, or undefined when absent. */
+export function readMcpHost(
+  homes: ScratchHomes,
+  app: McpAppId
+): Record<string, Record<string, unknown>> | undefined {
+  const filePath = mcpHostPath(homes, app);
+  if (!fs.existsSync(filePath)) return undefined;
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  const root =
+    app === 'codex'
+      ? (parseToml(raw) as Record<string, unknown>)
+      : (parseJsonc(raw) as Record<string, unknown>);
+  return root[mcpRootKey(app)] as Record<string, Record<string, unknown>> | undefined;
 }
 
 export interface SeedSkillOptions {
