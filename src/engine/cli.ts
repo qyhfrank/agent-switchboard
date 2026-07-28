@@ -17,6 +17,7 @@ import {
   type Action,
   type ExplainSlice,
   explainRules,
+  explainSkills,
   planRules,
   planSkills,
   type SyncCapture,
@@ -377,10 +378,15 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   const inventory = scanLibrary({ env });
   const capture = captureFor(config, ledger);
 
-  let slices = explainRules(
-    { config, inventory, ledger, capture, table: APP_ROWS, now: new Date().toISOString() },
-    target
-  );
+  const planInput = {
+    config,
+    inventory,
+    ledger,
+    capture,
+    table: APP_ROWS,
+    now: new Date().toISOString(),
+  };
+  let slices = [...explainRules(planInput, target), ...explainSkills(planInput, target)];
   if (opts.apps && opts.apps.length > 0) {
     const wanted = new Set(opts.apps);
     slices = slices.filter((slice) => wanted.has(slice.app));

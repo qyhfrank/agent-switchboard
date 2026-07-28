@@ -793,6 +793,50 @@ export interface ExplainSlice {
 }
 
 /**
+ * Skills view over the same planner: match a skill id, app id, or bundle
+ * path and join each matched slice with its ledger record and captured tree
+ * fingerprints. Own-dir slices have no single rendered body, so `desired`
+ * stays null and the source bundle appears under `components`.
+ */
+export function explainSkills(input: PlanInput, target: string): ExplainSlice[] {
+  const { inventory, ledger, capture } = input;
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === 'skills')
+      .map((component) => [component.id, component])
+  );
+  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
+
+  const slices: ExplainSlice[] = [];
+  for (const action of planSkills(input)) {
+    if (action.app === null || action.id === null || action.path === null) continue;
+    const pathMatch = action.path === target || action.path.endsWith(`${path.sep}${target}`);
+    if (action.id !== target && action.app !== target && !pathMatch) continue;
+
+    const recorded =
+      ledgerByKey.get(
+        ledgerKey({ app: action.app, type: 'skills', id: action.id, path: action.path })
+      ) ?? null;
+    const component = byId.get(action.id);
+
+    const slice: ExplainSlice = {
+      app: action.app,
+      path: action.path,
+      outcome: action.outcome,
+      provenance: recorded?.provenance ?? null,
+      recordedHash: recorded?.hash ?? null,
+      currentHash: capture.bundles[action.path]?.fingerprint ?? null,
+      desiredHash: null,
+      desired: null,
+      components: component ? [{ id: component.id, path: component.path }] : [],
+    };
+    if (action.detail !== undefined) slice.detail = action.detail;
+    slices.push(slice);
+  }
+  return slices;
+}
+
+/**
  * One-target view over the same planner: match a component id, app id, or
  * target path (exact or basename) and join each matched slice with its
  * ledger record, captured bytes, and freshly rendered desired content.
