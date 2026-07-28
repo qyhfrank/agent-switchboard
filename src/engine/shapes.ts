@@ -197,6 +197,19 @@ export function isContainedIn(root: string, candidate: string): boolean {
 }
 
 /**
+ * Escape check for a declared target: its PARENT chain must resolve inside
+ * the app root. The file's own symlink is deliberately not followed here —
+ * a user-linked target file (Mackup) is written through, while a parent
+ * directory swapped for a link pointing elsewhere is an escape.
+ */
+export function targetEscapesRoot(root: string, targetPath: string): boolean {
+  const resolvedRoot = resolveWritePath(root);
+  const resolvedParent = resolveWritePath(path.dirname(path.resolve(targetPath)));
+  const relative = path.relative(resolvedRoot, resolvedParent);
+  return relative !== '' && (relative.startsWith('..') || path.isAbsolute(relative));
+}
+
+/**
  * Atomic write through symlinks: the temp file is created in the resolved
  * target's own directory and renamed over the resolved path.
  */
@@ -221,8 +234,11 @@ export function writeFileAtomic(targetPath: string, content: string): void {
   }
 }
 
-/** Remove the resolved target file; parent directories are left in place. */
-export function removeFileResolved(targetPath: string): void {
-  const resolved = resolveWritePath(targetPath);
-  fs.unlinkSync(resolved);
+/**
+ * Remove the managed file at its declared path. A symlinked target loses the
+ * link only — the user's backing file (Mackup store) is never deleted, and no
+ * dangling link is left behind by removing the destination instead.
+ */
+export function removeManagedFile(targetPath: string): void {
+  fs.unlinkSync(path.resolve(targetPath));
 }

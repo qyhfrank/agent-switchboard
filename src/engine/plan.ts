@@ -10,16 +10,19 @@ import { composeRules, hashContent } from './shapes.js';
  * state → actions. Nothing here touches the filesystem; the capture is taken
  * once and shared by preview and apply, so they cannot diverge structurally.
  *
- * Ownership proofs, in order and nothing else: (1) ledger entry whose hash
- * matches the captured slice; (2) asb's own markers; (3) byte-identity with
- * the current render; (5) convention — a table-declared managed location,
- * update authority only, never deletion. Removal is authorized only by
- * deselection.
+ * Ownership proofs for the rules cell, in order and nothing else: (1) ledger
+ * entry whose hash matches the captured slice; (3) byte-identity with the
+ * current render; (5) convention — a table-declared managed location, update
+ * authority only, never deletion. Marker proof (2) belongs to region shapes
+ * and peer-record proof (4) to hook state and project manifests; neither has
+ * a rules own-file carrier. Removal is authorized only by deselection.
  */
 
 export interface CapturedTarget {
   exists: boolean;
   content: string | null;
+  /** Parent chain of the declared path resolves outside the app root. */
+  escapes?: boolean;
 }
 
 export interface SyncCapture {
@@ -42,6 +45,11 @@ export interface Action {
   content?: string;
   /** Containment root for write/remove actions. */
   root?: string;
+  /**
+   * Hash the target must still carry at apply time (null = must be absent);
+   * the executor re-reads and refuses on drift since planning.
+   */
+  expectedHash?: string | null;
   /** Ledger mutation carried by this action. */
   ledger?: { op: 'put'; entry: LedgerEntry } | { op: 'delete'; key: string };
 }
@@ -198,6 +206,7 @@ export function planRules(input: PlanInput): Action[] {
             op: 'remove',
             outcome: 'removed',
             root,
+            expectedHash: currentHash,
             ledger: { op: 'delete', key: ledgerKey(recorded) },
           });
         } else {
@@ -244,6 +253,7 @@ export function planRules(input: PlanInput): Action[] {
         detail: 'created',
         content: desired,
         root,
+        expectedHash: null,
         ledger: putEntry('written'),
       });
       continue;
@@ -286,6 +296,7 @@ export function planRules(input: PlanInput): Action[] {
           detail: 'updated',
           content: desired,
           root,
+          expectedHash: currentHash,
           ledger: putEntry('written'),
         });
       } else {
@@ -316,11 +327,32 @@ export function planRules(input: PlanInput): Action[] {
       detail: 'updated',
       content: desired,
       root,
+      expectedHash: currentHash,
       ledger: putEntry('written'),
     });
   }
 
-  return actions;
+  // Escaping targets are decided here, from the capture, so dry-run and the
+  // real run report the identical blocked entry; the executor re-checks live.
+  return actions.map((action) => {
+    if (
+      (action.op === 'write' || action.op === 'remove') &&
+      action.path !== null &&
+      capture.targets[action.path]?.escapes === true
+    ) {
+      return {
+        app: action.app,
+        type: action.type,
+        id: action.id,
+        path: action.path,
+        op: 'none' as const,
+        outcome: 'blocked' as const,
+        detail: 'path-escape',
+        reason: `parent directory of ${action.path} resolves outside the app root; not touching it`,
+      };
+    }
+    return action;
+  });
 }
 
 export interface ExplainSlice {
