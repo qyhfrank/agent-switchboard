@@ -117,7 +117,7 @@ test('byte-identical pre-existing targets adopt without rewriting', async () => 
   });
 });
 
-test('a stale shared target updates under convention adoption', async () => {
+test('a stale shared target adopts by convention, then updates on the next sync', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedTwoRules(homes);
@@ -127,11 +127,78 @@ test('a stale shared target updates under convention adoption', async () => {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, 'Old composed output\n', 'utf-8');
 
+    const adoption = await runSync();
+    const adopted = rulesEntry(adoption, 'claude-code');
+    assert.equal(adopted?.outcome, 'adopted');
+    assert.equal(adopted?.detail, 'convention');
+    assert.equal(
+      fs.readFileSync(filePath, 'utf-8'),
+      'Old composed output\n',
+      'adoption writes nothing'
+    );
+    assert.equal(adoption.exitCode, 0);
+
     const report = await runSync();
     const entry = rulesEntry(report, 'claude-code');
     assert.equal(entry?.outcome, 'written');
     assert.equal(entry?.detail, 'updated');
     assert.equal(fs.readFileSync(filePath, 'utf-8'), COMPOSED_V1);
+    assert.equal(report.exitCode, 0);
+  });
+});
+
+test('deselecting between adoption and the first rewrite preserves the file', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha', 'beta']));
+
+    const filePath = ruleFilePath(homes, 'claude-code');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, 'Hand-written notes asb never wrote\n', 'utf-8');
+
+    await runSync();
+    writeUserConfig(homes, configFor(['claude-code'], []));
+    const report = await runSync();
+
+    const entry = rulesEntry(report, 'claude-code');
+    assert.equal(entry?.outcome, 'left-behind');
+    assert.equal(entry?.detail, 'unproven');
+    assert.equal(
+      fs.readFileSync(filePath, 'utf-8'),
+      'Hand-written notes asb never wrote\n',
+      'a convention claim never deletes'
+    );
+
+    // The claim is relinquished: later runs stay silent about the file.
+    const later = await runSync();
+    assert.equal(rulesEntry(later, 'claude-code'), undefined);
+    assert.equal(fs.existsSync(filePath), true);
+  });
+});
+
+test('a still-selected rule that composes to empty bytes never deletes the target', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedRule(homes, 'solo.md', 'Something worth writing\n');
+    writeUserConfig(
+      homes,
+      `[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["solo"]\nincludeDelimiters = false\n`
+    );
+
+    await runSync();
+    const filePath = ruleFilePath(homes, 'claude-code');
+    assert.equal(fs.existsSync(filePath), true);
+
+    // The rule file becomes empty while still selected: removal is only for
+    // deselection, so the empty composition is written instead.
+    seedRule(homes, 'solo.md', '');
+    const report = await runSync();
+
+    const entry = rulesEntry(report, 'claude-code');
+    assert.notEqual(entry?.outcome, 'removed');
+    assert.equal(fs.existsSync(filePath), true, 'the target survives');
+    assert.equal(fs.readFileSync(filePath, 'utf-8'), '');
     assert.equal(report.exitCode, 0);
   });
 });

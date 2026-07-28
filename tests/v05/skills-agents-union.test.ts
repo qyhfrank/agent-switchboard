@@ -106,15 +106,25 @@ test('turning use_agents_dir on removes the recorded per-app copies with proof',
     writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
     const second = await runSync();
 
-    assert.equal(entryFor(second, 'codex', 'alpha')?.outcome, 'removed', '0.4 leaked this copy');
-    assert.equal(fs.existsSync(codexCopy), false);
+    // The old copy leaves only after the union copy is proven on disk, so
+    // this run defers the removal and the next one performs it.
+    const deferred = entryFor(second, 'codex', 'alpha');
+    assert.equal(deferred?.outcome, 'skipped');
+    assert.equal(deferred?.detail, 'not-selected');
+    assert.equal(fs.existsSync(codexCopy), true, 'kept until the union copy lands');
     assert.equal(entryFor(second, 'agents', 'alpha')?.outcome, 'written');
     assert.equal(fs.existsSync(path.join(agentsBundle(homes, 'alpha'), 'SKILL.md')), true);
     assert.equal(second.exitCode, 0);
 
     const third = await runSync();
+    assert.equal(entryFor(third, 'codex', 'alpha')?.outcome, 'removed', '0.4 leaked this copy');
+    assert.equal(fs.existsSync(codexCopy), false);
     assert.equal(entryFor(third, 'agents', 'alpha')?.outcome, 'unchanged');
-    assert.equal(entryFor(third, 'codex', 'alpha'), undefined, 'the removed copy stays gone');
+    assert.equal(third.exitCode, 0);
+
+    const fourth = await runSync();
+    assert.equal(entryFor(fourth, 'agents', 'alpha')?.outcome, 'unchanged');
+    assert.equal(entryFor(fourth, 'codex', 'alpha'), undefined, 'the removed copy stays gone');
   });
 });
 
@@ -130,14 +140,81 @@ test('turning use_agents_dir off cleans the recorded union copies and restores p
     writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: false }));
     const report = await runSync();
 
-    assert.equal(entryFor(report, 'agents', 'alpha')?.outcome, 'removed');
-    assert.equal(fs.existsSync(agentsBundle(homes, 'alpha')), false);
+    // Mirror image of toggle-on: the per-app copy is written first, and the
+    // union copy leaves on the following run once that copy is proven.
+    assert.equal(entryFor(report, 'agents', 'alpha')?.outcome, 'skipped');
+    assert.equal(fs.existsSync(agentsBundle(homes, 'alpha')), true);
     assert.equal(entryFor(report, 'codex', 'alpha')?.outcome, 'written');
     assert.equal(
       fs.existsSync(path.join(skillsParentDir(homes, 'codex'), 'alpha', 'SKILL.md')),
       true
     );
     assert.equal(report.exitCode, 0);
+
+    const second = await runSync();
+    assert.equal(entryFor(second, 'agents', 'alpha')?.outcome, 'removed');
+    assert.equal(fs.existsSync(agentsBundle(homes, 'alpha')), false);
+    assert.equal(entryFor(second, 'codex', 'alpha')?.outcome, 'unchanged');
+    assert.equal(second.exitCode, 0);
+  });
+});
+
+test('an --app filter mid-migration never orphans the skill', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedSkill(homes, 'alpha');
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'] }));
+
+    await runSync();
+    const codexCopy = path.join(skillsParentDir(homes, 'codex'), 'alpha');
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+
+    // The filter drops the union write; the deferred removal must not fire.
+    const filtered = await runSync({ apps: ['codex'] });
+    const entry = entryFor(filtered, 'codex', 'alpha');
+    assert.equal(entry?.outcome, 'skipped');
+    assert.equal(entry?.detail, 'not-selected');
+    assert.equal(fs.existsSync(path.join(codexCopy, 'SKILL.md')), true, 'copy intact');
+    assert.equal(entryFor(filtered, 'agents', 'alpha'), undefined, 'union write filtered out');
+    assert.equal(filtered.exitCode, 0);
+
+    const full = await runSync();
+    assert.equal(entryFor(full, 'agents', 'alpha')?.outcome, 'written');
+    const converged = await runSync();
+    assert.equal(entryFor(converged, 'codex', 'alpha')?.outcome, 'removed');
+    assert.equal(fs.existsSync(path.join(agentsBundle(homes, 'alpha'), 'SKILL.md')), true);
+  });
+});
+
+test('a failing union destination leaves the per-app copy in place', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedSkill(homes, 'alpha');
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'] }));
+
+    await runSync();
+    const codexCopy = path.join(skillsParentDir(homes, 'codex'), 'alpha');
+
+    // ~/.agents already exists as a file: the union parent cannot be created.
+    fs.writeFileSync(path.join(homes.agentsHome, '.agents'), 'not a directory\n');
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+
+    const report = await runSync();
+    const union = entryFor(report, 'agents', 'alpha');
+    assert.equal(union?.outcome, 'failed');
+    assert.equal(union?.detail, 'write-error');
+    assert.equal(entryFor(report, 'codex', 'alpha')?.outcome, 'skipped');
+    assert.equal(fs.existsSync(path.join(codexCopy, 'SKILL.md')), true, 'copy intact');
+    assert.equal(report.exitCode, 1);
+
+    // Unblock the destination: the migration completes over the next runs.
+    fs.rmSync(path.join(homes.agentsHome, '.agents'));
+    const unblocked = await runSync();
+    assert.equal(entryFor(unblocked, 'agents', 'alpha')?.outcome, 'written');
+    assert.equal(entryFor(unblocked, 'codex', 'alpha')?.outcome, 'skipped');
+    const converged = await runSync();
+    assert.equal(entryFor(converged, 'codex', 'alpha')?.outcome, 'removed');
+    assert.equal(converged.exitCode, 0);
   });
 });
 

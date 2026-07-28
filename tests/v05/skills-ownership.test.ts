@@ -143,7 +143,7 @@ test('a byte-identical unrecorded bundle is adopted by identity and never rewrit
   });
 });
 
-test('an unrecorded plain bundle takes convention updates and keeps foreign files', async () => {
+test('an unrecorded plain bundle adopts by convention, then updates keeping foreign files', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedLibrarySkill(homes);
@@ -159,6 +159,13 @@ test('an unrecorded plain bundle takes convention updates and keeps foreign file
     fs.writeFileSync(path.join(target, 'my-notes.md'), 'hand-written, not asb\n');
     fs.writeFileSync(path.join(target, 'references', 'mine.md'), 'also mine\n');
 
+    const adoption = await runSync();
+    const adopted = skillEntry(adoption, 'claude-code', 'review-pr');
+    assert.equal(adopted?.outcome, 'adopted');
+    assert.equal(adopted?.detail, 'convention');
+    assert.match(read(target, 'SKILL.md'), /Old body\./, 'adoption writes nothing');
+    assert.equal(adoption.exitCode, 0);
+
     const report = await runSync();
 
     const entry = skillEntry(report, 'claude-code', 'review-pr');
@@ -172,9 +179,34 @@ test('an unrecorded plain bundle takes convention updates and keeps foreign file
     assert.equal(read(target, 'my-notes.md'), 'hand-written, not asb\n', 'foreign file preserved');
     assert.equal(read(target, 'references', 'mine.md'), 'also mine\n', 'nested foreign preserved');
 
-    const second = await runSync();
-    assert.equal(skillEntry(second, 'claude-code', 'review-pr')?.outcome, 'unchanged');
-    assert.equal(second.exitCode, 0);
+    const third = await runSync();
+    assert.equal(skillEntry(third, 'claude-code', 'review-pr')?.outcome, 'unchanged');
+    assert.equal(third.exitCode, 0);
+  });
+});
+
+test('deselecting between adoption and the first rewrite preserves the bundle', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedLibrarySkill(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['review-pr']));
+
+    const target = bundlePath(homes, 'claude-code', 'review-pr');
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, 'SKILL.md'), 'their own take on this skill\n');
+
+    await runSync();
+    writeUserConfig(homes, configFor(['claude-code'], []));
+    const report = await runSync();
+
+    const entry = skillEntry(report, 'claude-code', 'review-pr');
+    assert.equal(entry?.outcome, 'left-behind');
+    assert.equal(entry?.detail, 'unproven');
+    assert.equal(
+      read(target, 'SKILL.md'),
+      'their own take on this skill\n',
+      'a convention claim never deletes'
+    );
   });
 });
 
@@ -270,12 +302,18 @@ test('deselecting a user-modified bundle leaves it behind and drops the ownershi
     );
     assert.equal(fs.existsSync(target), true);
 
-    // Re-selecting meets a foreign dir: convention adoption, not a resurrected
-    // ledger claim reporting `unchanged` over the user's bytes.
+    // Re-selecting meets a foreign dir: convention adoption first (writing
+    // nothing), then the update — not a resurrected ledger claim reporting
+    // `unchanged` over the user's bytes.
     writeUserConfig(homes, configFor(['claude-code'], ['review-pr']));
     const fourth = await runSync();
-    assert.equal(skillEntry(fourth, 'claude-code', 'review-pr')?.outcome, 'written');
-    assert.equal(skillEntry(fourth, 'claude-code', 'review-pr')?.detail, 'updated');
+    assert.equal(skillEntry(fourth, 'claude-code', 'review-pr')?.outcome, 'adopted');
+    assert.equal(skillEntry(fourth, 'claude-code', 'review-pr')?.detail, 'convention');
+    assert.equal(read(target, 'SKILL.md'), 'hand-edited since asb wrote it\n');
+
+    const fifth = await runSync();
+    assert.equal(skillEntry(fifth, 'claude-code', 'review-pr')?.outcome, 'written');
+    assert.equal(skillEntry(fifth, 'claude-code', 'review-pr')?.detail, 'updated');
     assert.match(read(target, 'SKILL.md'), /Walk the diff\./);
   });
 });

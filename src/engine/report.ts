@@ -116,8 +116,9 @@ export function renderExplain(slices: readonly ExplainSlice[], target: string): 
 
   const lines: string[] = [];
   for (const slice of slices) {
-    lines.push(`${slice.app}: ${slice.path ?? '(no target file)'}`);
+    lines.push(`${slice.app ?? 'library'}: ${slice.path ?? '(no target file)'}`);
     lines.push(`  outcome: ${slice.detail ? `${slice.outcome} (${slice.detail})` : slice.outcome}`);
+    if (slice.reason) lines.push(`  reason: ${slice.reason}`);
     lines.push(
       `  owner: ${
         slice.provenance

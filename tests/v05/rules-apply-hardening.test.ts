@@ -104,6 +104,16 @@ test('a symlinked target file writes through the link and removal unlinks only t
     const target = ruleFilePath(homes, 'codex');
     fs.symlinkSync(backing, target);
 
+    // First contact adopts the occupied file by convention without writing;
+    // the update lands on the next sync and flips the entry to written.
+    const adoption = await runSync();
+    assert.equal(adoption.exitCode, 0);
+    assert.equal(
+      fs.readFileSync(backing, 'utf-8'),
+      'old hand-managed content\n',
+      'adoption writes nothing'
+    );
+
     const report = await runSync();
     assert.equal(report.exitCode, 0);
     const rendered = renderedRules('codex', 'Always be kind.\n');

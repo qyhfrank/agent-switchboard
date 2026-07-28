@@ -211,7 +211,7 @@ export function planRules(input: PlanInput): Action[] {
       ledgerKey({ app: appId, type: 'rules', id: null, path: targetPath })
     );
 
-    const { missing, content } = resolveFor(appId);
+    const { present, missing, content } = resolveFor(appId);
 
     // A missing member blocks that app's aggregate slice: rendering without
     // it would silently drop content the user selected for this app.
@@ -247,7 +247,10 @@ export function planRules(input: PlanInput): Action[] {
       },
     });
 
-    if (desired.length === 0) {
+    // Removal is authorized only by true deselection. A selected set that
+    // happens to compose to empty bytes (delimiters off, empty rule bodies)
+    // falls through and writes the empty composition instead.
+    if (present.length === 0) {
       if (!current.exists) {
         if (recorded) {
           actions.push({
@@ -264,7 +267,23 @@ export function planRules(input: PlanInput): Action[] {
         continue;
       }
       if (recorded) {
-        if (currentHash === recorded.hash) {
+        if (currentHash === recorded.hash && recorded.provenance === 'convention') {
+          // Adopted by convention and never rewritten by asb: the bytes are
+          // the user's, so deselection relinquishes the claim without
+          // deleting (design: convention never grants deletion).
+          actions.push({
+            app: appId,
+            type: 'rules',
+            id: null,
+            path: targetPath,
+            op: 'none',
+            outcome: 'left-behind',
+            detail: 'unproven',
+            reason:
+              'adopted by convention and never rewritten by asb; preserved — delete it yourself',
+            ledger: { op: 'delete', key: ledgerKey(recorded) },
+          });
+        } else if (currentHash === recorded.hash) {
           actions.push({
             app: appId,
             type: 'rules',
@@ -381,21 +400,45 @@ export function planRules(input: PlanInput): Action[] {
     }
 
     // Unrecorded, occupied, different bytes: the table-declared managed
-    // location grants convention adoption for update (0.4 overwrote these
-    // files; updating is behavior parity). Deletion authority never follows
-    // from convention — but this write makes the bytes ours by fact.
+    // location grants convention adoption for update only. Nothing is
+    // written this run — the entry records the user's current bytes, the
+    // next sync performs the update (and flips the entry to `written`), and
+    // a deselect before that first rewrite preserves the file.
+    if (currentHash === null) {
+      actions.push({
+        app: appId,
+        type: 'rules',
+        id: null,
+        path: targetPath,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'foreign',
+        reason: 'occupied but unreadable; asb cannot prove what it would be overwriting',
+      });
+      continue;
+    }
     actions.push({
       app: appId,
       type: 'rules',
       id: null,
       path: targetPath,
-      op: 'write',
-      outcome: 'written',
-      detail: 'updated',
-      content: desired,
-      root,
-      expectedHash: currentHash,
-      ledger: putEntry('written'),
+      op: 'adopt',
+      outcome: 'adopted',
+      detail: 'convention',
+      reason: 'existing file adopted for update; the next sync writes the composed rules',
+      ledger: {
+        op: 'put',
+        entry: {
+          app: appId,
+          type: 'rules',
+          id: null,
+          path: targetPath,
+          shape: 'own-file',
+          hash: currentHash,
+          provenance: 'convention',
+          updatedAt: now,
+        },
+      },
     });
   }
 
@@ -467,12 +510,19 @@ export function planSkills(input: PlanInput): Action[] {
   const useAgentsDir = config.distribution.useAgentsDir;
   const trio = new Set(AGENTS_SKILLS_UNION.members);
 
+  const trioEffective = new Map<string, Set<string>>();
+  const memberDirs = new Map<string, string>();
+
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId);
     if (!row?.skills || !detected(appId)) continue;
     const effective = effectiveSelection(config, appId, 'skills');
     for (const id of effective) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
+    }
+    if (trio.has(appId)) {
+      trioEffective.set(appId, new Set(effective));
+      memberDirs.set(appId, row.skills.dir(config.homes));
     }
     rows.push({
       app: appId,
@@ -484,6 +534,26 @@ export function planSkills(input: PlanInput): Action[] {
       selected: useAgentsDir && trio.has(appId) ? [] : effective,
     });
   }
+
+  // A copy that only moved (agents-dir toggle) is removed strictly after its
+  // replacement is proven on disk: every desired file present, byte- and
+  // mode-clean, at the destination this same capture saw. Until then the
+  // remove defers, so a failed destination write or an `--app` filter can
+  // never leave the user with no copy at all.
+  const bundleCleanAt = (bundlePath: string, component: Component | undefined): boolean => {
+    if (!component?.files || component.files.length === 0) return false;
+    const capturedThere = capture.bundles[bundlePath];
+    if (!capturedThere?.exists || capturedThere.files === null) return false;
+    const liveByRel = new Map(capturedThere.files.map((file) => [file.rel, file]));
+    return component.files.every((file) => {
+      const live = liveByRel.get(file.rel);
+      return (
+        live !== undefined &&
+        live.hash === hashContent(file.bytes) &&
+        targetModeMatchesSourceExecutableBits(file.mode, live.mode)
+      );
+    });
+  };
 
   const activeMembers = AGENTS_SKILLS_UNION.members.filter(
     (member) => config.apps.enabled.includes(member) && detected(member)
@@ -642,15 +712,51 @@ export function planSkills(input: PlanInput): Action[] {
             });
           }
         } else {
-          actions.push({
-            ...base,
-            op: 'remove',
-            outcome: 'removed',
-            bundle: { files: [], stale: recorded.files ?? [] },
-            root: row.root,
-            expectedHash: recorded.hash,
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
-          });
+          // Deselected here, but still wanted at the counterpart location of
+          // an agents-dir toggle: defer until that copy is proven on disk.
+          const waitingOn: string[] = [];
+          if (useAgentsDir && trio.has(row.app) && trioEffective.get(row.app)?.has(id)) {
+            const unionPath = path.join(unionDir, id);
+            if (!bundleCleanAt(unionPath, component)) waitingOn.push(unionPath);
+          }
+          if (row.app === 'agents') {
+            for (const [member, dir] of memberDirs) {
+              if (!trioEffective.get(member)?.has(id)) continue;
+              const memberPath = path.join(dir, id);
+              if (!bundleCleanAt(memberPath, component)) waitingOn.push(memberPath);
+            }
+          }
+          if (waitingOn.length > 0) {
+            actions.push({
+              ...base,
+              op: 'none',
+              outcome: 'skipped',
+              detail: 'not-selected',
+              reason: `kept until ${waitingOn.join(', ')} carries this skill; run asb sync again`,
+            });
+          } else if (recorded.provenance === 'convention' && !identicalToDesired()) {
+            // Adopted by convention and never rewritten: the tree is the
+            // user's; deselection relinquishes the claim without deleting.
+            actions.push({
+              ...base,
+              op: 'none',
+              outcome: 'left-behind',
+              detail: 'unproven',
+              reason:
+                'adopted by convention and never rewritten by asb; preserved — delete it yourself',
+              ledger: { op: 'delete', key: ledgerKey(recorded) },
+            });
+          } else {
+            actions.push({
+              ...base,
+              op: 'remove',
+              outcome: 'removed',
+              bundle: { files: [], stale: recorded.files ?? [] },
+              root: row.root,
+              expectedHash: recorded.hash,
+              ledger: { op: 'delete', key: ledgerKey(recorded) },
+            });
+          }
         }
         continue;
       }
@@ -716,7 +822,7 @@ export function planSkills(input: PlanInput): Action[] {
             detail: 'identity',
             ledger: putEntry('identity', captured.fingerprint),
           });
-        } else if (captured.files === null) {
+        } else if (captured.files === null || captured.fingerprint === null) {
           actions.push({
             ...base,
             op: 'none',
@@ -726,17 +832,31 @@ export function planSkills(input: PlanInput): Action[] {
               'directory matches this skill by name but contains symlinks or special files asb cannot prove ownership of; move it away or delete it yourself',
           });
         } else {
-          // Convention: name-matched child of the managed parent, update
-          // authority over desired rels only; foreign files stay.
+          // Convention: name-matched child of the managed parent adopts for
+          // update only — nothing is written this run. The entry records the
+          // user's current tree with an empty file list (so the first update
+          // deletes nothing), the next sync writes the desired files, and a
+          // deselect before that first rewrite preserves the tree.
           actions.push({
             ...base,
-            op: 'write',
-            outcome: 'written',
-            detail: 'updated',
-            bundle: { files: desired, stale: [] },
-            root: row.root,
-            expectedHash: captured.fingerprint,
-            ledger: putEntry('written', ''),
+            op: 'adopt',
+            outcome: 'adopted',
+            detail: 'convention',
+            reason: 'existing directory adopted for update; the next sync writes the skill files',
+            ledger: {
+              op: 'put',
+              entry: {
+                app: row.app,
+                type: 'skills',
+                id,
+                path: bundlePath,
+                shape: 'own-dir',
+                hash: captured.fingerprint,
+                files: [],
+                provenance: 'convention',
+                updatedAt: now,
+              },
+            },
           });
         }
         continue;
@@ -777,10 +897,12 @@ export function planSkills(input: PlanInput): Action[] {
 }
 
 export interface ExplainSlice {
-  app: string;
+  /** Owning app, or null for library-level rows (missing, parse failures). */
+  app: string | null;
   path: string | null;
   outcome: Outcome;
   detail?: string;
+  reason?: string;
   /** Recorded ownership proof, or null when no ledger record exists. */
   provenance: Provenance | null;
   recordedHash: string | null;
@@ -790,6 +912,24 @@ export interface ExplainSlice {
   desired: string | null;
   /** Library components composing the slice. */
   components: { id: string; path: string }[];
+}
+
+/** Library-level planner rows (app null) carried into an explain view. */
+function librarySlice(action: Action): ExplainSlice {
+  const slice: ExplainSlice = {
+    app: null,
+    path: action.path,
+    outcome: action.outcome,
+    provenance: null,
+    recordedHash: null,
+    currentHash: null,
+    desiredHash: null,
+    desired: null,
+    components: [],
+  };
+  if (action.detail !== undefined) slice.detail = action.detail;
+  if (action.reason !== undefined) slice.reason = action.reason;
+  return slice;
 }
 
 /**
@@ -809,7 +949,15 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
 
   const slices: ExplainSlice[] = [];
   for (const action of planSkills(input)) {
-    if (action.app === null || action.id === null || action.path === null) continue;
+    if (action.app === null) {
+      // Library-level rows (missing, parse failures) explain by id or path;
+      // without them a missing skill would explain to silence.
+      if (action.id === target || action.path === target) {
+        slices.push(librarySlice(action));
+      }
+      continue;
+    }
+    if (action.id === null || action.path === null) continue;
     const pathMatch = action.path === target || action.path.endsWith(`${path.sep}${target}`);
     if (action.id !== target && action.app !== target && !pathMatch) continue;
 
@@ -848,7 +996,12 @@ export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
 
   const slices: ExplainSlice[] = [];
   for (const action of planRules(input)) {
-    if (action.app === null) continue;
+    if (action.app === null) {
+      if (action.id === target || action.path === target) {
+        slices.push(librarySlice(action));
+      }
+      continue;
+    }
     const { present, missing, content } = resolveFor(action.app);
     const pathMatch =
       action.path !== null && (action.path === target || action.path.endsWith(`/${target}`));

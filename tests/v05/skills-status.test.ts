@@ -115,3 +115,35 @@ test('explain shows a user-modified bundle as conflict with diverging hashes', a
     assert.notEqual(slices[0]?.currentHash, slices[0]?.recordedHash);
   });
 });
+
+test('explain names a missing skill instead of returning silence', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    writeUserConfig(homes, baseConfig(['ghost']));
+
+    const slices = await runExplain('ghost');
+
+    assert.equal(slices.length, 1);
+    assert.equal(slices[0]?.app, null);
+    assert.equal(slices[0]?.outcome, 'missing');
+    assert.match(slices[0]?.reason ?? '', /skills\/ghost/);
+  });
+});
+
+test('explain surfaces a parse failure for a selected malformed skill', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const dir = path.join(homes.asbHome, 'skills', 'broken');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: broken\n', 'utf-8');
+    writeUserConfig(homes, baseConfig(['broken']));
+
+    const slices = await runExplain('broken');
+
+    assert.equal(slices.length, 1);
+    assert.equal(slices[0]?.app, null);
+    assert.equal(slices[0]?.outcome, 'failed');
+    assert.equal(slices[0]?.detail, 'parse-error');
+    assert.match(slices[0]?.reason ?? '', /closing delimiter/);
+  });
+});

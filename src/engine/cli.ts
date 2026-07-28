@@ -389,7 +389,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   let slices = [...explainRules(planInput, target), ...explainSkills(planInput, target)];
   if (opts.apps && opts.apps.length > 0) {
     const wanted = new Set(opts.apps);
-    slices = slices.filter((slice) => wanted.has(slice.app));
+    slices = slices.filter((slice) => slice.app === null || wanted.has(slice.app));
   }
   return slices;
 }
