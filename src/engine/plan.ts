@@ -1,5 +1,5 @@
 import type { AppRow } from './apps.js';
-import type { ResolvedConfig } from './config.js';
+import { effectiveIncludeDelimiters, effectiveSelection, type ResolvedConfig } from './config.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, LibraryInventory } from './library.js';
 import type { Outcome } from './report.js';
@@ -63,20 +63,49 @@ export interface PlanInput {
   now: string;
 }
 
-function selectedRules(config: ResolvedConfig, inventory: LibraryInventory) {
+interface ResolvedRuleSet {
+  present: Component[];
+  missing: string[];
+  content: string;
+}
+
+/**
+ * Per-app rules resolution: the app's effective selection (global overlaid by
+ * its override) composed with its effective delimiter setting. Apps sharing
+ * one effective set share one composition.
+ */
+function rulesResolver(
+  config: ResolvedConfig,
+  inventory: LibraryInventory
+): (appId: string) => ResolvedRuleSet {
   const byId = new Map(
     inventory.components
       .filter((component) => component.type === 'rules')
       .map((component) => [component.id, component])
   );
-  const present: Component[] = [];
-  const missing: string[] = [];
-  for (const id of config.selection.rules) {
-    const component = byId.get(id);
-    if (component) present.push(component);
-    else missing.push(id);
-  }
-  return { present, missing };
+  const cache = new Map<string, ResolvedRuleSet>();
+  return (appId) => {
+    const ids = effectiveSelection(config, appId, 'rules');
+    const includeDelimiters = effectiveIncludeDelimiters(config, appId);
+    const key = JSON.stringify([includeDelimiters, ids]);
+    let resolved = cache.get(key);
+    if (!resolved) {
+      const present: Component[] = [];
+      const missing: string[] = [];
+      for (const id of ids) {
+        const component = byId.get(id);
+        if (component) present.push(component);
+        else missing.push(id);
+      }
+      resolved = {
+        present,
+        missing,
+        content: composeRules(present, { includeDelimiters }).content,
+      };
+      cache.set(key, resolved);
+    }
+    return resolved;
+  };
 }
 
 export function planRules(input: PlanInput): Action[] {
@@ -98,8 +127,20 @@ export function planRules(input: PlanInput): Action[] {
     });
   }
 
-  const { present, missing } = selectedRules(config, inventory);
-  for (const id of missing) {
+  const resolveFor = rulesResolver(config, inventory);
+
+  // One library-level row per id any enabled app selects but the library
+  // lacks; per-app blocking happens inside the app loop.
+  const missingUnion: string[] = [];
+  const seenMissing = new Set<string>();
+  for (const appId of config.apps.enabled) {
+    for (const id of resolveFor(appId).missing) {
+      if (seenMissing.has(id)) continue;
+      seenMissing.add(id);
+      missingUnion.push(id);
+    }
+  }
+  for (const id of missingUnion) {
     actions.push({
       app: null,
       type: 'rules',
@@ -110,10 +151,6 @@ export function planRules(input: PlanInput): Action[] {
       reason: `enabled but not in the library (expected ${config.homes.asbHome}/rules/${id}.md)`,
     });
   }
-
-  const composed = composeRules(present, {
-    includeDelimiters: config.rules.includeDelimiters,
-  });
 
   const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
   const assumeInstalled = new Set(config.apps.assumeInstalled);
@@ -146,8 +183,10 @@ export function planRules(input: PlanInput): Action[] {
       ledgerKey({ app: appId, type: 'rules', id: null, path: targetPath })
     );
 
-    // A missing member blocks the whole aggregate slice: rendering without it
-    // would silently drop content the user selected.
+    const { missing, content } = resolveFor(appId);
+
+    // A missing member blocks that app's aggregate slice: rendering without
+    // it would silently drop content the user selected for this app.
     if (missing.length > 0) {
       actions.push({
         app: appId,
@@ -162,7 +201,7 @@ export function planRules(input: PlanInput): Action[] {
       continue;
     }
 
-    const desired = composed.content.length > 0 ? row.rules.render(composed.content) : '';
+    const desired = content.length > 0 ? row.rules.render(content) : '';
     const desiredHash = hashContent(desired);
     const currentHash = current.content !== null ? hashContent(current.content) : null;
 
@@ -378,25 +417,22 @@ export interface ExplainSlice {
  */
 export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
   const { config, inventory, ledger, capture, table } = input;
-  const { present, missing } = selectedRules(config, inventory);
-  const composed = composeRules(present, {
-    includeDelimiters: config.rules.includeDelimiters,
-  });
-  const components = present.map((component) => ({ id: component.id, path: component.path }));
-  const componentMatch = present.some((component) => component.id === target);
+  const resolveFor = rulesResolver(config, inventory);
   const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
 
   const slices: ExplainSlice[] = [];
   for (const action of planRules(input)) {
     if (action.app === null) continue;
+    const { present, missing, content } = resolveFor(action.app);
     const pathMatch =
       action.path !== null && (action.path === target || action.path.endsWith(`/${target}`));
+    const componentMatch = present.some((component) => component.id === target);
     if (action.app !== target && !pathMatch && !componentMatch) continue;
 
     const row = table.find((candidate) => candidate.id === action.app);
     const desired =
-      action.path !== null && row?.rules && missing.length === 0 && composed.content.length > 0
-        ? row.rules.render(composed.content)
+      action.path !== null && row?.rules && missing.length === 0 && content.length > 0
+        ? row.rules.render(content)
         : null;
     const recorded =
       action.path !== null
@@ -415,7 +451,7 @@ export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
       currentHash: current?.content != null ? hashContent(current.content) : null,
       desiredHash: desired !== null ? hashContent(desired) : null,
       desired,
-      components,
+      components: present.map((component) => ({ id: component.id, path: component.path })),
     };
     if (action.detail !== undefined) slice.detail = action.detail;
     slices.push(slice);

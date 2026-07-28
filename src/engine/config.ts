@@ -500,6 +500,48 @@ export interface AppOverride {
   rules?: z.infer<typeof incrementalRules>;
 }
 
+export interface IncrementalOverride {
+  enabled?: string[];
+  add?: string[];
+  remove?: string[];
+}
+
+/**
+ * Frozen 0.4 semantics: `enabled` replaces the base outright — even when it
+ * is an empty array — and short-circuits add/remove; otherwise the base
+ * minus `remove` plus `add`, first occurrence wins.
+ */
+export function mergeIncrementalSelection(
+  base: readonly string[],
+  override?: IncrementalOverride
+): string[] {
+  if (!override) return [...base];
+  if (override.enabled) return [...override.enabled];
+  const removed = new Set(override.remove ?? []);
+  const result = base.filter((id) => !removed.has(id));
+  const seen = new Set(result);
+  for (const id of override.add ?? []) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
+}
+
+/** Per-app effective selection: the global list overlaid by the app's override, deduplicated in order. */
+export function effectiveSelection(
+  config: ResolvedConfig,
+  appId: string,
+  type: ComponentType
+): string[] {
+  const override = config.apps.overrides[appId]?.[type];
+  return [...new Set(mergeIncrementalSelection(config.selection[type], override))];
+}
+
+export function effectiveIncludeDelimiters(config: ResolvedConfig, appId: string): boolean {
+  return config.apps.overrides[appId]?.rules?.includeDelimiters ?? config.rules.includeDelimiters;
+}
+
 export interface ResolvedConfig {
   homes: Homes;
   layers: ConfigLayer[];
