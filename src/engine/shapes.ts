@@ -10,7 +10,7 @@ import path from 'node:path';
  * devices.
  */
 
-export function hashContent(content: string): string {
+export function hashContent(content: string | Buffer): string {
   return createHash('sha256').update(content).digest('hex');
 }
 
@@ -261,6 +261,140 @@ export function desiredTargetMode(srcMode: number, currentMode: number): number 
   return currentMode & 0o666;
 }
 
+export interface TargetFile {
+  rel: string;
+  hash: string;
+  mode: number;
+}
+
+/**
+ * Target-side bundle inventory: every file including dot files, hashed, with
+ * permission bits. Null when any entry is a symlink or non-regular file —
+ * such a tree is unprovable and gets neither byte comparison nor authority.
+ */
+export function listTargetFiles(dir: string): TargetFile[] | null {
+  try {
+    const root = fs.lstatSync(dir);
+    if (!root.isDirectory() || root.isSymbolicLink()) return null;
+  } catch {
+    return null;
+  }
+  const files: TargetFile[] = [];
+  const visit = (current: string, prefix: string): boolean => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const filePath = path.join(current, entry.name);
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const stat = fs.lstatSync(filePath);
+      if (stat.isSymbolicLink()) return false;
+      if (stat.isDirectory()) {
+        if (!visit(filePath, rel)) return false;
+      } else if (stat.isFile()) {
+        files.push({ rel, hash: hashContent(fs.readFileSync(filePath)), mode: stat.mode & 0o777 });
+      } else {
+        return false;
+      }
+    }
+    return true;
+  };
+  return visit(path.resolve(dir), '') ? files : null;
+}
+
+/** Prune now-empty directories along a rel path's parent chain, bottom-up. */
+function pruneEmptyParents(bundleRoot: string, rel: string): void {
+  let parent = path.posix.dirname(rel);
+  while (parent !== '.' && parent !== '') {
+    const dirPath = path.join(bundleRoot, parent);
+    try {
+      if (fs.readdirSync(dirPath).length > 0) return;
+      fs.rmdirSync(dirPath);
+    } catch {
+      return;
+    }
+    parent = path.posix.dirname(parent);
+  }
+}
+
+/**
+ * Reconcile an owned bundle directory to the desired file set: write files
+ * whose bytes or mode differ (atomic, mode per the 0.4 repair rule), delete
+ * exactly the stale rels the caller's ownership record names, and prune
+ * directories those deletions emptied. Files the record never covered are
+ * left in place.
+ */
+export function applyBundleFiles(
+  bundleRoot: string,
+  files: readonly BundleFile[],
+  stale: readonly string[]
+): void {
+  const root = path.resolve(bundleRoot);
+  fs.mkdirSync(root, { recursive: true });
+  for (const file of files) {
+    const filePath = path.join(root, file.rel);
+    let currentMode: number | null = null;
+    let equal = false;
+    try {
+      const stat = fs.lstatSync(filePath);
+      if (stat.isFile()) {
+        currentMode = stat.mode & 0o777;
+        equal = Buffer.compare(fs.readFileSync(filePath), file.bytes) === 0;
+      }
+    } catch {
+      // absent: written fresh below
+    }
+    if (!equal) {
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      writeFileAtomic(filePath, file.bytes);
+      currentMode = fs.lstatSync(filePath).mode & 0o777;
+    }
+    if (currentMode !== null && !targetModeMatchesSourceExecutableBits(file.mode, currentMode)) {
+      fs.chmodSync(filePath, desiredTargetMode(file.mode, currentMode));
+    }
+  }
+  const desired = new Set(files.map((file) => file.rel));
+  for (const rel of stale) {
+    if (desired.has(rel)) continue;
+    try {
+      fs.unlinkSync(path.join(root, rel));
+    } catch {
+      // already gone
+    }
+    pruneEmptyParents(root, rel);
+  }
+}
+
+/**
+ * Remove an owned bundle's recorded files, prune emptied directories, and
+ * drop the bundle directory itself only when nothing foreign remains.
+ * Returns true when the directory is fully gone.
+ */
+export function removeBundleSlice(bundleRoot: string, recorded: readonly string[]): boolean {
+  const root = path.resolve(bundleRoot);
+  for (const rel of recorded) {
+    try {
+      fs.unlinkSync(path.join(root, rel));
+    } catch {
+      // already gone
+    }
+    pruneEmptyParents(root, rel);
+  }
+  try {
+    if (fs.readdirSync(root).length === 0) {
+      fs.rmdirSync(root);
+      return true;
+    }
+  } catch {
+    return !fs.existsSync(root);
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Write mechanics (symlink-through, atomic, contained)
 // ---------------------------------------------------------------------------
@@ -317,7 +451,7 @@ export function targetEscapesRoot(root: string, targetPath: string): boolean {
  * Atomic write through symlinks: the temp file is created in the resolved
  * target's own directory and renamed over the resolved path.
  */
-export function writeFileAtomic(targetPath: string, content: string): void {
+export function writeFileAtomic(targetPath: string, content: string | Buffer): void {
   const resolved = resolveWritePath(targetPath);
   const directory = path.dirname(resolved);
   fs.mkdirSync(directory, { recursive: true });
@@ -326,7 +460,8 @@ export function writeFileAtomic(targetPath: string, content: string): void {
     `.${path.basename(resolved)}.asb-tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   );
   try {
-    fs.writeFileSync(temp, content, 'utf-8');
+    if (typeof content === 'string') fs.writeFileSync(temp, content, 'utf-8');
+    else fs.writeFileSync(temp, content);
     fs.renameSync(temp, resolved);
   } catch (error) {
     try {

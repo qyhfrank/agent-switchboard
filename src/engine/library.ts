@@ -3,6 +3,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { type ComponentType, resolveHomes } from './config.js';
+import { type BundleFile, listBundleFiles } from './shapes.js';
 
 /**
  * Library scan: content directories under the asb home become Components.
@@ -29,6 +30,8 @@ export interface Component {
   path: string;
   content: string;
   metadata: RuleMetadata;
+  /** Own-dir components (skills): the source bundle's distributable files. */
+  files?: BundleFile[];
 }
 
 export interface FailedComponent {
@@ -199,6 +202,7 @@ function scanSkillsDirectory(directory: string, inventory: LibraryInventory): vo
         path: dirPath,
         content: parsed.content,
         metadata: parsed.metadata,
+        files: listBundleFiles(dirPath),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

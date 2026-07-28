@@ -1,7 +1,8 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { Command } from 'commander';
-import { APP_ROWS } from './apps.js';
-import { loadConfig } from './config.js';
+import { AGENTS_SKILLS_UNION, APP_ROWS } from './apps.js';
+import { effectiveSelection, loadConfig } from './config.js';
 import {
   acquireRunLock,
   type Ledger,
@@ -17,6 +18,7 @@ import {
   type ExplainSlice,
   explainRules,
   planRules,
+  planSkills,
   type SyncCapture,
 } from './plan.js';
 import {
@@ -26,7 +28,16 @@ import {
   renderExplain,
   renderReport,
 } from './report.js';
-import { hashContent, removeManagedFile, targetEscapesRoot, writeFileAtomic } from './shapes.js';
+import {
+  applyBundleFiles,
+  bundleFingerprint,
+  hashContent,
+  listTargetFiles,
+  removeBundleSlice,
+  removeManagedFile,
+  targetEscapesRoot,
+  writeFileAtomic,
+} from './shapes.js';
 
 /**
  * Command bodies. `runSync` is the one reconciliation: load → capture →
@@ -44,8 +55,8 @@ export interface SyncOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-function captureFor(config: ReturnType<typeof loadConfig>): SyncCapture {
-  const capture: SyncCapture = { installed: {}, targets: {} };
+function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): SyncCapture {
+  const capture: SyncCapture = { installed: {}, targets: {}, bundles: {}, bundleDirs: {} };
   for (const appId of config.apps.enabled) {
     const row = APP_ROWS.find((candidate) => candidate.id === appId);
     if (!row) continue;
@@ -61,6 +72,75 @@ function captureFor(config: ReturnType<typeof loadConfig>): SyncCapture {
       };
     } catch {
       capture.targets[targetPath] = { exists: fs.existsSync(targetPath), content: null, escapes };
+    }
+  }
+
+  // Skills parents: list present child dirs, then snapshot every bundle the
+  // planner can possibly touch — selected, recorded, or name-present.
+  const skillRows: { app: string; dir: string; root: string; reserved: readonly string[] }[] = [];
+  for (const appId of config.apps.enabled) {
+    const row = APP_ROWS.find((candidate) => candidate.id === appId);
+    if (!row?.skills) continue;
+    skillRows.push({
+      app: appId,
+      dir: row.skills.dir(config.homes),
+      root: row.skills.root(config.homes),
+      reserved: row.skills.reserved,
+    });
+  }
+  if (AGENTS_SKILLS_UNION.members.some((member) => config.apps.enabled.includes(member))) {
+    skillRows.push({
+      app: 'agents',
+      dir: AGENTS_SKILLS_UNION.dir(config.homes),
+      root: AGENTS_SKILLS_UNION.root(config.homes),
+      reserved: AGENTS_SKILLS_UNION.reserved,
+    });
+  }
+  for (const row of skillRows) {
+    let present: string[] = [];
+    try {
+      present = fs
+        .readdirSync(row.dir, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
+        .map((entry) => entry.name)
+        .filter((name) => !name.startsWith('.') && !row.reserved.includes(name));
+    } catch {
+      // parent absent: nothing present
+    }
+    capture.bundleDirs[row.dir] = present;
+
+    const recorded = ledger.entries
+      .filter(
+        (entry) =>
+          entry.app === row.app &&
+          entry.type === 'skills' &&
+          entry.id !== null &&
+          path.dirname(entry.path) === row.dir
+      )
+      .map((entry) => entry.id as string);
+    const selected = row.app === 'agents' ? [] : effectiveSelection(config, row.app, 'skills');
+    const unionSelected =
+      row.app === 'agents'
+        ? AGENTS_SKILLS_UNION.members
+            .filter((member) => config.apps.enabled.includes(member))
+            .flatMap((member) => effectiveSelection(config, member, 'skills'))
+        : [];
+    const candidates = new Set(
+      [...selected, ...unionSelected, ...recorded, ...present].filter(
+        (id) => !id.startsWith('.') && !row.reserved.includes(id)
+      )
+    );
+    for (const id of candidates) {
+      const bundlePath = path.join(row.dir, id);
+      if (capture.bundles[bundlePath]) continue;
+      const escapes = targetEscapesRoot(row.root, bundlePath);
+      const exists = fs.existsSync(bundlePath);
+      capture.bundles[bundlePath] = {
+        exists,
+        files: exists ? listTargetFiles(bundlePath) : null,
+        fingerprint: exists ? (bundleFingerprint(bundlePath) ?? null) : null,
+        escapes,
+      };
     }
   }
   return capture;
@@ -130,8 +210,57 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
       );
     }
 
-    // The plan's proof was for the captured bytes; re-check at action time
+    // The plan's proof was for the captured state; re-check at action time
     // and refuse on drift rather than overwrite or delete unproven content.
+    if (action.bundle) {
+      const expected = action.expectedHash ?? null;
+      const drifted =
+        expected === null
+          ? fs.existsSync(action.path)
+          : (bundleFingerprint(action.path) ?? null) !== expected;
+      if (drifted) {
+        return action.op === 'write'
+          ? failure('conflict', undefined, 'changed between planning and apply; re-run asb sync')
+          : failure(
+              'left-behind',
+              'modified',
+              'changed between planning and apply; re-run asb sync'
+            );
+      }
+
+      try {
+        if (action.op === 'write') {
+          applyBundleFiles(action.path, action.bundle.files, action.bundle.stale);
+        } else {
+          removeBundleSlice(action.path, action.bundle.stale);
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return failure('failed', 'write-error', message);
+      }
+
+      // The recorded proof is the measured post-write tree, foreign extras
+      // included; an unprovable result records no ownership at all.
+      if (action.op === 'write' && action.ledger?.op === 'put') {
+        const measured = bundleFingerprint(action.path);
+        if (measured === undefined) {
+          return failure(
+            'failed',
+            'write-error',
+            'bundle is unprovable after writing (symlink or special file appeared); no ownership recorded'
+          );
+        }
+        applyLedgerMutation(ledger, {
+          ...action,
+          ledger: { op: 'put', entry: { ...action.ledger.entry, hash: measured } },
+        });
+        return toEntry(action);
+      }
+
+      applyLedgerMutation(ledger, action);
+      return toEntry(action);
+    }
+
     let live: string | null = null;
     try {
       live = fs.readFileSync(action.path, 'utf-8');
@@ -174,16 +303,17 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   try {
     const ledger = loadLedger(config.homes.stateHome);
     const inventory = scanLibrary({ env });
-    const capture = captureFor(config);
+    const capture = captureFor(config, ledger);
 
-    let actions = planRules({
+    const planInput = {
       config,
       inventory,
       ledger,
       capture,
       table: APP_ROWS,
       now: new Date().toISOString(),
-    });
+    };
+    let actions = [...planRules(planInput), ...planSkills(planInput)];
 
     // Filters select which actions execute, never which inputs the planner saw.
     if (opts.apps && opts.apps.length > 0) {
@@ -245,7 +375,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   const config = loadConfig({ profile: opts.profile, project: opts.project, env });
   const ledger = loadLedger(config.homes.stateHome);
   const inventory = scanLibrary({ env });
-  const capture = captureFor(config);
+  const capture = captureFor(config, ledger);
 
   let slices = explainRules(
     { config, inventory, ledger, capture, table: APP_ROWS, now: new Date().toISOString() },
