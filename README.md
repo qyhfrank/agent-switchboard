@@ -560,6 +560,8 @@ Code changes take effect after `pnpm build`. To unlink: `pnpm uninstall -g agent
 
 Other scripts: `pnpm dev` (tsx), `pnpm test`, `pnpm lint`, `pnpm typecheck`.
 
+`pnpm check` runs typecheck, lint, and the full test suite in one command. `pnpm test:v05` runs only the 0.5 engine suites (`tests/v05/*.test.ts`) for a faster loop when working under `src/engine/`; `tests/run.mjs` discovers `tests/*.test.ts` and `tests/v05/*.test.ts` only. Engine tests provision disposable scratch homes via `tests/v05/helpers/scratch.ts` and must never touch the live `~/.asb` or real app config dirs.
+
 ### Git Hooks
 
 `pnpm install` automatically sets `core.hooksPath` to `.githooks/`. The pre-commit hook runs `biome check --write --staged` on staged files, ensuring all committed code passes formatting and lint checks.
