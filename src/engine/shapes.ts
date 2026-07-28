@@ -424,7 +424,12 @@ export function resolveWritePath(targetPath: string): string {
       }
       followed = path.resolve(path.dirname(followed), link);
     }
-    if (endsAtNonLink && followed !== absolute) return resolveWritePath(followed);
+    if (!endsAtNonLink) {
+      // 32 hops without reaching a non-link: a cycle. 0.4's writeFileSync
+      // threw ELOOP here; renaming over the link would destroy it.
+      throw new Error(`ELOOP: too many symbolic links encountered, '${absolute}'`);
+    }
+    if (followed !== absolute) return resolveWritePath(followed);
 
     // Target does not exist yet: resolve the deepest existing ancestor.
     let existing = path.dirname(absolute);

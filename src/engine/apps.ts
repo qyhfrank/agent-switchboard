@@ -61,6 +61,12 @@ export const AGENTS_SKILLS_UNION = {
   root: (homes: Homes): string => path.join(homes.agentsHome, '.agents'),
   dir: (homes: Homes): string => path.join(homes.agentsHome, '.agents', 'skills'),
   reserved: ['.system'] as readonly string[],
+  // Capture and planner must agree on this predicate: a row the planner
+  // builds over an uncaptured directory reads as absent and mis-reports
+  // removal. With every member disabled the union is dormant — records and
+  // files stay untouched until a member returns.
+  participates: (enabled: readonly string[]): boolean =>
+    AGENTS_SKILLS_UNION.members.some((member) => enabled.includes(member)),
 };
 
 export const APP_ROWS: readonly AppRow[] = [

@@ -264,3 +264,31 @@ test('the agents .system directory is reserved exactly like the codex one', asyn
     );
   });
 });
+
+test('disabling every union member leaves the agents copies and records dormant', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex', 'claude-code');
+    seedSkill(homes, 'alpha');
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+
+    const first = await runSync();
+    assert.equal(entryFor(first, 'agents', 'alpha')?.outcome, 'written');
+    const unionCopy = path.join(agentsBundle(homes, 'alpha'), 'SKILL.md');
+    assert.equal(fs.existsSync(unionCopy), true);
+
+    // Every member leaves [applications].enabled: the union goes dormant —
+    // no agents rows, files untouched, the ownership record kept.
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: ['alpha'], agentsDir: true }));
+    const dormant = await runSync();
+    assert.equal(entryFor(dormant, 'agents', 'alpha'), undefined, 'no agents row while dormant');
+    assert.equal(fs.existsSync(unionCopy), true, 'union copy untouched');
+    assert.equal(dormant.exitCode, 0);
+
+    // A returning member finds the record intact: deselection still removes
+    // with proof instead of rediscovering an unproven foreign tree.
+    writeUserConfig(homes, config({ apps: ['codex'], skills: [], agentsDir: true }));
+    const cleanup = await runSync();
+    assert.equal(entryFor(cleanup, 'agents', 'alpha')?.outcome, 'removed');
+    assert.equal(fs.existsSync(agentsBundle(homes, 'alpha')), false, 'removed with proof');
+  });
+});

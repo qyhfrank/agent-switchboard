@@ -90,7 +90,7 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
       reserved: row.skills.reserved,
     });
   }
-  if (AGENTS_SKILLS_UNION.members.some((member) => config.apps.enabled.includes(member))) {
+  if (AGENTS_SKILLS_UNION.participates(config.apps.enabled)) {
     skillRows.push({
       app: 'agents',
       dir: AGENTS_SKILLS_UNION.dir(config.homes),

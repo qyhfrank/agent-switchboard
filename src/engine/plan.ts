@@ -567,10 +567,11 @@ export function planSkills(input: PlanInput): Action[] {
         ]
       : [];
   const unionDir = AGENTS_SKILLS_UNION.dir(config.homes);
-  const unionRecordedOrPresent =
-    ledger.entries.some((entry) => entry.app === 'agents' && entry.type === 'skills') ||
-    unionSelected.length > 0;
-  if (unionRecordedOrPresent) {
+  const unionRowActive =
+    AGENTS_SKILLS_UNION.participates(config.apps.enabled) &&
+    (ledger.entries.some((entry) => entry.app === 'agents' && entry.type === 'skills') ||
+      unionSelected.length > 0);
+  if (unionRowActive) {
     rows.push({
       app: 'agents',
       dir: unionDir,
@@ -751,7 +752,16 @@ export function planSkills(input: PlanInput): Action[] {
               ...base,
               op: 'remove',
               outcome: 'removed',
-              bundle: { files: [], stale: recorded.files ?? [] },
+              bundle: {
+                files: [],
+                // A convention entry records no files; it reaches removal
+                // only through identicalToDesired (proof 3), so the desired
+                // rels are exactly the live tree.
+                stale:
+                  recorded.provenance === 'convention'
+                    ? desired.map((file) => file.rel)
+                    : (recorded.files ?? []),
+              },
               root: row.root,
               expectedHash: recorded.hash,
               ledger: { op: 'delete', key: ledgerKey(recorded) },

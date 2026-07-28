@@ -230,3 +230,26 @@ test('a dangling symlinked target is written through, creating the backing file'
     );
   });
 });
+
+test('a symlink cycle at the target fails the entry and never replaces the link', async () => {
+  await withScratchHomes(async (homes) => {
+    seedRule(homes, 'base.md', 'Always be kind.\n');
+    writeUserConfig(homes, CODEX_CONFIG);
+    installApps(homes, 'codex');
+    const target = ruleFilePath(homes, 'codex');
+    const partner = path.join(path.dirname(target), 'loop-partner');
+    fs.symlinkSync(partner, target);
+    fs.symlinkSync(target, partner);
+
+    const report = await runSync();
+
+    // 0.4's writeFileSync threw ELOOP; the entry fails and the link survives.
+    const entry = report.entries.find((candidate) => candidate.app === 'codex');
+    assert.equal(entry?.outcome, 'failed');
+    assert.equal(entry?.detail, 'write-error');
+    assert.match(entry?.reason ?? '', /ELOOP/);
+    assert.equal(report.exitCode, 1);
+    assert.ok(fs.lstatSync(target).isSymbolicLink(), 'the cyclic link is preserved');
+    assert.ok(fs.lstatSync(partner).isSymbolicLink());
+  });
+});

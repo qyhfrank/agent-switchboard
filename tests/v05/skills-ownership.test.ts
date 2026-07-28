@@ -500,3 +500,36 @@ test('the codex .system directory is never reported, claimed, or touched', async
     assert.equal(fs.existsSync(bundlePath(homes, 'codex', 'review-pr')), false);
   });
 });
+
+test('a convention claim whose tree became the desired render removes for real', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedSkill(homes, 'keeper', { body: 'Library original.' });
+    const handDoc = [
+      '---',
+      'name: keeper',
+      'description: hand-rolled keeper',
+      '---',
+      '',
+      'The user wrote this by hand.',
+      '',
+    ].join('\n');
+    const hand = bundlePath(homes, 'codex', 'keeper');
+    fs.mkdirSync(hand, { recursive: true });
+    fs.writeFileSync(path.join(hand, 'SKILL.md'), handDoc);
+    writeUserConfig(homes, configFor(['codex'], ['keeper']));
+
+    const adopted = await runSync();
+    assert.equal(skillEntry(adopted, 'codex', 'keeper')?.detail, 'convention');
+
+    // The user promotes the hand copy into the library before the rewrite:
+    // desired now IS the adopted tree (proof 3), so deselection may delete it.
+    fs.writeFileSync(path.join(homes.asbHome, 'skills', 'keeper', 'SKILL.md'), handDoc);
+    writeUserConfig(homes, configFor(['codex'], []));
+    const removal = await runSync();
+
+    const entry = skillEntry(removal, 'codex', 'keeper');
+    assert.equal(entry?.outcome, 'removed');
+    assert.equal(fs.existsSync(hand), false, 'the identity-proven tree is actually deleted');
+  });
+});
