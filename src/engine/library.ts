@@ -30,8 +30,14 @@ export interface Component {
   path: string;
   content: string;
   metadata: RuleMetadata;
-  /** Own-dir components (skills): the source bundle's distributable files. */
+  /**
+   * Own-dir components: the source bundle's distributable files. Always set
+   * for skills; for hooks it is set exactly for bundle entries and absent for
+   * single-file definitions, which have nothing to distribute.
+   */
   files?: BundleFile[];
+  /** Hooks: the app-native event map this entry contributes. */
+  hooks?: HookEventMap;
 }
 
 export interface FailedComponent {
@@ -62,6 +68,44 @@ const skillMetadataSchema = z
     description: z.string().trim().min(1),
   })
   .passthrough();
+
+/** Frozen 0.4.35 hook grammar: an app-native event map with per-type required fields. */
+const REQUIRED_HANDLER_FIELD = {
+  command: 'command',
+  http: 'url',
+  prompt: 'prompt',
+  agent: 'prompt',
+} as const;
+
+const hookHandlerSchema = z
+  .object({
+    type: z.enum(['command', 'http', 'prompt', 'agent']),
+    command: z.string().optional(),
+    commandWindows: z.string().optional(),
+    command_windows: z.string().optional(),
+  })
+  .passthrough()
+  .refine(
+    (handler) => typeof handler[REQUIRED_HANDLER_FIELD[handler.type]] === 'string',
+    (handler) => ({
+      message: `${handler.type} hook requires ${REQUIRED_HANDLER_FIELD[handler.type]}`,
+    })
+  );
+
+const hookGroupSchema = z
+  .object({
+    matcher: z.string().optional(),
+    hooks: z.array(hookHandlerSchema).min(1),
+  })
+  .passthrough();
+
+const hookFileSchema = z
+  .object({ hooks: z.record(z.string(), z.array(hookGroupSchema)) })
+  .passthrough();
+
+export type HookHandler = z.infer<typeof hookHandlerSchema>;
+export type HookGroup = z.infer<typeof hookGroupSchema>;
+export type HookEventMap = Record<string, HookGroup[]>;
 
 // Frozen 0.4.35 frontmatter grammar: ---\n...\n---\n(optional newline)
 const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
@@ -220,6 +264,55 @@ function scanSkillsDirectory(directory: string, inventory: LibraryInventory): vo
   }
 }
 
+const HOOK_FILE = 'hook.json';
+
+/**
+ * Hooks scan: `<asbHome>/hooks/<id>.json` is a definition entry, and a child
+ * directory holding `hook.json` is a bundle entry whose files are distributed
+ * beside the app config. A malformed entry fails alone (0.4 threw and aborted
+ * the whole load).
+ */
+function scanHooksDirectory(directory: string, inventory: LibraryInventory): void {
+  if (!fs.existsSync(directory)) return;
+
+  const entries = fs.readdirSync(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) continue;
+    const entryPath = path.join(directory, entry.name);
+    const isBundle = entry.isDirectory();
+    if (isBundle) {
+      if (!fs.existsSync(path.join(entryPath, HOOK_FILE))) continue;
+    } else if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.json') {
+      continue;
+    }
+
+    const id = isBundle ? entry.name : componentIdFromFile(entry.name);
+    const filePath = isBundle ? path.join(entryPath, HOOK_FILE) : entryPath;
+    try {
+      const parsed = hookFileSchema.parse(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
+      inventory.components.push({
+        type: 'hooks',
+        id,
+        source: 'library',
+        path: entryPath,
+        content: '',
+        metadata: { tags: [], requires: [] },
+        hooks: parsed.hooks,
+        ...(isBundle ? { files: listBundleFiles(entryPath) } : {}),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      inventory.failed.push({
+        type: 'hooks',
+        id,
+        source: 'library',
+        path: filePath,
+        error: `Failed to parse hook "${id}": ${message}`,
+      });
+    }
+  }
+}
+
 export interface ScanOptions {
   types?: readonly ComponentType[];
   env?: NodeJS.ProcessEnv;
@@ -227,7 +320,7 @@ export interface ScanOptions {
 
 export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   const homes = resolveHomes(opts.env ?? process.env);
-  const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills']);
+  const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills', 'hooks']);
   const inventory: LibraryInventory = { components: [], failed: [] };
 
   if (wanted.has('rules')) {
@@ -235,6 +328,9 @@ export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   }
   if (wanted.has('skills')) {
     scanSkillsDirectory(path.join(homes.asbHome, 'skills'), inventory);
+  }
+  if (wanted.has('hooks')) {
+    scanHooksDirectory(path.join(homes.asbHome, 'hooks'), inventory);
   }
 
   inventory.components.sort((a, b) =>

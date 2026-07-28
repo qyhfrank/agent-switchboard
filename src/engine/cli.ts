@@ -13,11 +13,14 @@ import {
   saveLedger,
 } from './ledger.js';
 import { scanLibrary } from './library.js';
+import { loadPeerState, savePeerState } from './peer.js';
 import {
   type Action,
+  type CapturedHookApp,
   type ExplainSlice,
   explainRules,
   explainSkills,
+  planHooks,
   planRules,
   planSkills,
   type SyncCapture,
@@ -58,7 +61,13 @@ export interface SyncOptions {
 }
 
 function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): SyncCapture {
-  const capture: SyncCapture = { installed: {}, targets: {}, bundles: {}, bundleDirs: {} };
+  const capture: SyncCapture = {
+    installed: {},
+    targets: {},
+    bundles: {},
+    bundleDirs: {},
+    hooks: {},
+  };
   for (const appId of config.apps.enabled) {
     const row = APP_ROWS.find((candidate) => candidate.id === appId);
     if (!row) continue;
@@ -142,6 +151,53 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
         files: exists ? listTargetFiles(bundlePath) : null,
         fingerprint: exists ? (bundleFingerprint(bundlePath) ?? null) : null,
         escapes,
+      };
+    }
+  }
+
+  // Hooks: the app config it merges into, the peer record that says which
+  // groups are asb's, and every bundle directory that record can reclaim.
+  for (const appId of config.apps.enabled) {
+    const row = APP_ROWS.find((candidate) => candidate.id === appId)?.hooks;
+    if (!row) continue;
+    const configPath = row.path(config.homes);
+    const root = row.root(config.homes);
+    const captured: CapturedHookApp = {
+      path: configPath,
+      exists: fs.existsSync(configPath),
+      content: null,
+      config: {},
+      escapes: targetEscapesRoot(root, configPath),
+      state: loadPeerState(config.homes.asbHome, row.stateTarget),
+    };
+    if (captured.exists) {
+      try {
+        captured.content = fs.readFileSync(configPath, 'utf-8');
+        const parsed = JSON.parse(captured.content) as unknown;
+        captured.config =
+          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null;
+      } catch (error) {
+        captured.config = null;
+        captured.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+    capture.hooks[appId] = captured;
+
+    const claimable = new Set([
+      ...effectiveSelection(config, appId, 'hooks'),
+      ...captured.state.bundles,
+    ]);
+    for (const id of claimable) {
+      const bundlePath = path.join(row.bundleDir(config.homes), id);
+      if (capture.bundles[bundlePath]) continue;
+      const exists = fs.existsSync(bundlePath);
+      capture.bundles[bundlePath] = {
+        exists,
+        files: exists ? listTargetFiles(bundlePath) : null,
+        fingerprint: exists ? (bundleFingerprint(bundlePath) ?? null) : null,
+        escapes: targetEscapesRoot(root, bundlePath),
       };
     }
   }
@@ -289,6 +345,23 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
   }
 
   applyLedgerMutation(ledger, action);
+
+  // The peer record is published only once its own slice landed: a config
+  // holding groups no record claims is a leak, and a record claiming groups
+  // no config holds authorizes deleting the user's.
+  if (action.peer) {
+    try {
+      savePeerState(action.peer.asbHome, action.peer.target, action.peer.state);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ...toEntry(action),
+        outcome: 'failed',
+        detail: 'write-error',
+        reason: `hook ownership state could not be saved (${message})`,
+      };
+    }
+  }
   return toEntry(action);
 }
 
@@ -326,7 +399,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       table: APP_ROWS,
       now: new Date().toISOString(),
     };
-    let actions = [...planRules(planInput), ...planSkills(planInput)];
+    let actions = [...planRules(planInput), ...planSkills(planInput), ...planHooks(planInput)];
 
     // Filters select which actions execute, never which inputs the planner saw.
     if (opts.apps && opts.apps.length > 0) {

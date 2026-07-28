@@ -1,7 +1,8 @@
 import os from 'node:os';
 import path from 'node:path';
 import type { Homes } from './config.js';
-import { rawBody, wrapMdcFrontmatter } from './dialects.js';
+import { filterCodexHooks, rawBody, wrapMdcFrontmatter } from './dialects.js';
+import type { HookEventMap } from './library.js';
 
 /**
  * The app × type table. Variation that fits a column is a column: detect
@@ -44,11 +45,27 @@ export interface SkillsTargetRow {
   reserved: readonly string[];
 }
 
+export interface HooksTargetRow {
+  /** Directory whose resolved tree contains the config and the bundles; the containment root. */
+  root(homes: Homes): string;
+  /** JSON config whose `hooks` key holds the event map. */
+  path(homes: Homes): string;
+  /** Managed parent: each distributed bundle hook is a child directory of this. */
+  bundleDir(homes: Homes): string;
+  /** The file exists only to carry hooks, so an emptied one is removed outright. */
+  deleteWhenEmpty: boolean;
+  /** The app-native subset of the library shape, when the app supports less than Claude. */
+  filter?: (hooks: HookEventMap) => HookEventMap;
+  /** Peer state target name: `<ASB_HOME>/state/hooks/<target>.json`. */
+  stateTarget: 'claude-code' | 'codex';
+}
+
 export interface AppRow {
   id: string;
   detectDir(homes: Homes): string;
   rules?: RulesTargetRow;
   skills?: SkillsTargetRow;
+  hooks?: HooksTargetRow;
 }
 
 /**
@@ -84,6 +101,13 @@ export const APP_ROWS: readonly AppRow[] = [
       dir: (homes) => path.join(homes.agentsHome, '.claude', 'skills'),
       reserved: [],
     },
+    hooks: {
+      root: (homes) => path.join(homes.agentsHome, '.claude'),
+      path: (homes) => path.join(homes.agentsHome, '.claude', 'settings.json'),
+      bundleDir: (homes) => path.join(homes.agentsHome, '.claude', 'hooks', 'managed'),
+      deleteWhenEmpty: false,
+      stateTarget: 'claude-code',
+    },
   },
   {
     id: 'claude-desktop',
@@ -102,6 +126,14 @@ export const APP_ROWS: readonly AppRow[] = [
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       dir: (homes) => path.join(homes.agentsHome, '.codex', 'skills'),
       reserved: ['.system'],
+    },
+    hooks: {
+      root: (homes) => path.join(homes.agentsHome, '.codex'),
+      path: (homes) => path.join(homes.agentsHome, '.codex', 'hooks.json'),
+      bundleDir: (homes) => path.join(homes.agentsHome, '.codex', 'hooks', 'managed'),
+      deleteWhenEmpty: true,
+      filter: filterCodexHooks,
+      stateTarget: 'codex',
     },
   },
   {

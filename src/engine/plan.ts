@@ -1,8 +1,11 @@
 import path from 'node:path';
-import { AGENTS_SKILLS_UNION, type AppRow } from './apps.js';
+import { isDeepStrictEqual } from 'node:util';
+import { AGENTS_SKILLS_UNION, type AppRow, type HooksTargetRow } from './apps.js';
 import { effectiveIncludeDelimiters, effectiveSelection, type ResolvedConfig } from './config.js';
+import { preferHomeVar } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
-import type { Component, LibraryInventory } from './library.js';
+import type { Component, HookEventMap, LibraryInventory } from './library.js';
+import { type HookTarget, type PeerState, peerStateHasContent } from './peer.js';
 import type { Outcome } from './report.js';
 import {
   type BundleFile,
@@ -42,6 +45,21 @@ export interface CapturedBundle {
   escapes?: boolean;
 }
 
+export interface CapturedHookApp {
+  path: string;
+  exists: boolean;
+  /** Current bytes; null when the config is absent or unreadable. */
+  content: string | null;
+  /** Parsed config root; null when it is not a JSON object. */
+  config: Record<string, unknown> | null;
+  /** Why the config could not be parsed, when it could not. */
+  error?: string;
+  /** Parent chain of the config path resolves outside the app root. */
+  escapes?: boolean;
+  /** Peer ownership record: the shared file merged with any device copies. */
+  state: PeerState;
+}
+
 export interface SyncCapture {
   /** Detection probe results per app id. */
   installed: Record<string, boolean>;
@@ -51,6 +69,8 @@ export interface SyncCapture {
   bundles: Record<string, CapturedBundle>;
   /** Non-dot child directory names per managed skills parent. */
   bundleDirs: Record<string, string[]>;
+  /** Hook config and peer ownership state per app id. */
+  hooks: Record<string, CapturedHookApp>;
 }
 
 export interface Action {
@@ -80,6 +100,12 @@ export interface Action {
   expectedHash?: string | null;
   /** Ledger mutation carried by this action. */
   ledger?: { op: 'put'; entry: LedgerEntry } | { op: 'delete'; key: string };
+  /**
+   * Peer ownership record to publish once the action's own write succeeds.
+   * Hook groups live in a file every peer reads, so their ownership travels
+   * with this record instead of a ledger entry.
+   */
+  peer?: { asbHome: string; target: HookTarget; state: PeerState };
 }
 
 export interface PlanInput {
@@ -883,6 +909,385 @@ export function planSkills(input: PlanInput): Action[] {
           'directory matches a library skill by name but has no ownership record; delete it yourself or enable the skill to adopt it',
       });
     }
+  }
+
+  return actions.map((action) => {
+    if (
+      (action.op === 'write' || action.op === 'remove') &&
+      action.path !== null &&
+      capture.bundles[action.path]?.escapes === true
+    ) {
+      return {
+        app: action.app,
+        type: action.type,
+        id: action.id,
+        path: action.path,
+        op: 'none' as const,
+        outcome: 'blocked' as const,
+        detail: 'path-escape',
+        reason: `parent directory of ${action.path} resolves outside the app root; not touching it`,
+      };
+    }
+    return action;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Hooks: a JSON slice inside a config the app and the user also write
+// ---------------------------------------------------------------------------
+
+const HOOK_DIR_PLACEHOLDERS = [
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+  '${HOOK_DIR}',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+  '${CLAUDE_PLUGIN_ROOT}/hooks',
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: intentional literal placeholder
+  '${CLAUDE_PLUGIN_ROOT}\\hooks',
+  '$env:CLAUDE_PLUGIN_ROOT\\hooks',
+];
+
+/**
+ * Render one library entry into the groups an app config carries: the bundle
+ * placeholders resolve to the distributed directory, commands become
+ * `$HOME`-portable, and `_asb*` metadata is stripped — an app config holds no
+ * ASB marker of any kind, which is why ownership needs the peer record.
+ */
+function renderHookGroups(
+  hooks: HookEventMap,
+  bundleDir: string | undefined
+): Record<string, unknown[]> {
+  const rendered: Record<string, unknown[]> = {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    rendered[event] = groups.map((group) => {
+      const clean: Record<string, unknown> = { ...group };
+      for (const key of Object.keys(clean)) {
+        if (key.startsWith('_asb')) delete clean[key];
+      }
+      clean.hooks = group.hooks.map((handler) => {
+        const rewritten: Record<string, unknown> = { ...handler };
+        const commands = {
+          command: handler.command,
+          commandWindows: handler.commandWindows ?? handler.command_windows,
+        };
+        delete rewritten.command_windows;
+        for (const key of Object.keys(rewritten)) {
+          if (key.startsWith('_asb')) delete rewritten[key];
+        }
+        for (const field of ['command', 'commandWindows'] as const) {
+          const original = commands[field];
+          if (typeof original !== 'string') continue;
+          const resolved = bundleDir
+            ? HOOK_DIR_PLACEHOLDERS.reduce(
+                (command, placeholder) => command.replaceAll(placeholder, bundleDir),
+                original
+              )
+            : original;
+          rewritten[field] = preferHomeVar(resolved);
+        }
+        return rewritten;
+      });
+      return clean;
+    });
+  }
+  return rendered;
+}
+
+/**
+ * Count-bounded removal of recorded groups: each recorded instance takes out
+ * the first deep-equal group and no more, so a user's own duplicate of a
+ * managed group and a hand-edited copy both survive. Emptied events go.
+ */
+function spliceRecordedGroups(
+  existing: Record<string, unknown[]>,
+  recorded: Record<string, unknown[]>
+): { hooks: Record<string, unknown[]>; removed: boolean } {
+  const hooks: Record<string, unknown[]> = {};
+  let removed = false;
+  for (const [event, groups] of Object.entries(existing)) {
+    const remaining = [...groups];
+    for (const group of recorded[event] ?? []) {
+      const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, group));
+      if (index >= 0) {
+        remaining.splice(index, 1);
+        removed = true;
+      }
+    }
+    if (remaining.length > 0) hooks[event] = remaining;
+  }
+  return { hooks, removed };
+}
+
+/** The shape asb can merge into, or the reason it cannot. */
+function invalidHooksShape(config: Record<string, unknown>): string | null {
+  const hooks = config.hooks;
+  if (hooks === undefined) return null;
+  if (typeof hooks !== 'object' || hooks === null || Array.isArray(hooks)) {
+    return '"hooks" must be an object';
+  }
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) return `"hooks.${event}" must be an array`;
+  }
+  return null;
+}
+
+/**
+ * Hooks planner. The slice is a set of matcher groups inside a config file
+ * the app and the user also own, so nothing is positional: the peer record
+ * says exactly which groups asb appended, and only those come back out.
+ *
+ * Proofs for this slice: (4) the peer record — the sole authority for
+ * splicing groups and for deleting a distributed bundle directory. Proof (1)
+ * has no carrier here (the ledger records no hook groups), (2) no marker may
+ * enter an app config, and (3) byte-identity would claim a group the user
+ * wrote by hand. Shape validation runs before any write, so a config asb
+ * cannot merge into never gets a partial distribution.
+ */
+export function planHooks(input: PlanInput): Action[] {
+  const { config, inventory, capture, table } = input;
+  const actions: Action[] = [];
+
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === 'hooks')
+      .map((component) => [component.id, component])
+  );
+  const failedIds = new Set(
+    inventory.failed.filter((failure) => failure.type === 'hooks').map((failure) => failure.id)
+  );
+  const assumeInstalled = new Set(config.apps.assumeInstalled);
+
+  const rows: { app: string; row: HooksTargetRow; selected: string[] }[] = [];
+  const missingUnion = new Set<string>();
+  for (const appId of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === appId)?.hooks;
+    if (!row) continue;
+    if (capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
+    const selected = effectiveSelection(config, appId, 'hooks');
+    for (const id of selected) {
+      if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
+    }
+    rows.push({ app: appId, row, selected });
+  }
+
+  for (const id of missingUnion) {
+    actions.push({
+      app: null,
+      type: 'hooks',
+      id,
+      path: null,
+      op: 'none',
+      outcome: 'missing',
+      reason: `enabled but not in the library (expected ${config.homes.asbHome}/hooks/${id}.json)`,
+    });
+  }
+
+  for (const { app, row, selected } of rows) {
+    const configPath = row.path(config.homes);
+    const root = row.root(config.homes);
+    const captured = capture.hooks[app];
+    if (!captured) continue;
+    const base = { app, type: 'hooks', id: null, path: configPath };
+
+    if (captured.escapes === true) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'path-escape',
+        reason: `parent directory of ${configPath} resolves outside the app root; not touching it`,
+      });
+      continue;
+    }
+    if (captured.error !== undefined || captured.config === null) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: `cannot read ${path.basename(configPath)}, hooks not merged: ${captured.error ?? 'config root must be a JSON object'}`,
+      });
+      continue;
+    }
+    const invalid = invalidHooksShape(captured.config);
+    if (invalid !== null) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'invalid-shape',
+        reason: `${path.basename(configPath)} has invalid shape: ${invalid}; resolve it by hand, then re-run asb sync`,
+      });
+      continue;
+    }
+
+    const state = captured.state;
+    const { hooks: remainder, removed } = spliceRecordedGroups(
+      (captured.config.hooks ?? {}) as Record<string, unknown[]>,
+      state.events
+    );
+
+    // Bundle files land before the config that points at them.
+    const writes: Action[] = [];
+    const desired: Record<string, unknown[]> = {};
+    const owned: string[] = [];
+    let distributed = 0;
+    for (const id of selected) {
+      const component = byId.get(id);
+      if (!component?.hooks) continue;
+      const source = row.filter ? row.filter(component.hooks) : component.hooks;
+      if (Object.keys(source).length === 0) {
+        actions.push({
+          app,
+          type: 'hooks',
+          id,
+          path: configPath,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'unsupported',
+          reason: `${app} supports none of this hook's events or handlers`,
+        });
+        continue;
+      }
+      distributed++;
+
+      const bundlePath = component.files ? path.join(row.bundleDir(config.homes), id) : undefined;
+      for (const [event, groups] of Object.entries(renderHookGroups(source, bundlePath))) {
+        if (!desired[event]) desired[event] = [];
+        desired[event].push(...groups);
+      }
+      if (!bundlePath) continue;
+
+      owned.push(id);
+      const files = component.files ?? [];
+      const live = capture.bundles[bundlePath] ?? { exists: false, files: null, fingerprint: null };
+      const desiredRels = new Set(files.map((file) => file.rel));
+      const byRel =
+        live.files !== null ? new Map(live.files.map((file) => [file.rel, file])) : null;
+      const clean =
+        byRel !== null &&
+        live.files?.length === files.length &&
+        files.every((file) => {
+          const target = byRel.get(file.rel);
+          return (
+            target !== undefined &&
+            target.hash === hashContent(file.bytes) &&
+            targetModeMatchesSourceExecutableBits(file.mode, target.mode)
+          );
+        });
+      writes.push(
+        clean
+          ? { app, type: 'hooks', id, path: bundlePath, op: 'none', outcome: 'unchanged' }
+          : {
+              app,
+              type: 'hooks',
+              id,
+              path: bundlePath,
+              op: 'write',
+              outcome: 'written',
+              detail: live.exists ? 'updated' : 'created',
+              bundle: {
+                files,
+                stale: (live.files ?? [])
+                  .map((file) => file.rel)
+                  .filter((rel) => !desiredRels.has(rel)),
+              },
+              root,
+              expectedHash: live.fingerprint,
+            }
+      );
+    }
+
+    // Nothing selected, nothing of ours in the config, no record: the run has
+    // no business rewriting a config or a state file it does not own.
+    if (distributed === 0 && !removed && !peerStateHasContent(state)) continue;
+
+    // Deselected bundle directories: the peer record is the only thing that
+    // says asb put them there, so it is the only thing that may remove them.
+    const removals: Action[] = [];
+    const retained: string[] = [];
+    for (const id of state.bundles) {
+      if (owned.includes(id)) continue;
+      const bundlePath = path.join(row.bundleDir(config.homes), id);
+      const live = capture.bundles[bundlePath];
+      if (!live?.exists) continue;
+      if (live.files === null || live.fingerprint === null) {
+        retained.push(id);
+        removals.push({
+          app,
+          type: 'hooks',
+          id,
+          path: bundlePath,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'distributed hook bundle now contains symlinks or special files asb cannot prove ownership of; delete it yourself',
+        });
+        continue;
+      }
+      removals.push({
+        app,
+        type: 'hooks',
+        id,
+        path: bundlePath,
+        op: 'remove',
+        outcome: 'removed',
+        bundle: { files: [], stale: live.files.map((file) => file.rel) },
+        root,
+        expectedHash: live.fingerprint,
+      });
+    }
+
+    const merged: Record<string, unknown[]> = {};
+    for (const [event, groups] of Object.entries(remainder)) merged[event] = [...groups];
+    for (const [event, groups] of Object.entries(desired)) {
+      if (!merged[event]) merged[event] = [];
+      merged[event].push(...groups);
+    }
+    const next = { ...captured.config };
+    if (Object.keys(merged).length === 0) delete next.hooks;
+    else next.hooks = merged;
+
+    const peer: Action['peer'] = {
+      asbHome: config.homes.asbHome,
+      target: row.stateTarget,
+      state: { version: 1, events: desired, bundles: [...owned, ...retained], legacyBundles: [] },
+    };
+    const currentHash = captured.content !== null ? hashContent(captured.content) : null;
+    const content = `${JSON.stringify(next, null, 2)}\n`;
+
+    // A file that exists only to carry hooks goes away with them; one asb
+    // shares with the app (settings.json) never does.
+    const emptied = distributed === 0 && Object.keys(merged).length === 0;
+    let configAction: Action;
+    if (row.deleteWhenEmpty && emptied && Object.keys(next).length === 0) {
+      configAction = captured.exists
+        ? {
+            ...base,
+            op: 'remove',
+            outcome: 'removed',
+            detail: 'cleared',
+            root,
+            expectedHash: currentHash,
+            peer,
+          }
+        : { ...base, op: 'none', outcome: 'unchanged', peer };
+    } else if (captured.content === content) {
+      configAction = { ...base, op: 'none', outcome: 'unchanged', peer };
+    } else {
+      configAction = {
+        ...base,
+        op: 'write',
+        outcome: 'written',
+        detail: emptied ? 'cleared' : 'merged',
+        content,
+        root,
+        expectedHash: currentHash,
+        peer,
+      };
+    }
+
+    actions.push(...writes, configAction, ...removals);
   }
 
   return actions.map((action) => {
