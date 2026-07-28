@@ -12,6 +12,7 @@ import {
   renderedRules,
   ruleFilePath,
   seedRule,
+  seedSkill,
   withScratchHomes,
   writeUserConfig,
 } from './helpers/scratch.js';
@@ -251,5 +252,43 @@ test('a symlink cycle at the target fails the entry and never replaces the link'
     assert.equal(report.exitCode, 1);
     assert.ok(fs.lstatSync(target).isSymbolicLink(), 'the cyclic link is preserved');
     assert.ok(fs.lstatSync(partner).isSymbolicLink());
+  });
+});
+
+test('a cyclic directory contains to its own rows instead of killing the run', async () => {
+  await withScratchHomes(async (homes) => {
+    seedRule(homes, 'base.md', 'Always be kind.\n');
+    seedSkill(homes, 'alpha');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex", "claude-code"]\n\n[rules]\nenabled = ["base"]\n\n[skills]\nenabled = ["alpha"]\n'
+    );
+    installApps(homes, 'claude-code');
+    const codexRoot = path.join(homes.agentsHome, '.codex');
+    const codexPartner = path.join(homes.agentsHome, '.codex-loop');
+    fs.symlinkSync(codexPartner, codexRoot);
+    fs.symlinkSync(codexRoot, codexPartner);
+    const skillsDir = path.join(homes.agentsHome, '.claude', 'skills');
+    const skillsPartner = path.join(homes.agentsHome, '.claude', 'skills-loop');
+    fs.rmSync(skillsDir, { recursive: true, force: true });
+    fs.symlinkSync(skillsPartner, skillsDir);
+    fs.symlinkSync(skillsDir, skillsPartner);
+
+    // One pathological link must not disable syncing for everything else.
+    const report = await runSync();
+
+    const rules = report.entries.find(
+      (entry) => entry.app === 'claude-code' && entry.type === 'rules'
+    );
+    assert.equal(rules?.outcome, 'written');
+    const skill = report.entries.find(
+      (entry) => entry.app === 'claude-code' && entry.type === 'skills' && entry.id === 'alpha'
+    );
+    assert.equal(skill?.outcome, 'blocked');
+    assert.equal(skill?.detail, 'path-escape');
+    const codex = report.entries.find((entry) => entry.app === 'codex');
+    assert.equal(codex?.outcome, 'skipped');
+    assert.equal(codex?.detail, 'app-not-installed');
+    assert.equal(report.exitCode, 1);
   });
 });

@@ -463,10 +463,16 @@ export function isContainedIn(root: string, candidate: string): boolean {
  * directory swapped for a link pointing elsewhere is an escape.
  */
 export function targetEscapesRoot(root: string, targetPath: string): boolean {
-  const resolvedRoot = resolveWritePath(root);
-  const resolvedParent = resolveWritePath(path.dirname(path.resolve(targetPath)));
-  const relative = path.relative(resolvedRoot, resolvedParent);
-  return relative !== '' && (relative.startsWith('..') || path.isAbsolute(relative));
+  try {
+    const resolvedRoot = resolveWritePath(root);
+    const resolvedParent = resolveWritePath(path.dirname(path.resolve(targetPath)));
+    const relative = path.relative(resolvedRoot, resolvedParent);
+    return relative !== '' && (relative.startsWith('..') || path.isAbsolute(relative));
+  } catch {
+    // Unresolvable (a link cycle in the chain): not provably contained. The
+    // row blocks; the run and every other app continue.
+    return true;
+  }
 }
 
 /**
