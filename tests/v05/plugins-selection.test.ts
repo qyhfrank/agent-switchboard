@@ -222,6 +222,40 @@ test('an ambiguous bare name resolves to nothing rather than to one of its claim
   });
 });
 
+test('a per-app plugin override is honored in either spelling of the ref', async () => {
+  await withScratchHomes(async (scratch) => {
+    installApps(scratch, 'claude-code', 'codex');
+    seedMarketplace(scratch, 'shop', 'shop', 'pack', { 'rules/packed.md': 'PACK RULE BODY\n' });
+    const removal = (enabled: string, removed: string): string =>
+      [
+        '[applications]',
+        'enabled = ["claude-code", "codex"]',
+        '',
+        '[plugins]',
+        `enabled = ["${enabled}"]`,
+        '',
+        '[applications.codex.plugins]',
+        `remove = ["${removed}"]`,
+        '',
+      ].join('\n');
+
+    // The base list and the override are written in different spellings of
+    // the same ref, which is the ergonomic form the bare name exists for.
+    writeUserConfig(scratch, removal('pack@shop', 'pack'));
+    assert.deepEqual(effectivePlugins(expanded(), 'claude-code'), ['pack@shop']);
+    assert.deepEqual(effectivePlugins(expanded(), 'codex'), []);
+
+    writeUserConfig(scratch, removal('pack', 'pack@shop'));
+    assert.deepEqual(effectivePlugins(expanded(), 'codex'), []);
+
+    await runSync();
+    assert.match(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), /PACK RULE BODY/);
+    const codexTarget = ruleFilePath(scratch, 'codex');
+    const codexBody = fs.existsSync(codexTarget) ? fs.readFileSync(codexTarget, 'utf-8') : '';
+    assert.doesNotMatch(codexBody, /PACK RULE BODY/, 'the removed plugin never reaches codex');
+  });
+});
+
 test('a plugin rule reaches the app target through a real sync', async () => {
   await withScratchHomes(async (scratch) => {
     installApps(scratch, 'claude-code');

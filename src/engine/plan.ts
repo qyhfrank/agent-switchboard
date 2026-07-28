@@ -20,7 +20,7 @@ import {
   type TargetFile,
   targetModeMatchesSourceExecutableBits,
 } from './shapes.js';
-import type { ReadinessRow, SourceCatalog, UpdateRow } from './sources.js';
+import type { EntryRow, ReadinessRow, SourceCatalog, UpdateRow } from './sources.js';
 
 /**
  * The pure planner: selection × inventory × table × ledger × captured fs
@@ -1437,6 +1437,8 @@ export interface SourcePlanInput {
   updates: readonly UpdateRow[];
   /** Sources a preview would refresh; empty on a real run. */
   pendingRefresh: readonly string[];
+  /** External marketplace entries the sources phase fetched, or would. */
+  entries: readonly EntryRow[];
   dryRun: boolean;
 }
 
@@ -1469,11 +1471,16 @@ function sourceRow(
  * planner, so nothing here is left for the executor to do.
  */
 export function planSources(input: SourcePlanInput): Action[] {
-  const { config, catalog, readiness, updates, pendingRefresh, dryRun } = input;
+  const { config, catalog, readiness, updates, pendingRefresh, entries, dryRun } = input;
   const actions: Action[] = [];
 
+  // A namespace resolution refused has no location to be ready at, and the
+  // resolution row names what the user wrote rather than a path derived from
+  // it, so that row is the one worth printing.
+  const unresolved = new Set(catalog.unresolved.map((failure) => failure.namespace));
   for (const row of readiness) {
     if (row.status === 'error') {
+      if (unresolved.has(row.namespace)) continue;
       actions.push(
         sourceRow(row.namespace, row.path, 'failed', 'source-error', row.error ?? 'unknown error')
       );
@@ -1531,14 +1538,37 @@ export function planSources(input: SourcePlanInput): Action[] {
     );
   }
 
+  // An external entry the run reached says so in its own row: fetched, or a
+  // preview of the fetch, or the reason the fetch did not happen.
+  for (const entry of entries) {
+    if (entry.status === 'pending') {
+      actions.push(
+        sourceRow(entry.id, entry.url, 'pending', 'clone', `would fetch from ${entry.url}`)
+      );
+    } else if (entry.status === 'fetched') {
+      actions.push(sourceRow(entry.id, entry.url, 'written', undefined, `fetched ${entry.url}`));
+    } else {
+      actions.push(
+        sourceRow(
+          entry.id,
+          entry.url,
+          'missing',
+          undefined,
+          `enabled but its content could not be fetched from ${entry.url}: ${entry.error ?? 'unknown error'}`
+        )
+      );
+    }
+  }
+
   // An enabled plugin whose content is not on disk names where asb looked, so
   // the fix is visible without a second command. It never authorizes removal:
   // absent content is not deselection.
   const enabledPlugins = new Set(
     config.apps.enabled.flatMap((appId) => effectivePlugins(config, appId))
   );
+  const reported = new Set(entries.map((entry) => entry.id));
   for (const absent of catalog.absent) {
-    if (!enabledPlugins.has(absent.id)) continue;
+    if (reported.has(absent.id) || !enabledPlugins.has(absent.id)) continue;
     const declared = absent.url ? ` (declared as ${absent.url})` : '';
     actions.push(
       sourceRow(

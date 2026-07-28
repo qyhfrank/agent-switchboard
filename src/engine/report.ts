@@ -55,13 +55,19 @@ export const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
   'missing',
 ]);
 
-/** Strip credentials from URL-shaped text (https://user:token@host, token@host). */
+/**
+ * Strip credentials from URL-shaped text. A secret travels in three spellings:
+ * `//user:token@host`, a bare `//token@host`, and a query or fragment
+ * parameter — the last is what `credentialFreeGitUrl` drops wholesale, and
+ * nothing downstream of a location needs it to stay readable.
+ */
 export function redactCredentials(text: string): string {
   return (
     text
       .replace(/(\/\/[^/@\s:]+):([^@\s/]+)@/g, '$1:***@')
       // Any remaining lone userinfo is a bare token (ghp_..., oauth token URLs).
       .replace(/(\/\/)([^@\s/:]+)@/g, '$1***@')
+      .replace(/([a-z][a-z0-9+.-]*:\/\/[^\s'"]*?)[?#][^\s'"]*/gi, '$1')
   );
 }
 
@@ -155,14 +161,24 @@ export function renderExplain(slices: readonly ExplainSlice[], target: string): 
   return `${lines.join('\n')}\n`;
 }
 
-export function buildReport(scope: ReportScope, entries: readonly ReportEntry[]): Report {
+export function buildReport(
+  scope: ReportScope,
+  entries: readonly ReportEntry[],
+  /** A pre-write abort: the run stopped before distribution and exits 2. */
+  opts: { aborted?: boolean } = {}
+): Report {
   const summary: Partial<Record<Outcome, number>> = {};
   let failing = false;
 
+  // A failed source carries its configured location, and a configured
+  // location can carry a token, so `path` passes the redactor beside `reason`.
   const redacted = entries.map((entry) => {
     summary[entry.outcome] = (summary[entry.outcome] ?? 0) + 1;
     if (FAILING_OUTCOMES.has(entry.outcome)) failing = true;
-    return entry.reason ? { ...entry, reason: redactCredentials(entry.reason) } : entry;
+    const clean = { ...entry };
+    if (entry.reason) clean.reason = redactCredentials(entry.reason);
+    if (entry.path) clean.path = redactCredentials(entry.path);
+    return clean;
   });
 
   return {
@@ -170,6 +186,6 @@ export function buildReport(scope: ReportScope, entries: readonly ReportEntry[])
     scope,
     entries: redacted,
     summary,
-    exitCode: failing ? 1 : 0,
+    exitCode: opts.aborted ? 2 : failing ? 1 : 0,
   };
 }

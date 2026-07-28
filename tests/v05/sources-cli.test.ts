@@ -4,6 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { main, runAddSource, runRemoveSource, runSync } from '../../src/engine/cli.js';
 import { loadConfig } from '../../src/engine/config.js';
+import { entriesRoot } from '../../src/engine/entries.js';
 import { readSourceCatalog } from '../../src/engine/sources.js';
 import {
   commitAndPush,
@@ -104,6 +105,49 @@ test('removing a source retires every entry it enabled, one reported row each', 
     assert.match(after, /"core"/, 'an unrelated selection is untouched');
     assert.match(after, /# keep core/, 'comments survive the edit');
     assert.doesNotMatch(after, /\[plugins\.sources\][\s\S]*team =/);
+  });
+});
+
+test('removing a source retires the bare-name spellings its plugins were enabled by', async () => {
+  await withScratchHomes(async (scratch) => {
+    seedSource(scratch, 'shop', {
+      '.claude-plugin/marketplace.json': JSON.stringify({
+        name: 'shop',
+        plugins: [{ name: 'pack', source: './pack' }],
+      }),
+      'pack/rules/style.md': '# Style\n',
+    });
+    writeUserConfig(
+      scratch,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[rules]',
+        'enabled = ["pack:style"]',
+        '',
+        '[plugins]',
+        'enabled = ["pack"]',
+        '',
+        '[plugins.sources]',
+        `shop = ${JSON.stringify(path.join(scratch.asbHome, 'plugins', 'shop'))}`,
+        '',
+      ].join('\n')
+    );
+
+    const report = await runRemoveSource('shop');
+
+    // The user enabled both through their bare aliases; leaving those behind
+    // lets the next source claiming the name re-enable foreign content.
+    const retired = report.entries.filter((entry) => entry.detail === 'retired');
+    assert.deepEqual(
+      retired.map((entry) => `${entry.type}/${entry.id}`).sort(),
+      ['plugins/pack', 'rules/pack:style'],
+      JSON.stringify(report.entries, null, 2)
+    );
+    const after = userConfig(scratch);
+    assert.doesNotMatch(after, /"pack"/);
+    assert.doesNotMatch(after, /"pack:style"/);
   });
 });
 
@@ -212,6 +256,149 @@ test('a configured clone reports as pending on a preview and materializes on a r
   });
 });
 
+test('a selected external marketplace entry previews, fetches, and distributes', async () => {
+  await withScratchHomes(async (scratch) => {
+    installApps(scratch, 'claude-code');
+    const fixture = createGitFixture(scratch.root, 'external-pack');
+    writeFixtureFile(fixture, 'rules/remote.md', 'Remote rule body.\n');
+    commitAndPush(fixture, 'seed');
+    seedSource(scratch, 'shop', {
+      '.claude-plugin/marketplace.json': JSON.stringify({
+        name: 'shop',
+        plugins: [{ name: 'remote-pack', source: { source: 'git', url: fixture.bareRepo } }],
+      }),
+    });
+    writeUserConfig(
+      scratch,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[plugins]',
+        'enabled = ["remote-pack@shop"]',
+        '',
+      ].join('\n')
+    );
+
+    const preview = await runSync({ dryRun: true });
+    const pending = preview.entries.find((entry) => entry.id === 'remote-pack@shop');
+    assert.ok(pending, JSON.stringify(preview.entries, null, 2));
+    assert.equal(pending.outcome, 'pending');
+    assert.equal(pending.detail, 'clone');
+    assert.equal(
+      fs.existsSync(entriesRoot(loadConfig().homes)),
+      false,
+      'a preview fetches nothing'
+    );
+
+    const report = await runSync();
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.match(
+      fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'),
+      /Remote rule body\./
+    );
+  });
+});
+
+test('an external entry asb cannot fetch stays visible instead of silent', async () => {
+  await withScratchHomes(async (scratch) => {
+    installApps(scratch, 'claude-code');
+    seedRule(scratch, 'core.md', 'Be kind.\n');
+    seedSource(scratch, 'shop', {
+      '.claude-plugin/marketplace.json': JSON.stringify({
+        name: 'shop',
+        plugins: [{ name: 'gone', source: { source: 'git', url: 'http://127.0.0.1:1/none.git' } }],
+      }),
+    });
+    writeUserConfig(
+      scratch,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[rules]',
+        'enabled = ["core"]',
+        '',
+        '[plugins]',
+        'enabled = ["gone@shop"]',
+        '',
+      ].join('\n')
+    );
+
+    const report = await runSync();
+
+    const row = report.entries.find((entry) => entry.id === 'gone@shop');
+    assert.ok(row, JSON.stringify(report.entries, null, 2));
+    assert.equal(row.outcome, 'missing');
+    // A content failure inside a ready source is contained: siblings still land.
+    assert.equal(report.exitCode, 1);
+    assert.equal(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), 'Be kind.\n');
+  });
+});
+
+test('a readiness failure stops the run before it distributes anything', async () => {
+  await withScratchHomes(async (scratch) => {
+    installApps(scratch, 'claude-code');
+    seedRule(scratch, 'core.md', 'Be kind.\n');
+    const fixture = createGitFixture(scratch.root, 'healthy-pack');
+    writeFixtureFile(fixture, 'rules/tone.md', 'Be brief.\n');
+    commitAndPush(fixture, 'seed');
+    writeUserConfig(
+      scratch,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[rules]',
+        'enabled = ["core"]',
+        '',
+        '[plugins]',
+        'enabled = ["healthy"]',
+        '',
+        '[plugins.sources]',
+        'broken = { url = "http://127.0.0.1:1/missing.git", type = "clone" }',
+        `healthy = { url = ${JSON.stringify(`file://${fixture.bareRepo}`)}, type = "clone" }`,
+        '',
+      ].join('\n')
+    );
+
+    const report = await runSync();
+
+    // Distributing against a partial inventory would re-render every
+    // aggregate without the broken source's members.
+    assert.equal(report.exitCode, 2, JSON.stringify(report.entries, null, 2));
+    assert.ok(
+      report.entries.some((entry) => entry.id === 'broken' && entry.outcome === 'failed'),
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.equal(
+      fs.existsSync(ruleFilePath(scratch, 'claude-code')),
+      false,
+      'no app target was touched'
+    );
+  });
+});
+
+test('an unreadable manifest inside a ready source stays a contained row', async () => {
+  await withScratchHomes(async (scratch) => {
+    installApps(scratch, 'claude-code');
+    seedRule(scratch, 'core.md', 'Be kind.\n');
+    seedSource(scratch, 'broken-shop', { '.claude-plugin/marketplace.json': '{ not json' });
+    writeUserConfig(
+      scratch,
+      ['[applications]', 'enabled = ["claude-code"]', '', '[rules]', 'enabled = ["core"]', ''].join(
+        '\n'
+      )
+    );
+
+    const report = await runSync();
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.ok(report.entries.some((entry) => entry.detail === 'source-error'));
+    assert.equal(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), 'Be kind.\n');
+  });
+});
+
 test('add declares a local directory and a remote, and persists no credential', async () => {
   await withScratchHomes(async (scratch) => {
     const local = path.join(scratch.root, 'local-lib');
@@ -250,6 +437,44 @@ test('nothing leaving the command boundary carries a credential', async () => {
     assert.equal(result.code, 2);
     assert.doesNotMatch(result.err, /ghp_secret123/, result.err);
     assert.match(result.err, /user:\*\*\*@github\.com/);
+
+    // A token carried as a query parameter is the same secret in another
+    // spelling, echoed by the same parse error.
+    writeUserConfig(
+      scratch,
+      [
+        '[plugins.sources]',
+        'tools = { url = "https://example.com/org/repo.git?private_token=SECRETVALUE123" }',
+        'this line is malformed',
+        '',
+      ].join('\n')
+    );
+
+    const query = await runCli(['status']);
+    assert.equal(query.code, 2);
+    assert.doesNotMatch(query.err, /SECRETVALUE123/, query.err);
+  });
+});
+
+test('a credential in a configured URL never reaches --json or explain', async () => {
+  await withScratchHomes(async (scratch) => {
+    // Any resolution failure carries the configured location into the report;
+    // an invalid namespace is only the cheapest way to reach it.
+    writeUserConfig(
+      scratch,
+      [
+        '[plugins.sources]',
+        '"bad ns" = { url = "https://gituser:ghp_SUPERSECRET123@example.com/org/repo.git" }',
+        '',
+      ].join('\n')
+    );
+
+    const json = await runCli(['status', '--json']);
+    assert.doesNotMatch(json.out, /ghp_SUPERSECRET123/, json.out);
+    assert.match(json.out, /gituser:\*\*\*@example\.com/);
+
+    const explained = await runCli(['explain', 'bad ns']);
+    assert.doesNotMatch(explained.out, /ghp_SUPERSECRET123/, explained.out);
   });
 });
 

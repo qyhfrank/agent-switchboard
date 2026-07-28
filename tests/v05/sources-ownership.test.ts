@@ -394,6 +394,34 @@ test('one broken source does not block the healthy ones', async () => {
   });
 });
 
+test('a namespace that escapes the cache root never reaches a clone or a refresh', async () => {
+  await withScratchHomes(async (scratch) => {
+    const { bareRepo } = createBareRemote(path.join(scratch.root, 'escape-fixture'));
+    const escaped = path.join(scratch.root, 'escaped-source');
+    writeUserConfig(
+      scratch,
+      ['[plugins.sources]', `"../escaped-source" = { url = "${bareRepo}", type = "clone" }`].join(
+        '\n'
+      )
+    );
+
+    const readiness = ensureSourcesReady(loadConfig());
+    assert.deepEqual(
+      readiness.map((row) => [row.namespace, row.status]),
+      [['../escaped-source', 'error']]
+    );
+    assert.match(readiness[0]?.error ?? '', /Invalid namespace/);
+    assert.equal(fs.existsSync(escaped), false, 'nothing was created outside the cache root');
+
+    const updates = updateSources(loadConfig());
+    assert.deepEqual(
+      updates.map((row) => [row.namespace, row.status]),
+      [['../escaped-source', 'error']]
+    );
+    assert.equal(fs.existsSync(escaped), false);
+  });
+});
+
 test('readiness re-clones when the cache directory went missing, and skips local sources', async () => {
   await withScratchHomes(async (scratch) => {
     const { bareRepo } = createBareRemote(path.join(scratch.root, 'reclone-fixture'));

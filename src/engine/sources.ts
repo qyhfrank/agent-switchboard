@@ -8,6 +8,7 @@ import {
   type Homes,
   type ResolvedConfig,
   SELECTION_TYPES,
+  selectedPluginIds,
 } from './config.js';
 import {
   assertCacheRootOwned,
@@ -496,6 +497,10 @@ function prepareManagedClones(
     let previousCacheOwnerPath: string | undefined;
     let sourceChanged = false;
     try {
+      // Readiness is the one iteration that clones, so it is the one that may
+      // never take a namespace on trust: the grammar is what keeps every
+      // derived path inside a root asb owns.
+      validateNamespace(namespace);
       assertCacheRootOwned(homes);
       previousCacheOwnerPath = canonicalCacheOwnerPath(
         resolveEffectivePath(homes, namespace, value)
@@ -618,6 +623,7 @@ export function updateSources(
     if (typeof value === 'string' || !isCloneableSource(expandHome(value.url))) continue;
 
     try {
+      validateNamespace(namespace);
       const preparation = preparations.get(namespace);
       if (value.type === 'clone' && !preparation) continue;
       if (preparation?.status === 'error') {
@@ -864,6 +870,8 @@ export function removeSource(
  * Splice this source's ids out of every enabled list that carries them. A
  * dangling id is not fatal in 0.5 — it reports as `missing` — but leaving one
  * behind means the next `add` of an unrelated source silently re-enables it.
+ * The comparison runs on canonical ids while the edit names the spelling the
+ * user wrote, so an entry enabled through a bare alias retires too.
  */
 function retireSelection(
   config: ResolvedConfig,
@@ -871,21 +879,23 @@ function retireSelection(
   pluginIds: readonly string[],
   env: NodeJS.ProcessEnv | undefined
 ): { type: ComponentType | 'plugins'; id: string }[] {
+  const expansion = config.plugins.expansion;
   const retired: { type: ComponentType | 'plugins'; id: string }[] = [];
 
-  const byType = new Map<ComponentType, string[]>();
+  const wantedComponents = new Set(componentIds);
   for (const type of SELECTION_TYPES) {
-    const enabled = new Set(config.selection[type]);
-    const hits = componentIds.filter((id) => enabled.has(id));
-    if (hits.length > 0) byType.set(type, hits);
-  }
-  for (const [type, ids] of byType) {
-    editSelection({ type, disable: ids, env });
-    for (const id of ids) retired.push({ type, id });
+    const hits = config.selection[type].filter((ref) =>
+      wantedComponents.has(expansion?.componentAliases[ref] ?? ref)
+    );
+    if (hits.length === 0) continue;
+    editSelection({ type, disable: hits, env });
+    for (const id of hits) retired.push({ type, id });
   }
 
-  const enabledPlugins = new Set(config.selection.plugins);
-  const pluginHits = pluginIds.filter((id) => enabledPlugins.has(id));
+  const wantedPlugins = new Set(pluginIds);
+  const pluginHits = config.selection.plugins.filter((ref) =>
+    wantedPlugins.has(expansion?.pluginAliases[ref] ?? ref)
+  );
   if (pluginHits.length > 0) {
     editSelection({ type: 'plugins', disable: pluginHits, env });
     for (const id of pluginHits) retired.push({ type: 'plugins', id });
@@ -1369,6 +1379,13 @@ export interface SourceCatalog {
   plugins: PluginDescriptor[];
   /** Sources and catalog entries that could not be read. */
   failed: SourceFailure[];
+  /**
+   * The subset of `failed` where the source itself never resolved to a
+   * directory. Content asb could not read inside a resolved source is
+   * contained per entry; a source with no location at all leaves the
+   * inventory partial, which is a pre-write abort.
+   */
+  unresolved: SourceFailure[];
   /** Catalogued plugins whose content is not there — enabled or not. */
   absent: AbsentPlugin[];
 }
@@ -1389,8 +1406,16 @@ export function readSourceCatalog(config: ResolvedConfig): SourceCatalog {
       if (plugin.native?.install && source.remote) plugin.native.install.remote = source.remote;
       // A configured source whose directory is gone still contributes its
       // descriptor, so what the user enabled stays visible with the place asb
-      // expected to find it.
-      if (plugin.root !== undefined && !fs.existsSync(plugin.root)) {
+      // expected to find it. An entry living in a repository of its own is
+      // absent the same way until something fetches it, named by the remote
+      // it would come from rather than by a cache path nobody can act on.
+      if (plugin.root === undefined) {
+        absent.push({
+          id: plugin.id,
+          source: source.namespace,
+          path: plugin.request ? credentialFreeGitUrl(plugin.request.url) : source.path,
+        });
+      } else if (!fs.existsSync(plugin.root)) {
         const row: AbsentPlugin = {
           id: plugin.id,
           source: source.namespace,
@@ -1403,7 +1428,51 @@ export function readSourceCatalog(config: ResolvedConfig): SourceCatalog {
     plugins.push(...read.plugins);
     failed.push(...read.failed);
   }
-  return { sources: resolution.sources, plugins, failed, absent };
+  return { sources: resolution.sources, plugins, failed, unresolved: resolution.failed, absent };
+}
+
+export interface EntryRow {
+  /** Canonical plugin id of the external entry. */
+  id: string;
+  /** Credential-free remote it is fetched from. */
+  url: string;
+  status: 'fetched' | 'pending' | 'error';
+  error?: string;
+}
+
+/**
+ * Clone-if-missing for the external entries a selection points at, the same
+ * contract managed-clone readiness follows: an entry already in the cache is
+ * never refetched (that is what `--update` is for), and a preview reports what
+ * it would fetch without touching the network. An entry the run cannot fetch
+ * stays absent rather than silently contributing nothing.
+ */
+export function ensureEntriesReady(
+  config: ResolvedConfig,
+  catalog: SourceCatalog,
+  opts: { dryRun?: boolean } = {}
+): EntryRow[] {
+  const selected = selectedPluginIds(config);
+  const wanted = catalog.plugins.filter(
+    (plugin) => plugin.request && !plugin.root && selected.has(plugin.id)
+  );
+  const urls = new Map(
+    wanted.map((plugin) => [plugin.id, credentialFreeGitUrl(plugin.request?.url ?? '')])
+  );
+  if (opts.dryRun) {
+    return wanted.map((plugin) => ({
+      id: plugin.id,
+      url: urls.get(plugin.id) ?? '',
+      status: 'pending',
+    }));
+  }
+
+  return materializeSourceEntries(config.homes, wanted).map((result) => {
+    const url = urls.get(result.id) ?? '';
+    return result.error
+      ? { id: result.id, url, status: 'error' as const, error: result.error }
+      : { id: result.id, url, status: 'fetched' as const };
+  });
 }
 
 /** Fetch every external entry a source declares that the caller selected. */

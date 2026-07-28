@@ -562,14 +562,24 @@ function dedupe(ids: readonly string[]): string[] {
   return [...new Set(ids)];
 }
 
-/** Plugin ids this app enables, in order, with every ref resolved to its canonical id. */
+/**
+ * Plugin ids this app enables, in order, with every ref resolved to its
+ * canonical id. Both sides canonicalize before the merge, because the merge
+ * matches `remove` against the base by string equality: a base written
+ * `pack@shop` and an override written `pack` name the same plugin.
+ */
 export function effectivePlugins(config: ResolvedConfig, appId: string): string[] {
   const aliases = config.plugins.expansion?.pluginAliases ?? {};
-  const merged = mergeIncrementalSelection(
-    config.selection.plugins,
-    config.apps.overrides[appId]?.plugins
+  const canonical = (ref: string): string => aliases[ref] ?? ref;
+  const override = config.apps.overrides[appId]?.plugins;
+  const normalized = override && {
+    enabled: override.enabled?.map(canonical),
+    add: override.add?.map(canonical),
+    remove: override.remove?.map(canonical),
+  };
+  return dedupe(
+    mergeIncrementalSelection(config.selection.plugins.map(canonical), normalized).map(canonical)
   );
-  return dedupe(merged.map((ref) => aliases[ref] ?? ref));
 }
 
 /**
@@ -604,6 +614,29 @@ export function effectiveSelection(
     remove: override.remove?.map(canonical),
   };
   return dedupe(mergeIncrementalSelection(merged, normalized).map(canonical));
+}
+
+/**
+ * Every plugin the enabled apps point at, whether by naming the plugin or by
+ * enabling one of its components. A component ref carries its plugin as a
+ * prefix, so the second channel is a lookup through the same aliases rather
+ * than a second notion of what "selected" means.
+ */
+export function selectedPluginIds(config: ResolvedConfig): Set<string> {
+  const aliases = config.plugins.expansion?.pluginAliases ?? {};
+  const selected = new Set<string>();
+  for (const appId of config.apps.enabled) {
+    for (const id of effectivePlugins(config, appId)) selected.add(id);
+    for (const type of SELECTION_TYPES) {
+      for (const ref of effectiveSelection(config, appId, type)) {
+        const cut = ref.lastIndexOf(':');
+        if (cut < 0) continue;
+        const plugin = ref.slice(0, cut);
+        selected.add(aliases[plugin] ?? plugin);
+      }
+    }
+  }
+  return selected;
 }
 
 export function effectiveIncludeDelimiters(config: ResolvedConfig, appId: string): boolean {

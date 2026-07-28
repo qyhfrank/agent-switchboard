@@ -58,6 +58,7 @@ import {
 import {
   addLocalSource,
   addRemoteSource,
+  ensureEntriesReady,
   ensureSourcesReady,
   inferSourceName,
   isGitUrl,
@@ -554,15 +555,56 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   // capture → plan → apply sequence executes against serialized state, so a
   // plan built from another run's pre-apply snapshot can never fire.
   const lock: RunLock | null = dryRun ? null : acquireRunLock(config.homes.stateHome);
+  const scope = {
+    profile: config.profile,
+    project: config.project,
+    dryRun,
+  };
+
   try {
     const ledger = loadLedger(config.homes.stateHome);
     const sources = runSourcesPhase(config, opts, dryRun);
-    const catalog = readSourceCatalog(config);
-    const inventory = scanLibrary({ env, plugins: catalog.plugins });
+    let catalog = readSourceCatalog(config);
+
+    // Readiness and resolution are pre-write conditions. Distributing against
+    // a partial inventory re-renders every aggregate without the broken
+    // source's members, so a real run reports what the sources phase found
+    // and stops before it can write anything. Content asb could not read
+    // inside a source that did resolve stays a contained row.
+    if (
+      !dryRun &&
+      (catalog.unresolved.length > 0 || sources.readiness.some((row) => row.status === 'error'))
+    ) {
+      const aborted = buildReport(
+        scope,
+        planSources({
+          config,
+          catalog: { ...catalog, absent: [] },
+          ...sources,
+          entries: [],
+          dryRun,
+        }).map(toEntry),
+        { aborted: true }
+      );
+      if (ledger.lastRun) aborted.lastRun = ledger.lastRun;
+      return aborted;
+    }
+
+    let inventory = scanLibrary({ env, plugins: catalog.plugins });
 
     // What the sources contribute is only known after the scan, so the
     // expansion joins the configuration here rather than at load time.
-    const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+    let resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+
+    // An external entry is content the selection points at and the scan could
+    // not see, so fetching one changes what the library holds: read it again.
+    const sourceEntries = ensureEntriesReady(resolved, catalog, { dryRun });
+    if (sourceEntries.some((entry) => entry.status === 'fetched')) {
+      catalog = readSourceCatalog(config);
+      inventory = scanLibrary({ env, plugins: catalog.plugins });
+      resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+    }
+
     const capture = captureFor(resolved, ledger);
     const nativeState = captureNative(resolved, catalog, APP_ROWS, env, capture.installed);
 
@@ -575,7 +617,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       now: new Date().toISOString(),
     };
     let actions = [
-      ...planSources({ config: resolved, catalog, ...sources, dryRun }),
+      ...planSources({ config: resolved, catalog, ...sources, entries: sourceEntries, dryRun }),
       ...planRules(planInput),
       ...planSkills(planInput),
       ...planHooks(planInput),
@@ -609,12 +651,6 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         return source === null || wanted.has(source);
       });
     }
-
-    const scope = {
-      profile: config.profile,
-      project: config.project,
-      dryRun,
-    };
 
     if (dryRun) {
       const preview = buildReport(scope, reconcile(actions, toEntry));
@@ -690,6 +726,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
         readiness: ensureSourcesReady(resolved, { dryRun: true }),
         updates: [],
         pendingRefresh: [],
+        entries: ensureEntriesReady(resolved, catalog, { dryRun: true }),
         dryRun: true,
       },
       target
@@ -702,9 +739,13 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     const wanted = new Set(opts.apps);
     slices = slices.filter((slice) => slice.app === null || wanted.has(slice.app));
   }
-  return slices.map((slice) =>
-    slice.reason ? { ...slice, reason: redactCredentials(slice.reason) } : slice
-  );
+  // A source row carries its configured location, which can carry a token.
+  return slices.map((slice) => {
+    const clean = { ...slice };
+    if (slice.reason) clean.reason = redactCredentials(slice.reason);
+    if (slice.path) clean.path = redactCredentials(slice.path);
+    return clean;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -790,7 +831,13 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
     Object.values(expansion.byPlugin[id] ?? {}).flat()
   );
 
-  const { retired } = removeSource(config, namespace, { componentIds, pluginIds, env });
+  // Retirement compares canonical ids, so it needs the same expansion the
+  // selection was written against.
+  const { retired } = removeSource(withPluginExpansion(config, expansion), namespace, {
+    componentIds,
+    pluginIds,
+    env,
+  });
 
   const entries: ReportEntry[] = [
     {
