@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Command } from 'commander';
 import { AGENTS_SKILLS_UNION, APP_ROWS } from './apps.js';
-import { effectiveSelection, loadConfig } from './config.js';
+import { ConfigError, effectiveSelection, loadConfig } from './config.js';
 import {
   acquireRunLock,
   type Ledger,
@@ -53,6 +53,7 @@ export interface SyncOptions {
   types?: readonly string[];
   profile?: string;
   project?: string;
+  sources?: readonly string[];
   env?: NodeJS.ProcessEnv;
 }
 
@@ -291,11 +292,22 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
   return toEntry(action);
 }
 
+/** Scope flags whose engine wiring lands with a later cell fail closed. */
+function rejectUnwiredScope(opts: SyncOptions): void {
+  if (opts.project) {
+    throw new ConfigError('project scope is not available in this engine build');
+  }
+  if (opts.sources && opts.sources.length > 0) {
+    throw new ConfigError('the --source filter is not available in this engine build');
+  }
+}
+
 export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   const env = opts.env ?? process.env;
   const dryRun = opts.dryRun === true;
 
-  const config = loadConfig({ profile: opts.profile, project: opts.project, env });
+  rejectUnwiredScope(opts);
+  const config = loadConfig({ profile: opts.profile, env });
 
   // A real run takes the lock before ledger and capture: the whole
   // capture → plan → apply sequence executes against serialized state, so a
@@ -333,39 +345,50 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     };
 
     if (dryRun) {
-      return buildReport(scope, actions.map(toEntry));
+      const preview = buildReport(scope, actions.map(toEntry));
+      if (ledger.lastRun) preview.lastRun = ledger.lastRun;
+      return preview;
     }
 
-    let ledgerDirty = false;
     const entries: ReportEntry[] = [];
     for (const action of actions) {
-      const hadMutation = action.ledger !== undefined;
-      const entry = executeAction(action, ledger);
-      if (hadMutation && entry.outcome === action.outcome) ledgerDirty = true;
-      entries.push(entry);
+      entries.push(executeAction(action, ledger));
     }
 
-    if (ledgerDirty) {
-      try {
-        saveLedger(config.homes.stateHome, ledger);
-      } catch (error) {
-        // Files changed but the proof did not persist: that is a failure of
-        // this run, reported as such — identity adoption re-proves ownership
-        // on the next run.
-        const message = error instanceof Error ? error.message : String(error);
-        entries.push({
-          app: null,
-          type: null,
-          id: null,
-          path: ledgerPath(config.homes.stateHome),
-          outcome: 'failed',
-          detail: 'write-error',
-          reason: `ownership ledger could not be saved (${message})`,
-        });
-      }
+    // Every real run stamps the last-run fact; `status` (dry) reports it.
+    const previousLastRun = ledger.lastRun;
+    const counts = new Map<string, number>();
+    for (const entry of entries) {
+      counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
+    }
+    ledger.lastRun = {
+      at: planInput.now,
+      summary:
+        [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(', ') ||
+        'nothing to do',
+    };
+
+    try {
+      saveLedger(config.homes.stateHome, ledger);
+    } catch (error) {
+      // Files changed but the proof did not persist: that is a failure of
+      // this run, reported as such — identity adoption re-proves ownership
+      // on the next run.
+      const message = error instanceof Error ? error.message : String(error);
+      entries.push({
+        app: null,
+        type: null,
+        id: null,
+        path: ledgerPath(config.homes.stateHome),
+        outcome: 'failed',
+        detail: 'write-error',
+        reason: `ownership ledger could not be saved (${message})`,
+      });
     }
 
-    return buildReport(scope, entries);
+    const report = buildReport(scope, entries);
+    if (previousLastRun) report.lastRun = previousLastRun;
+    return report;
   } finally {
     lock?.release();
   }
@@ -373,7 +396,8 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
 
 export async function runExplain(target: string, opts: SyncOptions = {}): Promise<ExplainSlice[]> {
   const env = opts.env ?? process.env;
-  const config = loadConfig({ profile: opts.profile, project: opts.project, env });
+  rejectUnwiredScope(opts);
+  const config = loadConfig({ profile: opts.profile, env });
   const ledger = loadLedger(config.homes.stateHome);
   const inventory = scanLibrary({ env });
   const capture = captureFor(config, ledger);

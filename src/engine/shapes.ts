@@ -409,6 +409,23 @@ export function resolveWritePath(targetPath: string): string {
   try {
     return fs.realpathSync(absolute);
   } catch {
+    // A dangling symlink is still written through: resolve the link chain by
+    // hand (0.4's writeFileSync followed it and created the backing file);
+    // replacing the link with a plain file would break the user's setup.
+    let followed = absolute;
+    let endsAtNonLink = false;
+    for (let depth = 0; depth < 32; depth++) {
+      let link: string;
+      try {
+        link = fs.readlinkSync(followed);
+      } catch {
+        endsAtNonLink = true;
+        break;
+      }
+      followed = path.resolve(path.dirname(followed), link);
+    }
+    if (endsAtNonLink && followed !== absolute) return resolveWritePath(followed);
+
     // Target does not exist yet: resolve the deepest existing ancestor.
     let existing = path.dirname(absolute);
     const pending: string[] = [path.basename(absolute)];

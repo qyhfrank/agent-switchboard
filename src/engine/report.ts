@@ -42,6 +42,8 @@ export interface Report {
   entries: ReportEntry[];
   summary: Partial<Record<Outcome, number>>;
   exitCode: 0 | 1 | 2;
+  /** Recorded fact from the most recent completed real run. */
+  lastRun?: { at: string; summary: string };
 }
 
 const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
@@ -54,9 +56,12 @@ const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
 
 /** Strip credentials from URL-shaped text (https://user:token@host, token@host). */
 export function redactCredentials(text: string): string {
-  return text
-    .replace(/(\/\/[^/@\s:]+):([^@\s/]+)@/g, '$1:***@')
-    .replace(/(\/\/)(gh[pousr]_[A-Za-z0-9]+|x-access-token:[^@\s/]+)@/g, '$1***@');
+  return (
+    text
+      .replace(/(\/\/[^/@\s:]+):([^@\s/]+)@/g, '$1:***@')
+      // Any remaining lone userinfo is a bare token (ghp_..., oauth token URLs).
+      .replace(/(\/\/)([^@\s/:]+)@/g, '$1***@')
+  );
 }
 
 const QUICK_START = [
@@ -105,6 +110,7 @@ export function renderReport(report: Report): string {
     .map(([outcome, count]) => `${count} ${outcome}`)
     .join(', ');
   lines.push(tally);
+  if (report.lastRun) lines.push(`last run: ${report.lastRun.at} — ${report.lastRun.summary}`);
 
   return `${lines.join('\n')}\n`;
 }

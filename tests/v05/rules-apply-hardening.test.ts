@@ -203,3 +203,30 @@ test('mutations without a containment root are refused, not silently unchecked',
   assert.equal(entry.detail, 'path-escape');
   assert.equal(fs.existsSync('/tmp/never-written.md'), false);
 });
+
+test('a dangling symlinked target is written through, creating the backing file', async () => {
+  await withScratchHomes(async (homes) => {
+    seedRule(homes, 'base.md', 'Always be kind.\n');
+    writeUserConfig(homes, CODEX_CONFIG);
+    installApps(homes, 'codex');
+    const backing = path.join(homes.root, 'dotfiles-store', 'AGENTS.md');
+    fs.mkdirSync(path.dirname(backing), { recursive: true });
+    const target = ruleFilePath(homes, 'codex');
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.symlinkSync(backing, target);
+    fs.rmSync(backing, { force: true });
+
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+
+    // 0.4's writeFileSync followed the dangling link and created the backing
+    // file; replacing the link with a plain file would break the dotfiles
+    // setup the user built the link for.
+    assert.ok(fs.lstatSync(target).isSymbolicLink(), 'the link survives');
+    assert.equal(
+      fs.readFileSync(backing, 'utf-8'),
+      renderedRules('codex', 'Always be kind.\n'),
+      'the backing file was created through the link'
+    );
+  });
+});
