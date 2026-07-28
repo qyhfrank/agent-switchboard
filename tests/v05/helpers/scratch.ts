@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,7 +6,9 @@ import path from 'node:path';
 /**
  * Scratch homes for 0.5 engine tests. Every environment root the engine
  * resolves (library, agents home, cache, state) points into one disposable
- * temp tree; the real user homes are never read or written.
+ * temp tree; the real user homes are never read or written. Git fixtures are
+ * real repositories built under the same scratch root and reached over
+ * file:// or plain paths, so no test needs the network.
  */
 
 const MANAGED_ENV = [
@@ -64,6 +67,46 @@ export async function withScratchHomes<T>(fn: (homes: ScratchHomes) => T | Promi
     fs.rmSync(root, { recursive: true, force: true });
   }
 }
+
+export interface GitFixture {
+  /** Push target: a bare repository usable as a clone URL. */
+  bareRepo: string;
+  /** Checkout used to author commits. */
+  workDir: string;
+}
+
+function git(args: string[], cwd?: string): string {
+  return execFileSync('git', args, { cwd, stdio: 'pipe', encoding: 'utf-8' }).trim();
+}
+
+/** A bare repo plus a work clone, both under the scratch root. */
+export function createGitFixture(root: string, name: string): GitFixture {
+  const bareRepo = path.join(root, `${name}.git`);
+  const workDir = path.join(root, `${name}-work`);
+  git(['init', '--bare', '--initial-branch=main', bareRepo]);
+  git(['clone', bareRepo, workDir]);
+  git(['config', 'user.email', 'test@example.com'], workDir);
+  git(['config', 'user.name', 'Test'], workDir);
+  return { bareRepo, workDir };
+}
+
+/** Commit everything in the work tree and push it to the bare repo. */
+export function commitAndPush(fixture: GitFixture, message: string): string {
+  git(['add', '-A'], fixture.workDir);
+  git(['commit', '-m', message], fixture.workDir);
+  git(['push', 'origin', 'refs/heads/main'], fixture.workDir);
+  return git(['rev-parse', 'HEAD'], fixture.workDir);
+}
+
+/** Write a file into the work tree, creating parents. */
+export function writeFixtureFile(fixture: GitFixture, relative: string, content: string): string {
+  const filePath = path.join(fixture.workDir, relative);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, content, 'utf-8');
+  return filePath;
+}
+
+export const gitFixtureCommand = git;
 
 export type RuleAppId =
   | 'claude-code'

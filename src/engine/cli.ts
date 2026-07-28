@@ -44,6 +44,7 @@ import {
   targetEscapesRoot,
   writeFileAtomic,
 } from './shapes.js';
+import { readSourceCatalog, type SourceCatalog } from './sources.js';
 
 /**
  * Command bodies. `runSync` is the one reconciliation: load → capture →
@@ -438,6 +439,24 @@ function reconcile(
   return entries;
 }
 
+/**
+ * A source asb cannot read is reported rather than skipped: its plugins are
+ * absent from the scan, and silence there would look like a source that
+ * contributes nothing.
+ */
+function sourceFailureRows(catalog: SourceCatalog): Action[] {
+  return catalog.failed.map((failure) => ({
+    app: null,
+    type: null,
+    id: failure.namespace,
+    path: failure.path,
+    op: 'none' as const,
+    outcome: 'failed' as const,
+    detail: 'source-error',
+    reason: failure.error,
+  }));
+}
+
 /** Scope flags whose engine wiring lands with a later cell fail closed. */
 function rejectUnwiredScope(opts: SyncOptions): void {
   if (opts.project) {
@@ -461,7 +480,8 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   const lock: RunLock | null = dryRun ? null : acquireRunLock(config.homes.stateHome);
   try {
     const ledger = loadLedger(config.homes.stateHome);
-    const inventory = scanLibrary({ env });
+    const catalog = readSourceCatalog(config);
+    const inventory = scanLibrary({ env, plugins: catalog.plugins });
     const capture = captureFor(config, ledger);
 
     const planInput = {
@@ -472,7 +492,12 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       table: APP_ROWS,
       now: new Date().toISOString(),
     };
-    let actions = [...planRules(planInput), ...planSkills(planInput), ...planHooks(planInput)];
+    let actions = [
+      ...sourceFailureRows(catalog),
+      ...planRules(planInput),
+      ...planSkills(planInput),
+      ...planHooks(planInput),
+    ];
 
     // Filters select which actions execute, never which inputs the planner saw.
     if (opts.apps && opts.apps.length > 0) {
@@ -542,7 +567,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   rejectUnwiredScope(opts);
   const config = loadConfig({ profile: opts.profile, env });
   const ledger = loadLedger(config.homes.stateHome);
-  const inventory = scanLibrary({ env });
+  const inventory = scanLibrary({ env, plugins: readSourceCatalog(config).plugins });
   const capture = captureFor(config, ledger);
 
   const planInput = {

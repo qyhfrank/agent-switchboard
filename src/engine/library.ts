@@ -4,11 +4,14 @@ import { parse as parseYaml } from 'yaml';
 import { z } from 'zod';
 import { type ComponentType, resolveHomes } from './config.js';
 import { type BundleFile, listBundleFiles } from './shapes.js';
+import type { PluginDescriptor } from './sources.js';
 
 /**
- * Library scan: content directories under the asb home become Components.
- * Scanning creates nothing on disk; a malformed entry becomes a failed
- * component carrying its parser message and path, never a thrown run.
+ * Library scan: content directories under the asb home and under every plugin
+ * a configured source contributes become Components. Scanning creates nothing
+ * on disk and never reaches the network: an external plugin nobody has fetched
+ * yet contributes nothing here. A malformed entry becomes a failed component
+ * carrying its parser message and path, never a thrown run.
  */
 
 export interface RuleMetadata {
@@ -48,9 +51,21 @@ export interface FailedComponent {
   error: string;
 }
 
+/** A component id a later source repeated: the first reading stays. */
+export interface DuplicateComponent {
+  type: ComponentType;
+  id: string;
+  /** The source that lost the id. */
+  source: string;
+  /** The source whose reading is in the inventory. */
+  keptSource: string;
+  path: string;
+}
+
 export interface LibraryInventory {
   components: Component[];
   failed: FailedComponent[];
+  duplicates: DuplicateComponent[];
 }
 
 const ruleMetadataSchema = z
@@ -164,9 +179,26 @@ function componentIdFromFile(fileName: string): string {
   return path.basename(fileName, path.extname(fileName));
 }
 
+/**
+ * Who a scanned directory belongs to. Content under the asb home keeps bare
+ * ids; a plugin's content is prefixed with the plugin id, so two sources
+ * shipping the same file name stay distinct components.
+ */
+interface Owner {
+  source: string;
+  prefix: string;
+}
+
+const LIBRARY: Owner = { source: 'library', prefix: '' };
+
+function ownerFor(plugin: PluginDescriptor): Owner {
+  return { source: plugin.id, prefix: `${plugin.id}:` };
+}
+
 interface ScanTarget {
   type: ComponentType;
   directory: string;
+  owner: Owner;
 }
 
 function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): void {
@@ -177,7 +209,7 @@ function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): vo
     if (!entry.isFile() || !isMarkdownFile(entry.name)) continue;
 
     const absolutePath = path.join(target.directory, entry.name);
-    const id = componentIdFromFile(entry.name);
+    const id = target.owner.prefix + componentIdFromFile(entry.name);
     let raw: string;
     try {
       raw = fs.readFileSync(absolutePath, 'utf-8');
@@ -186,7 +218,7 @@ function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): vo
       inventory.failed.push({
         type: target.type,
         id,
-        source: 'library',
+        source: target.owner.source,
         path: absolutePath,
         error: message,
       });
@@ -198,7 +230,7 @@ function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): vo
       inventory.components.push({
         type: target.type,
         id,
-        source: 'library',
+        source: target.owner.source,
         path: absolutePath,
         content: parsed.content,
         metadata: parsed.metadata,
@@ -208,7 +240,7 @@ function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): vo
       inventory.failed.push({
         type: target.type,
         id,
-        source: 'library',
+        source: target.owner.source,
         path: absolutePath,
         error: message,
       });
@@ -219,60 +251,115 @@ function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): vo
 const SKILL_FILE = 'SKILL.md';
 
 /**
- * Skills scan: each non-dot child directory of <asbHome>/skills/ holding a
+ * Skills scan: each non-dot child directory of a skills root holding a
  * SKILL.md is one component whose id is the directory name; the component
  * path is the bundle directory. Directories without a SKILL.md are not
  * skills and are skipped silently. A malformed SKILL.md fails that entry
  * with the frozen 0.4.35 error string (0.4 aborted the whole run instead).
+ *
+ * A plugin's custom skills path may name the bundle itself rather than a
+ * parent of bundles, so such a root is read as one skill when it holds a
+ * SKILL.md of its own.
  */
-function scanSkillsDirectory(directory: string, inventory: LibraryInventory): void {
-  if (!fs.existsSync(directory)) return;
+function scanSkillsDirectory(
+  directory: string,
+  owner: Owner,
+  inventory: LibraryInventory,
+  allowDirectSkill = false
+): void {
+  if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) return;
+
+  if (allowDirectSkill && fs.existsSync(path.join(directory, SKILL_FILE))) {
+    scanSkillBundle(directory, owner, inventory);
+    return;
+  }
 
   const entries = fs.readdirSync(directory, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
 
     const dirPath = path.join(directory, entry.name);
-    const skillPath = path.join(dirPath, SKILL_FILE);
-    if (!fs.existsSync(skillPath)) continue;
+    if (!fs.existsSync(path.join(dirPath, SKILL_FILE))) continue;
+    scanSkillBundle(dirPath, owner, inventory);
+  }
+}
 
-    try {
-      const parsed = parseFrontmatterMarkdown(
-        fs.readFileSync(skillPath, 'utf-8'),
-        skillMetadataSchema,
-        'Skill'
-      );
-      inventory.components.push({
-        type: 'skills',
-        id: entry.name,
-        source: 'library',
-        path: dirPath,
-        content: parsed.content,
-        metadata: parsed.metadata,
-        files: listBundleFiles(dirPath),
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      inventory.failed.push({
-        type: 'skills',
-        id: entry.name,
-        source: 'library',
-        path: skillPath,
-        error: `Failed to parse skill "${entry.name}": ${message}`,
-      });
-    }
+function scanSkillBundle(dirPath: string, owner: Owner, inventory: LibraryInventory): void {
+  const name = path.basename(dirPath);
+  const skillPath = path.join(dirPath, SKILL_FILE);
+  try {
+    const parsed = parseFrontmatterMarkdown(
+      fs.readFileSync(skillPath, 'utf-8'),
+      skillMetadataSchema,
+      'Skill'
+    );
+    inventory.components.push({
+      type: 'skills',
+      id: owner.prefix + name,
+      source: owner.source,
+      path: dirPath,
+      content: parsed.content,
+      metadata: parsed.metadata,
+      files: listBundleFiles(dirPath),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    inventory.failed.push({
+      type: 'skills',
+      id: owner.prefix + name,
+      source: owner.source,
+      path: skillPath,
+      error: `Failed to parse skill "${name}": ${message}`,
+    });
   }
 }
 
 const HOOK_FILE = 'hook.json';
 
 /**
- * Hooks scan: `<asbHome>/hooks/<id>.json` is a definition entry, and a child
+ * A GitHub Copilot v1 hook file shares the hooks/ directory with asb's own
+ * grammar, so a plugin shipping one is not shipping a broken asb hook. What
+ * separates the two: Copilot declares `version: 1` and maps each event to
+ * handlers directly, where an asb event maps to groups that nest their own
+ * `hooks` array.
+ *
+ * ponytail: a shape probe, not 0.4's full Copilot validator (event allow-list,
+ * https-only handlers, prompt-only-on-sessionStart). Ceiling: an asb-invalid
+ * file carrying `version: 1` and handler-shaped events is skipped silently
+ * instead of reported. Upgrade path is validating the events against Copilot's
+ * own list, which only ever narrows what this skips.
+ */
+function isForeignHookFile(value: unknown): boolean {
+  if (value === null || typeof value !== 'object') return false;
+  const file = value as { version?: unknown; hooks?: unknown };
+  if (file.version !== 1) return false;
+  const events = file.hooks;
+  if (events === null || typeof events !== 'object' || Array.isArray(events)) return false;
+  const handlerLists = Object.values(events as Record<string, unknown>);
+  return (
+    handlerLists.length > 0 &&
+    handlerLists.every(
+      (handlers) =>
+        Array.isArray(handlers) &&
+        handlers.length > 0 &&
+        handlers.every(
+          (handler) =>
+            handler !== null &&
+            typeof handler === 'object' &&
+            !Array.isArray((handler as { hooks?: unknown }).hooks) &&
+            (handler as { hooks?: unknown }).hooks === undefined
+        )
+    )
+  );
+}
+
+/**
+ * Hooks scan: `<root>/hooks/<id>.json` is a definition entry, and a child
  * directory holding `hook.json` is a bundle entry whose files are distributed
  * beside the app config. A malformed entry fails alone (0.4 threw and aborted
- * the whole load).
+ * the whole load, and for a plugin's single-file hooks only warned).
  */
-function scanHooksDirectory(directory: string, inventory: LibraryInventory): void {
+function scanHooksDirectory(directory: string, owner: Owner, inventory: LibraryInventory): void {
   if (!fs.existsSync(directory)) return;
 
   const entries = fs.readdirSync(directory, { withFileTypes: true });
@@ -286,14 +373,16 @@ function scanHooksDirectory(directory: string, inventory: LibraryInventory): voi
       continue;
     }
 
-    const id = isBundle ? entry.name : componentIdFromFile(entry.name);
+    const id = owner.prefix + (isBundle ? entry.name : componentIdFromFile(entry.name));
     const filePath = isBundle ? path.join(entryPath, HOOK_FILE) : entryPath;
     try {
-      const parsed = hookFileSchema.parse(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
+      const raw: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      if (owner.source !== LIBRARY.source && isForeignHookFile(raw)) continue;
+      const parsed = hookFileSchema.parse(raw);
       inventory.components.push({
         type: 'hooks',
         id,
-        source: 'library',
+        source: owner.source,
         path: entryPath,
         content: '',
         metadata: { tags: [], requires: [] },
@@ -305,7 +394,7 @@ function scanHooksDirectory(directory: string, inventory: LibraryInventory): voi
       inventory.failed.push({
         type: 'hooks',
         id,
-        source: 'library',
+        source: owner.source,
         path: filePath,
         error: `Failed to parse hook "${id}": ${message}`,
       });
@@ -313,26 +402,139 @@ function scanHooksDirectory(directory: string, inventory: LibraryInventory): voi
   }
 }
 
+/**
+ * A plugin's own paths stay inside the plugin: a path that leaves it
+ * lexically, or leaves it once symlinks are followed, is refused rather than
+ * read. Throwing here fails the one plugin, never the scan.
+ */
+function pluginComponentPath(root: string, relative: string): string {
+  if (relative.includes('\0') || path.isAbsolute(relative)) {
+    throw new Error(`plugin component path must be relative: ${relative}`);
+  }
+  const resolved = path.resolve(root, relative);
+  const escapes = (from: string, to: string): boolean => {
+    const rel = path.relative(from, to);
+    return rel.startsWith('..') || path.isAbsolute(rel);
+  };
+  if (escapes(root, resolved)) {
+    throw new Error(`plugin component path escapes the plugin root: ${relative}`);
+  }
+  if (fs.existsSync(resolved) && escapes(fs.realpathSync(root), fs.realpathSync(resolved))) {
+    throw new Error(`plugin component path escapes the plugin root: ${relative}`);
+  }
+  return resolved;
+}
+
+/**
+ * One plugin's contribution. Custom paths declared by a marketplace entry or
+ * plugin manifest replace the default directory for that kind; every other
+ * kind keeps its default directory.
+ */
+function scanPlugin(
+  plugin: PluginDescriptor,
+  root: string,
+  wanted: Set<ComponentType>,
+  inventory: LibraryInventory
+): void {
+  const owner = ownerFor(plugin);
+
+  if (wanted.has('rules')) {
+    scanRulesDirectory({ type: 'rules', directory: path.join(root, 'rules'), owner }, inventory);
+  }
+
+  if (wanted.has('skills')) {
+    const custom = plugin.customPaths?.skills;
+    if (custom) {
+      for (const relative of custom) {
+        try {
+          const resolved = pluginComponentPath(root, relative);
+          // A custom path may name the SKILL.md itself, the bundle holding
+          // one, or a parent of bundles.
+          if (path.basename(resolved) === SKILL_FILE && fs.existsSync(resolved)) {
+            scanSkillBundle(path.dirname(resolved), owner, inventory);
+          } else {
+            scanSkillsDirectory(resolved, owner, inventory, true);
+          }
+        } catch (error) {
+          inventory.failed.push({
+            type: 'skills',
+            id: plugin.id,
+            source: owner.source,
+            path: root,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } else {
+      scanSkillsDirectory(path.join(root, 'skills'), owner, inventory);
+    }
+  }
+
+  if (wanted.has('hooks')) {
+    scanHooksDirectory(path.join(root, 'hooks'), owner, inventory);
+  }
+}
+
+/**
+ * First reading of an id wins, in scan order: the asb home, then plugins in
+ * source order. The loser is recorded so the run can report which source lost
+ * the id rather than silently dropping it.
+ */
+function dropDuplicates(inventory: LibraryInventory): void {
+  const kept = new Map<string, Component>();
+  const survivors: Component[] = [];
+  for (const component of inventory.components) {
+    const key = `${component.type}\u0000${component.id}`;
+    const winner = kept.get(key);
+    if (winner) {
+      inventory.duplicates.push({
+        type: component.type,
+        id: component.id,
+        source: component.source,
+        keptSource: winner.source,
+        path: component.path,
+      });
+      continue;
+    }
+    kept.set(key, component);
+    survivors.push(component);
+  }
+  inventory.components = survivors;
+}
+
 export interface ScanOptions {
   types?: readonly ComponentType[];
   env?: NodeJS.ProcessEnv;
+  /**
+   * Plugins the configured sources contribute, in source order. A plugin that
+   * lives in a repository of its own contributes only once something has
+   * fetched it: the scan itself never does, so no command pays for a plugin
+   * nobody selected.
+   */
+  plugins?: readonly PluginDescriptor[];
 }
 
 export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   const homes = resolveHomes(opts.env ?? process.env);
   const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills', 'hooks']);
-  const inventory: LibraryInventory = { components: [], failed: [] };
+  const inventory: LibraryInventory = { components: [], failed: [], duplicates: [] };
 
   if (wanted.has('rules')) {
-    scanRulesDirectory({ type: 'rules', directory: path.join(homes.asbHome, 'rules') }, inventory);
+    const directory = path.join(homes.asbHome, 'rules');
+    scanRulesDirectory({ type: 'rules', directory, owner: LIBRARY }, inventory);
   }
   if (wanted.has('skills')) {
-    scanSkillsDirectory(path.join(homes.asbHome, 'skills'), inventory);
+    scanSkillsDirectory(path.join(homes.asbHome, 'skills'), LIBRARY, inventory);
   }
   if (wanted.has('hooks')) {
-    scanHooksDirectory(path.join(homes.asbHome, 'hooks'), inventory);
+    scanHooksDirectory(path.join(homes.asbHome, 'hooks'), LIBRARY, inventory);
   }
 
+  for (const plugin of opts.plugins ?? []) {
+    if (plugin.root) scanPlugin(plugin, plugin.root, wanted, inventory);
+  }
+
+  dropDuplicates(inventory);
   inventory.components.sort((a, b) =>
     a.type === b.type ? a.id.localeCompare(b.id) : a.type.localeCompare(b.type)
   );

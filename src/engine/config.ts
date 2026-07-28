@@ -883,6 +883,82 @@ function spliceOut(
   return content.slice(0, removeStart) + content.slice(removeEnd);
 }
 
+/** TOML bare key where the namespace allows it, quoted where it does not. */
+function tomlKey(name: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(name) ? name : JSON.stringify(name);
+}
+
+function renderSourceValue(value: string | Record<string, string>): string {
+  if (typeof value === 'string') return JSON.stringify(value);
+  const fields = Object.entries(value).map(([key, item]) => `${key} = ${JSON.stringify(item)}`);
+  return `{ ${fields.join(', ')} }`;
+}
+
+/** Drop a namespace's declaration in either spelling: an assignment inside
+ * `[plugins.sources]`, or its own `[plugins.sources.<ns>]` table. */
+function removeSourceDeclaration(content: string, namespace: string): string {
+  const keyPattern = `(?:${namespace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}|"${namespace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}")`;
+
+  const table = new RegExp(`^[ \\t]*\\[plugins\\.sources\\.${keyPattern}\\][ \\t]*(#.*)?$`, 'm');
+  const tableMatch = table.exec(content);
+  if (tableMatch) {
+    const start = tableMatch.index;
+    const end = sectionEnd(content, tableMatch.index + tableMatch[0].length + 1);
+    return content.slice(0, start) + content.slice(end);
+  }
+
+  const section = findSection(content, 'plugins.sources');
+  if (!section) return content;
+  const body = content.slice(section.start, section.end);
+  const assignment = new RegExp(`^[ \\t]*${keyPattern}[ \\t]*=.*$\\n?`, 'm').exec(body);
+  if (!assignment) return content;
+  const start = section.start + assignment.index;
+  return content.slice(0, start) + content.slice(start + assignment[0].length);
+}
+
+export interface EditSourceOptions {
+  namespace: string;
+  /** Declaration to write; omitted removes the namespace. */
+  value?: string | Record<string, string>;
+  env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * Write or remove one `[plugins.sources]` declaration by splicing the user
+ * config, so every unrelated comment and commented-out line survives. The
+ * result is re-parsed before it replaces the original.
+ */
+export function editSourceDeclaration(options: EditSourceOptions): void {
+  const env = options.env ?? process.env;
+  const homes = resolveHomes(env);
+  const filePath = userConfigPath(homes, env);
+  const original = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
+
+  let content = removeSourceDeclaration(original, options.namespace);
+  if (options.value !== undefined) {
+    const line = `${tomlKey(options.namespace)} = ${renderSourceValue(options.value)}\n`;
+    const section = findSection(content, 'plugins.sources');
+    if (section) {
+      // Append at the end of the existing table body, after any trailing blank line.
+      const body = content.slice(section.start, section.end);
+      const insertAt = section.start + body.replace(/\s*$/, '').length;
+      const prefix = content[insertAt - 1] === '\n' ? '' : '\n';
+      content = content.slice(0, insertAt) + prefix + line + content.slice(insertAt);
+    } else {
+      const separator =
+        content.length === 0 || content.endsWith('\n\n')
+          ? ''
+          : content.endsWith('\n')
+            ? '\n'
+            : '\n\n';
+      content += `${separator}[plugins.sources]\n${line}`;
+    }
+  }
+
+  if (content === original) return;
+  writeConfigFile(filePath, content, 'Source edit');
+}
+
 export interface EditSelectionOptions {
   type: ComponentType | 'plugins';
   enable?: readonly string[];
@@ -952,18 +1028,24 @@ export function editSelection(options: EditSelectionOptions): void {
   }
 
   if (content === original) return;
+  writeConfigFile(filePath, content, 'Selection edit');
+}
 
+/**
+ * Replace a config file with spliced content: validated as TOML first, then
+ * written through a symlink to its backing file, keeping the original
+ * permission bits (a 0600 config must not relax under the umask).
+ */
+function writeConfigFile(filePath: string, content: string, label: string): void {
   try {
     parseToml(content);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new ConfigError(
-      `Selection edit produced invalid TOML for ${filePath} (left untouched): ${message}`
+      `${label} produced invalid TOML for ${filePath} (left untouched): ${message}`
     );
   }
 
-  // Write through a symlinked config to its backing file, keeping the
-  // original permission bits (a 0600 config must not relax under the umask).
   let resolved = filePath;
   let mode: number | null = null;
   try {

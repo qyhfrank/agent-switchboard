@@ -190,6 +190,22 @@ export function planRules(input: PlanInput): Action[] {
     });
   }
 
+  // An id two sources both claim resolves to the first reading; the losing
+  // source is named so the collision is visible rather than inferred from
+  // content nobody asked for.
+  for (const duplicate of inventory.duplicates) {
+    actions.push({
+      app: null,
+      type: duplicate.type,
+      id: duplicate.id,
+      path: duplicate.path,
+      op: 'none',
+      outcome: 'skipped',
+      detail: 'duplicate-id',
+      reason: `"${duplicate.id}" is already provided by ${duplicate.keptSource}; ${duplicate.source} is not used`,
+    });
+  }
+
   const resolveFor = rulesResolver(config, inventory);
 
   // One library-level row per id any enabled app selects but the library
