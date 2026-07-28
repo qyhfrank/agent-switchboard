@@ -34,8 +34,7 @@
   "packageManager": "pnpm@10.18.0",
   "files": [
     "dist/",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "devDependencies": {
     "@biomejs/biome": "^2.2.5",

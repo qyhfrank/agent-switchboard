@@ -1,8 +1,6 @@
 # Agent Switchboard
 
 [![npm version](https://img.shields.io/npm/v/agent-switchboard)](https://www.npmjs.com/package/agent-switchboard)
-[![CI](https://github.com/mio/agent-switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/mio/agent-switchboard/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Manage MCP servers, rules, commands, agents, skills, and hooks from a single source of truth, then sync them to every AI coding agent you use.
 
