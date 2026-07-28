@@ -1,10 +1,11 @@
 import fs from 'node:fs';
+import { Command } from 'commander';
 import { APP_ROWS } from './apps.js';
 import { loadConfig } from './config.js';
 import { acquireRunLock, type Ledger, ledgerKey, loadLedger, saveLedger } from './ledger.js';
 import { scanLibrary } from './library.js';
 import { type Action, planRules, type SyncCapture } from './plan.js';
-import { buildReport, type Report, type ReportEntry } from './report.js';
+import { buildReport, type Report, type ReportEntry, renderReport } from './report.js';
 import { isContainedIn, removeFileResolved, resolveWritePath, writeFileAtomic } from './shapes.js';
 
 /**
@@ -173,4 +174,116 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   }
 
   return buildReport(scope, entries);
+}
+
+// ---------------------------------------------------------------------------
+// Argument parsing: scope flags are registered chain-wide and resolved once,
+// so any flag ordering yields identical behavior.
+// ---------------------------------------------------------------------------
+
+export interface CliInvocation {
+  command: 'sync' | 'status';
+  options: SyncOptions & { json: boolean; update: boolean; noUpdate: boolean; sources: string[] };
+}
+
+function collect(value: string, previous: string[]): string[] {
+  return [...previous, value];
+}
+
+function registerScopeFlags(target: Command): Command {
+  return target
+    .option('-n, --dry-run', 'plan and report; write nothing, clone nothing')
+    .option('--update', 'refresh managed clones after readiness, before planning')
+    .option('--no-update', 'suppress refresh (including plugins.auto_update)')
+    .option('--source <name>', 'filter the plan to entries from named sources', collect, [])
+    .option('--app <app>', 'narrow the plan to named apps', collect, [])
+    .option('--type <type>', 'narrow the plan to named types', collect, [])
+    .option('-p, --profile <name>', 'per-machine selection set')
+    .option('-P, --project <dir>', 'apply that repo project config at project scope')
+    .option('--json', 'machine-readable output');
+}
+
+export function parseCliArgs(argv: readonly string[]): CliInvocation {
+  let parsed: CliInvocation | null = null;
+
+  const program = new Command();
+  program.name('asb').exitOverride();
+  program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+  registerScopeFlags(program);
+
+  const capture = (command: 'sync' | 'status') => (_args: unknown, cmd: Command) => {
+    // Merge by hand: optsWithGlobals lets a subcommand's [] defaults shadow
+    // values collected before the subcommand name. Arrays concatenate in argv
+    // order; scalars prefer the later (subcommand) position.
+    const local = cmd.opts();
+    const global = cmd.parent?.opts() ?? {};
+    const update = local.update ?? global.update;
+    parsed = {
+      command,
+      options: {
+        dryRun: local.dryRun === true || global.dryRun === true,
+        update: update === true,
+        // Commander maps --no-update onto `update: false`; `noUpdate` reports
+        // the explicit suppression distinctly from "flag absent".
+        noUpdate: update === false,
+        sources: [...(global.source ?? []), ...(local.source ?? [])],
+        apps: [...(global.app ?? []), ...(local.app ?? [])],
+        types: [...(global.type ?? []), ...(local.type ?? [])],
+        profile: (local.profile ?? global.profile) as string | undefined,
+        project: (local.project ?? global.project) as string | undefined,
+        json: local.json === true || global.json === true,
+      },
+    };
+  };
+
+  registerScopeFlags(
+    program.command('sync').description('reconcile every installed app to the library')
+  ).action(capture('sync'));
+
+  registerScopeFlags(
+    program.command('status').description('inventory × selection × per-app reality')
+  ).action(capture('status'));
+
+  program.parse([...argv], { from: 'user' });
+
+  if (!parsed) {
+    throw new ConfigErrorLike('No command given.');
+  }
+  return parsed;
+}
+
+class ConfigErrorLike extends Error {
+  readonly exitCode = 2;
+}
+
+/**
+ * CLI entry: parse, run, render, set the exit code. Never calls
+ * process.exit — the exit code is set on process.exitCode so stdout always
+ * flushes before the process ends.
+ */
+export async function main(argv: readonly string[]): Promise<number> {
+  let invocation: CliInvocation;
+  try {
+    invocation = parseCliArgs(argv);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    return 2;
+  }
+
+  try {
+    const report = await runSync({
+      ...invocation.options,
+      dryRun: invocation.command === 'status' ? true : invocation.options.dryRun,
+    });
+    process.stdout.write(
+      invocation.options.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report)
+    );
+    return report.exitCode;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`${message}\n`);
+    const exitCode = (error as { exitCode?: number }).exitCode;
+    return exitCode === 2 ? 2 : 1;
+  }
 }

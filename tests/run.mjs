@@ -3,10 +3,13 @@ import { readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const testsDir = new URL('./', import.meta.url);
-const files = readdirSync(testsDir)
-  .filter((name) => name.endsWith('.test.ts'))
-  .sort()
-  .map((name) => fileURLToPath(new URL(name, testsDir)));
+const suiteDirs = [testsDir, new URL('./v05/', import.meta.url)];
+const files = suiteDirs.flatMap((dir) =>
+  readdirSync(dir)
+    .filter((name) => name.endsWith('.test.ts'))
+    .sort()
+    .map((name) => fileURLToPath(new URL(name, dir)))
+);
 const result = spawnSync(
   process.execPath,
   ['--import', 'tsx', '--test', ...process.argv.slice(2), ...files],

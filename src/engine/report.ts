@@ -57,6 +57,56 @@ export function redactCredentials(text: string): string {
     .replace(/(\/\/)(gh[pousr]_[A-Za-z0-9]+|x-access-token:[^@\s/]+)@/g, '$1***@');
 }
 
+const QUICK_START = [
+  'Quick start:',
+  '  asb add <git-url|path>   add a plugin source',
+  '  asb enable               pick what to activate',
+  '  asb sync                 reconcile every installed app',
+].join('\n');
+
+/**
+ * Human rendering: one line per non-clean entry grouped by app, `unchanged`
+ * as a count, a final tally. An empty plan says there is nothing to do and
+ * points at the quick start — never a bare success checkmark.
+ */
+export function renderReport(report: Report): string {
+  if (report.entries.length === 0) {
+    return `Nothing to do — the library is empty or nothing is selected.\n\n${QUICK_START}\n`;
+  }
+
+  const lines: string[] = [];
+  const prefix = report.scope.dryRun ? '[dry-run] ' : '';
+  const unchangedCount = report.summary.unchanged ?? 0;
+
+  const byApp = new Map<string, ReportEntry[]>();
+  for (const entry of report.entries) {
+    if (entry.outcome === 'unchanged') continue;
+    const key = entry.app ?? 'library';
+    const bucket = byApp.get(key);
+    if (bucket) bucket.push(entry);
+    else byApp.set(key, [entry]);
+  }
+
+  for (const [app, entries] of byApp) {
+    lines.push(`${app}:`);
+    for (const entry of entries) {
+      const label = entry.detail ? `${entry.outcome} (${entry.detail})` : entry.outcome;
+      const subject = entry.id ?? entry.path ?? entry.type ?? '';
+      const reason = entry.reason ? ` — ${entry.reason}` : '';
+      lines.push(`  ${prefix}${label}: ${subject}${reason}`);
+    }
+  }
+
+  if (unchangedCount > 0) lines.push(`unchanged: ${unchangedCount}`);
+
+  const tally = Object.entries(report.summary)
+    .map(([outcome, count]) => `${count} ${outcome}`)
+    .join(', ');
+  lines.push(tally);
+
+  return `${lines.join('\n')}\n`;
+}
+
 export function buildReport(scope: ReportScope, entries: readonly ReportEntry[]): Report {
   const summary: Partial<Record<Outcome, number>> = {};
   let failing = false;
