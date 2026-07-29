@@ -243,3 +243,23 @@ test('explain keeps MCP credential map keys and masks every value', async () => 
     assert.match(output, /\*\*\*/);
   });
 });
+
+test('explain masks env values through the kv-array dialect too', async () => {
+  await withScratchHomes(async (homes) => {
+    fs.mkdirSync(path.join(homes.agentsHome, '.config', 'coco'), { recursive: true });
+    const placeholder = 'INVENTED-PLACEHOLDER-9f3a';
+    seedMcpLibrary(homes, {
+      alpha: { command: 'run', env: { API_TOKEN: placeholder } },
+    });
+    writeUserConfig(homes, '[applications]\nenabled = ["coco"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    await runSync();
+
+    const slices = await runExplain('alpha');
+    const output = renderExplain(slices, 'alpha');
+
+    assert.equal(output.includes(placeholder), false);
+    assert.equal(JSON.stringify(slices).includes(placeholder), false);
+    assert.match(output, /API_TOKEN/);
+    assert.match(output, /\*\*\*/);
+  });
+});

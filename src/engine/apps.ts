@@ -170,6 +170,12 @@ export interface McpTargetRow {
   sanitize: boolean;
   /** Server-value transform; `verbatimServer` writes the definition as authored. */
   dialect(server: McpServerValue): McpServerValue | null;
+  /**
+   * Set when the dialect rewrites env maps to kv-arrays: the member field
+   * holding the env name. Explain keeps that field visible and masks every
+   * other member field.
+   */
+  envKeyName?: string;
   /** TOML hosts: how one addressed table serializes. JSON writes the value. */
   render?(keyPath: readonly string[], value: McpServerValue): string;
   /** A minimal host may be materialized when the document is absent. */
@@ -527,6 +533,7 @@ export const APP_ROWS: readonly AppRow[] = [
           envTransform: { keyName: 'key', valueName: 'value' },
           defaults: { type: 'stdio' },
         }),
+      envKeyName: 'key',
       create: true,
     },
   },
@@ -653,6 +660,7 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
           ...(envTransform ? { envTransform } : {}),
           ...(mcp.defaults ? { defaults: mcp.defaults } : {}),
         }),
+      ...(envTransform ? { envKeyName: envTransform.keyName ?? 'key' } : {}),
       create: true,
     };
   }

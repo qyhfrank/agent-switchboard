@@ -2835,7 +2835,7 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
         desired:
           slice.desired === null
             ? null
-            : `${JSON.stringify(maskMcpCredentialMaps(slice.desired), null, 2)}\n`,
+            : `${JSON.stringify(maskMcpCredentialMaps(slice.desired, row.envKeyName), null, 2)}\n`,
         components: component ? [{ id: component.id, path: component.path }] : [],
         sources: component ? componentSources([component]) : [],
       };
@@ -2849,15 +2849,39 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
 
 const MCP_CREDENTIAL_MAPS = new Set(['env', 'headers', 'http_headers', 'env_http_headers']);
 
-function maskMcpCredentialMaps(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(maskMcpCredentialMaps);
+/**
+ * A credential child is a name→value record, or — after a kv-array env
+ * dialect — an array of member records. Without a known env-name field every
+ * member field is masked; over-masking never leaks.
+ */
+function maskCredentialChild(child: unknown, envKeyName: string | undefined): unknown {
+  if (isPlainObject(child)) {
+    return Object.fromEntries(Object.keys(child).map((name) => [name, '***']));
+  }
+  if (Array.isArray(child)) {
+    return child.map((member) =>
+      isPlainObject(member)
+        ? Object.fromEntries(
+            Object.entries(member).map(([field, fieldValue]) => [
+              field,
+              envKeyName !== undefined && field === envKeyName ? fieldValue : '***',
+            ])
+          )
+        : '***'
+    );
+  }
+  return child;
+}
+
+function maskMcpCredentialMaps(value: unknown, envKeyName?: string): unknown {
+  if (Array.isArray(value)) return value.map((member) => maskMcpCredentialMaps(member, envKeyName));
   if (!isPlainObject(value)) return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [
       key,
-      MCP_CREDENTIAL_MAPS.has(key) && isPlainObject(child)
-        ? Object.fromEntries(Object.keys(child).map((name) => [name, '***']))
-        : maskMcpCredentialMaps(child),
+      MCP_CREDENTIAL_MAPS.has(key)
+        ? maskCredentialChild(child, envKeyName)
+        : maskMcpCredentialMaps(child, envKeyName),
     ])
   );
 }
