@@ -43,7 +43,7 @@ test('managed project MCP preserves foreign servers and records sanitized peer k
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.deepEqual(Object.keys(parsed.mcpServers).sort(), ['foreign', 'managed-server']);
-    assert.equal(manifest?.mcp['cursor::managed-server']?.serverKey, 'managed-server');
+    assert.equal(manifest?.sections.mcp?.['managed.server::cursor']?.serverKey, 'managed-server');
     assert.equal(JSON.stringify(manifest).includes('@array:'), false);
   });
 });
@@ -72,7 +72,7 @@ test('managed project MCP removes a clean disabled key and preserves foreign sib
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.deepEqual(Object.keys(after.mcpServers), ['foreign']);
-    assert.deepEqual(loadProjectManifest(homes.asbHome, project).manifest?.mcp, {});
+    assert.deepEqual(loadProjectManifest(homes.asbHome, project).manifest?.sections.mcp, {});
   });
 });
 
@@ -101,7 +101,9 @@ test('managed project MCP drifted removal is left behind with peer proof retaine
         .mcpServers.alpha.command,
       'user-edited'
     );
-    assert.ok(loadProjectManifest(homes.asbHome, project).manifest?.mcp['cursor::alpha']);
+    assert.ok(
+      loadProjectManifest(homes.asbHome, project).manifest?.sections.mcp?.['alpha::cursor']
+    );
   });
 });
 
@@ -187,6 +189,33 @@ test('Codex project trust refuses an existing untrusted value without rewriting 
   });
 });
 
+test('Codex trust refusal is not a collision=error input', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: { command: 'alpha' } });
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n');
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[distribution.project]\ncollision = "error"\n\n[mcp]\nenabled = ["alpha"]\n'
+    );
+    const globalConfig = path.join(homes.agentsHome, '.codex', 'config.toml');
+    const before = `[projects."${project}"]\ntrust_level = "untrusted"\n`;
+    fs.writeFileSync(globalConfig, before);
+
+    const report = await runSync({ project });
+    const projectHost = path.join(project, '.codex', 'config.toml');
+
+    assert.equal(report.exitCode, 1);
+    assert.equal(fs.readFileSync(globalConfig, 'utf-8'), before);
+    assert.equal(fs.existsSync(projectHost), true);
+    assert.match(fs.readFileSync(projectHost, 'utf-8'), /alpha/);
+    assert.equal(report.entries.find((entry) => entry.path === projectHost)?.detail, 'created');
+    assert.equal(report.entries.find((entry) => entry.path === globalConfig)?.detail, 'foreign');
+  });
+});
+
 test('Codex project trust preserves malformed global TOML and reports the refusal', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
@@ -257,7 +286,7 @@ test('shared Trae MCP retires inactive owner proof and removes the last inactive
     const second = await runSync({ project });
     const afterOne = loadProjectManifest(homes.asbHome, project).manifest;
     assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
-    assert.deepEqual(Object.keys(afterOne?.mcp ?? {}), ['trae::alpha']);
+    assert.deepEqual(Object.keys(afterOne?.sections.mcp ?? {}), ['alpha::trae']);
 
     writeUserConfig(homes, '[applications]\nenabled = []\n');
     const third = await runSync({ project });
@@ -265,6 +294,6 @@ test('shared Trae MCP retires inactive owner proof and removes the last inactive
     const root = JSON.parse(fs.readFileSync(host, 'utf-8')) as { mcpServers: unknown };
     assert.equal(third.exitCode, 0, JSON.stringify(third.entries, null, 2));
     assert.deepEqual(root.mcpServers, {});
-    assert.deepEqual(loadProjectManifest(homes.asbHome, project).manifest?.mcp, {});
+    assert.deepEqual(loadProjectManifest(homes.asbHome, project).manifest?.sections.mcp, {});
   });
 });

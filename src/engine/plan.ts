@@ -21,7 +21,6 @@ import type { Component, HookEventMap, LibraryInventory } from './library.js';
 import { type NativePlanInput, type NativeWork, planNative } from './native.js';
 import {
   type HookTarget,
-  manifestBundleKey,
   type PeerState,
   type ProjectManifest,
   peerStateHasContent,
@@ -194,17 +193,9 @@ export interface Action {
    * Hook groups live in a file every peer reads, so their ownership travels
    * with this record instead of a ledger entry.
    */
-  peer?: { asbHome: string; target: HookTarget; state: PeerState };
-  /** Project hook ownership checkpointed after the config action succeeds. */
-  projectPeer?: {
-    manifest: ProjectManifest;
-    projectRoot: string;
-    appId: string;
-    configPath: string;
-    bundleDir: string;
-    state: PeerState;
-    preserveBundles: string[];
-  };
+  peer?: { asbHome: string; target: HookTarget; state: PeerState; projectRoot?: string };
+  /** Project manifest mutated only after this action succeeds. */
+  projectManifest?: { manifest: ProjectManifest; projectRoot: string };
   /**
    * Native-manager work: the app's own plugin manager owns the result, so
    * there is no path, hash, or ledger entry — the commands are the apply.
@@ -706,9 +697,7 @@ export function planRules(input: PlanInput): Action[] {
             op: 'none',
             outcome: 'removed',
             detail: 'already-absent',
-            ...(input.project
-              ? {}
-              : { ledger: { op: 'delete' as const, key: ledgerKey(recorded) } }),
+            ledger: { op: 'delete' as const, key: ledgerKey(recorded) },
           });
         }
         continue;
@@ -1210,9 +1199,7 @@ export function planSkills(input: PlanInput): Action[] {
             op: 'none',
             outcome: 'removed',
             detail: 'already-absent',
-            ...(input.project
-              ? {}
-              : { ledger: { op: 'delete' as const, key: ledgerKey(recorded) } }),
+            ledger: { op: 'delete' as const, key: ledgerKey(recorded) },
           });
         }
         continue;
@@ -2489,14 +2476,8 @@ export function planHooks(input: PlanInput): Action[] {
             targetModeMatchesSourceExecutableBits(file.mode, target.mode)
           );
         });
-      const projectRecord = input.project
-        ? capture.projectManifest?.bundles[manifestBundleKey(app, 'hooks', id)]
-        : undefined;
-      const projectCollision =
-        input.project &&
-        live.exists &&
-        ((!projectRecord && !clean) ||
-          (projectRecord !== undefined && live.fingerprint !== projectRecord.hash));
+      const projectRecord = input.project ? state.bundles.includes(id) : false;
+      const projectCollision = input.project && live.exists && !projectRecord && !clean;
       if (projectCollision && input.project?.collision !== 'takeover') {
         writes.push({
           app,
@@ -2505,10 +2486,8 @@ export function planHooks(input: PlanInput): Action[] {
           path: bundlePath,
           op: 'none',
           outcome: 'conflict',
-          detail: projectRecord ? 'modified' : 'foreign',
-          reason: projectRecord
-            ? 'project hook bundle changed since the peer manifest was written; preserved'
-            : 'project hook bundle is occupied and the peer manifest does not own it; preserved',
+          detail: 'foreign',
+          reason: 'project hook bundle is occupied and the hook state does not own it; preserved',
         });
         continue;
       }
@@ -2613,25 +2592,6 @@ export function planHooks(input: PlanInput): Action[] {
         });
         continue;
       }
-      const projectRecord = input.project
-        ? capture.projectManifest?.bundles[manifestBundleKey(app, 'hooks', id)]
-        : undefined;
-      if (input.project && (!projectRecord || projectRecord.hash !== live.fingerprint)) {
-        retained.push(id);
-        removals.push({
-          app,
-          type: 'hooks',
-          id,
-          path: bundlePath,
-          op: 'none',
-          outcome: 'left-behind',
-          detail: projectRecord ? 'modified' : 'unproven',
-          reason: projectRecord
-            ? 'project hook bundle changed since the peer manifest was written; preserved'
-            : 'project manifest has no bundle proof; preserved',
-        });
-        continue;
-      }
       removals.push({
         app,
         type: 'hooks',
@@ -2661,20 +2621,12 @@ export function planHooks(input: PlanInput): Action[] {
       bundles: [...owned, ...retained],
       legacyBundles: [],
     };
-    const peer: Action['peer'] = input.project
-      ? undefined
-      : { asbHome: config.homes.asbHome, target: row.stateTarget, state: stateAfter };
-    const projectPeer: Action['projectPeer'] = input.project
-      ? {
-          manifest: capture.projectManifest as ProjectManifest,
-          projectRoot: input.project.root,
-          appId: app,
-          configPath,
-          bundleDir: row.bundleDir(config.homes),
-          state: stateAfter,
-          preserveBundles: retained,
-        }
-      : undefined;
+    const peer: Action['peer'] = {
+      asbHome: config.homes.asbHome,
+      target: row.stateTarget,
+      state: stateAfter,
+      ...(input.project ? { projectRoot: input.project.root } : {}),
+    };
     const currentHash = captured.content !== null ? hashContent(captured.content) : null;
     const content = `${JSON.stringify(next, null, 2)}\n`;
 
@@ -2696,11 +2648,10 @@ export function planHooks(input: PlanInput): Action[] {
             root,
             expectedHash: currentHash,
             peer,
-            projectPeer,
           }
-        : { ...base, op: 'none', outcome: 'unchanged', peer, projectPeer };
+        : { ...base, op: 'none', outcome: 'unchanged', peer };
     } else if (captured.content === content) {
-      configAction = { ...base, op: 'none', outcome: 'unchanged', peer, projectPeer };
+      configAction = { ...base, op: 'none', outcome: 'unchanged', peer };
     } else {
       configAction = {
         ...base,
@@ -2711,7 +2662,6 @@ export function planHooks(input: PlanInput): Action[] {
         root,
         expectedHash: currentHash,
         peer,
-        projectPeer,
       };
     }
 
@@ -2771,9 +2721,9 @@ export function projectMcpPeerLedgerEntries(
       component.type === 'mcp' && component.server !== undefined
   );
   const entries: LedgerEntry[] = [];
-  for (const peer of Object.values(manifest.mcp)) {
-    const row = table.find((candidate) => candidate.id === peer.appId)?.mcp;
-    const captured = capture.mcp[peer.appId];
+  for (const peer of Object.values(manifest.sections.mcp ?? {})) {
+    const row = table.find((candidate) => candidate.id === peer.targetId)?.mcp;
+    const captured = capture.mcp[peer.targetId];
     if (!row || !captured) continue;
     const expectedPath = path.resolve(config.project as string, peer.relativePath);
     if (expectedPath !== captured.path) continue;
@@ -2795,7 +2745,7 @@ export function projectMcpPeerLedgerEntries(
           ? { ...dialect, [identityField]: peer.serverKey }
           : dialect;
     entries.push({
-      app: peer.appId,
+      app: peer.targetId,
       type: 'mcp',
       id: component?.id ?? peer.serverKey,
       path: captured.path,
@@ -3431,7 +3381,6 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
     type: 'mcp',
     id: null,
     path: captured.path,
-    projectAction: true,
   } as const;
   if (captured.escapes === true) {
     return [
@@ -3496,6 +3445,7 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
         ...base,
         op: 'write',
         outcome: 'written',
+        projectAction: true,
         detail: captured.exists ? 'merged' : 'created',
         content,
         root: path.dirname(captured.path),
@@ -3625,6 +3575,7 @@ export function preflightProjectActions(
       expectedHash: undefined,
       ledger: undefined,
       peer: undefined,
+      projectManifest: undefined,
       keyEdits: undefined,
       native: undefined,
     };

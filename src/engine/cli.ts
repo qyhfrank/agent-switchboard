@@ -21,6 +21,7 @@ import { type ImportOptions, type ImportResult, importFromApp } from './importer
 import {
   acquireRunLock,
   type Ledger,
+  type LedgerEntry,
   ledgerKey,
   ledgerPath,
   loadLedger,
@@ -30,12 +31,17 @@ import {
 import { buildPluginExpansion, type LibraryInventory, scanLibrary } from './library.js';
 import { applyNative, captureNative, planNative } from './native.js';
 import {
-  checkpointProjectManifest,
   loadPeerState,
   loadProjectManifest,
-  projectHookState,
-  projectManifestLedgerEntries,
-  recordProjectHookState,
+  type ProjectLibrarySection,
+  type ProjectManifest,
+  projectManifestKeyParts,
+  recordManagedMcpEntry,
+  recordProjectLibraryEntry,
+  recordProjectRulesEntry,
+  removeManagedMcpEntry,
+  removeProjectLibraryEntry,
+  removeProjectRulesEntry,
   savePeerState,
   saveProjectManifest,
   uniqueProjectManifestPaths,
@@ -131,6 +137,65 @@ export interface SyncOptions {
   /** Status-only component id glob (`*` and `?`). */
   idGlob?: string;
   env?: NodeJS.ProcessEnv;
+}
+
+function projectRelative(projectRoot: string, targetPath: string): string | null {
+  const relative = path.relative(projectRoot, targetPath);
+  if (relative === '' || path.isAbsolute(relative) || relative.split(path.sep).includes('..')) {
+    return null;
+  }
+  return relative.split(path.sep).join('/');
+}
+
+/** Planner-only proof view. The machine ledger is never seeded from peer state. */
+function projectManifestProofs(manifest: ProjectManifest, projectRoot: string): LedgerEntry[] {
+  const root = path.resolve(projectRoot);
+  const proofs: LedgerEntry[] = [];
+  for (const section of ['skills', 'commands', 'agents'] as const) {
+    for (const [key, entry] of Object.entries(manifest.sections[section] ?? {})) {
+      if (
+        typeof entry.relativePath !== 'string' ||
+        typeof entry.targetId !== 'string' ||
+        typeof entry.hash !== 'string'
+      ) {
+        continue;
+      }
+      const targetPath = path.resolve(root, entry.relativePath);
+      if (projectRelative(root, targetPath) === null) continue;
+      proofs.push({
+        app: entry.targetId,
+        type: section,
+        id: projectManifestKeyParts(key).id,
+        path: targetPath,
+        shape: section === 'skills' ? 'own-dir' : 'own-file',
+        hash: entry.hash,
+        provenance: 'peer-record',
+        updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '',
+      });
+    }
+  }
+  for (const entry of Object.values(manifest.sections.rules ?? {})) {
+    if (
+      typeof entry.relativePath !== 'string' ||
+      typeof entry.hash !== 'string' ||
+      !Array.isArray(entry.targetIds)
+    ) {
+      continue;
+    }
+    const targetPath = path.resolve(root, entry.relativePath);
+    if (projectRelative(root, targetPath) === null) continue;
+    proofs.push({
+      app: entry.targetIds[0] ?? 'project',
+      type: 'rules',
+      id: null,
+      path: targetPath,
+      shape: entry.mode === 'block' ? 'region' : 'own-file',
+      hash: entry.hash,
+      provenance: 'peer-record',
+      updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '',
+    });
+  }
+  return proofs;
 }
 
 function captureFor(
@@ -379,9 +444,7 @@ function captureFor(
       content: null,
       config: {},
       escapes: targetEscapesRoot(root, configPath),
-      state: projectManifest
-        ? projectHookState(projectManifest, appId)
-        : loadPeerState(config.homes.asbHome, row.stateTarget),
+      state: loadPeerState(config.homes.asbHome, row.stateTarget, config.project ?? undefined),
     };
     if (captured.exists) {
       try {
@@ -420,7 +483,7 @@ function captureFor(
   // one settled location rather than probing the disk itself.
   const mcpApps = new Set([
     ...config.apps.enabled,
-    ...Object.values(projectManifest?.mcp ?? {}).map((entry) => entry.appId),
+    ...Object.values(projectManifest?.sections.mcp ?? {}).map((entry) => entry.targetId),
   ]);
   for (const appId of mcpApps) {
     const row = table.find((candidate) => candidate.id === appId)?.mcp;
@@ -510,6 +573,83 @@ function applyLedgerMutation(ledger: Ledger, action: Action): boolean {
     changed = changed || ledger.entries.length !== before;
   }
   return changed;
+}
+
+function projectEntryFromLedgerKey(key: string): Pick<LedgerEntry, 'app' | 'type' | 'id' | 'path'> {
+  const [app = '', type = '', id = '', targetPath = ''] = key.split('\0');
+  return { app, type, id: id || null, path: targetPath };
+}
+
+function applyProjectManifestMutation(action: Action): void {
+  const project = action.projectManifest;
+  if (!project || !action.ledger) return;
+  const mutations = Array.isArray(action.ledger) ? action.ledger : [action.ledger];
+  for (const mutation of mutations) {
+    if (mutation.op === 'delete') {
+      const entry = projectEntryFromLedgerKey(mutation.key);
+      const relativePath = projectRelative(project.projectRoot, entry.path);
+      if (relativePath === null) continue;
+      if (
+        (entry.type === 'skills' || entry.type === 'commands' || entry.type === 'agents') &&
+        entry.id !== null
+      ) {
+        removeProjectLibraryEntry(
+          project.manifest,
+          entry.type as ProjectLibrarySection,
+          entry.id,
+          entry.app
+        );
+      } else if (entry.type === 'mcp' && entry.id !== null) {
+        removeManagedMcpEntry(project.manifest, `${entry.id}::${entry.app}`);
+      } else if (entry.type === 'rules') {
+        removeProjectRulesEntry(project.manifest, relativePath);
+      }
+      continue;
+    }
+    const entry = mutation.entry;
+    const relativePath = projectRelative(project.projectRoot, entry.path);
+    if (relativePath === null) continue;
+    if (
+      (entry.type === 'skills' || entry.type === 'commands' || entry.type === 'agents') &&
+      entry.id !== null
+    ) {
+      const section = entry.type as ProjectLibrarySection;
+      if (
+        (section === 'skills' && entry.shape === 'own-dir') ||
+        (section !== 'skills' && entry.shape === 'own-file')
+      ) {
+        recordProjectLibraryEntry(project.manifest, section, entry.id, {
+          relativePath,
+          targetId: entry.app,
+          hash: entry.hash,
+          updatedAt: entry.updatedAt,
+        });
+      }
+      continue;
+    }
+    if (entry.type === 'mcp' && entry.id !== null) {
+      if (entry.shape === 'keys' && entry.serverKey) {
+        recordManagedMcpEntry(project.manifest, entry.id, {
+          relativePath,
+          targetId: entry.app,
+          serverKey: entry.serverKey,
+          updatedAt: entry.updatedAt,
+        });
+      }
+      continue;
+    }
+    if (entry.type === 'rules') {
+      if (entry.shape === 'region' || entry.shape === 'own-file') {
+        recordProjectRulesEntry(project.manifest, {
+          relativePath,
+          mode: entry.shape === 'region' ? 'block' : 'full',
+          targetIds: action.members ?? [entry.app],
+          hash: entry.hash,
+          updatedAt: entry.updatedAt,
+        });
+      }
+    }
+  }
 }
 
 export function executeAction(action: Action, ledger: Ledger): ReportEntry {
@@ -616,14 +756,17 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
             'bundle is unprovable after writing (symlink or special file appeared); no ownership recorded'
           );
         }
-        applyLedgerMutation(ledger, {
+        const applied = {
           ...action,
           ledger: { op: 'put', entry: { ...action.ledger.entry, hash: measured } },
-        });
+        } satisfies Action;
+        applyLedgerMutation(ledger, applied);
+        applyProjectManifestMutation(applied);
         return toEntry(action);
       }
 
       applyLedgerMutation(ledger, action);
+      applyProjectManifestMutation(action);
       return toEntry(action);
     }
 
@@ -653,34 +796,18 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
   }
 
   applyLedgerMutation(ledger, action);
+  applyProjectManifestMutation(action);
 
   // The peer record is published only once its own slice landed: a config
   // holding groups no record claims is a leak, and a record claiming groups
   // no config holds authorizes deleting the user's.
   if (action.peer) {
     try {
-      savePeerState(action.peer.asbHome, action.peer.target, action.peer.state);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        ...toEntry(action),
-        outcome: 'failed',
-        detail: 'write-error',
-        reason: `hook ownership state could not be saved (${message})`,
-      };
-    }
-  }
-  if (action.projectPeer) {
-    try {
-      recordProjectHookState(
-        action.projectPeer.manifest,
-        action.projectPeer.projectRoot,
-        action.projectPeer.appId,
-        action.projectPeer.configPath,
-        action.projectPeer.bundleDir,
-        action.projectPeer.state,
-        hashContent(action.content ?? ''),
-        action.projectPeer.preserveBundles
+      savePeerState(
+        action.peer.asbHome,
+        action.peer.target,
+        action.peer.state,
+        action.peer.projectRoot
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -688,7 +815,7 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
         ...toEntry(action),
         outcome: 'failed',
         detail: 'write-error',
-        reason: `project hook ownership state could not be saved (${message})`,
+        reason: `hook ownership state could not be saved (${message})`,
       };
     }
   }
@@ -737,32 +864,16 @@ function reconcile(
     // that reaches a peer publish failed to be REMOVED: it is still
     // distributed, and the record must keep saying so.
     const entry = run(
-      (action.peer || action.projectPeer) && slot.size > 0
+      action.peer && slot.size > 0
         ? {
             ...action,
-            ...(action.peer
-              ? {
-                  peer: {
-                    ...action.peer,
-                    state: {
-                      ...action.peer.state,
-                      bundles: [...new Set([...action.peer.state.bundles, ...slot])],
-                    },
-                  },
-                }
-              : {}),
-            ...(action.projectPeer
-              ? {
-                  projectPeer: {
-                    ...action.projectPeer,
-                    state: {
-                      ...action.projectPeer.state,
-                      bundles: [...new Set([...action.projectPeer.state.bundles, ...slot])],
-                    },
-                    preserveBundles: [...new Set([...action.projectPeer.preserveBundles, ...slot])],
-                  },
-                }
-              : {}),
+            peer: {
+              ...action.peer,
+              state: {
+                ...action.peer.state,
+                bundles: [...new Set([...action.peer.state.bundles, ...slot])],
+              },
+            },
           }
         : action
     );
@@ -781,7 +892,9 @@ function reconcile(
 /** Scope flags whose engine wiring lands with a later cell fail closed. */
 function rejectUnwiredScope(opts: SyncOptions): void {
   if (opts.project) {
-    throw new ConfigError('project scope is not available in this engine build');
+    throw new ConfigError(
+      'project scope is not wired into explain yet; use status -P for a project preview'
+    );
   }
 }
 
@@ -925,6 +1038,21 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
             return loadProjectManifest(config.homes.asbHome, config.project as string);
           })()
         : null;
+    if (manifestLoad?.collision) {
+      const report = buildReport(scope, [
+        {
+          app: 'project',
+          type: null,
+          id: null,
+          path: manifestLoad.path,
+          outcome: 'failed',
+          detail: 'slug-collision',
+          reason: `${manifestLoad.error ?? 'project manifest slug collision'}; no project file was written`,
+        },
+      ]);
+      if (ledger.lastRun) report.lastRun = ledger.lastRun;
+      return report;
+    }
     if (manifestLoad?.corrupt || (manifestLoad && manifestLoad.manifest === null)) {
       const report = buildReport(scope, [
         {
@@ -953,9 +1081,16 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       // A machine ledger can mirror project proof for reporting, but it never
       // substitutes for the peer manifest. Discard ledger-only project claims.
       ledger.entries = ledger.entries.filter((entry) => !inside(entry.path));
-      if (projectMode === 'managed' && manifestLoad?.manifest) {
-        ledger.entries.push(...projectManifestLedgerEntries(manifestLoad.manifest, root));
-      }
+    }
+    let planningLedger: Ledger = ledger;
+    if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
+      planningLedger = {
+        ...ledger,
+        entries: [
+          ...ledger.entries,
+          ...projectManifestProofs(manifestLoad.manifest, config.project),
+        ],
+      };
     }
     let catalog = readSourceCatalog(config);
 
@@ -1000,7 +1135,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
 
     const capture = captureFor(
       resolved,
-      ledger,
+      planningLedger,
       table,
       inventory,
       opts.all === true,
@@ -1008,23 +1143,32 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     );
     const now = new Date().toISOString();
     if (projectMode === 'managed' && manifestLoad?.manifest) {
-      ledger.entries.push(
-        ...projectMcpPeerLedgerEntries(
-          resolved,
-          inventory,
-          capture,
-          table,
-          manifestLoad.manifest,
-          now
-        )
-      );
+      for (const proof of planningLedger.entries) {
+        if (proof.type !== 'skills' || proof.shape !== 'own-dir') continue;
+        const files = capture.bundles[proof.path]?.files;
+        if (files) proof.files = files.map((file) => file.rel);
+      }
+      planningLedger = {
+        ...planningLedger,
+        entries: [
+          ...planningLedger.entries,
+          ...projectMcpPeerLedgerEntries(
+            resolved,
+            inventory,
+            capture,
+            table,
+            manifestLoad.manifest,
+            now
+          ),
+        ],
+      };
     }
     const nativeState = captureNative(resolved, catalog, table, env, capture.installed, dryRun);
 
     const planInput = {
       config: resolved,
       inventory,
-      ledger,
+      ledger: planningLedger,
       capture,
       table,
       now,
@@ -1105,6 +1249,15 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       );
     }
     actions = groupKeyActions(actions);
+    if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
+      actions = actions.map((action) => ({
+        ...action,
+        projectManifest: {
+          manifest: manifestLoad.manifest as ProjectManifest,
+          projectRoot: config.project as string,
+        },
+      }));
+    }
     if (projectPolicy) actions = preflightProjectActions(actions, projectPolicy);
 
     if (dryRun) {
@@ -1152,8 +1305,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       manifestLoad?.manifest &&
       manifestBefore !== null
     ) {
-      checkpointProjectManifest(manifestLoad.manifest, config.project, ledger.entries);
-      if (JSON.stringify(manifestLoad.manifest) !== manifestBefore) {
+      if (manifestLoad.needsSave || JSON.stringify(manifestLoad.manifest) !== manifestBefore) {
         try {
           saveProjectManifest(manifestLoad.path, manifestLoad.manifest);
         } catch (error) {
@@ -1165,7 +1317,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
             path: manifestLoad.path,
             outcome: 'failed',
             detail: 'write-error',
-            reason: `project manifest could not be saved (${message})`,
+            reason: `project manifest could not be saved (${message}); project targets were written without durable peer proof, and the next successful sync re-records ownership`,
           });
         }
       }

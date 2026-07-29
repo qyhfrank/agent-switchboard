@@ -90,8 +90,6 @@ export function composeRules(
 
 const REGION_START = '<!-- asb:rules:start -->';
 const REGION_END = '<!-- asb:rules:end -->';
-const PROJECT_REGION_START = '<!-- ASB:START -->';
-const PROJECT_REGION_END = '<!-- ASB:END -->';
 
 export type RegionPlacement = 'prepend' | 'append';
 
@@ -170,8 +168,8 @@ function markerOffsets(content: string, marker: string): number[] {
  * duplicated, or reordered marker set is ambiguous ownership and fails closed.
  */
 export function projectRegion(content: string): string | null {
-  const starts = markerOffsets(content, PROJECT_REGION_START);
-  const ends = markerOffsets(content, PROJECT_REGION_END);
+  const starts = markerOffsets(content, REGION_START);
+  const ends = markerOffsets(content, REGION_END);
   if (starts.length === 0 && ends.length === 0) return null;
   if (starts.length > 1 || ends.length > 1) {
     throw new Error('duplicate ASB project markers');
@@ -180,7 +178,7 @@ export function projectRegion(content: string): string | null {
     throw new Error('incomplete ASB project markers');
   }
   if (starts[0] >= ends[0]) throw new Error('reordered ASB project markers');
-  return content.slice(starts[0], ends[0] + PROJECT_REGION_END.length);
+  return content.slice(starts[0], ends[0] + REGION_END.length);
 }
 
 export function mergeProjectRegion(
@@ -196,7 +194,7 @@ export function mergeProjectRegion(
     const normalized = combined.replace(/\n{3,}/g, '\n\n').trim();
     return normalized.length > 0 ? `${normalized}\n` : '';
   }
-  const block = `${PROJECT_REGION_START}\n${content.trimEnd()}\n${PROJECT_REGION_END}`;
+  const block = `${REGION_START}\n${content.trimEnd()}\n${REGION_END}`;
   if (region !== null) {
     return `${existing.slice(0, start)}${block}${existing.slice(start + region.length)}`;
   }

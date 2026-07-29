@@ -3,9 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { appRows, projectAppRows } from '../../src/engine/apps.js';
-import { runSync } from '../../src/engine/cli.js';
+import { runExplain, runSync } from '../../src/engine/cli.js';
 import { effectiveSelection, loadConfig } from '../../src/engine/config.js';
-import { projectManifestPath } from '../../src/engine/peer.js';
+import { loadProjectManifest, peerStatePath, projectManifestPath } from '../../src/engine/peer.js';
+import { projectRegion } from '../../src/engine/shapes.js';
 import {
   installApps,
   seedRule,
@@ -171,7 +172,7 @@ test('managed takeover overwrites the named foreign project target and records o
   });
 });
 
-test('shared project AGENTS.md has one strict uppercase marker writer', async () => {
+test('shared project AGENTS.md has one strict 0.4 marker writer', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -188,8 +189,8 @@ test('shared project AGENTS.md has one strict uppercase marker writer', async ()
     const content = fs.readFileSync(agents, 'utf-8');
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(content.match(/<!-- ASB:START -->/g)?.length, 1);
-    assert.equal(content.match(/<!-- ASB:END -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- asb:rules:start -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- asb:rules:end -->/g)?.length, 1);
     assert.match(content, /# Shared rule/);
     assert.match(content, /# User instructions/);
     assert.equal(
@@ -210,7 +211,8 @@ test('malformed shared AGENTS markers fail closed without repair guessing', asyn
       '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["project"]\n'
     );
     projectConfig(project);
-    const broken = '<!-- ASB:START -->\nold\n<!-- ASB:START -->\n<!-- ASB:END -->\n';
+    const broken =
+      '<!-- asb:rules:start -->\nold\n<!-- asb:rules:start -->\n<!-- asb:rules:end -->\n';
     const agents = seed(project, 'AGENTS.md', broken);
 
     const report = await runSync({ project });
@@ -221,7 +223,19 @@ test('malformed shared AGENTS markers fail closed without repair guessing', asyn
   });
 });
 
-test('project hooks keep ownership in the project manifest, never global peer state', async () => {
+test('project marker parser accepts one 0.4 pair and rejects partial or reordered pairs', () => {
+  assert.equal(
+    projectRegion('before\n<!-- asb:rules:start -->\nmanaged\n<!-- asb:rules:end -->\nafter\n'),
+    '<!-- asb:rules:start -->\nmanaged\n<!-- asb:rules:end -->'
+  );
+  assert.throws(() => projectRegion('<!-- asb:rules:start -->\nmanaged\n'), /incomplete/i);
+  assert.throws(
+    () => projectRegion('<!-- asb:rules:end -->\nmanaged\n<!-- asb:rules:start -->\n'),
+    /reordered/i
+  );
+});
+
+test('project hooks keep ownership in the scoped hooks v1 state, never the manifest', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -244,13 +258,15 @@ test('project hooks keep ownership in the project manifest, never global peer st
 
     const first = await runSync({ project });
     const globalPeer = path.join(homes.asbHome, 'state', 'hooks', 'claude-code.json');
-    const manifest = JSON.parse(
-      fs.readFileSync(projectManifestPath(homes.asbHome, project), 'utf-8')
-    ) as { files: Record<string, { events?: Record<string, unknown[]> }> };
+    const projectPeer = peerStatePath(homes.asbHome, 'claude-code', project);
+    const state = JSON.parse(fs.readFileSync(projectPeer, 'utf-8')) as {
+      events: Record<string, unknown[]>;
+    };
 
     assert.equal(first.exitCode, 0, JSON.stringify(first.entries, null, 2));
     assert.equal(fs.existsSync(globalPeer), false);
-    assert.equal(manifest.files['claude-code::hooks']?.events?.UserPromptSubmit.length, 1);
+    assert.equal(state.events.UserPromptSubmit.length, 1);
+    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
 
     fs.writeFileSync(path.join(project, '.asb.toml'), '[hooks]\nenabled = []\n');
     const second = await runSync({ project });
@@ -260,10 +276,11 @@ test('project hooks keep ownership in the project manifest, never global peer st
 
     assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
     assert.equal(Object.hasOwn(settings, 'hooks'), false);
+    assert.equal(fs.existsSync(projectPeer), false);
   });
 });
 
-test('project hook bundle drift is preserved with manifest proof retained', async () => {
+test('project hook bundle cleanup follows the scoped 0.4 ownership list', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -293,13 +310,10 @@ test('project hook bundle drift is preserved with manifest proof retained', asyn
     fs.writeFileSync(path.join(project, '.asb.toml'), '[hooks]\nenabled = []\n');
 
     const report = await runSync({ project });
-    const manifest = JSON.parse(
-      fs.readFileSync(projectManifestPath(homes.asbHome, project), 'utf-8')
-    ) as { bundles: Record<string, unknown> };
 
-    assert.equal(report.exitCode, 1);
-    assert.equal(fs.readFileSync(target, 'utf-8'), '#!/bin/sh\necho edited\n');
-    assert.ok(manifest.bundles['claude-code::hooks::tool']);
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.existsSync(path.dirname(target)), false);
+    assert.equal(fs.existsSync(peerStatePath(homes.asbHome, 'claude-code', project)), false);
   });
 });
 
@@ -316,7 +330,7 @@ test('a corrupt project manifest aborts before project writes and remains byte-e
     projectConfig(project);
     const manifestPath = projectManifestPath(homes.asbHome, project);
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-    const corrupt = '{ "version": 1, "files": ';
+    const corrupt = '{ "version": 1, "updatedAt": "x", "sections": ';
     fs.writeFileSync(manifestPath, corrupt);
 
     const report = await runSync({ project });
@@ -325,6 +339,33 @@ test('a corrupt project manifest aborts before project writes and remains byte-e
     assert.equal(fs.readFileSync(manifestPath, 'utf-8'), corrupt);
     assert.equal(fs.existsSync(path.join(project, '.cursor', 'commands', 'build.md')), false);
     assert.equal(report.entries[0]?.path, manifestPath);
+  });
+});
+
+test('a live slug collision names both roots and applies no second-project write', async () => {
+  await withScratchHomes(async (homes) => {
+    const first = path.join(homes.root, 'a--b', 'c');
+    const second = path.join(homes.root, 'a', 'b--c');
+    fs.mkdirSync(first, { recursive: true });
+    fs.mkdirSync(second, { recursive: true });
+    installApps(homes, 'cursor');
+    seed(homes.asbHome, 'commands/build.md', 'desired\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["cursor"]\n\n[commands]\nenabled = ["build"]\n'
+    );
+    projectConfig(first);
+    projectConfig(second);
+
+    const firstRun = await runSync({ project: first });
+    const secondRun = await runSync({ project: second });
+    const reason = secondRun.entries[0]?.reason ?? '';
+
+    assert.equal(firstRun.exitCode, 0, JSON.stringify(firstRun.entries, null, 2));
+    assert.equal(secondRun.exitCode, 1);
+    assert.match(reason, new RegExp(first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.match(reason, new RegExp(second.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(fs.existsSync(path.join(second, '.cursor', 'commands', 'build.md')), false);
   });
 });
 
@@ -347,11 +388,52 @@ test('managed cleanup keeps modified command proof until the bytes can be reclai
     const report = await runSync({ project });
     const manifest = JSON.parse(
       fs.readFileSync(projectManifestPath(homes.asbHome, project), 'utf-8')
-    ) as { files: Record<string, unknown> };
+    ) as { sections: { commands?: Record<string, unknown> } };
 
     assert.equal(report.exitCode, 1);
     assert.equal(fs.readFileSync(target, 'utf-8'), 'user edit\n');
-    assert.ok(manifest.files['cursor::commands:build:.cursor/commands/build.md']);
+    assert.ok(manifest.sections.commands?.['build::cursor']);
+  });
+});
+
+test('manifest save failure reports unproven writes and the next sync records them', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'cursor');
+    seed(homes.asbHome, 'commands/build.md', 'desired\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["cursor"]\n\n[commands]\nenabled = ["build"]\n'
+    );
+    projectConfig(project);
+    const manifestPath = projectManifestPath(homes.asbHome, project);
+    const originalRename = fs.renameSync;
+    fs.renameSync = ((oldPath: fs.PathLike, newPath: fs.PathLike) => {
+      if (path.resolve(String(newPath)) === manifestPath) throw new Error('fixture write failure');
+      originalRename(oldPath, newPath);
+    }) as typeof fs.renameSync;
+
+    let failed: Awaited<ReturnType<typeof runSync>>;
+    try {
+      failed = await runSync({ project });
+    } finally {
+      fs.renameSync = originalRename;
+    }
+
+    const target = path.join(project, '.cursor', 'commands', 'build.md');
+    const manifestFailure = failed.entries.find((entry) => entry.path === manifestPath);
+    assert.equal(failed.exitCode, 1);
+    assert.equal(fs.readFileSync(target, 'utf-8'), 'desired\n');
+    assert.equal(fs.existsSync(manifestPath), false);
+    assert.match(manifestFailure?.reason ?? '', /written without durable peer proof/i);
+    assert.match(manifestFailure?.reason ?? '', /next successful sync re-records ownership/i);
+
+    const recovered = await runSync({ project });
+    assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.entries, null, 2));
+    assert.ok(
+      loadProjectManifest(homes.asbHome, project).manifest?.sections.commands?.['build::cursor']
+    );
   });
 });
 
@@ -499,5 +581,17 @@ test('shared Trae project skills plan one physical writer from both app selectio
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(fs.existsSync(target), true);
     assert.equal(report.entries.filter((entry) => entry.path === path.dirname(target)).length, 1);
+  });
+});
+
+test('project explain refusal points to status project preview', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, '.asb.toml'), '');
+    await assert.rejects(
+      runExplain('build', { project }),
+      /project scope is not wired into explain yet; use status -P for a project preview/i
+    );
   });
 });

@@ -2,8 +2,6 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { LedgerEntry } from './ledger.js';
-import { bundleFingerprint, listTargetFiles } from './shapes.js';
 
 /**
  * Hook ownership state: a peer contract, not private engine state. A 0.4.35
@@ -33,8 +31,16 @@ export function peerStateDir(asbHome: string): string {
   return path.join(asbHome, 'state', 'hooks');
 }
 
-export function peerStatePath(asbHome: string, target: HookTarget): string {
-  return path.join(peerStateDir(asbHome), `${target}.json`);
+function peerStateFileName(target: HookTarget, projectRoot?: string): string {
+  if (!projectRoot) return `${target}.json`;
+  const resolved = path.resolve(projectRoot);
+  const relative = path.relative(os.homedir(), resolved).split(path.sep).join('/');
+  const hash = createHash('sha256').update(relative).digest('hex').slice(0, 10);
+  return `${target}--${projectManifestSlug(resolved)}-${hash}.json`;
+}
+
+export function peerStatePath(asbHome: string, target: HookTarget, projectRoot?: string): string {
+  return path.join(peerStateDir(asbHome), peerStateFileName(target, projectRoot));
 }
 
 export function emptyPeerState(): PeerState {
@@ -94,13 +100,14 @@ function loadStateFile(filePath: string): PeerState {
   return state;
 }
 
-function deviceCopies(asbHome: string, target: HookTarget): string[] {
+function deviceCopies(asbHome: string, target: HookTarget, projectRoot?: string): string[] {
   const dir = peerStateDir(asbHome);
+  const fileName = peerStateFileName(target, projectRoot);
   try {
     return fs
       .readdirSync(dir, { withFileTypes: true })
       .filter((entry) => entry.isDirectory() && DEVICE_DIR_PATTERN.test(entry.name))
-      .map((entry) => path.join(dir, entry.name, `${target}.json`))
+      .map((entry) => path.join(dir, entry.name, fileName))
       .filter((candidate) => {
         try {
           const stat = fs.lstatSync(candidate);
@@ -119,12 +126,16 @@ function deviceCopies(asbHome: string, target: HookTarget): string[] {
  * de-duplicate: two machines that each appended the same group left two
  * copies in the app config, and count-bounded removal must reclaim both.
  */
-export function loadPeerState(asbHome: string, target: HookTarget): PeerState {
+export function loadPeerState(
+  asbHome: string,
+  target: HookTarget,
+  projectRoot?: string
+): PeerState {
   const merged = emptyPeerState();
-  const sharedPath = peerStatePath(asbHome, target);
+  const sharedPath = peerStatePath(asbHome, target, projectRoot);
   const sources = [
     ...(fs.existsSync(sharedPath) ? [sharedPath] : []),
-    ...deviceCopies(asbHome, target),
+    ...deviceCopies(asbHome, target, projectRoot),
   ];
   for (const source of sources) {
     const state = loadStateFile(source);
@@ -145,8 +156,13 @@ export function loadPeerState(asbHome: string, target: HookTarget): PeerState {
  * deletes the file instead of leaving a shell that still looks like live
  * evidence. Device-scoped copies are consumed on either path, never created.
  */
-export function savePeerState(asbHome: string, target: HookTarget, state: PeerState): void {
-  const filePath = peerStatePath(asbHome, target);
+export function savePeerState(
+  asbHome: string,
+  target: HookTarget,
+  state: PeerState,
+  projectRoot?: string
+): void {
+  const filePath = peerStatePath(asbHome, target, projectRoot);
   if (peerStateHasContent(state)) {
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const document = {
@@ -166,7 +182,7 @@ export function savePeerState(asbHome: string, target: HookTarget, state: PeerSt
   } else {
     fs.rmSync(filePath, { force: true });
   }
-  for (const copy of deviceCopies(asbHome, target)) {
+  for (const copy of deviceCopies(asbHome, target, projectRoot)) {
     fs.rmSync(copy, { force: true });
     try {
       fs.rmdirSync(path.dirname(copy));
@@ -176,34 +192,38 @@ export function savePeerState(asbHome: string, target: HookTarget, state: PeerSt
   }
 }
 
-/** Hash-bearing ownership of one project file. Unknown peer fields survive save. */
-export interface ProjectManifestFileEntry extends Record<string, unknown> {
-  appId: string;
+/** Hash-bearing ownership of one project file or bundle directory. */
+export interface ProjectManifestEntry extends Record<string, unknown> {
+  relativePath: string;
   targetId: string;
-  relativePath: string;
   hash: string;
-  type: string;
-  id: string | null;
-  shape?: 'own-file' | 'region';
-}
-
-/** Hash-bearing ownership of one project bundle directory. */
-export interface ProjectManifestBundleEntry extends Record<string, unknown> {
-  appId: string;
-  type: string;
-  name: string;
-  relativePath: string;
-  hash: string;
-  files?: string[];
+  updatedAt: string;
 }
 
 /** Key-placement-only MCP proof. `serverKey` is always the on-disk identity. */
 export interface ManagedMcpEntry extends Record<string, unknown> {
-  appId: string;
   relativePath: string;
   targetId: string;
   serverKey: string;
-  updatedAt?: string;
+  updatedAt: string;
+}
+
+export interface RulesManifestEntry extends Record<string, unknown> {
+  relativePath: string;
+  mode: 'block' | 'full';
+  targetIds: string[];
+  hash: string;
+  updatedAt: string;
+}
+
+export type ProjectLibrarySection = 'skills' | 'commands' | 'agents';
+
+export interface ProjectManifestSections extends Record<string, unknown> {
+  skills?: Record<string, ProjectManifestEntry>;
+  commands?: Record<string, ProjectManifestEntry>;
+  agents?: Record<string, ProjectManifestEntry>;
+  mcp?: Record<string, ManagedMcpEntry>;
+  rules?: Record<string, RulesManifestEntry>;
 }
 
 /**
@@ -213,78 +233,191 @@ export interface ManagedMcpEntry extends Record<string, unknown> {
  */
 export interface ProjectManifest extends Record<string, unknown> {
   version: 1;
+  updatedAt: string;
+  sections: ProjectManifestSections;
   projectRoot: string;
-  files: Record<string, ProjectManifestFileEntry>;
-  bundles: Record<string, ProjectManifestBundleEntry>;
-  mcp: Record<string, ManagedMcpEntry>;
 }
 
 export interface ProjectManifestLoad {
   path: string;
   existed: boolean;
   corrupt: boolean;
+  collision: boolean;
+  needsSave: boolean;
   manifest: ProjectManifest | null;
   error?: string;
 }
 
-/** Frozen device identity: no separators are inserted between the three values. */
 export function manifestDeviceId(
-  hostname = os.hostname(),
-  platform = os.platform(),
-  arch = os.arch()
+  agentsHome = process.env.ASB_AGENTS_HOME?.trim() || os.homedir(),
+  device = process.env.ASB_DEVICE_ID?.trim() || os.hostname()
 ): string {
-  return createHash('sha256').update(`${hostname}${platform}${arch}`).digest('hex').slice(0, 12);
+  return createHash('sha256')
+    .update(`${device}\0${path.resolve(agentsHome)}`)
+    .digest('hex')
+    .slice(0, 16);
 }
 
-/** Frozen flat filename transform. Composite keys and slugs are never parsed back. */
 export function projectManifestSlug(projectRoot: string): string {
-  return path.resolve(projectRoot).replace(/[\\/]/g, '--');
+  const resolved = path.resolve(projectRoot);
+  const home = os.homedir();
+  if (resolved === home || resolved.startsWith(`${home}${path.sep}`)) {
+    return path.relative(home, resolved).replace(/\//g, '--');
+  }
+  const stripped = resolved.startsWith('/') ? resolved.slice(1) : resolved;
+  return `_abs--${stripped.replace(/\//g, '--')}`;
 }
 
 export function projectManifestPath(asbHome: string, projectRoot: string): string {
-  return path.join(asbHome, 'manifests', `${projectManifestSlug(projectRoot)}.json`);
+  return path.join(
+    asbHome,
+    'state',
+    'manifests',
+    manifestDeviceId(),
+    `${projectManifestSlug(projectRoot)}.json`
+  );
 }
 
-export function manifestFileKey(appId: string, targetId: string): string {
-  return `${appId}::${targetId}`;
+const KEY_SEPARATOR = '::';
+
+function projectManifestKey(id: string, targetId: string): string {
+  return `${id}${KEY_SEPARATOR}${targetId}`;
 }
 
-export function manifestBundleKey(appId: string, type: string, name: string): string {
-  return `${appId}::${type}::${name}`;
+export function projectManifestKeyParts(key: string): { id: string; targetId: string } {
+  const separator = key.indexOf(KEY_SEPARATOR);
+  if (separator < 0) return { id: key, targetId: '' };
+  return {
+    id: key.slice(0, separator),
+    targetId: key.slice(separator + KEY_SEPARATOR.length),
+  };
 }
 
-export function manifestMcpKey(appId: string, serverKey: string): string {
-  return `${appId}::${serverKey}`;
-}
-
-export function recordManagedMcpEntry(manifest: ProjectManifest, entry: ManagedMcpEntry): string {
-  const key = manifestMcpKey(entry.appId, entry.serverKey);
-  manifest.mcp[key] = entry;
-  return key;
-}
-
-export function removeManagedMcpEntry(manifest: ProjectManifest, opaqueKey: string): void {
-  delete manifest.mcp[opaqueKey];
-}
-
-export function managedMcpCleanupKeys(
+export function recordProjectLibraryEntry(
   manifest: ProjectManifest,
-  appId: string,
-  desiredServerKeys: ReadonlySet<string>
-): string[] {
-  const stale: string[] = [];
-  for (const [opaqueKey, entry] of Object.entries(manifest.mcp)) {
-    if (entry.appId === appId && !desiredServerKeys.has(entry.serverKey)) stale.push(opaqueKey);
+  section: ProjectLibrarySection,
+  componentId: string,
+  entry: ProjectManifestEntry
+): void {
+  const entries = manifest.sections[section] ?? {};
+  for (const [key, owned] of Object.entries(entries)) {
+    if (
+      projectManifestKeyParts(key).id === componentId &&
+      owned.relativePath === entry.relativePath
+    ) {
+      owned.hash = entry.hash;
+      owned.updatedAt = entry.updatedAt;
+    }
+  }
+  const key = projectManifestKey(componentId, entry.targetId);
+  entries[key] = { ...(entries[key] ?? {}), ...entry };
+  manifest.sections[section] = entries;
+}
+
+export function removeProjectLibraryEntry(
+  manifest: ProjectManifest,
+  section: ProjectLibrarySection,
+  componentId: string,
+  targetId?: string
+): void {
+  const entries = manifest.sections[section];
+  if (!entries) return;
+  if (targetId) {
+    delete entries[projectManifestKey(componentId, targetId)];
+    return;
+  }
+  for (const key of Object.keys(entries)) {
+    if (projectManifestKeyParts(key).id === componentId) delete entries[key];
+  }
+}
+
+export function getProjectLibraryEntry(
+  manifest: ProjectManifest,
+  section: ProjectLibrarySection,
+  componentId: string,
+  targetId?: string
+): ProjectManifestEntry | undefined {
+  const entries = manifest.sections[section];
+  if (!entries) return undefined;
+  if (targetId) return entries[projectManifestKey(componentId, targetId)];
+  for (const [key, entry] of Object.entries(entries)) {
+    if (projectManifestKeyParts(key).id === componentId) return entry;
+  }
+  return undefined;
+}
+
+export interface ProjectManifestCleanupItem {
+  id: string;
+  entry: ProjectManifestEntry;
+}
+
+export function computeProjectLibraryCleanupSet(
+  manifest: ProjectManifest,
+  section: ProjectLibrarySection,
+  currentDesiredIds: ReadonlySet<string>,
+  targetId?: string
+): ProjectManifestCleanupItem[] {
+  const entries = manifest.sections[section];
+  if (!entries) return [];
+  const stale: ProjectManifestCleanupItem[] = [];
+  for (const [key, entry] of Object.entries(entries)) {
+    if (targetId && entry.targetId !== targetId) continue;
+    const { id } = projectManifestKeyParts(key);
+    if (!currentDesiredIds.has(id)) stale.push({ id, entry });
   }
   return stale;
 }
 
-export function ownedManagedMcpServers(manifest: ProjectManifest, appId: string): Set<string> {
+export function recordManagedMcpEntry(
+  manifest: ProjectManifest,
+  serverName: string,
+  entry: ManagedMcpEntry
+): string {
+  const entries = manifest.sections.mcp ?? {};
+  const key = projectManifestKey(serverName, entry.targetId);
+  entries[key] = { ...(entries[key] ?? {}), ...entry };
+  manifest.sections.mcp = entries;
+  return key;
+}
+
+export function removeManagedMcpEntry(manifest: ProjectManifest, compositeKey: string): void {
+  if (manifest.sections.mcp) delete manifest.sections.mcp[compositeKey];
+}
+
+export function computeProjectMcpCleanupSet(
+  manifest: ProjectManifest,
+  currentDesiredNames: ReadonlySet<string>,
+  targetId?: string
+): string[] {
+  const entries = manifest.sections.mcp;
+  if (!entries) return [];
+  const stale: string[] = [];
+  for (const [key, entry] of Object.entries(entries)) {
+    if (targetId && entry.targetId !== targetId) continue;
+    if (!currentDesiredNames.has(projectManifestKeyParts(key).id)) stale.push(key);
+  }
+  return stale;
+}
+
+export function ownedManagedMcpServers(manifest: ProjectManifest, targetId: string): Set<string> {
   const owned = new Set<string>();
-  for (const entry of Object.values(manifest.mcp)) {
-    if (entry.appId === appId) owned.add(entry.serverKey);
+  for (const [key, entry] of Object.entries(manifest.sections.mcp ?? {})) {
+    if (entry.targetId === targetId) owned.add(projectManifestKeyParts(key).id);
   }
   return owned;
+}
+
+export function recordProjectRulesEntry(
+  manifest: ProjectManifest,
+  entry: RulesManifestEntry
+): void {
+  const entries = manifest.sections.rules ?? {};
+  entries[entry.relativePath] = { ...(entries[entry.relativePath] ?? {}), ...entry };
+  manifest.sections.rules = entries;
+}
+
+export function removeProjectRulesEntry(manifest: ProjectManifest, relativePath: string): void {
+  if (manifest.sections.rules) delete manifest.sections.rules[relativePath];
 }
 
 /**
@@ -315,10 +448,9 @@ export function uniqueProjectManifestPaths(
 export function emptyProjectManifest(projectRoot: string): ProjectManifest {
   return {
     version: 1,
+    updatedAt: new Date().toISOString(),
+    sections: {},
     projectRoot: path.resolve(projectRoot),
-    files: {},
-    bundles: {},
-    mcp: {},
   };
 }
 
@@ -326,71 +458,14 @@ function plainRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function stringField(
-  entry: Record<string, unknown>,
-  field: string,
-  location: string,
-  optional = false
-): string | undefined {
-  const value = entry[field];
-  if (value === undefined && optional) return undefined;
-  if (typeof value !== 'string') throw new Error(`${location}.${field} must be a string`);
-  return value;
-}
-
-function validateManifestMap(
-  value: unknown,
-  name: 'files' | 'bundles' | 'mcp'
-): Record<string, Record<string, unknown>> {
-  if (!plainRecord(value)) throw new Error(`${name} must be an object`);
-  for (const [key, candidate] of Object.entries(value)) {
-    const location = `${name}[${JSON.stringify(key)}]`;
-    if (!plainRecord(candidate)) throw new Error(`${location} must be an object`);
-    stringField(candidate, 'appId', location);
-    stringField(candidate, 'relativePath', location);
-    if (name === 'files') {
-      stringField(candidate, 'targetId', location);
-      stringField(candidate, 'hash', location);
-      stringField(candidate, 'type', location);
-      if (candidate.id !== null) stringField(candidate, 'id', location);
-      if (
-        candidate.shape !== undefined &&
-        candidate.shape !== 'own-file' &&
-        candidate.shape !== 'region'
-      ) {
-        throw new Error(`${location}.shape must be own-file or region`);
-      }
-    } else if (name === 'bundles') {
-      stringField(candidate, 'type', location);
-      stringField(candidate, 'name', location);
-      stringField(candidate, 'hash', location);
-      if (
-        candidate.files !== undefined &&
-        (!Array.isArray(candidate.files) ||
-          !candidate.files.every((relative) => typeof relative === 'string'))
-      ) {
-        throw new Error(`${location}.files must be a string array`);
-      }
-    } else {
-      stringField(candidate, 'targetId', location);
-      stringField(candidate, 'serverKey', location);
-      stringField(candidate, 'updatedAt', location, true);
-    }
-  }
-  return value as Record<string, Record<string, unknown>>;
-}
-
-function validateProjectManifest(value: unknown, projectRoot: string): ProjectManifest {
+function validateProjectManifest(value: unknown): ProjectManifest {
   if (!plainRecord(value)) throw new Error('manifest root must be an object');
   if (value.version !== 1) throw new Error('version must be 1');
-  if (typeof value.projectRoot !== 'string') throw new Error('projectRoot must be a string');
-  const resolved = path.resolve(projectRoot);
-  if (path.resolve(value.projectRoot) !== resolved) {
-    throw new Error(`projectRoot must resolve to ${resolved}`);
+  if (!plainRecord(value.sections)) throw new Error('sections must be an object');
+  if (typeof value.updatedAt !== 'string') throw new Error('updatedAt must be a string');
+  if (value.projectRoot !== undefined && typeof value.projectRoot !== 'string') {
+    throw new Error('projectRoot must be a string when present');
   }
-  validateManifestMap(value.files, 'files');
-  validateManifestMap(value.bundles, 'bundles');
-  validateManifestMap(value.mcp, 'mcp');
   return value as ProjectManifest;
 }
 
@@ -403,17 +478,41 @@ export function loadProjectManifest(asbHome: string, projectRoot: string): Proje
       path: filePath,
       existed: false,
       corrupt: false,
+      collision: false,
+      needsSave: false,
       manifest: emptyProjectManifest(root),
     };
   }
   try {
-    const manifest = validateProjectManifest(JSON.parse(fs.readFileSync(filePath, 'utf-8')), root);
-    return { path: filePath, existed: true, corrupt: false, manifest };
+    const manifest = validateProjectManifest(JSON.parse(fs.readFileSync(filePath, 'utf-8')));
+    if (manifest.projectRoot !== undefined && path.resolve(manifest.projectRoot) !== root) {
+      return {
+        path: filePath,
+        existed: true,
+        corrupt: false,
+        collision: true,
+        needsSave: false,
+        manifest: null,
+        error: `project manifest slug collision: ${path.resolve(manifest.projectRoot)} and ${root} both map to ${filePath}`,
+      };
+    }
+    const needsSave = manifest.projectRoot === undefined;
+    manifest.projectRoot = root;
+    return {
+      path: filePath,
+      existed: true,
+      corrupt: false,
+      collision: false,
+      needsSave,
+      manifest,
+    };
   } catch (error) {
     return {
       path: filePath,
       existed: true,
       corrupt: true,
+      collision: false,
+      needsSave: false,
       manifest: null,
       error: error instanceof Error ? error.message : String(error),
     };
@@ -423,7 +522,8 @@ export function loadProjectManifest(asbHome: string, projectRoot: string): Proje
 /** Preserve insertion order and unknown fields; publish only complete JSON bytes. */
 export function saveProjectManifest(filePath: string, manifest: ProjectManifest): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
-  const temp = `${filePath}.${process.pid}.tmp`;
+  manifest.updatedAt = new Date().toISOString();
+  const temp = `${filePath}.tmp.${process.pid}`;
   try {
     fs.writeFileSync(temp, `${JSON.stringify(manifest, null, 2)}\n`, {
       encoding: 'utf-8',
@@ -434,203 +534,4 @@ export function saveProjectManifest(filePath: string, manifest: ProjectManifest)
     fs.rmSync(temp, { force: true });
     throw error;
   }
-}
-
-function projectRelative(projectRoot: string, absolutePath: string): string | null {
-  const relative = path.relative(projectRoot, absolutePath);
-  if (
-    relative.length === 0 ||
-    path.isAbsolute(relative) ||
-    relative.split(path.sep).includes('..')
-  ) {
-    return null;
-  }
-  return relative.split(path.sep).join('/');
-}
-
-/** Project hook ownership rides inside the app's manifest file entry. */
-export function projectHookState(manifest: ProjectManifest, appId: string): PeerState {
-  const entry = manifest.files[manifestFileKey(appId, 'hooks')];
-  if (!entry) return emptyPeerState();
-  return {
-    version: 1,
-    events:
-      plainRecord(entry.events) &&
-      Object.values(entry.events).every((groups) => Array.isArray(groups))
-        ? (entry.events as Record<string, unknown[]>)
-        : {},
-    bundles: bundleIds(entry.bundles),
-    legacyBundles: bundleIds(entry.legacyBundles),
-  };
-}
-
-/** Mutate the in-memory manifest only after the hook config action succeeds. */
-export function recordProjectHookState(
-  manifest: ProjectManifest,
-  projectRoot: string,
-  appId: string,
-  configPath: string,
-  bundleDir: string,
-  state: PeerState,
-  hash: string,
-  preserveBundles: readonly string[] = []
-): void {
-  const key = manifestFileKey(appId, 'hooks');
-  if (!peerStateHasContent(state)) {
-    delete manifest.files[key];
-    for (const [bundleKey, entry] of Object.entries(manifest.bundles)) {
-      if (entry.appId === appId && entry.type === 'hooks') delete manifest.bundles[bundleKey];
-    }
-    return;
-  }
-  const relativePath = projectRelative(path.resolve(projectRoot), path.resolve(configPath));
-  if (relativePath === null) throw new Error(`${configPath} is outside ${projectRoot}`);
-  manifest.files[key] = {
-    ...(manifest.files[key] ?? {}),
-    appId,
-    targetId: 'hooks',
-    type: 'hooks',
-    id: null,
-    relativePath,
-    shape: 'own-file',
-    hash,
-    events: state.events,
-    bundles: state.bundles,
-    legacyBundles: state.legacyBundles,
-  };
-  const active = new Set(state.bundles);
-  for (const [bundleKey, entry] of Object.entries(manifest.bundles)) {
-    if (entry.appId === appId && entry.type === 'hooks' && !active.has(entry.name)) {
-      delete manifest.bundles[bundleKey];
-    }
-  }
-  const preserved = new Set(preserveBundles);
-  for (const name of state.bundles) {
-    const bundleKey = manifestBundleKey(appId, 'hooks', name);
-    if (preserved.has(name)) continue;
-    const bundlePath = path.join(bundleDir, name);
-    const relativePath = projectRelative(path.resolve(projectRoot), path.resolve(bundlePath));
-    const fingerprint = bundleFingerprint(bundlePath);
-    const files = listTargetFiles(bundlePath);
-    if (relativePath === null || fingerprint === undefined || files === null) {
-      throw new Error(`${bundlePath} is outside the project or cannot be proven`);
-    }
-    manifest.bundles[bundleKey] = {
-      ...(manifest.bundles[bundleKey] ?? {}),
-      appId,
-      type: 'hooks',
-      name,
-      relativePath,
-      hash: fingerprint,
-      files: files.map((file) => file.rel),
-    };
-  }
-}
-
-/** Peer hash records join the planner as proof rank 4. MCP stays hash-less. */
-export function projectManifestLedgerEntries(
-  manifest: ProjectManifest,
-  projectRoot: string
-): LedgerEntry[] {
-  const root = path.resolve(projectRoot);
-  const entries: LedgerEntry[] = [];
-  for (const entry of Object.values(manifest.files)) {
-    const targetPath = path.resolve(root, entry.relativePath);
-    if (projectRelative(root, targetPath) === null) continue;
-    entries.push({
-      app: entry.appId,
-      type: entry.type,
-      id: entry.id,
-      path: targetPath,
-      shape: entry.shape ?? 'own-file',
-      hash: entry.hash,
-      provenance: 'peer-record',
-      updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '',
-    });
-  }
-  for (const entry of Object.values(manifest.bundles)) {
-    const targetPath = path.resolve(root, entry.relativePath);
-    if (projectRelative(root, targetPath) === null) continue;
-    entries.push({
-      app: entry.appId,
-      type: entry.type,
-      id: entry.name,
-      path: targetPath,
-      shape: 'own-dir',
-      hash: entry.hash,
-      ...(entry.files ? { files: [...entry.files] } : {}),
-      provenance: 'peer-record',
-      updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '',
-    });
-  }
-  return entries;
-}
-
-function manifestTargetId(entry: LedgerEntry, relativePath: string): string {
-  return entry.id === null ? entry.type : `${entry.type}:${entry.id}:${relativePath}`;
-}
-
-/**
- * Checkpoint surviving project ledger proofs into the peer document. Unknown
- * fields on retained entries survive, while retired proofs disappear only
- * after their apply pass succeeded.
- */
-export function checkpointProjectManifest(
-  manifest: ProjectManifest,
-  projectRoot: string,
-  ledgerEntries: readonly LedgerEntry[]
-): void {
-  const root = path.resolve(projectRoot);
-  const files: ProjectManifest['files'] = Object.fromEntries(
-    Object.entries(manifest.files).filter(([, entry]) => entry.type === 'hooks')
-  );
-  const bundles: ProjectManifest['bundles'] = Object.fromEntries(
-    Object.entries(manifest.bundles).filter(([, entry]) => entry.type === 'hooks')
-  );
-  const mcp: ProjectManifest['mcp'] = {};
-  for (const entry of ledgerEntries) {
-    const relativePath = projectRelative(root, entry.path);
-    if (relativePath === null) continue;
-    if (entry.shape === 'own-file' || entry.shape === 'region') {
-      const targetId = manifestTargetId(entry, relativePath);
-      const key = manifestFileKey(entry.app, targetId);
-      files[key] = {
-        ...(manifest.files[key] ?? {}),
-        appId: entry.app,
-        targetId,
-        type: entry.type,
-        id: entry.id,
-        relativePath,
-        shape: entry.shape,
-        hash: entry.hash,
-        updatedAt: entry.updatedAt,
-      } as ProjectManifestFileEntry;
-    } else if (entry.shape === 'own-dir' && entry.id !== null) {
-      const key = manifestBundleKey(entry.app, entry.type, entry.id);
-      bundles[key] = {
-        ...(manifest.bundles[key] ?? {}),
-        appId: entry.app,
-        type: entry.type,
-        name: entry.id,
-        relativePath,
-        hash: entry.hash,
-        ...(entry.files ? { files: [...entry.files] } : {}),
-        updatedAt: entry.updatedAt,
-      } as ProjectManifestBundleEntry;
-    } else if (entry.shape === 'keys' && entry.type === 'mcp' && entry.serverKey) {
-      const key = manifestMcpKey(entry.app, entry.serverKey);
-      mcp[key] = {
-        ...(manifest.mcp[key] ?? {}),
-        appId: entry.app,
-        relativePath,
-        targetId:
-          typeof manifest.mcp[key]?.targetId === 'string' ? manifest.mcp[key].targetId : entry.app,
-        serverKey: entry.serverKey,
-        updatedAt: entry.updatedAt,
-      } as ManagedMcpEntry;
-    }
-  }
-  manifest.files = files;
-  manifest.bundles = bundles;
-  manifest.mcp = mcp;
 }
