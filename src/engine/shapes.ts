@@ -411,11 +411,22 @@ export interface StructuredDocument {
   /** Why the document could not be used. */
   error?: string;
   /**
-   * TOML only: dotted names of the table headers the byte-splice writer can
-   * address. A key the document expresses some other way (inline table,
+   * TOML only: the table headers the byte-splice writer can address, one
+   * segment array per header. Segments stay separate because the joined
+   * spelling is lossy: `[a."b.c"]` names a sibling `b.c`, not a descendant
+   * `b` -> `c`. A key the document expresses some other way (inline table,
    * dotted assignment) is readable but not editable, so it is never spliced.
    */
-  tables: string[];
+  tables: string[][];
+}
+
+/** Render header segments back to TOML spelling, quoting non-bare segments. */
+export function tomlHeaderName(parts: readonly string[]): string {
+  return parts
+    .map((part) =>
+      TOML_BARE_KEY.test(part) ? part : `"${part.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+    )
+    .join('.');
 }
 
 /**
@@ -436,7 +447,7 @@ export function parseStructured(content: string, format: KeysFormat): Structured
   if (format === 'toml') {
     try {
       const parsed = parseToml(content) as Record<string, unknown>;
-      return { root: parsed, tables: scanTomlTables(content).map((table) => table.name) };
+      return { root: parsed, tables: scanTomlTables(content).map((table) => table.parts) };
     } catch (error) {
       return { root: null, error: tomlErrorText(error), tables: [] };
     }
@@ -524,8 +535,8 @@ function applyJsonEdits(content: string, edits: readonly KeysEdit[]): string {
 }
 
 interface TomlTable {
-  /** Dotted, unquoted header name. */
-  name: string;
+  /** Unquoted header segments, one per key part. */
+  parts: string[];
   /** Offset of the header's opening bracket. */
   start: number;
   /** Offset where the next header starts, or the end of the document. */
@@ -557,13 +568,13 @@ function skipTomlMultiline(content: string, from: number, fence: string): number
   return close === -1 ? content.length : close + 3;
 }
 
-/** Read a `[a.b."c"]` header, returning its dotted name and the offset after `]`. */
-function readTomlHeader(content: string, from: number): { name: string; after: number } | null {
+/** Read a `[a.b."c"]` header, returning its unquoted segments and the offset after `]`. */
+function readTomlHeader(content: string, from: number): { parts: string[]; after: number } | null {
   let i = from;
   const parts: string[] = [];
   while (i < content.length) {
     while (content[i] === ' ' || content[i] === '\t') i++;
-    if (content[i] === ']') return { name: parts.join('.'), after: i + 1 };
+    if (content[i] === ']') return { parts, after: i + 1 };
     if (content[i] === '"' || content[i] === "'") {
       const quote = content[i];
       const end = skipTomlString(content, i + 1, quote);
@@ -635,7 +646,9 @@ function scanTomlTables(content: string): TomlTable[] {
         // An array-of-tables entry is a repeated name; it is scanned so its
         // span closes the table before it, never addressed as a slice.
         tables.push({
-          name: arrayOfTables ? `${header.name}[]` : header.name,
+          parts: arrayOfTables
+            ? [...header.parts.slice(0, -1), `${header.parts.at(-1)}[]`]
+            : header.parts,
           start: i,
           end: content.length,
         });
@@ -655,8 +668,11 @@ function scanTomlTables(content: string): TomlTable[] {
 function applyTomlEdits(content: string, edits: readonly KeysEdit[]): string {
   let text = content;
   for (const edit of edits) {
-    const name = edit.keyPath.join('.');
-    const table = scanTomlTables(text).find((candidate) => candidate.name === name);
+    const table = scanTomlTables(text).find(
+      (candidate) =>
+        candidate.parts.length === edit.keyPath.length &&
+        edit.keyPath.every((segment, i) => candidate.parts[i] === segment)
+    );
     if (edit.remove) {
       if (table) text = text.slice(0, table.start) + text.slice(table.end);
       continue;

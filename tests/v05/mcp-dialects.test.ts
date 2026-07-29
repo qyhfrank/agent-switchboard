@@ -253,7 +253,7 @@ test('codex: a quoted server name round-trips through the table header', () => {
   ]);
 
   assert.match(content, /\[mcp_servers\."my\.server"\]/);
-  assert.deepEqual(parseStructured(content, 'toml').tables, ['mcp_servers.my.server']);
+  assert.deepEqual(parseStructured(content, 'toml').tables, [['mcp_servers', 'my.server']]);
 });
 
 // ---------------------------------------------------------------------------
@@ -426,7 +426,7 @@ test('toml: a bracket inside a multi-line string is not mistaken for a table hea
     '',
   ].join('\n');
 
-  assert.deepEqual(parseStructured(source, 'toml').tables, ['mcp_servers.real']);
+  assert.deepEqual(parseStructured(source, 'toml').tables, [['mcp_servers', 'real']]);
   const content = applyKeysEdits(source, 'toml', [
     { keyPath: ['mcp_servers', 'real'], remove: true },
   ]);
@@ -436,7 +436,7 @@ test('toml: a bracket inside a multi-line string is not mistaken for a table hea
 
 test('toml: a nested array element on its own line is not a table header', () => {
   const source = 'matrix = [\n  [1],\n  [2]\n]\n\n[mcp_servers.a]\ncommand = "a"\n';
-  assert.deepEqual(parseStructured(source, 'toml').tables, ['mcp_servers.a']);
+  assert.deepEqual(parseStructured(source, 'toml').tables, [['mcp_servers', 'a']]);
 });
 
 test('toml: a value the writer cannot serialize never takes the document with it', () => {

@@ -28,6 +28,7 @@ import {
   sliceHash,
   type TargetFile,
   targetModeMatchesSourceExecutableBits,
+  tomlHeaderName,
   valueAtKeyPath,
 } from './shapes.js';
 import type { EntryRow, ReadinessRow, SourceCatalog, UpdateRow } from './sources.js';
@@ -86,8 +87,8 @@ export interface CapturedMcpHost {
   root: Record<string, unknown> | null;
   /** Why the document could not be parsed, when it could not. */
   error?: string;
-  /** TOML table headers the byte-splice writer can address, dotted. */
-  tables: string[];
+  /** TOML table headers the byte-splice writer can address, one segment array per header. */
+  tables: string[][];
   /** Parent chain of the host path resolves outside the app root. */
   escapes?: boolean;
 }
@@ -1556,10 +1557,18 @@ function planMcpHost(
   // writes, and removing the parent would leave the server declared.
   const unspliceable = (keyPath: readonly string[]): string | null => {
     if (row.format !== 'toml') return null;
-    const name = keyPath.join('.');
-    const nested = captured.tables.find((table) => table.startsWith(`${name}.`));
-    if (nested !== undefined) return `[${nested}] nests under ${name} in ${captured.path}`;
-    if (captured.tables.includes(name)) return null;
+    const name = tomlHeaderName(keyPath);
+    const nested = captured.tables.find(
+      (parts) =>
+        parts.length > keyPath.length && keyPath.every((segment, i) => parts[i] === segment)
+    );
+    if (nested !== undefined)
+      return `[${tomlHeaderName(nested)}] nests under ${name} in ${captured.path}`;
+    const exact = captured.tables.some(
+      (parts) =>
+        parts.length === keyPath.length && keyPath.every((segment, i) => parts[i] === segment)
+    );
+    if (exact) return null;
     return `${name} is not written as a table in ${captured.path}`;
   };
   const recordFor = (id: string, keyPath: string[]): LedgerEntry => ({

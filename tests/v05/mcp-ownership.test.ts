@@ -527,6 +527,32 @@ test('an owned key with a descendant table conflicts rather than being half-writ
   });
 });
 
+test('a quoted sibling name is not a descendant: the owned key stays writable', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
+    config(homes, ['codex'], ['alpha']);
+    await runSync({});
+    assert.equal(mcpEntries(homes).length, 1);
+
+    // A server literally named `alpha.beta` — a legal sibling key whose header
+    // spells the dot inside quotes. It nests nothing under `alpha`.
+    const sibling = '\n[mcp_servers."alpha.beta"]\ncommand = "beta-cmd"\n';
+    fs.appendFileSync(mcpHostPath(homes, 'codex'), sibling);
+    seedMcpLibrary(homes, {
+      alpha: { command: 'npx', args: ['-y', 'alpha'], env: { FOO: 'two' } },
+    });
+    const report = await runSync({});
+
+    const written = row(report, null) ?? row(report, 'alpha');
+    assert.equal(written?.outcome, 'written');
+    assert.equal(report.exitCode, 0);
+    const host = fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8');
+    assert.match(host, /\[mcp_servers\."alpha\.beta"\]\ncommand = "beta-cmd"/);
+    assert.equal(readMcpHost(homes, 'codex')?.alpha.env?.FOO, 'two');
+  });
+});
+
 test('a descendant table is never re-merged behind a hash that says otherwise', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
