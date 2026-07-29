@@ -7,9 +7,9 @@ import {
   type ComponentType,
   ConfigError,
   editSelection,
-  effectivePlugins,
   effectiveSelection,
   loadConfig,
+  mergeIncrementalSelection,
   nearestKey,
   type ResolvedConfig,
   resolveHomes,
@@ -63,6 +63,7 @@ import {
   groupKeyActions,
   type ProjectPlanPolicy,
   planAgents,
+  planCatalogStatus,
   planCodexProjectTrust,
   planCommands,
   planHooks,
@@ -78,11 +79,13 @@ import {
   type SyncCapture,
 } from './plan.js';
 import {
+  buildJsonEnvelope,
   buildReport,
   FAILING_OUTCOMES,
   type Report,
   type ReportEntry,
   redactCredentials,
+  renderCompactStatus,
   renderExplain,
   renderReport,
 } from './report.js';
@@ -146,6 +149,55 @@ function projectRelative(projectRoot: string, targetPath: string): string | null
     return null;
   }
   return relative.split(path.sep).join('/');
+}
+
+function pathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative === '' || (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
+  );
+}
+
+function globalPlanningEntry(
+  entry: LedgerEntry,
+  config: ResolvedConfig,
+  table: readonly AppRow[]
+): boolean {
+  if (entry.app === 'agents' && entry.type === 'skills') {
+    return pathInside(AGENTS_SKILLS_UNION.dir(config.homes), entry.path);
+  }
+  const row = table.find((candidate) => candidate.id === entry.app);
+  if (!row) return false;
+  if (entry.type === 'rules' && row.rules) {
+    return pathInside(row.rules.root(config.homes, entry.path), entry.path);
+  }
+  if (entry.type === 'commands' || entry.type === 'agents') {
+    const target = row[entry.type];
+    return target ? pathInside(target.root(config.homes), entry.path) : false;
+  }
+  if (entry.type === 'skills' && row.skills) {
+    return pathInside(row.skills.root(config.homes), entry.path);
+  }
+  if (entry.type === 'hooks' && row.hooks) {
+    return pathInside(row.hooks.root(config.homes), entry.path);
+  }
+  if (entry.type === 'mcp' && row.mcp) {
+    return path.resolve(entry.path) === path.resolve(row.mcp.path(config.homes));
+  }
+  return false;
+}
+
+function planningLedgerForScope(
+  ledger: Ledger,
+  config: ResolvedConfig,
+  globalTable: readonly AppRow[]
+): Ledger {
+  return {
+    ...ledger,
+    entries: config.project
+      ? []
+      : ledger.entries.filter((entry) => globalPlanningEntry(entry, config, globalTable)),
+  };
 }
 
 /** Planner-only proof view. The machine ledger is never seeded from peer state. */
@@ -728,9 +780,10 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
             );
       }
 
+      let leftBehind: string[] = [];
       try {
         if (action.op === 'write') {
-          applyBundleFiles(action.path, action.bundle.files, action.bundle.stale);
+          leftBehind = applyBundleFiles(action.path, action.bundle.files, action.bundle.stale);
         } else if (action.bundle.exclusive) {
           fs.rmSync(action.path, { recursive: true });
         } else {
@@ -764,11 +817,33 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
         }
         const applied = {
           ...action,
-          ledger: { op: 'put', entry: { ...action.ledger.entry, hash: measured } },
+          ledger: {
+            op: 'put',
+            entry: {
+              ...action.ledger.entry,
+              hash: measured,
+              files: [...new Set([...action.bundle.files.map((file) => file.rel), ...leftBehind])],
+            },
+          },
         } satisfies Action;
         applyLedgerMutation(ledger, applied);
         applyProjectManifestMutation(applied);
+        if (leftBehind.length > 0) {
+          return failure(
+            'left-behind',
+            'remove-failed',
+            `could not delete ${leftBehind.length} recorded file(s) under ${action.path}; fix its permissions or delete it yourself, then re-run asb sync`
+          );
+        }
         return toEntry(action);
+      }
+
+      if (leftBehind.length > 0) {
+        return failure(
+          'left-behind',
+          'remove-failed',
+          `could not delete ${leftBehind.length} recorded file(s) under ${action.path}; fix its permissions or delete it yourself, then re-run asb sync`
+        );
       }
 
       applyLedgerMutation(ledger, action);
@@ -960,11 +1035,11 @@ function runSourcesPhase(
   opts: SyncOptions,
   dryRun: boolean
 ): { readiness: ReadinessRow[]; updates: UpdateRow[]; pendingRefresh: string[] } {
-  const readiness = ensureSourcesReady(config, { dryRun });
+  const only = opts.sources && opts.sources.length > 0 ? opts.sources : undefined;
+  const readiness = ensureSourcesReady(config, { dryRun, only });
   const refreshing = opts.update === true || (config.plugins.autoUpdate && opts.noUpdate !== true);
   if (!refreshing) return { readiness, updates: [], pendingRefresh: [] };
 
-  const only = opts.sources && opts.sources.length > 0 ? opts.sources : undefined;
   if (dryRun) {
     const scoped = refreshableSources(config).filter(
       (namespace) => !only || only.includes(namespace)
@@ -1095,25 +1170,12 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       return report;
     }
     const manifestBefore = manifestLoad?.manifest ? JSON.stringify(manifestLoad.manifest) : null;
-    if (config.project && projectMode !== 'none') {
-      const root = config.project;
-      const inside = (candidate: string): boolean => {
-        const relative = path.relative(root, candidate);
-        return (
-          relative === '' ||
-          (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
-        );
-      };
-      // A machine ledger can mirror project proof for reporting, but it never
-      // substitutes for the peer manifest. Discard ledger-only project claims.
-      ledger.entries = ledger.entries.filter((entry) => !inside(entry.path));
-    }
-    let planningLedger: Ledger = ledger;
+    let planningLedger = planningLedgerForScope(ledger, config, globalTable);
     if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
       planningLedger = {
-        ...ledger,
+        ...planningLedger,
         entries: [
-          ...ledger.entries,
+          ...planningLedger.entries,
           ...projectManifestProofs(manifestLoad.manifest, config.project),
         ],
       };
@@ -1125,10 +1187,11 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     // source's members, so a real run reports what the sources phase found
     // and stops before it can write anything. Content asb could not read
     // inside a source that did resolve stays a contained row.
-    if (
-      !dryRun &&
-      (catalog.unresolved.length > 0 || sources.readiness.some((row) => row.status === 'error'))
-    ) {
+    const selectedSources = opts.sources?.length ? new Set(opts.sources) : null;
+    const blockingUnresolved = catalog.unresolved.filter(
+      (row) => selectedSources === null || selectedSources.has(row.namespace)
+    );
+    if (blockingUnresolved.length > 0 || sources.readiness.some((row) => row.status === 'error')) {
       const aborted = buildReport(
         scope,
         [
@@ -1228,6 +1291,31 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       }),
     ];
 
+    const outOfScopeUnresolved =
+      selectedSources === null
+        ? []
+        : catalog.unresolved.filter((row) => !selectedSources.has(row.namespace));
+    if (outOfScopeUnresolved.length > 0) {
+      const names = outOfScopeUnresolved.map((row) => row.namespace).join(', ');
+      actions = actions.map((action) =>
+        action.app !== null &&
+        action.id === null &&
+        action.type !== null &&
+        ['rules', 'hooks', 'mcp'].includes(action.type)
+          ? {
+              app: action.app,
+              type: action.type,
+              id: null,
+              path: action.path,
+              op: 'none',
+              outcome: 'failed',
+              detail: 'aggregate-blocked',
+              reason: `source(s) ${names} are unresolved outside this --source run; previous aggregate content is left in place`,
+            }
+          : action
+      );
+    }
+
     if (opts.all === true) {
       // The typed probe rows replace the rules planner's one generic app
       // absence row and make `--type` filtering unambiguous.
@@ -1249,6 +1337,9 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
             !represented.has(`${action.type}\0${action.id}`)
         )
       );
+    }
+    if (opts.all === true || opts.types?.includes('plugins') === true) {
+      actions.push(...planCatalogStatus(resolved, catalog, inventory));
     }
 
     // Filters select which actions execute, never which inputs the planner saw.
@@ -1386,6 +1477,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
 export async function runExplain(target: string, opts: SyncOptions = {}): Promise<ExplainSlice[]> {
   const env = opts.env ?? process.env;
   const config = loadConfig({ profile: opts.profile, project: opts.project, env });
+  validateAppIds(config, opts.apps ?? []);
   const globalTable = appRows(config);
   const projectMode = config.project ? config.distribution.project.mode : null;
   const activeProjectMode =
@@ -1420,21 +1512,14 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
       `project manifest is corrupt (${manifestLoad.error ?? 'unrecognized shape'})`
     );
   }
-  if (config.project && projectMode !== 'none') {
-    const root = config.project;
-    ledger.entries = ledger.entries.filter((entry) => {
-      const relative = path.relative(root, entry.path);
-      return !(
-        relative === '' ||
-        (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
-      );
-    });
-  }
-  let planningLedger: Ledger = ledger;
+  let planningLedger = planningLedgerForScope(ledger, config, globalTable);
   if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
     planningLedger = {
-      ...ledger,
-      entries: [...ledger.entries, ...projectManifestProofs(manifestLoad.manifest, config.project)],
+      ...planningLedger,
+      entries: [
+        ...planningLedger.entries,
+        ...projectManifestProofs(manifestLoad.manifest, config.project),
+      ],
     };
   }
   const catalog = readSourceCatalog(config);
@@ -1495,7 +1580,8 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
         entries: ensureEntriesReady(resolved, catalog, { dryRun: true }),
         dryRun: true,
       },
-      target
+      target,
+      inventory
     ),
     ...(wants('rules') ? explainRules(planInput, target) : []),
     ...(wants('commands') ? explainCommands(planInput, target) : []),
@@ -1540,6 +1626,8 @@ export interface AddSourceOptions extends SyncOptions {
   as?: string;
   ref?: string;
   subtree?: boolean;
+  /** Require the source to carry a marketplace manifest. */
+  marketplace?: boolean;
 }
 
 /**
@@ -1555,6 +1643,12 @@ export async function runAddSource(location: string, opts: AddSourceOptions = {}
   const scope = { profile: config.profile, project: config.project, dryRun: false };
 
   const expanded = expandHome(location);
+  if (opts.marketplace && !isGitUrl(expanded) && !expanded.endsWith('.git')) {
+    const validation = validateSourcePath(expanded);
+    if (!validation.valid || validation.kind !== 'marketplace') {
+      throw new ConfigError('Source does not contain a marketplace manifest.');
+    }
+  }
   if (isGitUrl(expanded) || expanded.endsWith('.git')) {
     const parsed = parseGitUrl(location);
     const remote: RemoteSource = { url: parsed.url, type: opts.subtree ? 'subtree' : 'clone' };
@@ -1572,6 +1666,10 @@ export async function runAddSource(location: string, opts: AddSourceOptions = {}
   const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
   const plugins = catalog.plugins.filter((plugin) => plugin.source === namespace);
   const contents = source ? validateSourcePath(source.path) : undefined;
+  if (opts.marketplace && contents?.kind !== 'marketplace') {
+    removeSource(loadConfig({ profile: opts.profile, env }), namespace, { env });
+    throw new ConfigError('Source does not contain a marketplace manifest.');
+  }
   const detail =
     contents && !contents.valid
       ? '; it holds no rules, commands, agents, skills, or hooks yet'
@@ -1725,7 +1823,7 @@ export type CliOptions = SyncOptions & {
 };
 
 export type CliInvocation =
-  | { command: 'sync' | 'status'; options: CliOptions }
+  | { command: 'summary' | 'sync' | 'status'; options: CliOptions }
   | { command: 'explain'; target: string; options: CliOptions }
   | { command: 'add'; location: string; options: CliOptions & AddSourceOptions }
   | { command: 'remove'; namespace: string; options: CliOptions }
@@ -1776,6 +1874,21 @@ function registerScopeFlags(target: Command): Command {
 }
 
 export function parseCliArgs(argv: readonly string[]): CliInvocation {
+  if (argv.length === 0) {
+    return {
+      command: 'summary',
+      options: {
+        dryRun: true,
+        update: false,
+        noUpdate: false,
+        sources: [],
+        apps: [],
+        types: [],
+        all: false,
+        json: false,
+      },
+    };
+  }
   let parsed: CliInvocation | null = null;
 
   const program = new Command();
@@ -1858,6 +1971,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
       .option('--as <name>', 'namespace to file the source under')
       .option('--ref <ref>', 'branch, tag, or commit to track')
       .option('--subtree', 'commit the source into the library repository')
+      .option('--marketplace', 'require a marketplace manifest')
   ).action((location: string, args: Record<string, unknown>, cmd: Command) => {
     parsed = {
       command: 'add',
@@ -1867,6 +1981,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
         as: args.as as string | undefined,
         ref: args.ref as string | undefined,
         subtree: args.subtree === true,
+        marketplace: args.marketplace === true,
       },
     };
   });
@@ -1942,6 +2057,51 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   ) {
     throw new ConfigErrorLike('--all is only available on status.');
   }
+  const allowedScope = new Map<CliInvocation['command'], ReadonlySet<string>>([
+    ['summary', new Set()],
+    [
+      'sync',
+      new Set(['dryRun', 'update', 'noUpdate', 'sources', 'apps', 'types', 'profile', 'project']),
+    ],
+    ['status', new Set(['apps', 'types', 'profile', 'project', 'all'])],
+    ['explain', new Set(['apps', 'types', 'profile', 'project'])],
+    ['enable', new Set(['apps', 'types', 'profile', 'project'])],
+    ['disable', new Set(['apps', 'types', 'profile', 'project'])],
+    ['add', new Set()],
+    ['remove', new Set()],
+    ['import', new Set(['types'])],
+    ['init', new Set()],
+  ]);
+  const root = program.opts();
+  const options = 'options' in invocation ? invocation.options : {};
+  const scopeValues: Record<string, unknown> = {
+    dryRun: 'dryRun' in options ? options.dryRun : root.dryRun,
+    update: 'update' in options ? options.update : root.update,
+    noUpdate: 'noUpdate' in options ? options.noUpdate : root.update === false,
+    sources: 'sources' in options ? options.sources : root.source,
+    apps: 'apps' in options ? options.apps : root.app,
+    types: 'types' in options ? options.types : root.type,
+    all: 'all' in options ? options.all : root.all,
+    profile: 'profile' in options ? options.profile : root.profile,
+    project: 'project' in options ? options.project : root.project,
+  };
+  const flagNames: Record<string, string> = {
+    dryRun: '--dry-run',
+    update: '--update',
+    noUpdate: '--no-update',
+    sources: '--source',
+    apps: '--app',
+    types: '--type',
+    all: '--all',
+    profile: '--profile',
+    project: '--project',
+  };
+  for (const [key, value] of Object.entries(scopeValues)) {
+    const used = Array.isArray(value) ? value.length > 0 : value !== undefined && value !== false;
+    if (used && !allowedScope.get(invocation.command)?.has(key)) {
+      throw new ConfigErrorLike(`${flagNames[key]} is not available on ${invocation.command}.`);
+    }
+  }
   return invocation;
 }
 
@@ -1964,15 +2124,31 @@ interface SelectionEntry {
   type: SelectableType;
   id: string;
   outcome: 'written';
+  reason?: string;
 }
 
-function selectedFor(
+function validateAppIds(config: ResolvedConfig, ids: readonly string[]): void {
+  const known = appRows(config).map((row) => row.id);
+  for (const id of ids) {
+    if (known.includes(id)) continue;
+    const suggestion = nearestKey(id, known);
+    throw new ConfigError(
+      `Unknown app "${id}"${suggestion ? ` — did you mean "${suggestion}"?` : '.'}`
+    );
+  }
+}
+
+export function selectedFor(
   config: ResolvedConfig,
   type: SelectableType,
   app: string | undefined
 ): string[] {
-  if (type === 'plugins') return app ? effectivePlugins(config, app) : config.selection.plugins;
-  return app ? effectiveSelection(config, app, type) : config.selection[type];
+  const targetKind = config.project ? 'project' : config.profile ? 'profile' : 'user';
+  const layer = config.layers.find((candidate) => candidate.kind === targetKind);
+  if (!layer) return [];
+  if (!app) return [...(layer.values[type]?.enabled ?? [])];
+  const override = layer.values.applications?.[app]?.[type];
+  return mergeIncrementalSelection([], override);
 }
 
 function selectionTypes(
@@ -1991,7 +2167,11 @@ function selectionTypes(
     }
     return types as SelectableType[];
   }
-  if (catalog.plugins.some((plugin) => plugin.id === id) || config.selection.plugins.includes(id)) {
+  if (
+    config.plugins.expansion?.pluginAliases[id] !== undefined ||
+    catalog.plugins.some((plugin) => plugin.id === id) ||
+    config.selection.plugins.includes(id)
+  ) {
     return ['plugins'];
   }
   const matches = SELECTABLE_TYPES.filter(
@@ -2021,11 +2201,13 @@ export async function runSelectionCommand(
     project: options.project,
     env: options.env,
   });
+  validateAppIds(config, options.apps ?? []);
   const catalog = readSourceCatalog(config);
   const inventory = scanLibrary({ env: options.env, plugins: catalog.plugins });
+  const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
   const grouped = new Map<SelectableType, string[]>();
   for (const id of ids) {
-    for (const type of selectionTypes(id, options.types ?? [], config, inventory, catalog)) {
+    for (const type of selectionTypes(id, options.types ?? [], resolved, inventory, catalog)) {
       grouped.set(type, [...(grouped.get(type) ?? []), id]);
     }
   }
@@ -2042,7 +2224,24 @@ export async function runSelectionCommand(
         env: options.env,
       });
     }
-    entries.push(...values.map((id) => ({ type, id, outcome: 'written' as const })));
+    entries.push(
+      ...values.map((id): SelectionEntry => {
+        const known =
+          type === 'plugins'
+            ? resolved.plugins.expansion?.pluginAliases[id] !== undefined
+            : inventory.components.some(
+                (component) => component.type === type && component.id === id
+              );
+        return {
+          type,
+          id,
+          outcome: 'written',
+          ...(command === 'enable' && !known
+            ? { reason: 'cannot validate this id yet; it will be validated at the next sync' }
+            : {}),
+        };
+      })
+    );
   }
   return { entries, exitCode: 0 };
 }
@@ -2058,6 +2257,7 @@ async function runSelectionPicker(
     project: options.project,
     env: options.env,
   });
+  validateAppIds(config, options.apps ?? []);
   const catalog = readSourceCatalog(config);
   const inventory = scanLibrary({ env: options.env, plugins: catalog.plugins });
   const app = options.apps?.[0];
@@ -2150,6 +2350,11 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   try {
+    const jsonScope = (options?: SyncOptions): Report['scope'] => ({
+      profile: options?.profile ?? process.env.ASB_PROFILE?.trim() ?? null,
+      project: options?.project ? path.resolve(options.project) : null,
+      dryRun: options?.dryRun === true,
+    });
     if (invocation.command === 'enable' || invocation.command === 'disable') {
       const result =
         invocation.ids.length > 0
@@ -2157,8 +2362,8 @@ export async function main(argv: readonly string[]): Promise<number> {
           : await runSelectionPicker(invocation.options);
       process.stdout.write(
         invocation.options.json
-          ? `${JSON.stringify(result, null, 2)}\n`
-          : `${result.entries.map((entry) => `written ${entry.type}:${entry.id}`).join('\n')}\n`
+          ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), result.entries, result.exitCode), null, 2)}\n`
+          : `${result.entries.map((entry) => `written ${entry.type}:${entry.id}${entry.reason ? ` (${entry.reason})` : ''}`).join('\n')}\n`
       );
       return 0;
     }
@@ -2171,7 +2376,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       });
       process.stdout.write(
         invocation.options.json
-          ? `${JSON.stringify(result, null, 2)}\n`
+          ? `${JSON.stringify(buildJsonEnvelope(jsonScope(), result.entries, result.exitCode as 0 | 1), null, 2)}\n`
           : `${result.entries
               .map(
                 (entry) =>
@@ -2198,7 +2403,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       const result = runInit(process.cwd(), { force: true, createAgentsMd });
       process.stdout.write(
         invocation.options.json
-          ? `${JSON.stringify(result, null, 2)}\n`
+          ? `${JSON.stringify(buildJsonEnvelope(jsonScope(), [result], 0), null, 2)}\n`
           : `written ${result.path}${result.agentsPath ? `\nwritten ${result.agentsPath}` : ''}\n`
       );
       return 0;
@@ -2206,14 +2411,14 @@ export async function main(argv: readonly string[]): Promise<number> {
 
     if (invocation.command === 'explain') {
       const slices = await runExplain(invocation.target, invocation.options);
+      const exitCode =
+        slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome)) ? 0 : 1;
       process.stdout.write(
         invocation.options.json
-          ? `${JSON.stringify(slices, null, 2)}\n`
+          ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), slices, exitCode), null, 2)}\n`
           : renderExplain(slices, invocation.target)
       );
-      return slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome))
-        ? 0
-        : 1;
+      return exitCode;
     }
 
     const report =
@@ -2226,7 +2431,11 @@ export async function main(argv: readonly string[]): Promise<number> {
               dryRun: invocation.command === 'status' ? true : invocation.options.dryRun,
             });
     process.stdout.write(
-      invocation.options.json ? `${JSON.stringify(report, null, 2)}\n` : renderReport(report)
+      invocation.options.json
+        ? `${JSON.stringify(report, null, 2)}\n`
+        : invocation.command === 'summary'
+          ? renderCompactStatus(report)
+          : renderReport(report)
     );
     return report.exitCode;
   } catch (error) {

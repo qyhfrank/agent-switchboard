@@ -6,14 +6,7 @@ import { test } from 'node:test';
 import { runSync } from '../../src/engine/cli.js';
 import { installApps, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
-/**
- * Peer coexistence acceptance (design: "a 0.4 sync --dry-run on the shared
- * state after a 0.5 sync is an acceptance case"): the in-tree 0.4.35 CLI
- * (dist/index.js) runs against scratch homes whose hook state a 0.5 sync
- * just wrote, and must recognize 0.5's ownership — no duplicate appends,
- * no removals, clean exit. The real-sync leg is stricter than dry-run: a
- * misread would materialize as a duplicated group or a rewritten file.
- */
+/** The built 0.5 CLI re-syncs its own hook state without duplicate appends or removals. */
 
 const DIST = path.resolve('dist/index.js');
 
@@ -34,7 +27,7 @@ function seedHook(asbHome: string, id: string): void {
   );
 }
 
-test('the 0.4.35 binary accepts state a 0.5 sync wrote: no duplicates, no removals', async (t) => {
+test('the built 0.5 binary re-syncs hook state without duplicates or removals', async (t) => {
   if (!fs.existsSync(DIST)) {
     t.skip('dist/index.js absent — run npm run build first; the gate must not skip this');
     return;
@@ -67,16 +60,16 @@ test('the 0.4.35 binary accepts state a 0.5 sync wrote: no duplicates, no remova
       env,
       encoding: 'utf-8',
     });
-    assert.equal(dry.status, 0, `0.4 dry-run exits clean\n${dry.stdout}\n${dry.stderr}`);
+    assert.equal(dry.status, 0, `0.5 dry-run exits clean\n${dry.stdout}\n${dry.stderr}`);
 
     const real = spawnSync(process.execPath, [DIST, 'sync'], { env, encoding: 'utf-8' });
-    assert.equal(real.status, 0, `0.4 sync exits clean\n${real.stdout}\n${real.stderr}`);
+    assert.equal(real.status, 0, `0.5 sync exits clean\n${real.stdout}\n${real.stderr}`);
 
     const settingsAfter = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
     assert.equal(
       settingsAfter.hooks.UserPromptSubmit.length,
       groupsBefore,
-      '0.4 recognized ownership: the group is neither duplicated nor removed'
+      'the group is neither duplicated nor removed'
     );
     const stateAfter = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
     assert.equal(stateAfter.version, 1);

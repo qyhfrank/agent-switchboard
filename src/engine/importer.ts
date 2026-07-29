@@ -124,7 +124,7 @@ async function importEntries(
       : [];
   }
   const stat = fs.statSync(source);
-  if (stat.isDirectory() && !options.recursive) {
+  if (sourceOverride && stat.isDirectory() && !options.recursive) {
     return [
       {
         type,

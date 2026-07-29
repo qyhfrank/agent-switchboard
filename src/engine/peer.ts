@@ -717,6 +717,39 @@ function validateProjectManifest(value: unknown): ProjectManifest {
   if (value.projectRoot !== undefined && typeof value.projectRoot !== 'string') {
     throw new Error('projectRoot must be a string when present');
   }
+  const sections = value.sections;
+  const requireEntries = (
+    section: string,
+    fields: readonly string[],
+    validate?: (entry: Record<string, unknown>) => boolean
+  ): void => {
+    const container = sections[section];
+    if (container === undefined) return;
+    if (!plainRecord(container)) throw new Error(`sections.${section} must be an object`);
+    for (const [key, raw] of Object.entries(container)) {
+      if (!plainRecord(raw)) throw new Error(`sections.${section}.${key} must be an object`);
+      for (const field of fields) {
+        if (typeof raw[field] !== 'string') {
+          throw new Error(`sections.${section}.${key}.${field} must be a string`);
+        }
+      }
+      if (validate && !validate(raw)) {
+        throw new Error(`sections.${section}.${key} has an unrecognized shape`);
+      }
+    }
+  };
+  for (const section of ['skills', 'commands', 'agents']) {
+    requireEntries(section, ['relativePath', 'targetId', 'hash', 'updatedAt']);
+  }
+  requireEntries('mcp', ['relativePath', 'targetId', 'serverKey', 'updatedAt']);
+  requireEntries(
+    'rules',
+    ['relativePath', 'mode', 'hash', 'updatedAt'],
+    (entry) =>
+      (entry.mode === 'block' || entry.mode === 'full') &&
+      Array.isArray(entry.targetIds) &&
+      entry.targetIds.every((target) => typeof target === 'string')
+  );
   return value as ProjectManifest;
 }
 

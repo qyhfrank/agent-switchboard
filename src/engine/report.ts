@@ -46,6 +46,14 @@ export interface Report {
   lastRun?: { at: string; summary: string };
 }
 
+export interface JsonEnvelope<T extends { outcome: Outcome }> {
+  version: 1;
+  scope: ReportScope;
+  entries: T[];
+  summary: Partial<Record<Outcome, number>>;
+  exitCode: 0 | 1 | 2;
+}
+
 /** Outcomes that mean the slice did not reach its declared state. */
 export const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
   'failed',
@@ -54,6 +62,22 @@ export const FAILING_OUTCOMES: ReadonlySet<Outcome> = new Set([
   'conflict',
   'missing',
 ]);
+
+export function buildJsonEnvelope<T extends { outcome: Outcome }>(
+  scope: ReportScope,
+  entries: readonly T[],
+  exitCode?: 0 | 1 | 2
+): JsonEnvelope<T> {
+  const summary: Partial<Record<Outcome, number>> = {};
+  for (const entry of entries) summary[entry.outcome] = (summary[entry.outcome] ?? 0) + 1;
+  return {
+    version: 1,
+    scope,
+    entries: [...entries],
+    summary,
+    exitCode: exitCode ?? (entries.some((entry) => FAILING_OUTCOMES.has(entry.outcome)) ? 1 : 0),
+  };
+}
 
 /**
  * Strip credentials from URL-shaped text. A secret travels in three spellings:
@@ -120,6 +144,19 @@ export function renderReport(report: Report): string {
   if (report.lastRun) lines.push(`last run: ${report.lastRun.at} — ${report.lastRun.summary}`);
 
   return `${lines.join('\n')}\n`;
+}
+
+export function renderCompactStatus(report: Report): string {
+  const failing = report.entries.filter((entry) => FAILING_OUTCOMES.has(entry.outcome)).length;
+  const pending = report.entries.filter(
+    (entry) => entry.outcome !== 'unchanged' && !FAILING_OUTCOMES.has(entry.outcome)
+  ).length;
+  if (failing > 0) return `Status: ${failing} item(s) need attention.\nNext: asb status\n`;
+  if (pending > 0) return `Status: ${pending} change(s) pending.\nNext: asb sync\n`;
+  if (report.entries.length > 0) {
+    return `Status: ${report.entries.length} item(s) current.\nNext: asb status --all\n`;
+  }
+  return 'Status: nothing selected.\nNext: asb enable\n';
 }
 
 export function renderExplain(slices: readonly ExplainSlice[], target: string): string {

@@ -14,6 +14,7 @@ import {
   isPlainObject,
   type ResolvedConfig,
   SELECTION_TYPES,
+  selectedPluginIds,
 } from './config.js';
 import { preferHomeVar, sanitizeMcpName } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
@@ -230,10 +231,11 @@ export interface PlanInput {
   project?: ProjectPlanPolicy;
 }
 
-export const STATUS_TYPES = [...SELECTION_TYPES, 'native_plugins'] as const;
+export const STATUS_TYPES = [...SELECTION_TYPES, 'native_plugins', 'plugins'] as const;
 type StatusType = (typeof STATUS_TYPES)[number];
 
 function appSupports(row: AppRow, type: StatusType): boolean {
+  if (type === 'plugins') return false;
   return type === 'native_plugins' ? row.native !== undefined : row[type] !== undefined;
 }
 
@@ -265,6 +267,7 @@ export function planStatusAll(input: PlanInput): Action[] {
   const assumed = new Set(config.apps.assumeInstalled);
   for (const row of table) {
     for (const type of STATUS_TYPES) {
+      if (type === 'plugins') continue;
       if (!appSupports(row, type)) {
         actions.push({
           app: row.id,
@@ -291,6 +294,54 @@ export function planStatusAll(input: PlanInput): Action[] {
     }
   }
   return actions;
+}
+
+/** Source and plugin catalog rows, including entries with no components. */
+export function planCatalogStatus(
+  config: ResolvedConfig,
+  catalog: SourceCatalog,
+  inventory: LibraryInventory
+): Action[] {
+  const selected = selectedPluginIds(config);
+  const componentCounts = new Map<string, number>();
+  for (const component of inventory.components) {
+    componentCounts.set(component.source, (componentCounts.get(component.source) ?? 0) + 1);
+  }
+  const absentPaths = new Map(catalog.absent.map((plugin) => [plugin.id, plugin.path]));
+
+  return [
+    ...catalog.sources.map((source): Action => {
+      const plugins = catalog.plugins.filter((plugin) => plugin.source === source.namespace);
+      const components = plugins.reduce(
+        (count, plugin) => count + (componentCounts.get(plugin.id) ?? 0),
+        0
+      );
+      return {
+        app: null,
+        type: 'plugins',
+        id: source.namespace,
+        path: source.path,
+        op: 'none',
+        outcome: 'unchanged',
+        detail: source.configured ? 'configured-source' : 'discovered-source',
+        reason: `source is resolved; ${plugins.length} plugin(s), ${components} component(s)`,
+      };
+    }),
+    ...catalog.plugins.map((plugin): Action => {
+      const enabled = selected.has(plugin.id);
+      const resolved = plugin.root !== undefined;
+      return {
+        app: null,
+        type: 'plugins',
+        id: plugin.id,
+        path: plugin.root ?? absentPaths.get(plugin.id) ?? null,
+        op: 'none',
+        outcome: enabled && !resolved ? 'missing' : enabled ? 'unchanged' : 'skipped',
+        detail: enabled ? (resolved ? 'selected' : 'unavailable') : 'not-selected',
+        reason: `${enabled ? 'selected' : 'not selected'}; ${resolved ? 'resolved' : 'not materialized'}; ${componentCounts.get(plugin.id) ?? 0} component(s)`,
+      };
+    }),
+  ];
 }
 
 interface ResolvedRuleSet {
@@ -2613,6 +2664,15 @@ export function planHooks(input: PlanInput): Action[] {
     delete next._asb_managed_hooks;
     if (Object.keys(merged).length === 0) delete next.hooks;
     else next.hooks = merged;
+    const configEdits: KeysEdit[] = [];
+    if (hadLegacyManagedKey) configEdits.push({ keyPath: ['_asb_managed_hooks'], remove: true });
+    if (Object.keys(merged).length === 0) {
+      if (Object.hasOwn(captured.config, 'hooks')) {
+        configEdits.push({ keyPath: ['hooks'], remove: true });
+      }
+    } else {
+      configEdits.push({ keyPath: ['hooks'], value: merged });
+    }
 
     const stateAfter: PeerState = {
       version: 1,
@@ -2644,7 +2704,9 @@ export function planHooks(input: PlanInput): Action[] {
         }
       : undefined;
     const currentHash = captured.content !== null ? hashContent(captured.content) : null;
-    const content = `${JSON.stringify(next, null, 2)}\n`;
+    const baseContent = captured.content ?? '';
+    const content =
+      configEdits.length > 0 ? applyKeysEdits(baseContent, 'json', configEdits) : baseContent;
 
     // A file that exists only to carry hooks goes away with them; one asb
     // shares with the app (settings.json) never does.
@@ -2660,7 +2722,7 @@ export function planHooks(input: PlanInput): Action[] {
             // A symlinked config keeps its link and receives the empty
             // document instead, or the managed groups stay behind in the
             // dotfiles store with no record on any machine to reclaim them.
-            content,
+            content: `${JSON.stringify(next, null, 2)}\n`,
             root,
             expectedHash: currentHash,
             peer,
@@ -2678,6 +2740,7 @@ export function planHooks(input: PlanInput): Action[] {
         root,
         expectedHash: currentHash,
         peer,
+        keyEdits: { format: 'json', edits: configEdits, baseContent },
       };
     }
 
@@ -2916,7 +2979,7 @@ function planMcpHost(
     updatedAt: now,
   });
 
-  const desiredIds = new Set<string>();
+  const selectedIds = new Set(selected);
   const desiredServerKeys = new Set<string>();
   for (const id of selected) {
     const component = byId.get(id);
@@ -2941,7 +3004,6 @@ function planMcpHost(
       continue;
     }
     desiredServerKeys.add(diskIdFor(id));
-    desiredIds.add(id);
     const value =
       row.structure === 'keyed-array'
         ? { ...dialectValue, [identityField]: diskIdFor(id) }
@@ -3045,7 +3107,7 @@ function planMcpHost(
     if (recorded.app !== app || recorded.type !== 'mcp' || recorded.path !== captured.path)
       continue;
     const id = recorded.id;
-    if (id === null || desiredIds.has(id)) continue;
+    if (id === null || selectedIds.has(id)) continue;
     const keyPath = recorded.keys ?? keyPathFor(id);
     const current = valueAtKeyPath(captured.root, keyPath);
     const base = { id, keyPath: [...keyPath], desired: null, current, recorded };
@@ -3490,6 +3552,24 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
 export function groupKeyActions(actions: readonly Action[]): Action[] {
   const grouped: Action[] = [];
   const byPath = new Map<string, number>();
+  const cancel = (
+    action: Action,
+    outcome: 'conflict' | 'failed',
+    detail: string,
+    reason: string
+  ): Action => ({
+    ...action,
+    op: 'none',
+    outcome,
+    detail,
+    reason,
+    ledger: undefined,
+    keyEdits: undefined,
+  });
+  const pathsOverlap = (left: readonly string[], right: readonly string[]): boolean => {
+    const length = Math.min(left.length, right.length);
+    return left.slice(0, length).every((part, index) => part === right[index]);
+  };
   for (const action of actions) {
     if (action.op !== 'write' || !action.path || !action.keyEdits) {
       grouped.push(action);
@@ -3509,18 +3589,30 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
       first.root !== action.root ||
       first.expectedHash !== action.expectedHash
     ) {
-      grouped.push({
-        ...action,
-        op: 'none',
-        outcome: 'failed',
-        detail: 'capture-error',
-        reason: 'structured cells captured incompatible views of one host',
-        ledger: undefined,
-        keyEdits: undefined,
-      });
+      const reason = 'structured cells captured incompatible views of one host';
+      grouped[index] = cancel(first, 'failed', 'capture-error', reason);
+      grouped.push(cancel(action, 'failed', 'capture-error', reason));
       continue;
     }
-    const edits = [...first.keyEdits.edits, ...action.keyEdits.edits];
+    const overlap = first.keyEdits.edits
+      .flatMap((left) => action.keyEdits?.edits.map((right) => ({ left, right })) ?? [])
+      .find(
+        ({ left, right }) =>
+          pathsOverlap(left.keyPath, right.keyPath) && !isDeepStrictEqual(left, right)
+      );
+    if (overlap) {
+      const reason = `structured cells edit the same key path (${overlap.left.keyPath.join('.')})`;
+      grouped[index] = cancel(first, 'conflict', 'shared-key', reason);
+      grouped.push(cancel(action, 'conflict', 'shared-key', reason));
+      continue;
+    }
+    const edits = [
+      ...first.keyEdits.edits,
+      ...action.keyEdits.edits.filter(
+        (candidate) =>
+          !first.keyEdits?.edits.some((existing) => isDeepStrictEqual(existing, candidate))
+      ),
+    ];
     let content: string;
     try {
       content = applyKeysEdits(first.keyEdits.baseContent, first.keyEdits.format, edits);
@@ -3653,7 +3745,11 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
         desired:
           slice.desired === null
             ? null
-            : `${JSON.stringify(maskMcpCredentialMaps(slice.desired, row.envKeyName), null, 2)}\n`,
+            : `${JSON.stringify(
+                maskMcpCredentialMaps(slice.desired, new Set(row.credentialKeys), row.envKeyName),
+                null,
+                2
+              )}\n`,
         components: component ? [{ id: component.id, path: component.path }] : [],
         sources: component ? componentSources([component]) : [],
       };
@@ -3664,8 +3760,6 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
   }
   return slices;
 }
-
-const MCP_CREDENTIAL_MAPS = new Set(['env', 'headers', 'http_headers', 'env_http_headers']);
 
 /**
  * A credential child is a name→value record, or — after a kv-array env
@@ -3691,15 +3785,21 @@ function maskCredentialChild(child: unknown, envKeyName: string | undefined): un
   return child;
 }
 
-function maskMcpCredentialMaps(value: unknown, envKeyName?: string): unknown {
-  if (Array.isArray(value)) return value.map((member) => maskMcpCredentialMaps(member, envKeyName));
+function maskMcpCredentialMaps(
+  value: unknown,
+  credentialKeys: ReadonlySet<string>,
+  envKeyName?: string
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((member) => maskMcpCredentialMaps(member, credentialKeys, envKeyName));
+  }
   if (!isPlainObject(value)) return value;
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [
       key,
-      MCP_CREDENTIAL_MAPS.has(key)
+      credentialKeys.has(key)
         ? maskCredentialChild(child, envKeyName)
-        : maskMcpCredentialMaps(child, envKeyName),
+        : maskMcpCredentialMaps(child, credentialKeys, envKeyName),
     ])
   );
 }
@@ -3912,9 +4012,25 @@ function librarySlice(action: Action): ExplainSlice {
 }
 
 /** Source rows for one target: a namespace, a plugin id, or a source path. */
-export function explainSources(input: SourcePlanInput, target: string): ExplainSlice[] {
-  return planSources(input)
-    .filter((action) => action.id === target || action.path === target)
+export function explainSources(
+  input: SourcePlanInput,
+  target: string,
+  inventory: LibraryInventory
+): ExplainSlice[] {
+  const rows = [
+    ...planSources(input),
+    ...planCatalogStatus(input.config, input.catalog, inventory),
+  ];
+  const plugin = input.catalog.plugins.find(
+    (candidate) => candidate.id === target || candidate.name === target
+  );
+  return rows
+    .filter(
+      (action) =>
+        action.id === target ||
+        action.path === target ||
+        (plugin !== undefined && action.id === plugin.id)
+    )
     .map(librarySlice);
 }
 

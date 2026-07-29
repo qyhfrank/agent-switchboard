@@ -190,9 +190,16 @@ export function mergeProjectRegion(
   const start = region === null ? -1 : existing.indexOf(region);
   if (content.length === 0) {
     if (region === null) return existing;
-    const combined = `${existing.slice(0, start)}${existing.slice(start + region.length)}`;
-    const normalized = combined.replace(/\n{3,}/g, '\n\n').trim();
-    return normalized.length > 0 ? `${normalized}\n` : '';
+    let removeStart = start;
+    let removeEnd = start + region.length;
+    if (removeStart === 0) {
+      if (existing.startsWith('\n\n', removeEnd)) removeEnd += 2;
+      else if (existing.slice(removeEnd) === '\n') removeEnd += 1;
+    } else if (existing.slice(removeEnd) === '\n') {
+      removeEnd += 1;
+      if (existing.slice(0, removeStart).endsWith('\n\n')) removeStart -= 1;
+    }
+    return `${existing.slice(0, removeStart)}${existing.slice(removeEnd)}`;
   }
   const block = `${REGION_START}\n${content.trimEnd()}\n${REGION_END}`;
   if (region !== null) {
@@ -387,8 +394,9 @@ export function applyBundleFiles(
   bundleRoot: string,
   files: readonly BundleFile[],
   stale: readonly string[]
-): void {
+): string[] {
   const root = path.resolve(bundleRoot);
+  const leftBehind: string[] = [];
   fs.mkdirSync(root, { recursive: true });
   for (const file of files) {
     const filePath = path.join(root, file.rel);
@@ -418,10 +426,11 @@ export function applyBundleFiles(
     try {
       fs.unlinkSync(path.join(root, rel));
     } catch {
-      // already gone
+      if (fs.existsSync(path.join(root, rel))) leftBehind.push(rel);
     }
     pruneEmptyParents(root, rel);
   }
+  return leftBehind;
 }
 
 /**
@@ -1086,13 +1095,19 @@ export function writeFileAtomic(targetPath: string, content: string | Buffer): v
   const resolved = resolveWritePath(targetPath);
   const directory = path.dirname(resolved);
   fs.mkdirSync(directory, { recursive: true });
+  const existing = fs.statSync(resolved, { throwIfNoEntry: false });
+  const mode = existing ? existing.mode & 0o777 : null;
   const temp = path.join(
     directory,
     `.${path.basename(resolved)}.asb-tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   );
   try {
-    if (typeof content === 'string') fs.writeFileSync(temp, content, 'utf-8');
-    else fs.writeFileSync(temp, content);
+    if (typeof content === 'string') {
+      fs.writeFileSync(temp, content, { encoding: 'utf-8', ...(mode !== null ? { mode } : {}) });
+    } else {
+      fs.writeFileSync(temp, content, mode !== null ? { mode } : undefined);
+    }
+    if (mode !== null) fs.chmodSync(temp, mode);
     fs.renameSync(temp, resolved);
   } catch (error) {
     try {

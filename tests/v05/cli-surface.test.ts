@@ -31,9 +31,9 @@ const EQUIVALENCE_CLASSES: string[][][] = [
     ['--update', '-P', '/tmp/repo', 'sync', '--source', 'main'],
   ],
   [
-    ['explain', 'base', '-n', '--app', 'codex'],
-    ['-n', '--app', 'codex', 'explain', 'base'],
-    ['explain', '--app', 'codex', 'base', '-n'],
+    ['explain', 'base', '--app', 'codex'],
+    ['--app', 'codex', 'explain', 'base'],
+    ['explain', '--app', 'codex', 'base'],
   ],
 ];
 
@@ -86,11 +86,11 @@ test('explain carries its target through parsing', () => {
   if (invocation.command === 'explain') assert.equal(invocation.target, 'base');
 });
 
-test('unknown flags and missing commands are rejected, never half-parsed', () => {
+test('unknown flags and incomplete commands reject while bare invocation selects summary', () => {
   assert.throws(() => parseCliArgs(['sync', '--bogus']));
   assert.throws(() => parseCliArgs(['explode']));
   assert.throws(() => parseCliArgs(['explain']));
-  assert.throws(() => parseCliArgs([]));
+  assert.equal(parseCliArgs([]).command, 'summary');
 });
 
 const SCOPE = { profile: null, project: null, dryRun: false };

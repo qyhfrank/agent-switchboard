@@ -1230,6 +1230,20 @@ export function readSourcePlugins(homes: Homes, namespace: string, root: string)
       failed.push({ namespace, path: manifestInfo.path, error: 'marketplace entry has no name' });
       continue;
     }
+    if (
+      name === '.' ||
+      name === '..' ||
+      name.includes('\0') ||
+      path.posix.basename(name) !== name ||
+      path.win32.basename(name) !== name
+    ) {
+      failed.push({
+        namespace,
+        path: manifestInfo.path,
+        error: `plugin "${name}": name must be exactly one path segment`,
+      });
+      continue;
+    }
     const descriptor = readCatalogEntry(
       homes,
       namespace,

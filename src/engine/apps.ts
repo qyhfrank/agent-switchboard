@@ -178,6 +178,8 @@ export interface McpTargetRow {
   sanitize: boolean;
   /** Server-value transform; `verbatimServer` writes the definition as authored. */
   dialect(server: McpServerValue): McpServerValue | null;
+  /** Child-map keys whose values explain must mask after this row's dialect. */
+  credentialKeys: readonly string[];
   /**
    * Set when the dialect rewrites env maps to kv-arrays: the member field
    * holding the env name. Explain keeps that field visible and masks every
@@ -208,10 +210,13 @@ function opencodeConfigPath(root: string): string {
   return fs.existsSync(jsonc) ? jsonc : path.join(root, 'opencode.json');
 }
 
+const MCP_CREDENTIAL_KEYS = ['env', 'headers', 'http_headers', 'env_http_headers'] as const;
+
 const JSON_MCP_ROW = {
   format: 'json',
   rootKey: 'mcpServers',
   dialect: verbatimServer,
+  credentialKeys: MCP_CREDENTIAL_KEYS,
   create: true,
 } as const;
 
@@ -375,6 +380,7 @@ export const APP_ROWS: readonly AppRow[] = [
       rootKey: 'mcp_servers',
       sanitize: true,
       dialect: codexServer,
+      credentialKeys: MCP_CREDENTIAL_KEYS,
       render: renderCodexTable,
       create: true,
     },
@@ -465,6 +471,7 @@ export const APP_ROWS: readonly AppRow[] = [
       rootKey: 'mcp',
       sanitize: false,
       dialect: opencodeServer,
+      credentialKeys: [...MCP_CREDENTIAL_KEYS, 'environment'],
     },
   },
   {
@@ -560,6 +567,7 @@ export const APP_ROWS: readonly AppRow[] = [
           envTransform: { keyName: 'key', valueName: 'value' },
           defaults: { type: 'stdio' },
         }),
+      credentialKeys: MCP_CREDENTIAL_KEYS,
       envKeyName: 'key',
       create: true,
     },
@@ -708,6 +716,7 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
           ...(envTransform ? { envTransform } : {}),
           ...(mcp.defaults ? { defaults: mcp.defaults } : {}),
         }),
+      credentialKeys: MCP_CREDENTIAL_KEYS,
       ...(envTransform ? { envKeyName: envTransform.keyName ?? 'key' } : {}),
       create: true,
     };

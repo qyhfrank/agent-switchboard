@@ -24,6 +24,23 @@
 - **MIG-07, Codex project trust:** Trust is add-only. Existing trusted values
   are preserved, untrusted or malformed values are refused, and ASB provides
   no removal path.
+- **MIG-08, import boundaries:** `asb import` supports commands, agents,
+  skills, and hooks. There is no rules import; rules remain library-authored.
+- **MIG-09, marketplace refresh:** `asb sync --update --source <name>` both
+  refreshes the marketplace and reconciles that source in the same run.
+- **MIG-10, custom target ids:** Configuration fails when a custom target id
+  collides with a builtin app id; custom targets cannot override builtins.
+- **MIG-11, Codex agent eligibility:** A selected agent without the Codex role
+  metadata is reported as `skipped (no-codex-role)` and no role file is made.
+- **MIG-12, entry filenames:** Component ids use an ASCII-safe filename
+  encoding. Non-ASCII and other unsafe characters become `-`; collisions fail
+  closed before either component is written.
+- **MIG-13, project initialization:** `asb init` writes a dormant, commented scaffold.
+  Detected apps are annotations, and `AGENTS.md` is optional.
+- **MIG-14, remote source add:** `asb add` materializes the checkout or subtree
+  before persisting its declaration; a failed materialization writes no source.
+- **MIG-15, Codex skills import:** The default Codex skills import reads
+  `.codex/skills` and ignores its reserved `.system` directory.
 
 ### Compatibility boundaries
 

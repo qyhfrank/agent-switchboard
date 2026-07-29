@@ -151,13 +151,13 @@ function packageBins(pkg, destination) {
   return result;
 }
 
-async function exerciseBins(bins, expectedVersion) {
+async function exerciseBins(bins, expectedVersion, env) {
   for (const alias of ['asb', 'agent-switchboard']) {
     const executable = bins[alias];
     if (!executable) throw new Error(`Package bin alias is missing: ${alias}`);
-    const help = await run(executable, ['--help']);
+    const help = await run(executable, ['--help'], { env });
     if (!/Usage: asb/.test(help.stdout)) throw new Error(`${alias} --help returned no usage text`);
-    const version = await run(executable, ['--version']);
+    const version = await run(executable, ['--version'], { env });
     if (version.stdout.trim() !== expectedVersion) {
       throw new Error(`${alias} --version returned ${version.stdout.trim()}`);
     }
@@ -253,6 +253,51 @@ function snapshot(root, targets) {
   return result;
 }
 
+function snapshotTree(root) {
+  const result = {};
+  const visit = (target, relative) => {
+    const stat = fs.lstatSync(target);
+    const key = relative || '.';
+    const mode = stat.mode & 0o777;
+    if (stat.isSymbolicLink()) {
+      result[key] = { kind: 'symlink', mode, target: fs.readlinkSync(target) };
+      return;
+    }
+    if (stat.isFile()) {
+      const bytes = fs.readFileSync(target);
+      result[key] = { kind: 'file', mode, size: bytes.length, sha256: sha256(bytes) };
+      return;
+    }
+    if (!stat.isDirectory()) throw new Error(`Peer snapshot cannot represent ${target}`);
+    result[key] = { kind: 'directory', mode };
+    for (const name of fs.readdirSync(target).sort()) {
+      visit(path.join(target, name), relative ? path.join(relative, name) : name);
+    }
+  };
+  visit(root, '');
+  return result;
+}
+
+function peerStateSnapshot(env) {
+  return Object.fromEntries(
+    ['HOME', 'ASB_HOME', 'ASB_AGENTS_HOME', 'ASB_CACHE_HOME', 'ASB_STATE_HOME'].map((key) => [
+      key,
+      snapshotTree(env[key]),
+    ])
+  );
+}
+
+function changedPeerPaths(before, after) {
+  return Object.keys(before).flatMap((home) =>
+    [...new Set([...Object.keys(before[home]), ...Object.keys(after[home])])]
+      .filter(
+        (relative) =>
+          JSON.stringify(before[home][relative]) !== JSON.stringify(after[home][relative])
+      )
+      .map((relative) => `${home}/${relative}`)
+  );
+}
+
 function compareSnapshots(baseline, candidate, exceptions) {
   const expected = new Map(exceptions.map((item) => [`${item.path}\0${item.slice}`, item]));
   const allowed = [];
@@ -307,24 +352,39 @@ async function main() {
     );
     const baselineBins = packageBins(baselinePackage, path.join(scratch, 'baseline-bin'));
     const candidateBins = packageBins(candidatePackage, path.join(scratch, 'candidate-bin'));
-    await exerciseBins(candidateBins, expectedVersions.candidate);
-    const baselineVersion = await run(baselineBins.asb, ['--version']);
-    if (baselineVersion.stdout.trim() !== expectedVersions.baseline) {
-      throw new Error(`Baseline bin returned ${baselineVersion.stdout.trim()}`);
-    }
-
     const targets = loadTargets(options.fixture);
     const exceptions = loadExceptions(options.fixture, targets);
     const baselineRoot = path.join(scratch, 'baseline-home');
     const candidateRoot = path.join(scratch, 'candidate-home');
     const baselineEnv = prepareHome(options.fixture, baselineRoot);
     const candidateEnv = prepareHome(options.fixture, candidateRoot);
+    await exerciseBins(candidateBins, expectedVersions.candidate, candidateEnv);
+    const baselineVersion = await run(baselineBins.asb, ['--version'], { env: baselineEnv });
+    if (baselineVersion.stdout.trim() !== expectedVersions.baseline) {
+      throw new Error(`Baseline bin returned ${baselineVersion.stdout.trim()}`);
+    }
+
+    // Model an existing 0.4.35 home before the candidate sync and peer check.
+    await run(baselineBins.asb, ['--version'], { env: candidateEnv });
     await run(baselineBins.asb, ['sync', '--profile', options.profile, '--no-update'], {
       env: baselineEnv,
     });
     await run(candidateBins.asb, ['sync', '--profile', options.profile, '--no-update'], {
       env: candidateEnv,
     });
+
+    const peerBefore = peerStateSnapshot(candidateEnv);
+    await run(
+      baselineBins.asb,
+      ['sync', '--dry-run', '--profile', options.profile, '--no-update'],
+      { env: candidateEnv }
+    );
+    const peerAfter = peerStateSnapshot(candidateEnv);
+    const peerChanges = changedPeerPaths(peerBefore, peerAfter);
+    const peerStateIntact = peerChanges.length === 0;
+    if (!peerStateIntact) {
+      throw new Error(`0.4.35 peer dry-run changed candidate state: ${peerChanges.join(', ')}`);
+    }
 
     const baselineSnapshot = snapshot(baselineRoot, targets);
     const candidateSnapshot = snapshot(candidateRoot, targets);
@@ -371,6 +431,13 @@ async function main() {
         tarballSha256: candidateSha256,
         snapshotSha256: snapshotHash(candidateSnapshot),
         bins: ['asb', 'agent-switchboard'],
+      },
+      peerDryRun: {
+        version: expectedVersions.baseline,
+        command: `sync --dry-run --profile ${options.profile} --no-update`,
+        exitCode: 0,
+        stateIntact: peerStateIntact,
+        snapshotSha256: snapshotHash(peerAfter),
       },
       profile: options.profile,
       targets,

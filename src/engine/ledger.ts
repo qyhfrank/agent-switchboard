@@ -192,11 +192,11 @@ export interface RunLock {
   release(): void;
 }
 
-/** True when the pid recorded in the lock file is a live process. */
-function lockHolderAlive(lockFile: string): boolean {
+/** True when the pid recorded in one observed lock generation is live. */
+function lockHolderAlive(generation: string): boolean {
   let pid: number;
   try {
-    pid = Number.parseInt(fs.readFileSync(lockFile, 'utf-8').trim().split(/\s+/)[0] ?? '', 10);
+    pid = Number.parseInt(generation.trim().split(/\s+/)[0] ?? '', 10);
   } catch {
     return false;
   }
@@ -233,20 +233,35 @@ export function acquireRunLock(stateHome: string): RunLock {
   let fd = tryAcquire();
   if (fd === null) {
     let stale = false;
+    let observed: string | null = null;
     try {
+      observed = fs.readFileSync(lockFile, 'utf-8');
       stale =
-        Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS && !lockHolderAlive(lockFile);
+        Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS && !lockHolderAlive(observed);
     } catch {
       stale = true;
     }
-    if (stale) {
+    let replacementRace = false;
+    if (stale && observed !== null) {
       const reap = `${lockFile}.reap-${process.pid}`;
       try {
         fs.renameSync(lockFile, reap);
-        fs.unlinkSync(reap);
+        if (fs.readFileSync(reap, 'utf-8') === observed) {
+          fs.unlinkSync(reap);
+        } else {
+          replacementRace = true;
+          try {
+            fs.linkSync(reap, lockFile);
+            fs.unlinkSync(reap);
+          } catch {
+            // A newer contender may already have restored a live lock.
+          }
+        }
       } catch {
         // lost the steal race to another reaper; contend on create below
       }
+      if (!replacementRace) fd = tryAcquire();
+    } else if (stale) {
       fd = tryAcquire();
     }
   }
