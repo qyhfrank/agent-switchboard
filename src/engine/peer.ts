@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 /**
  * Hook ownership state: a peer contract, not private engine state. A 0.4.35
@@ -13,6 +14,285 @@ import path from 'node:path';
  */
 
 export type HookTarget = 'claude-code' | 'codex';
+
+const LEGACY_MARKER_LINES = [
+  '# asb-managed-by=agent-switchboard',
+  '# asb-hook-id=',
+  '# asb-bundle-sha256=',
+];
+
+/** v0.4.28 path-token ownership patterns. Keep byte-identical to 0.4.35. */
+const V0428_MANAGED_RE =
+  /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64}\//;
+const V0428_MANAGED_DIR_RE =
+  /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
+const MANAGED_ID_ANY_HOME_RE =
+  /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/([^/\s"'`;|&<>]+)/g;
+const LEGACY_ASB_ID_ANY_HOME_RE =
+  /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/asb\/([^/\s"'`;|&<>]+)/g;
+const COMMAND_PATH_BOUNDARY = /[\s"'`=(:;&|<>]/;
+const COMMAND_FIELDS = ['command', 'commandWindows', 'command_windows'] as const;
+const LEGACY_STATE_FILE_RE = /^(claude-code|codex)-[0-9a-f]{64}\.json$/;
+
+export interface OwnershipContext {
+  legacyAsbRoots: readonly string[];
+  managedRoots: readonly string[];
+  knownManagedIds: ReadonlySet<string>;
+  stateGroups: ReadonlyArray<Record<string, unknown[]>>;
+}
+
+export interface OwnershipRemoval {
+  hooks: Record<string, unknown[]>;
+  removed: boolean;
+  taken: Record<string, unknown[]>;
+  v0428Commands: string[];
+  removedLegacyAsbIds: Set<string>;
+}
+
+function findPathTokenIndexes(command: string, pathPrefix: string): number[] {
+  const needle = `${pathPrefix}/`;
+  const indexes: number[] = [];
+  let offset = 0;
+  while (offset <= command.length - needle.length) {
+    const index = command.indexOf(needle, offset);
+    if (index < 0) break;
+    if (index === 0 || COMMAND_PATH_BOUNDARY.test(command[index - 1] ?? '')) {
+      indexes.push(index);
+    }
+    offset = index + 1;
+  }
+  return indexes;
+}
+
+export function commandContainsPathToken(command: string, pathPrefix: string): boolean {
+  return findPathTokenIndexes(command, pathPrefix).length > 0;
+}
+
+export function extractPathTokenSegments(command: string, pathPrefix: string): string[] {
+  const needle = `${pathPrefix}/`;
+  const segments: string[] = [];
+  for (const index of findPathTokenIndexes(command, pathPrefix)) {
+    const rest = command.slice(index + needle.length);
+    const end = rest.search(/[/\s"'`]/);
+    const segment = end >= 0 ? rest.slice(0, end) : rest;
+    if (segment.length > 0) segments.push(segment);
+  }
+  return segments;
+}
+
+function groupCommands(group: unknown): string[] {
+  if (!group || typeof group !== 'object') return [];
+  const handlers = (group as Record<string, unknown>).hooks;
+  if (!Array.isArray(handlers)) return [];
+  const commands: string[] = [];
+  for (const handler of handlers) {
+    if (!handler || typeof handler !== 'object') continue;
+    for (const field of COMMAND_FIELDS) {
+      const value = (handler as Record<string, unknown>)[field];
+      if (typeof value === 'string') commands.push(value.split('\\').join('/'));
+    }
+  }
+  return commands;
+}
+
+function isLegacyMarkerLine(line: string): boolean {
+  return LEGACY_MARKER_LINES.some((marker) =>
+    marker.endsWith('=') ? line.trim().startsWith(marker) : line.trim() === marker
+  );
+}
+
+function hasLegacyMarker(command: string): boolean {
+  return command.split(/\r?\n/).some(isLegacyMarkerLine);
+}
+
+export function stripLegacyMarkerLines(command: string): string {
+  if (!hasLegacyMarker(command)) return command;
+  return command
+    .split(/\r?\n/)
+    .filter((line) => !isLegacyMarkerLine(line))
+    .join('\n');
+}
+
+function normalizeRoot(root: string): string {
+  return root.split('\\').join('/').replace(/\/+$/, '');
+}
+
+function extractIdsByPattern(command: string, pattern: RegExp): string[] {
+  const ids: string[] = [];
+  for (const match of command.matchAll(pattern)) {
+    const id = match[1];
+    if (id) ids.push(id);
+  }
+  return ids;
+}
+
+function isLegacyOwnedGroup(
+  group: unknown,
+  legacyAsbRoots: readonly string[],
+  knownManagedIds: ReadonlySet<string>
+): boolean {
+  if (
+    group &&
+    typeof group === 'object' &&
+    (group as Record<string, unknown>)._asb_source === true
+  ) {
+    return true;
+  }
+  const commands = groupCommands(group);
+  return commands.some(
+    (command) =>
+      hasLegacyMarker(command) ||
+      V0428_MANAGED_RE.test(command) ||
+      legacyAsbRoots.some((root) => commandContainsPathToken(command, root)) ||
+      extractIdsByPattern(command, LEGACY_ASB_ID_ANY_HOME_RE).some((id) => knownManagedIds.has(id))
+  );
+}
+
+function isManagedPathOwnedGroup(
+  group: unknown,
+  managedRoots: readonly string[],
+  knownManagedIds: ReadonlySet<string>
+): boolean {
+  const commands = groupCommands(group);
+  if (commands.length === 0) return false;
+  return commands.every(
+    (command) =>
+      managedRoots.some((root) =>
+        extractPathTokenSegments(command, root).some((segment) => knownManagedIds.has(segment))
+      ) ||
+      extractIdsByPattern(command, MANAGED_ID_ANY_HOME_RE).some((id) => knownManagedIds.has(id))
+  );
+}
+
+export function removeOwnedHookGroups(
+  existingHooks: Record<string, unknown[]>,
+  ctx: OwnershipContext
+): OwnershipRemoval {
+  const legacyAsbRoots = ctx.legacyAsbRoots.map(normalizeRoot);
+  const managedRoots = ctx.managedRoots.map(normalizeRoot);
+  const hooks: Record<string, unknown[]> = Object.create(null);
+  const taken: Record<string, unknown[]> = Object.create(null);
+  const removedGroups: unknown[] = [];
+  for (const [event, groups] of Object.entries(existingHooks)) {
+    if (!Array.isArray(groups)) continue;
+    let remaining = [...groups];
+
+    for (const stateEvents of ctx.stateGroups) {
+      const stateGroupsForEvent = stateEvents[event];
+      if (!Array.isArray(stateGroupsForEvent)) continue;
+      for (const stateGroup of stateGroupsForEvent) {
+        const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, stateGroup));
+        if (index >= 0) {
+          const removed = remaining.splice(index, 1);
+          removedGroups.push(...removed);
+          taken[event] = [...(taken[event] ?? []), ...removed];
+        }
+      }
+    }
+
+    remaining = remaining.filter((group) => {
+      const owned =
+        isLegacyOwnedGroup(group, legacyAsbRoots, ctx.knownManagedIds) ||
+        isManagedPathOwnedGroup(group, managedRoots, ctx.knownManagedIds);
+      if (owned) {
+        removedGroups.push(group);
+        taken[event] = [...(taken[event] ?? []), group];
+      }
+      return !owned;
+    });
+    if (remaining.length > 0) hooks[event] = remaining;
+  }
+
+  const v0428Commands: string[] = [];
+  const removedLegacyAsbIds = new Set<string>();
+  for (const group of removedGroups) {
+    for (const command of groupCommands(group)) {
+      if (V0428_MANAGED_RE.test(command)) v0428Commands.push(command);
+      for (const root of legacyAsbRoots) {
+        for (const segment of extractPathTokenSegments(command, root)) {
+          removedLegacyAsbIds.add(segment);
+        }
+      }
+    }
+  }
+  return {
+    hooks,
+    removed: removedGroups.length > 0,
+    taken,
+    v0428Commands,
+    removedLegacyAsbIds,
+  };
+}
+
+export function filterRecognizedDesiredGroups(
+  existing: Record<string, unknown[]>,
+  desired: Record<string, unknown[]>,
+  evidence: ReadonlyArray<Record<string, unknown[]>>
+): Record<string, unknown[]> {
+  const result: Record<string, unknown[]> = Object.create(null);
+  for (const [event, groups] of Object.entries(desired)) {
+    const remaining = [...(existing[event] ?? [])];
+    const proofs = evidence.flatMap((events) => events[event] ?? []);
+    for (const group of groups) {
+      const existingIndex = remaining.findIndex((value) => isDeepStrictEqual(value, group));
+      const proofIndex = proofs.findIndex((value) => isDeepStrictEqual(value, group));
+      if (existingIndex >= 0 && proofIndex >= 0) {
+        remaining.splice(existingIndex, 1);
+        proofs.splice(proofIndex, 1);
+      } else {
+        if (!result[event]) result[event] = [];
+        result[event].push(group);
+      }
+    }
+  }
+  return result;
+}
+
+export function collectV0428BundleDirs(commands: readonly string[]): Set<string> {
+  const dirs = new Set<string>();
+  for (const command of commands) {
+    for (const match of command.matchAll(V0428_MANAGED_DIR_RE)) {
+      dirs.add(match[1]);
+    }
+  }
+  return dirs;
+}
+
+/** Read v0.4.28 groups as scope-local recognition evidence. */
+export function consumeLegacyManagedState(
+  asbHome: string,
+  target: HookTarget,
+  projectRoot?: string
+): Record<string, unknown[]>[] {
+  const project = projectRoot?.trim();
+  const dir = project
+    ? path.join(path.resolve(project), '.asb', 'state', 'hooks')
+    : path.join(asbHome, 'state', 'hooks');
+  const groups: Record<string, unknown[]>[] = [];
+  let entries: fs.Dirent[] = [];
+  try {
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return groups;
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return groups;
+  }
+  for (const entry of entries) {
+    const match = entry.name.match(LEGACY_STATE_FILE_RE);
+    if (match?.[1] !== target || !entry.isFile()) continue;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(path.join(dir, entry.name), 'utf-8')) as {
+        hooks?: Record<string, unknown[]>;
+      };
+      if (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) {
+        groups.push(parsed.hooks);
+      }
+    } catch {
+      // Unreadable legacy state carries no recognition evidence.
+    }
+  }
+  return groups;
+}
 
 export interface PeerState {
   version: 1;

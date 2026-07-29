@@ -31,6 +31,7 @@ import {
 import { buildPluginExpansion, type LibraryInventory, scanLibrary } from './library.js';
 import { applyNative, captureNative, planNative } from './native.js';
 import {
+  consumeLegacyManagedState,
   loadPeerState,
   loadProjectManifest,
   type ProjectLibrarySection,
@@ -445,6 +446,11 @@ function captureFor(
       config: {},
       escapes: targetEscapesRoot(root, configPath),
       state: loadPeerState(config.homes.asbHome, row.stateTarget, config.project ?? undefined),
+      legacyGroups: consumeLegacyManagedState(
+        config.homes.asbHome,
+        row.stateTarget,
+        config.project ?? undefined
+      ),
     };
     if (captured.exists) {
       try {
