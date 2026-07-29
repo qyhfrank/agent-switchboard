@@ -10,6 +10,7 @@ import {
   effectiveIncludeDelimiters,
   effectivePlugins,
   effectiveSelection,
+  isPlainObject,
   type ResolvedConfig,
 } from './config.js';
 import { preferHomeVar, sanitizeMcpName } from './dialects.js';
@@ -1483,6 +1484,13 @@ interface McpHostPlan {
   failure?: { outcome: Outcome; detail: string; reason: string };
 }
 
+/** What a host holds where asb expects a table, for a reason line. */
+function describeValue(value: unknown): string {
+  if (Array.isArray(value)) return 'an array';
+  if (value === null) return 'null';
+  return `a ${typeof value}`;
+}
+
 /**
  * One app's MCP host, slice by slice. Proofs available here: (1) the ledger
  * entry whose hash matches the value now at that key path, and (3)
@@ -1526,8 +1534,34 @@ function planMcpHost(
     claimed.set(key, id);
   }
 
-  const addressable = (keyPath: readonly string[]): boolean =>
-    row.format !== 'toml' || captured.tables.includes(keyPath.join('.'));
+  // The server map itself. A value that is not a table reads through as an
+  // absent server key, so every slice would take the create branch and hand
+  // the writer a parent it cannot index; the host fails on its own instead.
+  const container = valueAtKeyPath(captured.root, [row.rootKey]);
+  if (container !== undefined && !isPlainObject(container)) {
+    return {
+      slices,
+      failure: {
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: `cannot use ${path.basename(captured.path)}, MCP servers not merged: ${row.rootKey} is ${describeValue(container)}, not a table of servers`,
+      },
+    };
+  }
+
+  // Why a TOML key path cannot be spliced, or null when it can be. The writer
+  // addresses one table by its byte span, so a descendant header
+  // ([mcp_servers.x.env]) is outside the span even though TOML merges it into
+  // the value: replacing the parent would orphan it beside the keys asb
+  // writes, and removing the parent would leave the server declared.
+  const unspliceable = (keyPath: readonly string[]): string | null => {
+    if (row.format !== 'toml') return null;
+    const name = keyPath.join('.');
+    const nested = captured.tables.find((table) => table.startsWith(`${name}.`));
+    if (nested !== undefined) return `[${nested}] nests under ${name} in ${captured.path}`;
+    if (captured.tables.includes(name)) return null;
+    return `${name} is not written as a table in ${captured.path}`;
+  };
   const recordFor = (id: string, keyPath: string[]): LedgerEntry => ({
     app,
     type: 'mcp',
@@ -1595,12 +1629,13 @@ function planMcpHost(
       continue;
     }
 
-    if (!addressable(keyPath)) {
+    const unaddressable = unspliceable(keyPath);
+    if (unaddressable !== null) {
       slices.push({
         ...base,
         outcome: recorded ? 'conflict' : 'blocked',
         detail: recorded ? undefined : 'foreign',
-        reason: `${keyPath.join('.')} is not written as a table in ${captured.path}; asb edits tables only — move it or remove it by hand`,
+        reason: `${unaddressable}; asb edits whole tables only — move it or remove it by hand`,
       });
       continue;
     }
@@ -1651,12 +1686,13 @@ function planMcpHost(
       slices.push({ ...base, outcome: 'removed', detail: 'already-absent', ledger: drop });
       continue;
     }
-    if (!addressable(keyPath)) {
+    const unaddressable = unspliceable(keyPath);
+    if (unaddressable !== null) {
       slices.push({
         ...base,
         outcome: 'left-behind',
         detail: 'modified',
-        reason: `${keyPath.join('.')} is no longer written as a table in ${captured.path}; delete it yourself`,
+        reason: `${unaddressable}; delete it yourself`,
         ledger: drop,
       });
       continue;
@@ -1715,6 +1751,13 @@ export function planMcp(input: PlanInput): Action[] {
     for (const id of selected) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
+    // Nothing to write, nothing claimed there and nothing to adopt: a
+    // document asb has no business in is not read for problems either.
+    const claimedHere = ledger.entries.some(
+      (entry) =>
+        entry.app === appId && entry.type === 'mcp' && entry.path === capture.mcp[appId]?.path
+    );
+    if (selected.length === 0 && !claimedHere && byId.size === 0) continue;
     rows.push({ app: appId, row, selected });
   }
 

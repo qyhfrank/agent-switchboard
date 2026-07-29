@@ -476,6 +476,115 @@ test('a codex table replaced by hand with an inline form is never spliced', asyn
   });
 });
 
+/**
+ * The same value with `env` spelled as a sub-table. TOML merges it into
+ * `mcp_servers.alpha`, so it parses to what asb records, but the header owns a
+ * byte span of its own outside the parent table's: a splice of the parent can
+ * neither replace it nor take it away.
+ */
+const SUB_TABLE_HOST = [
+  '# my codex config -- hand written',
+  'model = "gpt-5"',
+  '',
+  '[mcp_servers.alpha]',
+  'command = "npx"',
+  'args = [ "-y", "alpha" ]',
+  '',
+  '[mcp_servers.alpha.env]',
+  'FOO = "one"',
+  '',
+  '[other_thing]',
+  'keep = true',
+  '',
+].join('\n');
+
+const ALPHA_SUB_TABLE = { command: 'npx', args: ['-y', 'alpha'], env: { FOO: 'one' } };
+
+test('an owned key with a descendant table conflicts rather than being half-written', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
+    config(homes, ['codex'], ['alpha']);
+    await runSync({});
+    assert.equal(mcpEntries(homes).length, 1);
+
+    // Reformatted by hand into the sub-table spelling: same value, same order,
+    // so the recorded hash still matches and nothing has drifted.
+    seedHost(homes, 'codex', SUB_TABLE_HOST);
+    seedMcpLibrary(homes, {
+      alpha: { command: 'npx', args: ['-y', 'alpha'], env: { FOO: 'two' } },
+    });
+    const report = await runSync({});
+
+    assert.equal(fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'), SUB_TABLE_HOST);
+    const conflict = row(report, 'alpha');
+    assert.equal(conflict?.outcome, 'conflict');
+    assert.match(conflict?.reason ?? '', /mcp_servers\.alpha\.env/);
+    // A splice of the parent span would write `env.FOO` beside the orphaned
+    // header and leave the whole document unreadable to codex.
+    assert.deepEqual(readMcpHost(homes, 'codex')?.alpha, ALPHA_SUB_TABLE);
+    assert.equal(report.exitCode, 1);
+  });
+});
+
+test('a descendant table is never re-merged behind a hash that says otherwise', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
+    config(homes, ['codex'], ['alpha']);
+    await runSync({});
+    const [recorded] = mcpEntries(homes);
+
+    // The desired value loses `env` entirely. Splicing the parent span writes
+    // bytes identical to what is there, so the host looks unchanged while the
+    // sub-table keeps merging the stale values back into the parsed server.
+    seedHost(homes, 'codex', SUB_TABLE_HOST);
+    seedMcpLibrary(homes, { alpha: { command: 'npx', args: ['-y', 'alpha'] } });
+    const report = await runSync({});
+
+    assert.equal(row(report, 'alpha')?.outcome, 'conflict');
+    assert.deepEqual(readMcpHost(homes, 'codex')?.alpha, ALPHA_SUB_TABLE, 'env is still merged');
+    assert.equal(mcpEntries(homes)[0].hash, recorded.hash, 'no hash for a value asb did not write');
+  });
+});
+
+test('a hand-written key with a descendant table is never adopted by identity', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
+    config(homes, ['codex'], ['alpha']);
+    seedHost(homes, 'codex', SUB_TABLE_HOST);
+
+    const report = await runSync({});
+
+    assert.equal(fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'), SUB_TABLE_HOST);
+    const blocked = row(report, 'alpha');
+    assert.equal(blocked?.outcome, 'blocked');
+    assert.equal(blocked?.detail, 'foreign');
+    assert.match(blocked?.reason ?? '', /mcp_servers\.alpha\.env/);
+    assert.equal(mcpEntries(homes).length, 0, 'asb never claims a slice it cannot edit');
+  });
+});
+
+test('a deselected key with a descendant table is left behind, not reported retired', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
+    config(homes, ['codex'], ['alpha']);
+    await runSync({});
+
+    seedHost(homes, 'codex', SUB_TABLE_HOST);
+    config(homes, ['codex'], []);
+    const report = await runSync({});
+
+    assert.equal(fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'), SUB_TABLE_HOST);
+    const left = row(report, 'alpha');
+    assert.equal(left?.outcome, 'left-behind');
+    assert.match(left?.reason ?? '', /mcp_servers\.alpha\.env/);
+    assert.equal(mcpEntries(homes).length, 0, 'the claim goes either way');
+  });
+});
+
 test('a second run re-proves ownership from the record the first one wrote', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');

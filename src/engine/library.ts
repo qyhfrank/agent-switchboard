@@ -629,8 +629,11 @@ export function buildPluginExpansion(
     else claimants.set(plugin.name, [plugin.id]);
   }
 
-  const pluginAliases: Record<string, string> = {};
-  const componentAliases: Record<string, string> = {};
+  // Every consumer resolves a ref by reading this record, so the records carry
+  // no prototype: a ref spelled `__proto__` or `constructor` has to answer
+  // with nothing rather than with an inherited member.
+  const pluginAliases: Record<string, string> = Object.create(null);
+  const componentAliases: Record<string, string> = Object.create(null);
   for (const plugin of plugins) {
     pluginAliases[plugin.id] = plugin.id;
     const unambiguous = claimants.get(plugin.name)?.length === 1;

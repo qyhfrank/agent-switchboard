@@ -418,6 +418,18 @@ export interface StructuredDocument {
   tables: string[];
 }
 
+/**
+ * A TOML parse failure, position only. `@iarna/toml` quotes the failing source
+ * lines under its message, and a host's MCP `env` values live on those lines;
+ * a document error travels into reports, so it carries what the JSON branch
+ * carries — where the parser stopped, never what it read there.
+ */
+function tomlErrorText(error: unknown): string {
+  if (!(error instanceof Error)) return 'invalid TOML';
+  const [head] = error.message.split('\n');
+  return head.replace(/,? pos \d+:?\s*$/, '').trim() || 'invalid TOML';
+}
+
 /** Read a structured host. JSON hosts are parsed as JSONC: comments are legal. */
 export function parseStructured(content: string, format: KeysFormat): StructuredDocument {
   if (content.trim().length === 0) return { root: {}, tables: [] };
@@ -426,11 +438,7 @@ export function parseStructured(content: string, format: KeysFormat): Structured
       const parsed = parseToml(content) as Record<string, unknown>;
       return { root: parsed, tables: scanTomlTables(content).map((table) => table.name) };
     } catch (error) {
-      return {
-        root: null,
-        error: error instanceof Error ? error.message : String(error),
-        tables: [],
-      };
+      return { root: null, error: tomlErrorText(error), tables: [] };
     }
   }
   const errors: ParseError[] = [];

@@ -291,7 +291,7 @@ export function renderCodexTable(keyPath: readonly string[], value: McpServerVal
     }
     if (CODEX_INLINE_TABLES.has(key)) {
       const pairs = Object.entries(item as Record<string, string>)
-        .map(([name, entry]) => `"${name}" = "${entry.replace(/"/g, '\\"')}"`)
+        .map(([name, entry]) => `${tomlStringify.value(name)} = ${tomlStringify.value(entry)}`)
         .join(', ');
       lines.push(`${key} = { ${pairs} }`);
       continue;

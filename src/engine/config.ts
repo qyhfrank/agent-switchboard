@@ -116,7 +116,7 @@ export function projectConfigPath(projectRoot: string): string {
 
 const idArray = z.array(z.string().trim().min(1));
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 

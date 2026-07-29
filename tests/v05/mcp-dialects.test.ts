@@ -520,3 +520,37 @@ test('a keys edit list is applied in order against the updated text', () => {
   const root = parseStructured(applyKeysEdits('', 'json', edits), 'json').root;
   assert.deepEqual(Object.keys(valueAtKeyPath(root, ['mcpServers']) as object), ['b']);
 });
+
+test('codex: an inline table escapes its names and values like every other value', () => {
+  // Hand-quoting wrote a backslash, a newline or a quote straight through, so
+  // an ordinary Windows path in a header produced TOML codex cannot read.
+  const hostile: readonly [string, Record<string, string>][] = [
+    ['backslash', { 'X-Path': 'C:\\Users\\me' }],
+    ['newline', { 'X-Note': 'line1\nline2' }],
+    ['quote in the name', { 'X-"Q"': 'v' }],
+  ];
+
+  for (const [label, headers] of hostile) {
+    const text = codexToml({ url: 'https://example.invalid/mcp', headers });
+    const root = parseToml(text) as { mcp_servers: { srv: { http_headers: unknown } } };
+    assert.deepEqual(root.mcp_servers.srv.http_headers, headers, label);
+  }
+});
+
+test('a TOML parse error keeps the parser position and drops the lines it quotes', () => {
+  const placeholder = 'INVENTED-PLACEHOLDER-9f3a';
+  const source = [
+    '[mcp_servers.private]',
+    'command = "my-server"',
+    `env.API_TOKEN = "${placeholder}"`,
+    'broken here',
+    '',
+  ].join('\n');
+
+  const document = parseStructured(source, 'toml');
+
+  assert.equal(document.root, null);
+  assert.match(document.error ?? '', /row 4/);
+  assert.equal(document.error?.includes(placeholder), false, 'no source excerpt');
+  assert.equal(document.error?.includes('\n'), false, 'a reason is one line');
+});

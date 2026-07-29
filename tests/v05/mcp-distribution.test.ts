@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { runSync } from '../../src/engine/cli.js';
+import { runExplain, runSync } from '../../src/engine/cli.js';
 import { type Report, type ReportEntry, renderReport } from '../../src/engine/report.js';
 import {
   installApps,
@@ -10,8 +10,10 @@ import {
   type McpAppId,
   mcpHostPath,
   readMcpHost,
+  ruleFilePath,
   type ScratchHomes,
   seedMcpLibrary,
+  seedRule,
   withScratchHomes,
   writeUserConfig,
 } from './helpers/scratch.js';
@@ -448,4 +450,181 @@ test('a server secret never reaches a report line, on any path through the run',
     // The value still reaches the target it was meant for.
     assert.deepEqual(readMcpHost(homes, 'codex')?.owned.env, { TOKEN: secret });
   });
+});
+
+/**
+ * A container key holding something that is not a map of servers. The value
+ * asb reads at the server key is `undefined` either way, so without a check
+ * the planner takes the create branch and hands an unindexable parent to the
+ * JSON writer — one malformed key in a file asb does not own then aborts the
+ * whole run. It is the one input class the fail-closed contract missed.
+ */
+const CONTAINER_CLASSES: readonly [string, string, RegExp][] = [
+  ['array', '[ "one", "two" ]', /array/],
+  ['empty array', '[]', /array/],
+  ['number', '12345', /number/],
+  ['null', 'null', /null/],
+  ['boolean', 'false', /boolean/],
+  ['string', '"nope"', /string/],
+];
+
+test('a container key that is not a table of servers fails that host alone', async () => {
+  for (const [label, literal, typeName] of CONTAINER_CLASSES) {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'cursor', 'gemini');
+      seedMcpLibrary(homes, { alpha: ALPHA });
+      enableAll(homes, ['alpha'], ['cursor', 'gemini']);
+      const host = `{\n  "mcpServers": ${literal}\n}\n`;
+      const filePath = mcpHostPath(homes, 'cursor');
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, host, 'utf-8');
+
+      const report = await runSync({});
+
+      assert.equal(fs.readFileSync(filePath, 'utf-8'), host, label);
+      const [failed] = rowsFor(report, 'cursor');
+      assert.equal(failed?.outcome, 'failed', label);
+      assert.equal(failed?.detail, 'parse-error', label);
+      assert.match(failed?.reason ?? '', /mcpServers/, label);
+      assert.match(failed?.reason ?? '', typeName, label);
+      // The rest of the run is untouched by one poisoned host.
+      assert.deepEqual(readMcpHost(homes, 'gemini')?.alpha, {
+        command: 'npx',
+        args: ['-y', 'alpha'],
+      });
+      assert.equal(report.exitCode, 1, label);
+    });
+  }
+});
+
+test("opencode's own container key is checked the same way, on a preview too", async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'opencode');
+    seedMcpLibrary(homes, { alpha: ALPHA });
+    enableAll(homes, ['alpha'], ['opencode']);
+    const host = '{\n  "mcp": [],\n  "theme": "dark"\n}\n';
+    const filePath = mcpHostPath(homes, 'opencode');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, host, 'utf-8');
+
+    const preview = await runSync({ dryRun: true });
+    assert.equal(rowsFor(preview, 'opencode')[0]?.outcome, 'failed');
+    assert.match(rowsFor(preview, 'opencode')[0]?.reason ?? '', /mcp\b/);
+
+    const report = await runSync({});
+    assert.equal(fs.readFileSync(filePath, 'utf-8'), host);
+    assert.equal(rowsFor(report, 'opencode')[0]?.detail, 'parse-error');
+  });
+});
+
+test('one poisoned host does not take sync, status and explain down with it', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code', 'cursor', 'codex');
+    seedRule(homes, 'house.md', '# House rules\nBe kind.\n');
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code", "cursor", "codex"]',
+        '',
+        '[rules]',
+        'enabled = ["house"]',
+        '',
+        '[mcp]',
+        'enabled = ["alpha"]',
+        '',
+      ].join('\n')
+    );
+    seedMcpLibrary(homes, { alpha: ALPHA });
+    const poisoned = mcpHostPath(homes, 'cursor');
+    fs.mkdirSync(path.dirname(poisoned), { recursive: true });
+    fs.writeFileSync(poisoned, '{\n  "mcpServers": []\n}\n', 'utf-8');
+
+    const report = await runSync({});
+
+    assert.ok(fs.existsSync(ruleFilePath(homes, 'claude-code')), 'rules still land');
+    assert.deepEqual(readMcpHost(homes, 'codex')?.alpha, { command: 'npx', args: ['-y', 'alpha'] });
+    assert.ok(readMcpHost(homes, 'claude-code')?.alpha, 'the other JSON host is written');
+    const poisonedRow = rowsFor(report, 'cursor').find((entry) => entry.type === 'mcp');
+    assert.equal(poisonedRow?.outcome, 'failed');
+
+    // The read-only surfaces answer for every other app instead of aborting.
+    const preview = await runSync({ dryRun: true });
+    assert.equal(
+      preview.entries.some((entry) => entry.app === 'codex'),
+      true
+    );
+    const slices = await runExplain('alpha');
+    assert.equal(
+      slices.some((slice) => slice.app === 'codex'),
+      true
+    );
+  });
+});
+
+test('a corrupt host asb has no MCP work on is never probed', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'cursor');
+    // Nothing defined, nothing selected, nothing claimed: asb has no business
+    // in this document, so it has nothing to say about it either.
+    enableAll(homes, [], ['cursor']);
+    const filePath = mcpHostPath(homes, 'cursor');
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, '{ "mcpServers": {\n', 'utf-8');
+
+    const report = await runSync({});
+
+    assert.deepEqual(
+      report.entries.filter((entry) => entry.type === 'mcp'),
+      []
+    );
+    assert.equal(report.exitCode, 0);
+  });
+});
+
+test('a host that will not parse reports where it broke, never what it holds', async () => {
+  const placeholder = 'INVENTED-PLACEHOLDER-9f3a';
+  const fixtures: readonly [string, string][] = [
+    [
+      'syntax error beside an env line',
+      [
+        '[mcp_servers.private]',
+        'command = "my-server"',
+        `env.API_TOKEN = "${placeholder}"`,
+        'broken here',
+        '',
+      ].join('\n'),
+    ],
+    [
+      'a key defined twice, once as a sub-table',
+      [
+        '[mcp_servers.alpha]',
+        'command = "npx"',
+        `env.API_TOKEN = "${placeholder}"`,
+        '',
+        '[mcp_servers.alpha.env]',
+        `API_TOKEN = "${placeholder}"`,
+        '',
+      ].join('\n'),
+    ],
+  ];
+
+  for (const [label, host] of fixtures) {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'codex');
+      seedMcpLibrary(homes, { alpha: { command: 'npx' } });
+      enableAll(homes, ['alpha'], ['codex']);
+      const filePath = mcpHostPath(homes, 'codex');
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, host, 'utf-8');
+
+      const report = await runSync({});
+
+      const failed = rowsFor(report, 'codex')[0];
+      assert.equal(failed?.detail, 'parse-error', label);
+      assert.match(failed?.reason ?? '', /row \d+/, label);
+      assert.equal(renderReport(report).includes(placeholder), false, label);
+      assert.equal(JSON.stringify(report).includes(placeholder), false, `${label} (json)`);
+    });
+  }
 });

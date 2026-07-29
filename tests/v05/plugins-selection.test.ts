@@ -283,3 +283,29 @@ test('a plugin rule reaches the app target through a real sync', async () => {
     assert.match(written, /Be brief\./);
   });
 });
+
+test('a ref spelled as an inherited object key resolves to nothing, not a crash', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'cursor');
+    seedRule(homes, 'house.md', '# House\n');
+    // Alias lookups are ordinary property reads: on a plain object literal
+    // these two names answer with a prototype member and every consumer of a
+    // canonical ref gets an object or a function where an id belongs.
+    for (const ref of ['__proto__', 'constructor']) {
+      writeUserConfig(
+        homes,
+        ['[applications]', 'enabled = ["cursor"]', '', '[rules]', `enabled = ["${ref}"]`, ''].join(
+          '\n'
+        )
+      );
+
+      const report = await runSync({});
+
+      assert.equal(
+        report.entries.some((entry) => entry.outcome === 'missing' && entry.id === ref),
+        true,
+        ref
+      );
+    }
+  });
+});
