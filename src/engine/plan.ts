@@ -2295,8 +2295,8 @@ function spliceRecordedGroups(
   existing: Record<string, unknown[]>,
   recorded: Record<string, unknown[]>
 ): { hooks: Record<string, unknown[]>; removed: boolean; taken: Record<string, unknown[]> } {
-  const hooks: Record<string, unknown[]> = {};
-  const taken: Record<string, unknown[]> = {};
+  const hooks: Record<string, unknown[]> = Object.create(null);
+  const taken: Record<string, unknown[]> = Object.create(null);
   let removed = false;
   for (const [event, groups] of Object.entries(existing)) {
     const remaining = [...groups];
@@ -2436,12 +2436,6 @@ export function planHooks(input: PlanInput): Action[] {
     });
     const remainder = recognized.hooks;
     const removed = recorded.removed || recognized.removed;
-    const taken: Record<string, unknown[]> = {};
-    for (const source of [recorded.taken, recognized.taken]) {
-      for (const [event, groups] of Object.entries(source)) {
-        taken[event] = [...(taken[event] ?? []), ...groups];
-      }
-    }
     const hadLegacyManagedKey = Object.hasOwn(captured.config, '_asb_managed_hooks');
 
     // A selected id the library cannot resolve — absent file, parse failure —
@@ -2549,7 +2543,9 @@ export function planHooks(input: PlanInput): Action[] {
     // from state.events directly — device-copy merges over-count there.
     let stranded = 0;
     if (unresolved.length > 0) {
-      for (const [event, groups] of Object.entries(spliceRecordedGroups(taken, desired).hooks)) {
+      for (const [event, groups] of Object.entries(
+        spliceRecordedGroups(recorded.taken, desired).hooks
+      )) {
         desired[event] = [...(desired[event] ?? []), ...groups];
         stranded += groups.length;
       }
@@ -2607,7 +2603,7 @@ export function planHooks(input: PlanInput): Action[] {
     }
 
     const toAppend = filterRecognizedDesiredGroups(remainder, desired, captured.legacyGroups);
-    const merged: Record<string, unknown[]> = {};
+    const merged: Record<string, unknown[]> = Object.create(null);
     for (const [event, groups] of Object.entries(remainder)) merged[event] = [...groups];
     for (const [event, groups] of Object.entries(toAppend)) {
       if (!merged[event]) merged[event] = [];

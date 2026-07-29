@@ -391,6 +391,38 @@ test('a user-edited recorded group survives deselection and removal stays count-
   });
 });
 
+/**
+ * Event names come from the app's vocabulary, not from asb, and `JSON.parse`
+ * hands back `__proto__` as an own key. Every event-keyed map the rewrite
+ * builds must therefore be a plain dictionary: a `{}` literal routes that key
+ * into the prototype setter and drops the user's groups on the floor.
+ */
+test('a user event named __proto__ survives the rewrite', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedHook(homes, 'lint', LINT_LIBRARY);
+    const protoGroup = { matcher: 'proto', hooks: [{ type: 'command', command: 'echo proto' }] };
+    const settings = configPath(homes, 'claude-code');
+    fs.mkdirSync(path.dirname(settings), { recursive: true });
+    fs.writeFileSync(settings, `{ "hooks": { "__proto__": [${JSON.stringify(protoGroup)}] } }\n`);
+    writeUserConfig(homes, configFor(['claude-code'], ['lint']));
+
+    await runSync();
+
+    const hooks = readJson(settings).hooks as Record<string, unknown>;
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(hooks, '__proto__')?.value,
+      [protoGroup],
+      'the user-written event and its group are preserved'
+    );
+    assert.deepEqual(
+      eventGroups(settings, 'UserPromptSubmit'),
+      [LINT_RENDERED],
+      'the selected hook still distributes beside it'
+    );
+  });
+});
+
 test('distributed bundle scripts follow the source executable bit', async () => {
   const HOOKS = {
     UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${HOOK_DIR}/run.sh` }] }],

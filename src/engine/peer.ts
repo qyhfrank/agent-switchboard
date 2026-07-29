@@ -24,8 +24,6 @@ const LEGACY_MARKER_LINES = [
 /** v0.4.28 path-token ownership patterns. Keep byte-identical to 0.4.35. */
 const V0428_MANAGED_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64}\//;
-const V0428_MANAGED_DIR_RE =
-  /(?:^|[\s"'`=(:;&|<>])((?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64})\//g;
 const MANAGED_ID_ANY_HOME_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/([^/\s"'`;|&<>]+)/g;
 const LEGACY_ASB_ID_ANY_HOME_RE =
@@ -45,8 +43,6 @@ export interface OwnershipRemoval {
   hooks: Record<string, unknown[]>;
   removed: boolean;
   taken: Record<string, unknown[]>;
-  v0428Commands: string[];
-  removedLegacyAsbIds: Set<string>;
 }
 
 function findPathTokenIndexes(command: string, pathPrefix: string): number[] {
@@ -203,25 +199,7 @@ export function removeOwnedHookGroups(
     if (remaining.length > 0) hooks[event] = remaining;
   }
 
-  const v0428Commands: string[] = [];
-  const removedLegacyAsbIds = new Set<string>();
-  for (const group of removedGroups) {
-    for (const command of groupCommands(group)) {
-      if (V0428_MANAGED_RE.test(command)) v0428Commands.push(command);
-      for (const root of legacyAsbRoots) {
-        for (const segment of extractPathTokenSegments(command, root)) {
-          removedLegacyAsbIds.add(segment);
-        }
-      }
-    }
-  }
-  return {
-    hooks,
-    removed: removedGroups.length > 0,
-    taken,
-    v0428Commands,
-    removedLegacyAsbIds,
-  };
+  return { hooks, removed: removedGroups.length > 0, taken };
 }
 
 export function filterRecognizedDesiredGroups(
@@ -246,16 +224,6 @@ export function filterRecognizedDesiredGroups(
     }
   }
   return result;
-}
-
-export function collectV0428BundleDirs(commands: readonly string[]): Set<string> {
-  const dirs = new Set<string>();
-  for (const command of commands) {
-    for (const match of command.matchAll(V0428_MANAGED_DIR_RE)) {
-      dirs.add(match[1]);
-    }
-  }
-  return dirs;
 }
 
 /** Read v0.4.28 groups as scope-local recognition evidence. */
@@ -324,7 +292,10 @@ export function peerStatePath(asbHome: string, target: HookTarget, projectRoot?:
 }
 
 export function emptyPeerState(): PeerState {
-  return { version: 1, events: {}, bundles: [], legacyBundles: [] };
+  // Event names come from the app's vocabulary, so the map is keyed by
+  // untrusted strings: `__proto__` must read back as a missing event, not as
+  // Object.prototype.
+  return { version: 1, events: Object.create(null), bundles: [], legacyBundles: [] };
 }
 
 export function peerStateHasContent(state: PeerState): boolean {

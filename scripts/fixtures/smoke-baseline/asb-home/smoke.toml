@@ -1,2 +1,14 @@
 [rules]
 enabled = ["policy"]
+
+[commands]
+enabled = ["review"]
+
+[agents]
+enabled = ["reviewer"]
+
+[skills]
+enabled = ["research"]
+
+[hooks]
+enabled = ["notify"]

@@ -59,10 +59,10 @@ When both `claude-code` and `opencode` are in `applications.active`, ASB writes 
 
 **Current status: known limitation, no mitigation.**
 
-The duplication is cosmetic (extra context tokens) rather than functional. A dedup mechanism similar to `shouldDedupCursorSkills()` in `src/skills/distribution.ts` could suppress OpenCode-specific writes when `claude-code` is also active, but this depends on OpenCode's undocumented behavior remaining stable. Revisit if OpenCode officially documents the compatibility layer or if users report token-budget issues.
+The duplication is cosmetic (extra context tokens) rather than functional. A dedup mechanism could suppress OpenCode-specific writes when `claude-code` is also active, but this depends on OpenCode's undocumented behavior remaining stable. Revisit if OpenCode officially documents the compatibility layer or if users report token-budget issues.
 
 ## Sources
 
 - [OpenCode docs](https://opencode.ai/docs)
 - [Claude Code compat gist](https://gist.github.com/zeke/9927445e67b28cd97a1afa916dbdd444)
-- Source: `src/targets/builtin/opencode.ts`, `src/agents/opencode.ts`
+- Source: `src/engine/apps.ts` (OpenCode rows)

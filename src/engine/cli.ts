@@ -980,7 +980,7 @@ function extensionCutoverWarning(asbHome: string): Action[] {
   try {
     found = fs
       .readdirSync(extensions, { withFileTypes: true })
-      .some((entry) => entry.isFile() && /\.(?:mjs|js)$/.test(entry.name));
+      .some((entry) => entry.isFile() && /\.(?:mjs|js)$/i.test(entry.name));
   } catch {
     return [];
   }
@@ -1834,7 +1834,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     registerScopeFlags(
       program
         .command(command)
-        .description(`${command} library components; enable with no ids opens the picker`)
+        .description(`${command} library components; with no ids opens the picker`)
         .argument('[ids...]', 'component or plugin ids')
     ).action((ids: string[], _args: unknown, cmd: Command) => {
       parsed = { command, ids, options: scopeOptions(cmd) };

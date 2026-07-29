@@ -1,1 +1,8 @@
-["agents-home/.claude/CLAUDE.md", "agents-home/.claude.json"]
+[
+  "agents-home/.claude/CLAUDE.md",
+  "agents-home/.claude.json",
+  "agents-home/.claude/commands/review.md",
+  "agents-home/.claude/agents/reviewer.md",
+  "agents-home/.claude/skills/research/SKILL.md",
+  "agents-home/.claude/settings.json"
+]

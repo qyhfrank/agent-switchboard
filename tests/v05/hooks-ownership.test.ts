@@ -514,6 +514,72 @@ test('one unresolved bundle yields one config deferral and retains peer state', 
   });
 });
 
+/**
+ * The stranded channel carries peer-recorded groups only. A group held by
+ * predecessor evidence alone was never the record's to hand back, so an
+ * unresolved selection must not turn recognition into re-injection — into the
+ * config or into the record the next run reads.
+ */
+for (const [label, group] of [
+  [
+    'a legacy marker',
+    {
+      matcher: 'marked',
+      hooks: [{ type: 'command', command: 'echo legacy\n# asb-managed-by=agent-switchboard' }],
+    },
+  ],
+  [
+    'a v0.4.28 managed path',
+    {
+      matcher: 'v0428',
+      hooks: [{ type: 'command', command: `$HOME/.claude/hooks/managed/${HEX64_A}/run.sh` }],
+    },
+  ],
+] as const) {
+  test(`an unresolved entry does not strand a group recognized by ${label}`, async () => {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'claude-code');
+      const betaDir = seedRunner(homes, 'beta');
+      writeUserConfig(homes, configFor(['claude-code'], ['beta']));
+      assert.equal((await runSync()).exitCode, 0, 'the bundle is distributed');
+
+      // The entry breaks, and the config no longer holds anything the record
+      // recorded — the only asb-looking group left is recognized, not recorded.
+      fs.writeFileSync(path.join(betaDir, 'hook.json'), '{ not json', 'utf-8');
+      const settings = configPath(homes, 'claude-code');
+      writeJson(settings, {
+        hooks: {
+          PreToolUse: [
+            { matcher: 'user', hooks: [{ type: 'command', command: 'echo mine' }] },
+            group,
+          ],
+        },
+      });
+
+      const report = await runSync();
+
+      assert.deepEqual(
+        commandsOf(eventGroups(settings, 'PreToolUse')),
+        ['echo mine'],
+        'the recognized group is removed, never handed back as stranded'
+      );
+      assert.deepEqual(
+        readJson(statePath(homes, 'claude-code')).events,
+        {},
+        'the record does not absorb the recognized residue'
+      );
+      const deferral = hooksRows(report).find(
+        (entry) => entry.app === 'claude-code' && entry.detail === 'not-selected'
+      );
+      assert.match(
+        deferral?.reason ?? '',
+        /^0 recorded group\(s\) and 1 bundle\(s\) kept because entry beta is unresolved/,
+        'only recorded groups count toward the deferral'
+      );
+    });
+  });
+}
+
 test('a device-scoped duplicate does not double the config while the entry is broken', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
