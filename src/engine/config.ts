@@ -449,7 +449,7 @@ function editDistance(a: string, b: string): number {
   return dist[cols - 1];
 }
 
-function nearestKey(candidate: string, known: readonly string[]): string | null {
+export function nearestKey(candidate: string, known: readonly string[]): string | null {
   let best: string | null = null;
   let bestDistance = Number.POSITIVE_INFINITY;
   for (const key of known) {

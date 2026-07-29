@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { appRows } from '../../src/engine/apps.js';
+import { runSync } from '../../src/engine/cli.js';
 import { loadConfig } from '../../src/engine/config.js';
 import {
   keyedArrayToRecord,
@@ -10,7 +12,7 @@ import {
   transformMcpServer,
 } from '../../src/engine/dialects.js';
 import type { Component } from '../../src/engine/library.js';
-import { withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+import { seedMcpLibrary, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
 function command(metadata: Record<string, unknown>): Component {
   return {
@@ -120,6 +122,60 @@ test('a custom target id cannot collide with a builtin', async () => {
   await withScratchHomes(async (homes) => {
     writeUserConfig(homes, '[targets.cursor.rules]\nfile_path = "~/.mine/rules.md"\n');
     assert.throws(() => appRows(loadConfig()), /target id "cursor" collides with builtin/);
+  });
+});
+
+test('a custom JSON keyed-array target writes, updates, and removes array members', async () => {
+  await withScratchHomes(async (homes) => {
+    const targetDir = path.join(homes.agentsHome, '.mine');
+    const host = path.join(targetDir, 'config.json');
+    fs.mkdirSync(targetDir, { recursive: true });
+    const config = (enabled: boolean): string =>
+      [
+        '[applications]',
+        'enabled = ["mine"]',
+        '',
+        '[mcp]',
+        `enabled = ${enabled ? '["alpha"]' : '[]'}`,
+        '',
+        '[targets.mine]',
+        'detect = "~/.mine"',
+        '',
+        '[targets.mine.mcp]',
+        'format = "json"',
+        'config_path = "~/.mine/config.json"',
+        'root_key = "servers"',
+        'structure = "keyed-array"',
+        'key_field = "name"',
+        '',
+      ].join('\n');
+    seedMcpLibrary(homes, { alpha: { command: 'one' } });
+    writeUserConfig(homes, config(true));
+
+    assert.equal((await runSync()).exitCode, 0);
+    assert.equal(JSON.parse(fs.readFileSync(host, 'utf-8')).servers[0].name, 'alpha');
+
+    fs.writeFileSync(host, '{\n  "servers": [],\n  "keep": true\n}\n', 'utf-8');
+    assert.equal((await runSync()).exitCode, 0);
+    let root = JSON.parse(fs.readFileSync(host, 'utf-8')) as {
+      servers: Record<string, unknown>[];
+      keep: boolean;
+    };
+    assert.equal(root.servers[0]?.name, 'alpha');
+    assert.equal(root.keep, true);
+
+    root.servers.push({ name: 'foreign', command: 'keep' });
+    fs.writeFileSync(host, `${JSON.stringify(root, null, 2)}\n`, 'utf-8');
+    seedMcpLibrary(homes, { alpha: { command: 'two' } });
+    assert.equal((await runSync()).exitCode, 0);
+    root = JSON.parse(fs.readFileSync(host, 'utf-8'));
+    assert.equal(root.servers.find((server) => server.name === 'alpha')?.command, 'two');
+
+    writeUserConfig(homes, config(false));
+    assert.equal((await runSync()).exitCode, 0);
+    root = JSON.parse(fs.readFileSync(host, 'utf-8'));
+    assert.deepEqual(root.servers, [{ name: 'foreign', command: 'keep' }]);
+    assert.equal(root.keep, true);
   });
 });
 

@@ -14,6 +14,7 @@ import {
 import {
   applyKeysEdits,
   type KeysEdit,
+  keyedArraySegment,
   parseStructured,
   sliceHash,
   valueAtKeyPath,
@@ -372,6 +373,38 @@ test('json: an absent host materializes as the managed slice alone', () => {
   ]);
 
   assert.equal(content, '{\n  "mcpServers": {\n    "a": {\n      "command": "x"\n    }\n  }\n}\n');
+});
+
+test('json: keyed-array edits create, append, update, and remove by identity', () => {
+  const alpha = keyedArraySegment('servers', 'name', 'alpha');
+  const beta = keyedArraySegment('servers', 'name', 'beta');
+
+  for (const source of ['', '{\n  "servers": [],\n  "keep": true\n}\n']) {
+    const content = applyKeysEdits(source, 'json', [
+      { keyPath: [alpha], value: { name: 'alpha', command: 'one' } },
+    ]);
+    const root = parseStructured(content, 'json').root;
+    assert.deepEqual(valueAtKeyPath(root, [alpha]), { name: 'alpha', command: 'one' });
+    assert.equal(root?.[alpha], undefined, 'the address never becomes a literal object key');
+  }
+
+  const populated =
+    '{\n  "servers": [\n    { "name": "alpha", "command": "old" },\n    { "name": "beta", "command": "keep" }\n  ],\n  "keep": true\n}\n';
+  const content = applyKeysEdits(populated, 'json', [
+    { keyPath: [alpha], value: { name: 'alpha', command: 'new' } },
+    { keyPath: [beta], remove: true },
+  ]);
+  const root = parseStructured(content, 'json').root;
+  assert.deepEqual(valueAtKeyPath(root, [alpha]), { name: 'alpha', command: 'new' });
+  assert.equal(valueAtKeyPath(root, [beta]), undefined);
+  assert.equal(root?.keep, true);
+});
+
+test('a record key that resembles a keyed-array address stays a plain nested key', () => {
+  const hostile = '@array:mcp_servers[name=alpha]';
+  const root = { mcpServers: { [hostile]: { command: 'user-edited' } } };
+
+  assert.deepEqual(valueAtKeyPath(root, ['mcpServers', hostile]), { command: 'user-edited' });
 });
 
 test('toml: a table is replaced in place and everything else keeps its bytes', () => {

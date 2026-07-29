@@ -201,7 +201,7 @@ export interface PlanInput {
   now: string;
 }
 
-const STATUS_TYPES = [...SELECTION_TYPES, 'native_plugins'] as const;
+export const STATUS_TYPES = [...SELECTION_TYPES, 'native_plugins'] as const;
 type StatusType = (typeof STATUS_TYPES)[number];
 
 function appSupports(row: AppRow, type: StatusType): boolean {
@@ -1228,7 +1228,8 @@ function planEntryConfig(
   app: string,
   target: EntryTargetRow,
   candidates: readonly ConfigCandidate[],
-  protectedIds: ReadonlySet<string>
+  protectedIds: ReadonlySet<string>,
+  selectedEligible: boolean
 ): Action[] {
   const spec = target.config;
   if (!spec) return [];
@@ -1335,6 +1336,10 @@ function planEntryConfig(
       return;
     }
     if (currentHash === sliceHash(value)) {
+      if (id === null) {
+        actions.push({ ...sliceBase, op: 'none', outcome: 'unchanged' });
+        return;
+      }
       actions.push({
         ...sliceBase,
         op: 'adopt',
@@ -1369,7 +1374,7 @@ function planEntryConfig(
       recorded.path !== captured.path ||
       recorded.shape !== 'keys' ||
       desiredKeys.has(ledgerKey(recorded)) ||
-      (recorded.id !== null && protectedIds.has(recorded.id))
+      (recorded.id === null ? selectedEligible : protectedIds.has(recorded.id))
     )
       continue;
     const keyPath = recorded.keys as string[];
@@ -1494,9 +1499,10 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
 
     const desiredRecords = new Set<string>();
     const configCandidates: ConfigCandidate[] = [];
+    let selectedEligible = false;
     for (const id of selected) {
       const component = byId.get(id);
-      if (!component || collisions.has(id)) continue;
+      if (!component) continue;
       const filename = target.filename(id);
       const targetPath = path.join(target.dir(config.homes), filename);
       let desired: string | null;
@@ -1529,6 +1535,8 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
         });
         continue;
       }
+      selectedEligible = true;
+      if (collisions.has(id)) continue;
       const recordKey = ledgerKey({ app, type, id, path: targetPath });
       desiredRecords.add(recordKey);
       const recorded = ledger.entries.find((entry) => ledgerKey(entry) === recordKey) ?? null;
@@ -1678,7 +1686,9 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
             'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
         });
     }
-    actions.push(...planEntryConfig(input, app, target, configCandidates, protectedIds));
+    actions.push(
+      ...planEntryConfig(input, app, target, configCandidates, protectedIds, selectedEligible)
+    );
   }
   return actions;
 }
@@ -1693,8 +1703,12 @@ export function planAgents(input: PlanInput): Action[] {
 
 /** Retire recognized OpenCode singular-layout entries after replacements land. */
 export function planLegacyOpencode(input: PlanInput): Action[] {
-  const { config, capture } = input;
+  const { config, capture, inventory, table } = input;
   const actions: Action[] = [];
+  const opencode = table.find((row) => row.id === 'opencode');
+  const components = new Map(
+    inventory.components.map((component) => [`${component.type}\0${component.id}`, component])
+  );
   for (const scan of capture.legacy) {
     if (scan.error) {
       actions.push({
@@ -1713,16 +1727,38 @@ export function planLegacyOpencode(input: PlanInput): Action[] {
     for (const entry of scan.entries) {
       const replacement = selected.has(entry.id);
       const base = { app: 'opencode', type: entry.type, id: entry.id, path: entry.path };
+      const component = components.get(`${entry.type}\0${entry.id}`);
+      const leaveUnproven = (): void => {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
+        });
+      };
       if (entry.bundle) {
         const captured = capture.bundles[entry.path];
         if (!captured?.exists || captured.files === null || captured.fingerprint === null) {
-          actions.push({
-            ...base,
-            op: 'none',
-            outcome: 'left-behind',
-            detail: 'unprovable',
-            reason: 'legacy bundle cannot be proven safe to remove',
-          });
+          leaveUnproven();
+          continue;
+        }
+        const desired = component?.files;
+        const liveByRel = new Map(captured.files.map((file) => [file.rel, file]));
+        if (
+          !desired ||
+          desired.length !== captured.files.length ||
+          !desired.every((file) => {
+            const live = liveByRel.get(file.rel);
+            return (
+              live !== undefined &&
+              live.hash === hashContent(file.bytes) &&
+              targetModeMatchesSourceExecutableBits(file.mode, live.mode)
+            );
+          })
+        ) {
+          leaveUnproven();
           continue;
         }
         actions.push({
@@ -1738,13 +1774,18 @@ export function planLegacyOpencode(input: PlanInput): Action[] {
       } else {
         const captured = capture.targets[entry.path];
         if (!captured?.exists || captured.content === null) {
-          actions.push({
-            ...base,
-            op: 'none',
-            outcome: 'left-behind',
-            detail: 'unprovable',
-            reason: 'legacy file cannot be read safely',
-          });
+          leaveUnproven();
+          continue;
+        }
+        const target = entry.type === 'commands' ? opencode?.commands : opencode?.agents;
+        let desired: string | null = null;
+        try {
+          if (component && target) desired = target.render(component);
+        } catch {
+          // A component that cannot render cannot prove ownership of user bytes.
+        }
+        if (desired === null || hashContent(captured.content) !== hashContent(desired)) {
+          leaveUnproven();
           continue;
         }
         actions.push({
@@ -1782,7 +1823,7 @@ const HOOK_DIR_PLACEHOLDERS = [
  * `$HOME`-portable, and `_asb*` metadata is stripped — an app config holds no
  * ASB marker of any kind, which is why ownership needs the peer record.
  */
-function renderHookGroups(
+export function renderHookGroups(
   hooks: HookEventMap,
   bundleDir: string | undefined
 ): Record<string, unknown[]> {
@@ -2791,7 +2832,10 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
         recordedHash: slice.recorded?.hash ?? null,
         currentHash: slice.current === undefined ? null : sliceHash(slice.current),
         desiredHash: slice.desired === null ? null : sliceHash(slice.desired),
-        desired: slice.desired === null ? null : `${JSON.stringify(slice.desired, null, 2)}\n`,
+        desired:
+          slice.desired === null
+            ? null
+            : `${JSON.stringify(maskMcpCredentialMaps(slice.desired), null, 2)}\n`,
         components: component ? [{ id: component.id, path: component.path }] : [],
         sources: component ? componentSources([component]) : [],
       };
@@ -2801,6 +2845,21 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
     }
   }
   return slices;
+}
+
+const MCP_CREDENTIAL_MAPS = new Set(['env', 'headers', 'http_headers', 'env_http_headers']);
+
+function maskMcpCredentialMaps(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(maskMcpCredentialMaps);
+  if (!isPlainObject(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      key,
+      MCP_CREDENTIAL_MAPS.has(key) && isPlainObject(child)
+        ? Object.fromEntries(Object.keys(child).map((name) => [name, '***']))
+        : maskMcpCredentialMaps(child),
+    ])
+  );
 }
 
 // ---------------------------------------------------------------------------

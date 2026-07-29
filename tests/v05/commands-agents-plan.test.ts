@@ -169,14 +169,114 @@ test('Codex convention adoption does not activate foreign role bytes before rewr
       first.entries.find((row) => row.app === 'codex' && row.type === 'agents')?.outcome,
       'adopted'
     );
+    const parsed = parseToml(fs.readFileSync(configPath, 'utf-8')) as {
+      agents?: unknown;
+      features?: unknown;
+    };
+    assert.equal(parsed.agents, undefined);
+    assert.equal(parsed.features, undefined);
+  });
+});
+
+test('Codex never adopts a user activation key and leaves it on deselection', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seed(
+      homes.asbHome,
+      'agents/reviewer.md',
+      '---\nextras:\n  codex:\n    model: gpt-5\n---\nReview.\n'
+    );
+    const configPath = seed(
+      homes.agentsHome,
+      '.codex/config.toml',
+      '# user setting\n[features]\nmulti_agent = true\n'
+    );
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex"]\n\n[agents]\nenabled = ["reviewer"]\n'
+    );
+
+    const first = await runSync();
     assert.equal(
-      (parseToml(fs.readFileSync(configPath, 'utf-8')) as { agents?: unknown }).agents,
-      undefined
+      first.entries.find((row) => row.app === 'codex' && row.type === 'agents' && row.id === null)
+        ?.outcome,
+      'unchanged'
+    );
+    const ledger = JSON.parse(
+      fs.readFileSync(path.join(homes.stateHome, 'ledger.json'), 'utf-8')
+    ) as { entries: { app: string; type: string; id: string | null }[] };
+    assert.equal(
+      ledger.entries.some(
+        (entry) => entry.app === 'codex' && entry.type === 'agents' && entry.id === null
+      ),
+      false
+    );
+
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n\n[agents]\nenabled = []\n');
+    await runSync();
+    assert.equal(
+      (parseToml(fs.readFileSync(configPath, 'utf-8')) as { features: { multi_agent: boolean } })
+        .features.multi_agent,
+      true
     );
   });
 });
 
-test('opencode singular command, agent, and skill cleanup is visible and scan-fatal', async () => {
+test('Codex retains owned activation while a selected role is conflicted', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seed(
+      homes.asbHome,
+      'agents/reviewer.md',
+      '---\nextras:\n  codex:\n    model: gpt-5\n---\nReview.\n'
+    );
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex"]\n\n[agents]\nenabled = ["reviewer"]\n'
+    );
+    await runSync();
+    fs.writeFileSync(
+      path.join(homes.agentsHome, '.codex', 'agents', 'reviewer.toml'),
+      'model = "user-edited"\n',
+      'utf-8'
+    );
+
+    const report = await runSync();
+    assert.equal(
+      report.entries.find((row) => row.app === 'codex' && row.id === 'reviewer')?.outcome,
+      'conflict'
+    );
+    const parsed = parseToml(
+      fs.readFileSync(path.join(homes.agentsHome, '.codex', 'config.toml'), 'utf-8')
+    ) as { features: { multi_agent: boolean } };
+    assert.equal(parsed.features.multi_agent, true);
+  });
+});
+
+test('Codex removes its activation scalar and the empty table on true deselection', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seed(
+      homes.asbHome,
+      'agents/reviewer.md',
+      '---\nextras:\n  codex:\n    model: gpt-5\n---\nReview.\n'
+    );
+    const configPath = seed(homes.agentsHome, '.codex/config.toml', '# keep\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex"]\n\n[agents]\nenabled = ["reviewer"]\n'
+    );
+    await runSync();
+
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n\n[agents]\nenabled = []\n');
+    await runSync();
+    const content = fs.readFileSync(configPath, 'utf-8');
+    assert.match(content, /^# keep$/m);
+    assert.doesNotMatch(content, /\[features\]|multi_agent/);
+  });
+});
+
+test('opencode singular cleanup requires rendered identity and stays scan-fatal', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'opencode');
     seed(homes.asbHome, 'commands/build.md', 'Build.\n');
@@ -186,20 +286,45 @@ test('opencode singular command, agent, and skill cleanup is visible and scan-fa
       'skills/check/SKILL.md',
       '---\nname: Check\ndescription: Check\n---\nCheck.\n'
     );
+    seed(
+      homes.asbHome,
+      'skills/notes/SKILL.md',
+      '---\nname: Notes\ndescription: Notes\n---\nNotes.\n'
+    );
     const root = path.join(homes.agentsHome, '.config', 'opencode');
-    const oldCommand = seed(root, 'command/build.md', 'Old build.\n');
-    const oldAgent = seed(root, 'agent/reviewer.md', 'Old review.\n');
-    const oldSkill = seed(root, 'skill/check/SKILL.md', 'Old skill.\n');
     writeUserConfig(
       homes,
-      '[applications]\nenabled = ["opencode"]\n\n[commands]\nenabled = ["build"]\n\n[agents]\nenabled = ["reviewer"]\n\n[skills]\nenabled = ["check"]\n'
+      '[applications]\nenabled = ["opencode"]\n\n[commands]\nenabled = ["build"]\n\n[agents]\nenabled = ["reviewer"]\n\n[skills]\nenabled = ["check", "notes"]\n'
     );
+    await runSync();
+    const oldCommand = seed(
+      root,
+      'command/build.md',
+      fs.readFileSync(path.join(root, 'commands', 'build.md'), 'utf-8')
+    );
+    const oldSkill = path.join(root, 'skill', 'check');
+    fs.mkdirSync(path.dirname(oldSkill), { recursive: true });
+    fs.cpSync(path.join(root, 'skills', 'check'), oldSkill, { recursive: true });
 
     const report = await runSync();
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(fs.existsSync(oldCommand), false);
-    assert.equal(fs.existsSync(oldAgent), false);
-    assert.equal(fs.existsSync(path.dirname(oldSkill)), false);
+    assert.equal(fs.existsSync(oldSkill), false);
+
+    const oldAgent = seed(root, 'agent/reviewer.md', 'User-edited review.\n');
+    const dirtySkill = path.join(root, 'skill', 'notes');
+    fs.cpSync(path.join(root, 'skills', 'notes'), dirtySkill, { recursive: true });
+    seed(dirtySkill, 'data.txt', 'user data\n');
+    const unproven = await runSync();
+    assert.equal(unproven.exitCode, 1, JSON.stringify(unproven.entries, null, 2));
+    assert.equal(fs.existsSync(oldAgent), true);
+    assert.equal(fs.existsSync(path.join(dirtySkill, 'SKILL.md')), true);
+    assert.equal(fs.existsSync(path.join(dirtySkill, 'data.txt')), true);
+    assert.equal(
+      unproven.entries.filter((row) => row.detail === 'unproven').length,
+      2,
+      JSON.stringify(unproven.entries, null, 2)
+    );
 
     fs.rmSync(path.join(root, 'command'), { recursive: true, force: true });
     fs.writeFileSync(path.join(root, 'command'), 'not a directory', 'utf-8');

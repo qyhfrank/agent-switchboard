@@ -53,6 +53,8 @@ export interface NativeAppState {
   invalid: Record<string, string>;
   /** ASB-owned bare-plugin marketplaces reconstructed from wrapper manifests. */
   managed: CodexWrapper[];
+  /** Per-directory wrapper state that could not be recognized safely. */
+  wrapperErrors: { root: string; error: string }[];
   /** Why the manager could not be probed at all. */
   error?: string;
 }
@@ -214,45 +216,53 @@ function contained(root: string, candidate: string): boolean {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
-function readCodexWrappers(homes: Homes): CodexWrapper[] {
+function readCodexWrappers(homes: Homes): {
+  managed: CodexWrapper[];
+  errors: { root: string; error: string }[];
+} {
   const stateRoot = codexStateRoot(homes);
-  if (!fs.existsSync(stateRoot)) return [];
-  const wrappers: CodexWrapper[] = [];
+  if (!fs.existsSync(stateRoot)) return { managed: [], errors: [] };
+  const managed: CodexWrapper[] = [];
+  const errors: { root: string; error: string }[] = [];
   for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue;
     const root = path.join(stateRoot, entry.name);
-    const manifestPath = path.join(root, '.agents', 'plugins', 'marketplace.json');
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
-      name?: unknown;
-      plugins?: unknown;
-    };
-    if (
-      typeof manifest.name !== 'string' ||
-      !Array.isArray(manifest.plugins) ||
-      manifest.plugins.length !== 1
-    ) {
-      throw new Error(`unrecognized ASB Codex wrapper at ${root}`);
+    try {
+      const manifestPath = path.join(root, '.agents', 'plugins', 'marketplace.json');
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+        name?: unknown;
+        plugins?: unknown;
+      };
+      if (
+        typeof manifest.name !== 'string' ||
+        !Array.isArray(manifest.plugins) ||
+        manifest.plugins.length !== 1
+      ) {
+        throw new Error(`unrecognized ASB Codex wrapper at ${root}`);
+      }
+      const plugin = manifest.plugins[0] as { name?: unknown; source?: unknown };
+      if (
+        typeof plugin.name !== 'string' ||
+        typeof plugin.source !== 'string' ||
+        !plugin.source.startsWith('./plugins/')
+      ) {
+        throw new Error(`unrecognized ASB Codex wrapper at ${root}`);
+      }
+      const link = path.resolve(root, plugin.source);
+      if (!contained(root, link)) throw new Error(`ASB Codex wrapper escapes its root at ${root}`);
+      managed.push({
+        root,
+        stateRoot,
+        marketplaceName: manifest.name,
+        pluginName: plugin.name,
+        ref: `${plugin.name}@${manifest.name}`,
+        sourcePath: realPath(link),
+      });
+    } catch (error) {
+      errors.push({ root, error: error instanceof Error ? error.message : String(error) });
     }
-    const plugin = manifest.plugins[0] as { name?: unknown; source?: unknown };
-    if (
-      typeof plugin.name !== 'string' ||
-      typeof plugin.source !== 'string' ||
-      !plugin.source.startsWith('./plugins/')
-    ) {
-      throw new Error(`unrecognized ASB Codex wrapper at ${root}`);
-    }
-    const link = path.resolve(root, plugin.source);
-    if (!contained(root, link)) throw new Error(`ASB Codex wrapper escapes its root at ${root}`);
-    wrappers.push({
-      root,
-      stateRoot,
-      marketplaceName: manifest.name,
-      pluginName: plugin.name,
-      ref: `${plugin.name}@${manifest.name}`,
-      sourcePath: realPath(link),
-    });
   }
-  return wrappers;
+  return { managed, errors };
 }
 
 function materializeCodexWrapper(wrapper: CodexWrapper): void {
@@ -285,6 +295,38 @@ function materializeCodexWrapper(wrapper: CodexWrapper): void {
       2
     )}\n`
   );
+}
+
+interface CodexWrapperSnapshot {
+  link: string;
+  linkTarget: string | null;
+  manifestPath: string;
+  manifest: Buffer | null;
+}
+
+function snapshotCodexWrapper(wrapper: CodexWrapper): CodexWrapperSnapshot {
+  const link = path.join(wrapper.root, 'plugins', safeSegment(wrapper.pluginName));
+  const manifestPath = path.join(wrapper.root, '.agents', 'plugins', 'marketplace.json');
+  return {
+    link,
+    linkTarget: fs.lstatSync(link, { throwIfNoEntry: false }) ? fs.readlinkSync(link) : null,
+    manifestPath,
+    manifest: fs.existsSync(manifestPath) ? fs.readFileSync(manifestPath) : null,
+  };
+}
+
+function restoreCodexWrapper(snapshot: CodexWrapperSnapshot): void {
+  fs.rmSync(snapshot.link, { recursive: true, force: true });
+  if (snapshot.linkTarget !== null) {
+    fs.mkdirSync(path.dirname(snapshot.link), { recursive: true });
+    fs.symlinkSync(
+      snapshot.linkTarget,
+      snapshot.link,
+      process.platform === 'win32' ? 'junction' : 'dir'
+    );
+  }
+  if (snapshot.manifest === null) fs.rmSync(snapshot.manifestPath, { force: true });
+  else writeFileAtomic(snapshot.manifestPath, snapshot.manifest);
 }
 
 function githubRepo(url: string): string | undefined {
@@ -474,16 +516,14 @@ export function captureNative(
       settings: null,
       invalid: {},
       managed: [],
+      wrapperErrors: [],
     };
     capture[app] = state;
 
     if (row.target === 'codex') {
-      try {
-        state.managed = readCodexWrappers(config.homes);
-      } catch (error) {
-        state.error = error instanceof Error ? error.message : String(error);
-        continue;
-      }
+      const wrappers = readCodexWrappers(config.homes);
+      state.managed = wrappers.managed;
+      state.wrapperErrors = wrappers.errors;
       if (dryRun) continue;
     } else {
       for (const resolved of resolveNativeRefs(catalog, row, enabled, config.homes)) {
@@ -633,6 +673,21 @@ function planCodexNative(
   const { config, catalog, capture, env, dryRun } = input;
   const state = capture[app];
   const actions: Action[] = [];
+  const invalidWrapperRoots = new Set(
+    (state?.wrapperErrors ?? []).map((failure) => realPath(failure.root))
+  );
+  for (const failure of state?.wrapperErrors ?? []) {
+    actions.push(
+      nativeRow(
+        app,
+        path.basename(failure.root),
+        failure.root,
+        'conflict',
+        `Codex wrapper path exists but is not a recognized ASB-owned wrapper: ${failure.error}`,
+        'registered'
+      )
+    );
+  }
   const resolvedRows = resolveNativeRefs(catalog, row, enabled, config.homes);
   const pathCounts = new Map<string, number>();
   for (const resolved of resolvedRows) {
@@ -684,6 +739,7 @@ function planCodexNative(
     }
 
     const wrapper = wrapperFor(install);
+    if (wrapper && invalidWrapperRoots.has(realPath(wrapper.root))) continue;
     const knownWrapper = state?.managed.some(
       (managed) => realPath(managed.root) === realPath(install.marketplacePath)
     );
@@ -1041,11 +1097,33 @@ export function applyNative(
   runner: NativeCommandRunner = run
 ): string | undefined {
   const preparedNew = work.prepare !== undefined && !fs.existsSync(work.prepare.root);
+  let snapshot: CodexWrapperSnapshot | null = null;
+  if (work.prepare && !preparedNew) {
+    try {
+      snapshot = snapshotCodexWrapper(work.prepare);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+  const restorePrepared = (): string | undefined => {
+    if (!work.prepare) return undefined;
+    try {
+      if (preparedNew) fs.rmSync(work.prepare.root, { recursive: true, force: true });
+      else if (snapshot) restoreCodexWrapper(snapshot);
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
   if (work.prepare) {
     try {
       materializeCodexWrapper(work.prepare);
     } catch (error) {
-      return error instanceof Error ? error.message : String(error);
+      const failure = error instanceof Error ? error.message : String(error);
+      const restoreFailure = restorePrepared();
+      return restoreFailure
+        ? `${failure}; restoring Codex wrapper failed: ${restoreFailure}`
+        : failure;
     }
   }
   for (const [index, args] of work.commands.entries()) {
@@ -1053,16 +1131,19 @@ export function applyNative(
     if (result.status === 0) continue;
     const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
     const failure = `${work.bin} ${args.join(' ')} failed: ${detail}`;
-    if (preparedNew && work.prepare) fs.rmSync(work.prepare.root, { recursive: true, force: true });
-    if (index === 0 || work.compensate.length === 0) return failure;
+    const restoreFailure = restorePrepared();
+    const failed = restoreFailure
+      ? `${failure}; restoring Codex wrapper failed: ${restoreFailure}`
+      : failure;
+    if (index === 0 || work.compensate.length === 0) return failed;
     for (const undo of work.compensate) {
       const restored = runner(work.bin, undo, work.env);
       if (restored.status !== 0) {
         const why = restored.stderr.trim() || restored.stdout.trim() || `exit ${restored.status}`;
-        return `${failure}; restoring the previous registration failed: ${work.bin} ${undo.join(' ')}: ${why}`;
+        return `${failed}; restoring the previous registration failed: ${work.bin} ${undo.join(' ')}: ${why}`;
       }
     }
-    return failure;
+    return failed;
   }
 
   if (work.setting) {

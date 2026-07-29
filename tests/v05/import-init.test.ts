@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { parse as parseToml } from '@iarna/toml';
-import { parseCliArgs, runImport, runInit } from '../../src/engine/cli.js';
+import { parseCliArgs, runImport, runInit, runSync } from '../../src/engine/cli.js';
 import { renderGeminiCommand } from '../../src/engine/dialects.js';
 import { scanLibrary } from '../../src/engine/library.js';
 import { savePeerState } from '../../src/engine/peer.js';
@@ -118,6 +118,70 @@ test('no-type import uses every app reader and existing files skip unless forced
     assert.equal(
       second.entries.every((entry) => entry.outcome === 'skipped'),
       true
+    );
+  });
+});
+
+test('forced skill import overlays copied files and preserves library-only files', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(
+      path.join(homes.agentsHome, '.claude', 'skills', 'notes', 'SKILL.md'),
+      '---\nname: notes\ndescription: App copy\n---\nApp.\n'
+    );
+    const target = path.join(homes.asbHome, 'skills', 'notes');
+    write(
+      path.join(target, 'SKILL.md'),
+      '---\nname: notes\ndescription: Library copy\n---\nLibrary.\n'
+    );
+    write(path.join(target, 'reference.md'), 'library reference\n');
+    write(path.join(target, '.library-note'), 'keep\n');
+
+    const result = await runImport('claude-code', undefined, {
+      types: ['skills'],
+      force: true,
+    });
+
+    assert.equal(result.exitCode, 0, JSON.stringify(result.entries));
+    assert.match(fs.readFileSync(path.join(target, 'SKILL.md'), 'utf-8'), /App copy/);
+    assert.equal(
+      fs.readFileSync(path.join(target, 'reference.md'), 'utf-8'),
+      'library reference\n'
+    );
+    assert.equal(fs.readFileSync(path.join(target, '.library-note'), 'utf-8'), 'keep\n');
+    assert.match(result.entries[0]?.reason ?? '', /overwrote SKILL\.md/);
+  });
+});
+
+test('hook import excludes enabled rendered groups when peer state is absent', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(
+      path.join(homes.asbHome, 'hooks', 'guard.json'),
+      `${JSON.stringify({
+        hooks: {
+          PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'echo guard' }] }],
+        },
+      })}\n`
+    );
+    write(
+      path.join(homes.asbHome, 'config.toml'),
+      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["guard"]\n'
+    );
+    await runSync();
+    fs.rmSync(path.join(homes.asbHome, 'state', 'hooks'), { recursive: true, force: true });
+
+    const result = await runImport('claude-code', undefined, {
+      types: ['hooks'],
+      force: true,
+    });
+
+    assert.equal(result.exitCode, 0, JSON.stringify(result.entries));
+    assert.deepEqual(
+      JSON.parse(
+        fs.readFileSync(path.join(homes.asbHome, 'hooks', 'claude-code-hooks.json'), 'utf-8')
+      ),
+      { hooks: {} }
     );
   });
 });

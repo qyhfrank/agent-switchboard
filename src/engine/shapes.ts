@@ -540,7 +540,7 @@ export function valueAtKeyPath(
 ): unknown {
   let current: unknown = root;
   for (const segment of keyPath) {
-    const address = parseKeyedArraySegment(segment);
+    const address = keyPath.length === 1 ? parseKeyedArraySegment(segment) : null;
     if (address) {
       if (current === null || typeof current !== 'object' || Array.isArray(current)) {
         return undefined;
@@ -616,13 +616,13 @@ export function applyKeysEdits(
 }
 
 function applyYamlEdits(content: string, edits: readonly KeysEdit[]): string {
-  const document =
-    content.length === 0 ? new Document({}) : parseDocument(content, { keepSourceTokens: true });
+  const blank = content.trim().length === 0;
+  const document = blank ? new Document({}) : parseDocument(content, { keepSourceTokens: true });
   if (document.errors.length > 0) throw new Error('invalid YAML');
   if (document.contents !== null && !isMap(document.contents)) {
     throw new Error('document root must be an object');
   }
-  const root = document.toJS() as Record<string, unknown>;
+  const root = (document.toJS() ?? {}) as Record<string, unknown>;
   const addresses = edits
     .map((edit) => (edit.keyPath.length === 1 ? parseKeyedArraySegment(edit.keyPath[0]) : null))
     .filter((address): address is KeyedArrayAddress => address !== null);
@@ -631,7 +631,7 @@ function applyYamlEdits(content: string, edits: readonly KeysEdit[]): string {
     if (problem) throw new Error(problem);
   }
 
-  if (content.length > 0 && document.toString() !== content) {
+  if (!blank && document.toString() !== content) {
     // ponytail: this conservative gate also rejects normalization confined to
     // a managed node. Upgrade by comparing CST ranges once such a real input
     // must be supported; whole-document refusal cannot alter user bytes.
@@ -649,7 +649,7 @@ function applyYamlEdits(content: string, edits: readonly KeysEdit[]): string {
     let sequence = document.get(address.key, true);
     if (sequence === undefined) {
       if (edit.remove) continue;
-      document.set(address.key, []);
+      document.set(address.key, document.createNode([]));
       sequence = document.get(address.key, true);
     }
     if (!isSeq(sequence)) throw new Error(`${address.key} is not an array`);
@@ -681,6 +681,52 @@ function applyJsonEdits(content: string, edits: readonly KeysEdit[]): string {
   const formattingOptions = jsonFormatting(content);
   let text = content.trim().length === 0 ? '{}\n' : content;
   for (const edit of edits) {
+    const address = edit.keyPath.length === 1 ? parseKeyedArraySegment(edit.keyPath[0]) : null;
+    if (address) {
+      const parsed = parseStructured(text, 'json');
+      if (parsed.root === null) throw new Error(parsed.error ?? 'document root must be an object');
+      const problem = keyedArrayProblem(parsed.root, address.key, address.field);
+      if (problem) throw new Error(problem);
+      const members = parsed.root[address.key] as unknown[] | undefined;
+      const index =
+        members?.findIndex(
+          (member) =>
+            member !== null &&
+            typeof member === 'object' &&
+            !Array.isArray(member) &&
+            (member as Record<string, unknown>)[address.field] === address.identity
+        ) ?? -1;
+      if (edit.remove) {
+        if (index < 0) continue;
+        text = applyEdits(
+          text,
+          modify(text, [address.key, index], undefined, { formattingOptions })
+        );
+        continue;
+      }
+      if (edit.value === null || typeof edit.value !== 'object' || Array.isArray(edit.value)) {
+        throw new Error(`${address.key} member "${address.identity}" is not an object`);
+      }
+      const identity = (edit.value as Record<string, unknown>)[address.field];
+      if (identity !== address.identity) {
+        throw new Error(
+          `${address.key} member identity must be ${address.field}="${address.identity}"`
+        );
+      }
+      const keyPath =
+        members === undefined
+          ? [address.key]
+          : [address.key, index === -1 ? members.length : index];
+      const value = members === undefined ? [edit.value] : edit.value;
+      text = applyEdits(
+        text,
+        modify(text, keyPath, value, {
+          formattingOptions,
+          ...(index === -1 ? { isArrayInsertion: true } : {}),
+        })
+      );
+      continue;
+    }
     text = applyEdits(
       text,
       modify(text, [...edit.keyPath], edit.remove ? undefined : edit.value, { formattingOptions })
@@ -844,8 +890,12 @@ function applyTomlEdits(content: string, edits: readonly KeysEdit[]): string {
         if (edit.remove) {
           if (match?.index !== undefined) {
             const end = block.indexOf('\n', match.index) + 1 || block.length;
+            const remaining = block.slice(0, match.index) + block.slice(end);
+            const [header, ...body] = remaining.split(/\r?\n/);
             text =
-              text.slice(0, table.start + match.index) + block.slice(end) + text.slice(table.end);
+              !header.includes('#') && body.every((line) => line.trim().length === 0)
+                ? text.slice(0, table.start) + text.slice(table.end)
+                : text.slice(0, table.start) + remaining + text.slice(table.end);
           }
           continue;
         }

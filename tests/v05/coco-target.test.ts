@@ -148,6 +148,29 @@ test('coco YAML keyed arrays preserve foreign members and record identity paths'
   });
 });
 
+test('coco MCP bootstraps absent and empty YAML hosts', async () => {
+  for (const initial of [null, '', '\n', '# keep\ntheme: dark\n'] as const) {
+    await withScratchHomes(async (homes) => {
+      const cocoDir = path.join(homes.agentsHome, '.config', 'coco');
+      fs.mkdirSync(cocoDir, { recursive: true });
+      const host = path.join(cocoDir, 'coco.yaml');
+      if (initial !== null) fs.writeFileSync(host, initial, 'utf-8');
+      seedMcpLibrary(homes, { alpha: { command: 'run' } });
+      writeUserConfig(homes, '[applications]\nenabled = ["coco"]\n\n[mcp]\nenabled = ["alpha"]\n');
+
+      const report = await runSync({});
+
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+      const root = parseYaml(fs.readFileSync(host, 'utf-8')) as {
+        mcp_servers: Record<string, unknown>[];
+        theme?: string;
+      };
+      assert.equal(root.mcp_servers[0]?.name, 'alpha');
+      if (initial?.includes('theme')) assert.equal(root.theme, 'dark');
+    });
+  }
+});
+
 test('a defective coco identity array fails that host while another app proceeds', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');

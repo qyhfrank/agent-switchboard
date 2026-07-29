@@ -8,6 +8,7 @@ import {
   applyNative,
   captureNative,
   type NativeCommandRunner,
+  type NativeWork,
   planNative,
 } from '../../src/engine/native.js';
 import { readSourceCatalog } from '../../src/engine/sources.js';
@@ -247,5 +248,125 @@ test('Codex refuses a foreign same-name marketplace and removes a deselected ASB
       manager
     );
     assert.equal(managerCalls, 0, 'an empty state root does not keep Codex capture active');
+  });
+});
+
+test('a partial Codex wrapper conflicts without hiding healthy managed wrappers', async () => {
+  await withScratchHomes(async (homes) => {
+    const stateRoot = path.join(homes.asbHome, 'state', 'native-plugins', 'codex');
+    const good = path.join(stateRoot, 'good');
+    fs.mkdirSync(path.join(good, '.agents', 'plugins'), { recursive: true });
+    fs.mkdirSync(path.join(good, 'plugins'), { recursive: true });
+    fs.symlinkSync(homes.asbHome, path.join(good, 'plugins', 'good'), 'dir');
+    fs.writeFileSync(
+      path.join(good, '.agents', 'plugins', 'marketplace.json'),
+      '{"name":"good","plugins":[{"name":"good","source":"./plugins/good"}]}\n',
+      'utf-8'
+    );
+    const partial = path.join(stateRoot, 'partial');
+    fs.mkdirSync(path.join(partial, '.agents', 'plugins'), { recursive: true });
+    writeUserConfig(homes, configText([]));
+    const config = loadConfig();
+    const table = appRows(config);
+    const runner: NativeCommandRunner = () => ({
+      status: 0,
+      stdout: '{"marketplaces":[]}\n',
+      stderr: '',
+    });
+
+    const capture = captureNative(
+      config,
+      readSourceCatalog(config),
+      table,
+      process.env,
+      { codex: true },
+      false,
+      runner
+    );
+    const actions = planNative({
+      config,
+      catalog: readSourceCatalog(config),
+      capture,
+      table,
+      env: process.env,
+      installed: { codex: true },
+      dryRun: false,
+    });
+
+    assert.equal(actions.filter((action) => action.outcome === 'conflict').length, 1);
+    assert.equal(actions.find((action) => action.outcome === 'conflict')?.path, partial);
+    assert.equal(
+      actions.some((action) => action.id === 'good@good' && action.outcome === 'removed'),
+      true
+    );
+  });
+});
+
+test('a failed Codex verb restores a pre-existing wrapper symlink and manifest bytes', async () => {
+  await withScratchHomes(async (homes) => {
+    const stateRoot = path.join(homes.asbHome, 'state', 'native-plugins', 'codex');
+    const root = path.join(stateRoot, 'bare');
+    const oldSource = path.join(homes.root, 'old-source');
+    const newSource = path.join(homes.root, 'new-source');
+    fs.mkdirSync(oldSource);
+    fs.mkdirSync(newSource);
+    fs.mkdirSync(path.join(root, '.agents', 'plugins'), { recursive: true });
+    fs.mkdirSync(path.join(root, 'plugins'), { recursive: true });
+    const link = path.join(root, 'plugins', 'demo');
+    fs.symlinkSync(oldSource, link, 'dir');
+    const manifestPath = path.join(root, '.agents', 'plugins', 'marketplace.json');
+    const originalManifest =
+      '{\n  "name": "bare",\n  "plugins": [{ "name": "demo", "source": "./plugins/demo" }]\n}\n';
+    fs.writeFileSync(manifestPath, originalManifest, 'utf-8');
+    const work: NativeWork = {
+      bin: 'codex',
+      env: process.env,
+      commands: [['first'], ['second']],
+      compensate: [],
+      setting: null,
+      prepare: {
+        root,
+        stateRoot,
+        marketplaceName: 'bare',
+        pluginName: 'demo',
+        ref: 'demo@bare',
+        sourcePath: newSource,
+      },
+    };
+    let calls = 0;
+    const failure = applyNative(work, () => ({
+      status: ++calls === 2 ? 1 : 0,
+      stdout: '',
+      stderr: calls === 2 ? 'simulated failure' : '',
+    }));
+
+    assert.match(failure ?? '', /simulated failure/);
+    assert.equal(fs.realpathSync(link), fs.realpathSync(oldSource));
+    assert.equal(fs.readFileSync(manifestPath, 'utf-8'), originalManifest);
+  });
+});
+
+test('a materialize failure removes the wrapper root created by that run', async () => {
+  await withScratchHomes(async (homes) => {
+    const stateRoot = path.join(homes.asbHome, 'state', 'native-plugins', 'codex');
+    const root = path.join(stateRoot, 'bad');
+    const work: NativeWork = {
+      bin: 'codex',
+      env: process.env,
+      commands: [],
+      compensate: [],
+      setting: null,
+      prepare: {
+        root,
+        stateRoot,
+        marketplaceName: 'bad',
+        pluginName: 'bad',
+        ref: 'bad@bad',
+        sourcePath: 'invalid\0source',
+      },
+    };
+
+    assert.match(applyNative(work) ?? '', /null bytes|must be a string without null bytes/i);
+    assert.equal(fs.existsSync(root), false);
   });
 });

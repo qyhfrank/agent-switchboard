@@ -3,9 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { parseCliArgs, runExplain, runSync } from '../../src/engine/cli.js';
+import { ConfigError } from '../../src/engine/config.js';
 import { renderExplain } from '../../src/engine/report.js';
 import { hashContent } from '../../src/engine/shapes.js';
-import { installApps, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+import {
+  installApps,
+  seedMcpLibrary,
+  withScratchHomes,
+  writeUserConfig,
+} from './helpers/scratch.js';
 
 function write(filePath: string, content: string): string {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -131,6 +137,30 @@ test('status --type filters both modes and id globs match selected, missing, and
   });
 });
 
+test('status and sync reject unknown type and app filters with suggestions', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(path.join(homes.asbHome, 'commands', 'build.md'), 'Build.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = ["build"]\n'
+    );
+
+    for (const [options, suggestion] of [
+      [{ dryRun: true, types: ['mcpp'] }, 'mcp'],
+      [{ apps: ['claud-code'] }, 'claude-code'],
+    ] as const) {
+      await assert.rejects(
+        () => runSync(options),
+        (error: unknown) =>
+          error instanceof ConfigError &&
+          error.exitCode === 2 &&
+          error.message.includes(`did you mean "${suggestion}"`)
+      );
+    }
+  });
+});
+
 test('explain completes command and agent slices with source, owner, and all hashes', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
@@ -182,5 +212,34 @@ test('explain covers native manager state and attributes its plugin source witho
     assert.equal(slices[0].desired, null);
     assert.deepEqual(slices[0].sources, [{ id: 'bare', source: 'bare', path: source }]);
     assert.match(renderExplain(slices, 'demo@bare'), /owner: native-manager/);
+  });
+});
+
+test('explain keeps MCP credential map keys and masks every value', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const placeholder = 'INVENTED-PLACEHOLDER-9f3a';
+    seedMcpLibrary(homes, {
+      alpha: {
+        command: 'run',
+        env: { API_TOKEN: placeholder },
+        headers: { Authorization: placeholder },
+        http_headers: { 'X-Api-Key': placeholder },
+        env_http_headers: { 'X-Env-Key': placeholder },
+      },
+    });
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[mcp]\nenabled = ["alpha"]\n'
+    );
+    await runSync();
+
+    const output = renderExplain(await runExplain('alpha'), 'alpha');
+
+    assert.equal(output.includes(placeholder), false);
+    for (const key of ['API_TOKEN', 'Authorization', 'X-Api-Key', 'X-Env-Key']) {
+      assert.match(output, new RegExp(key));
+    }
+    assert.match(output, /\*\*\*/);
   });
 });

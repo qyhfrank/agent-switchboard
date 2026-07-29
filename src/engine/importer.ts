@@ -2,8 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { AppRow } from './apps.js';
-import { ConfigError, type Homes } from './config.js';
+import { ConfigError, effectiveSelection, type Homes, type ResolvedConfig } from './config.js';
+import type { LibraryInventory } from './library.js';
 import { loadPeerState } from './peer.js';
+import { renderHookGroups } from './plan.js';
 import { writeFileAtomic } from './shapes.js';
 
 export type ImportType = 'commands' | 'agents' | 'skills' | 'hooks';
@@ -67,6 +69,34 @@ function filesUnder(root: string, extensions: readonly string[], recursive: bool
 async function mayWrite(target: string, options: ImportOptions): Promise<boolean> {
   if (!fs.existsSync(target) || options.force) return true;
   return options.confirm ? options.confirm(target) : false;
+}
+
+function overlayBundle(source: string, target: string, skipHidden: boolean): string[] {
+  const copied: string[] = [];
+  const visit = (directory: string, prefix = ''): void => {
+    for (const entry of fs
+      .readdirSync(directory, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name))) {
+      if (skipHidden && entry.name.startsWith('.')) continue;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) visit(path.join(directory, entry.name), rel);
+      else if (entry.isFile()) copied.push(rel);
+    }
+  };
+  visit(source);
+  const overwritten = copied.filter((rel) => fs.existsSync(path.join(target, rel)));
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.cpSync(source, target, {
+    recursive: true,
+    force: true,
+    ...(skipHidden
+      ? {
+          filter: (candidate: string) =>
+            candidate === source || !path.basename(candidate).startsWith('.'),
+        }
+      : {}),
+  });
+  return overwritten;
 }
 
 async function importEntries(
@@ -172,13 +202,15 @@ async function importSkills(
         entries.push({ type: 'skills', id, sourcePath: skill, path: target, outcome: 'skipped' });
         continue;
       }
-      if (fs.existsSync(target)) fs.rmSync(target, { recursive: true });
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.cpSync(skill, target, {
-        recursive: true,
-        filter: (candidate) => candidate === skill || !path.basename(candidate).startsWith('.'),
+      const overwritten = overlayBundle(skill, target, true);
+      entries.push({
+        type: 'skills',
+        id,
+        sourcePath: skill,
+        path: target,
+        outcome: 'written',
+        ...(overwritten.length > 0 ? { reason: `overwrote ${overwritten.join(', ')}` } : {}),
       });
-      entries.push({ type: 'skills', id, sourcePath: skill, path: target, outcome: 'written' });
     } catch (error) {
       entries.push({
         type: 'skills',
@@ -197,7 +229,8 @@ async function importHooks(
   row: AppRow,
   homes: Homes,
   sourceOverride: string | undefined,
-  options: ImportOptions
+  options: ImportOptions,
+  context: { config: ResolvedConfig; inventory: LibraryInventory }
 ): Promise<ImportEntry[]> {
   if (!row.hooks?.importable) return [];
   const source = path.resolve(sourceOverride ?? row.hooks.path(homes));
@@ -232,7 +265,27 @@ async function importHooks(
     let content = sourceOverride ? document : { hooks: document.hooks };
     if (!content.hooks || typeof content.hooks !== 'object') throw new Error('hook map is absent');
     if (!sourceOverride) {
-      const owned = loadPeerState(homes.asbHome, row.hooks.stateTarget).events;
+      let owned = loadPeerState(homes.asbHome, row.hooks.stateTarget).events;
+      if (Object.keys(owned).length === 0) {
+        const byId = new Map(
+          context.inventory.components
+            .filter((component) => component.type === 'hooks')
+            .map((component) => [component.id, component])
+        );
+        const rendered: Record<string, unknown[]> = {};
+        for (const selected of effectiveSelection(context.config, row.id, 'hooks')) {
+          const component = byId.get(selected);
+          if (!component?.hooks) continue;
+          const filtered = row.hooks.filter ? row.hooks.filter(component.hooks) : component.hooks;
+          const bundleDir = component.files
+            ? path.join(row.hooks.bundleDir(homes), selected)
+            : undefined;
+          for (const [event, groups] of Object.entries(renderHookGroups(filtered, bundleDir))) {
+            rendered[event] = [...(rendered[event] ?? []), ...groups];
+          }
+        }
+        owned = rendered;
+      }
       const userHooks: Record<string, unknown[]> = {};
       for (const [event, groups] of Object.entries(content.hooks as Record<string, unknown[]>)) {
         const remaining = [...groups];
@@ -248,9 +301,17 @@ async function importHooks(
       return [{ type: 'hooks', id, sourcePath: source, path: target, outcome: 'skipped' }];
     }
     if (bundleFile) {
-      if (fs.existsSync(target)) fs.rmSync(target, { recursive: true });
-      fs.mkdirSync(path.dirname(target), { recursive: true });
-      fs.cpSync(source, target, { recursive: true });
+      const overwritten = overlayBundle(source, target, false);
+      return [
+        {
+          type: 'hooks',
+          id,
+          sourcePath: source,
+          path: target,
+          outcome: 'written',
+          ...(overwritten.length > 0 ? { reason: `overwrote ${overwritten.join(', ')}` } : {}),
+        },
+      ];
     } else {
       writeFileAtomic(target, `${JSON.stringify(content, null, 2)}\n`);
     }
@@ -273,7 +334,8 @@ export async function importFromApp(
   row: AppRow,
   homes: Homes,
   sourcePath: string | undefined,
-  options: ImportOptions = {}
+  options: ImportOptions,
+  context: { config: ResolvedConfig; inventory: LibraryInventory }
 ): Promise<ImportResult> {
   const supported = importableTypes(row);
   const requested = options.types?.length ? [...new Set(options.types)] : supported;
@@ -294,7 +356,7 @@ export async function importFromApp(
     } else if (type === 'skills') {
       entries.push(...(await importSkills(row, homes, sourcePath, options)));
     } else {
-      entries.push(...(await importHooks(row, homes, sourcePath, options)));
+      entries.push(...(await importHooks(row, homes, sourcePath, options, context)));
     }
   }
   return { entries, exitCode: entries.some((entry) => entry.outcome === 'failed') ? 1 : 0 };

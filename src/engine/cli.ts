@@ -10,6 +10,7 @@ import {
   effectivePlugins,
   effectiveSelection,
   loadConfig,
+  nearestKey,
   type ResolvedConfig,
   resolveHomes,
   SELECTION_TYPES,
@@ -52,6 +53,7 @@ import {
   planSkills,
   planSources,
   planStatusAll,
+  STATUS_TYPES,
   type SyncCapture,
 } from './plan.js';
 import {
@@ -780,6 +782,23 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   rejectUnwiredScope(opts);
   const config = loadConfig({ profile: opts.profile, env });
   const table = appRows(config);
+  const knownTypes = new Set<string>(STATUS_TYPES);
+  for (const type of opts.types ?? []) {
+    if (knownTypes.has(type)) continue;
+    const suggestion = nearestKey(type, STATUS_TYPES);
+    throw new ConfigError(
+      `Unknown status type "${type}"${suggestion ? ` — did you mean "${suggestion}"?` : '.'}`
+    );
+  }
+  const appIds = table.map((row) => row.id);
+  const knownApps = new Set(appIds);
+  for (const app of opts.apps ?? []) {
+    if (knownApps.has(app)) continue;
+    const suggestion = nearestKey(app, appIds);
+    throw new ConfigError(
+      `Unknown app "${app}"${suggestion ? ` — did you mean "${suggestion}"?` : '.'}`
+    );
+  }
 
   // A real run takes the lock before ledger and capture: the whole
   // capture → plan → apply sequence executes against serialized state, so a
@@ -1152,10 +1171,13 @@ export async function runImport(
   sourcePath: string | undefined,
   options: ImportOptions = {}
 ): Promise<ImportResult> {
-  const config = loadConfig();
+  const base = loadConfig();
+  const catalog = readSourceCatalog(base);
+  const inventory = scanLibrary({ plugins: catalog.plugins });
+  const config = withPluginExpansion(base, buildPluginExpansion(catalog.plugins, inventory));
   const row = appRows(config).find((candidate) => candidate.id === app);
   if (!row) throw new ConfigError(`Unknown app "${app}".`);
-  return importFromApp(row, config.homes, sourcePath, options);
+  return importFromApp(row, config.homes, sourcePath, options, { config, inventory });
 }
 
 export interface InitResult {
