@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { parse as parseToml } from '@iarna/toml';
+import { parse as parseToml, stringify as tomlStringify } from '@iarna/toml';
 import { applyEdits, modify, type ParseError, parse as parseJsonc } from 'jsonc-parser';
+import { Document, isMap, isSeq, parseDocument, type YAMLSeq } from 'yaml';
 
 /**
  * Write shapes and slice renderers. Every owned slice is defined here in
@@ -403,7 +404,61 @@ export function removeBundleSlice(bundleRoot: string, recorded: readonly string[
 // Keys shape (structured hosts): addressed slices, byte-preserving elsewhere
 // ---------------------------------------------------------------------------
 
-export type KeysFormat = 'json' | 'toml';
+export type KeysFormat = 'json' | 'toml' | 'yaml';
+
+const KEYED_ARRAY_PREFIX = '@array:';
+
+/**
+ * One persisted identity segment. Percent encoding keeps the grammar
+ * unambiguous for component ids containing `:`, `@`, `=`, or `]`.
+ */
+export function keyedArraySegment(key: string, field: string, identity: string): string {
+  return `${KEYED_ARRAY_PREFIX}${encodeURIComponent(key)}[${encodeURIComponent(field)}=${encodeURIComponent(identity)}]`;
+}
+
+interface KeyedArrayAddress {
+  key: string;
+  field: string;
+  identity: string;
+}
+
+function parseKeyedArraySegment(segment: string): KeyedArrayAddress | null {
+  if (!segment.startsWith(KEYED_ARRAY_PREFIX)) return null;
+  const match = /^@array:([^[]+)\[([^=\]]+)=([^\]]*)\]$/.exec(segment);
+  if (!match) return null;
+  try {
+    return {
+      key: decodeURIComponent(match[1]),
+      field: decodeURIComponent(match[2]),
+      identity: decodeURIComponent(match[3]),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function keyedArrayProblem(
+  root: Record<string, unknown>,
+  key: string,
+  field: string
+): string | null {
+  const value = root[key];
+  if (value === undefined) return null;
+  if (!Array.isArray(value)) return `${key} is not an array`;
+  const seen = new Set<string>();
+  for (const member of value) {
+    if (member === null || typeof member !== 'object' || Array.isArray(member)) {
+      return `${key} contains a member that is not an object`;
+    }
+    const identity = (member as Record<string, unknown>)[field];
+    if (typeof identity !== 'string' || identity.length === 0) {
+      return `${key} contains a member missing identity field "${field}"`;
+    }
+    if (seen.has(identity)) return `${key} contains duplicate identity "${identity}"`;
+    seen.add(identity);
+  }
+  return null;
+}
 
 export interface StructuredDocument {
   /** Parsed root, or null when the document is unreadable or not an object. */
@@ -452,6 +507,21 @@ export function parseStructured(content: string, format: KeysFormat): Structured
       return { root: null, error: tomlErrorText(error), tables: [] };
     }
   }
+  if (format === 'yaml') {
+    const document = parseDocument(content, { keepSourceTokens: true });
+    if (document.errors.length > 0) {
+      const position = document.errors[0]?.linePos?.[0];
+      const at = position ? ` at line ${position.line}, column ${position.col}` : '';
+      return { root: null, error: `invalid YAML${at}`, tables: [] };
+    }
+    if (document.contents !== null && !isMap(document.contents)) {
+      return { root: null, error: 'document root must be an object', tables: [] };
+    }
+    return {
+      root: (document.toJS() ?? {}) as Record<string, unknown>,
+      tables: [],
+    };
+  }
   const errors: ParseError[] = [];
   const parsed = parseJsonc(content, errors, { allowTrailingComma: true }) as unknown;
   if (errors.length > 0) {
@@ -470,6 +540,22 @@ export function valueAtKeyPath(
 ): unknown {
   let current: unknown = root;
   for (const segment of keyPath) {
+    const address = parseKeyedArraySegment(segment);
+    if (address) {
+      if (current === null || typeof current !== 'object' || Array.isArray(current)) {
+        return undefined;
+      }
+      const members = (current as Record<string, unknown>)[address.key];
+      if (!Array.isArray(members)) return undefined;
+      current = members.find(
+        (member) =>
+          member !== null &&
+          typeof member === 'object' &&
+          !Array.isArray(member) &&
+          (member as Record<string, unknown>)[address.field] === address.identity
+      );
+      continue;
+    }
     if (current === null || typeof current !== 'object' || Array.isArray(current)) return undefined;
     current = (current as Record<string, unknown>)[segment];
   }
@@ -491,6 +577,8 @@ export interface KeysEdit {
   value?: unknown;
   /** TOML: the fully rendered table block, header included. */
   text?: string;
+  /** TOML: address one assignment inside the parent table, not a table block. */
+  scalar?: true;
   remove?: true;
 }
 
@@ -518,8 +606,75 @@ export function applyKeysEdits(
   edits: readonly KeysEdit[]
 ): string {
   if (edits.length === 0) return content;
-  const next = format === 'toml' ? applyTomlEdits(content, edits) : applyJsonEdits(content, edits);
+  const next =
+    format === 'toml'
+      ? applyTomlEdits(content, edits)
+      : format === 'yaml'
+        ? applyYamlEdits(content, edits)
+        : applyJsonEdits(content, edits);
   return next.endsWith('\n') ? next : `${next}\n`;
+}
+
+function applyYamlEdits(content: string, edits: readonly KeysEdit[]): string {
+  const document =
+    content.length === 0 ? new Document({}) : parseDocument(content, { keepSourceTokens: true });
+  if (document.errors.length > 0) throw new Error('invalid YAML');
+  if (document.contents !== null && !isMap(document.contents)) {
+    throw new Error('document root must be an object');
+  }
+  const root = document.toJS() as Record<string, unknown>;
+  const addresses = edits
+    .map((edit) => (edit.keyPath.length === 1 ? parseKeyedArraySegment(edit.keyPath[0]) : null))
+    .filter((address): address is KeyedArrayAddress => address !== null);
+  for (const address of addresses) {
+    const problem = keyedArrayProblem(root, address.key, address.field);
+    if (problem) throw new Error(problem);
+  }
+
+  if (content.length > 0 && document.toString() !== content) {
+    // ponytail: this conservative gate also rejects normalization confined to
+    // a managed node. Upgrade by comparing CST ranges once such a real input
+    // must be supported; whole-document refusal cannot alter user bytes.
+    throw new Error('unmanaged YAML would not round-trip byte-identically');
+  }
+
+  for (const edit of edits) {
+    const address = edit.keyPath.length === 1 ? parseKeyedArraySegment(edit.keyPath[0]) : null;
+    if (!address) {
+      if (edit.remove) document.deleteIn([...edit.keyPath]);
+      else document.setIn([...edit.keyPath], edit.value);
+      continue;
+    }
+
+    let sequence = document.get(address.key, true);
+    if (sequence === undefined) {
+      if (edit.remove) continue;
+      document.set(address.key, []);
+      sequence = document.get(address.key, true);
+    }
+    if (!isSeq(sequence)) throw new Error(`${address.key} is not an array`);
+    const items = sequence as YAMLSeq;
+    const index = items.items.findIndex(
+      (item) => isMap(item) && item.get(address.field) === address.identity
+    );
+    if (edit.remove) {
+      if (index >= 0) items.items.splice(index, 1);
+      continue;
+    }
+    if (edit.value === null || typeof edit.value !== 'object' || Array.isArray(edit.value)) {
+      throw new Error(`${address.key} member "${address.identity}" is not an object`);
+    }
+    const identity = (edit.value as Record<string, unknown>)[address.field];
+    if (identity !== address.identity) {
+      throw new Error(
+        `${address.key} member identity must be ${address.field}="${address.identity}"`
+      );
+    }
+    const node = document.createNode(edit.value);
+    if (index >= 0) items.items[index] = node;
+    else items.add(node);
+  }
+  return document.toString();
 }
 
 function applyJsonEdits(content: string, edits: readonly KeysEdit[]): string {
@@ -668,6 +823,56 @@ function scanTomlTables(content: string): TomlTable[] {
 function applyTomlEdits(content: string, edits: readonly KeysEdit[]): string {
   let text = content;
   for (const edit of edits) {
+    // A missing table block means this is an addressed scalar within its
+    // parent table (Codex `[features].multi_agent`). Keep every sibling byte
+    // and splice only that assignment line. ponytail: inline-comment scanning
+    // assumes this owned scalar is not a quoted string containing `#`; add a
+    // TOML token scanner if another real scalar key needs that value shape.
+    if (edit.scalar === true && edit.keyPath.length >= 2) {
+      const parent = edit.keyPath.slice(0, -1);
+      const leaf = edit.keyPath.at(-1) as string;
+      const table = scanTomlTables(text).find(
+        (candidate) =>
+          candidate.parts.length === parent.length &&
+          parent.every((segment, i) => candidate.parts[i] === segment)
+      );
+      const escaped = leaf.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const assignment = new RegExp(`^(\\s*)(?:${escaped}|"${escaped}"|'${escaped}')\\s*=.*$`, 'm');
+      if (table) {
+        const block = text.slice(table.start, table.end);
+        const match = block.match(assignment);
+        if (edit.remove) {
+          if (match?.index !== undefined) {
+            const end = block.indexOf('\n', match.index) + 1 || block.length;
+            text =
+              text.slice(0, table.start + match.index) + block.slice(end) + text.slice(table.end);
+          }
+          continue;
+        }
+        const rendered = `${tomlKey(leaf)} = ${tomlStringify.value(edit.value as never)}`;
+        if (match?.index !== undefined) {
+          const lineEnd = block.indexOf('\n', match.index);
+          const end = lineEnd === -1 ? block.length : lineEnd;
+          const oldLine = block.slice(match.index, end);
+          const commentAt = oldLine.indexOf('#');
+          const suffix = commentAt >= 0 ? ` ${oldLine.slice(commentAt).trimStart()}` : '';
+          text =
+            text.slice(0, table.start + match.index) +
+            `${match[1]}${rendered}${suffix}` +
+            text.slice(table.start + end);
+        } else {
+          const trailing = block.match(/\n*$/)?.[0] ?? '\n';
+          const body = block.slice(0, block.length - trailing.length).trimEnd();
+          text = `${text.slice(0, table.start)}${body}\n${rendered}${trailing}${text.slice(table.end)}`;
+        }
+        continue;
+      }
+      if (edit.remove) continue;
+      const head = text.trimEnd();
+      const block = `[${parent.map(tomlKey).join('.')}]\n${tomlKey(leaf)} = ${tomlStringify.value(edit.value as never)}\n`;
+      text = head.length === 0 ? block : `${head}\n\n${block}`;
+      continue;
+    }
     const table = scanTomlTables(text).find(
       (candidate) =>
         candidate.parts.length === edit.keyPath.length &&

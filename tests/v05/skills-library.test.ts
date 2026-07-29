@@ -292,8 +292,12 @@ test('the app table declares the frozen skills parent directories', async () => 
     assert.equal(appRow('claude-desktop')?.skills, undefined, 'claude-desktop is detect-only');
     assert.deepEqual(appRow('codex')?.skills?.reserved, ['.system']);
     assert.deepEqual(appRow('claude-code')?.skills?.reserved, []);
+    assert.equal(
+      appRow('coco')?.skills?.dir(homes),
+      path.join(homes.agentsHome, '.coco', 'skills')
+    );
     const withSkills = APP_ROWS.filter((row) => row.skills).map((row) => row.id);
-    assert.deepEqual(withSkills, [...skillApps]);
+    assert.deepEqual(withSkills, [...skillApps.slice(0, 5), 'coco', ...skillApps.slice(5)]);
   });
 });
 

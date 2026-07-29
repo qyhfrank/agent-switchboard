@@ -1,15 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { checkbox, confirm, input } from '@inquirer/prompts';
 import { Command } from 'commander';
-import { AGENTS_SKILLS_UNION, APP_ROWS } from './apps.js';
+import { AGENTS_SKILLS_UNION, APP_ROWS, type AppRow, appRows } from './apps.js';
 import {
   ConfigError,
+  editSelection,
+  effectivePlugins,
   effectiveSelection,
   loadConfig,
   type ResolvedConfig,
+  resolveHomes,
   withPluginExpansion,
 } from './config.js';
 import { expandHome, type RemoteSource } from './git.js';
+import { type ImportOptions, type ImportResult, importFromApp } from './importer.js';
 import {
   acquireRunLock,
   type Ledger,
@@ -19,7 +24,7 @@ import {
   type RunLock,
   saveLedger,
 } from './ledger.js';
-import { buildPluginExpansion, scanLibrary } from './library.js';
+import { buildPluginExpansion, type LibraryInventory, scanLibrary } from './library.js';
 import { applyNative, captureNative, planNative } from './native.js';
 import { loadPeerState, savePeerState } from './peer.js';
 import {
@@ -32,7 +37,11 @@ import {
   explainRules,
   explainSkills,
   explainSources,
+  groupKeyActions,
+  planAgents,
+  planCommands,
   planHooks,
+  planLegacyOpencode,
   planMcp,
   planRules,
   planSkills,
@@ -98,22 +107,26 @@ export interface SyncOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): SyncCapture {
+function captureFor(
+  config: ReturnType<typeof loadConfig>,
+  ledger: Ledger,
+  table: readonly AppRow[],
+  inventory: LibraryInventory
+): SyncCapture {
   const capture: SyncCapture = {
     installed: {},
     targets: {},
+    rulePaths: {},
     bundles: {},
     bundleDirs: {},
     hooks: {},
     mcp: {},
+    legacy: [],
   };
-  for (const appId of config.apps.enabled) {
-    const row = APP_ROWS.find((candidate) => candidate.id === appId);
-    if (!row) continue;
-    capture.installed[appId] = fs.existsSync(row.detectDir(config.homes));
-    if (!row.rules) continue;
-    const targetPath = row.rules.path(config.homes);
-    const escapes = targetEscapesRoot(row.rules.root(config.homes), targetPath);
+
+  const captureFile = (root: string, targetPath: string): void => {
+    if (capture.targets[targetPath]) return;
+    const escapes = targetEscapesRoot(root, targetPath);
     try {
       capture.targets[targetPath] = {
         exists: true,
@@ -123,13 +136,60 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
     } catch {
       capture.targets[targetPath] = { exists: fs.existsSync(targetPath), content: null, escapes };
     }
+  };
+  for (const appId of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === appId);
+    if (!row) continue;
+    capture.installed[appId] = fs.existsSync(row.detectDir(config.homes));
+    if (!row.rules) continue;
+    const targetPath = row.rules.path(config.homes);
+    capture.rulePaths[appId] = targetPath;
+    captureFile(row.rules.root(config.homes, targetPath), targetPath);
+    for (const stale of ledger.entries) {
+      if (
+        stale.app !== appId ||
+        stale.type !== 'rules' ||
+        stale.id !== null ||
+        stale.path === targetPath ||
+        capture.targets[stale.path]
+      ) {
+        continue;
+      }
+      captureFile(row.rules.root(config.homes, stale.path), stale.path);
+    }
+  }
+
+  // Commands and agents are own-file targets. Snapshot every selected or
+  // known library filename plus every recorded path; the planner never
+  // reverse-parses a filename into an id.
+  for (const appId of config.apps.enabled) {
+    const app = table.find((candidate) => candidate.id === appId);
+    if (!app) continue;
+    for (const type of ['commands', 'agents'] as const) {
+      const row = app[type];
+      if (!row) continue;
+      const root = row.root(config.homes);
+      const dir = row.dir(config.homes);
+      const ids = new Set([
+        ...effectiveSelection(config, appId, type),
+        ...inventory.components
+          .filter((component) => component.type === type)
+          .map((component) => component.id),
+      ]);
+      for (const id of ids) captureFile(root, path.join(dir, row.filename(id)));
+      for (const entry of ledger.entries) {
+        if (entry.app === appId && entry.type === type && entry.shape === 'own-file') {
+          captureFile(root, entry.path);
+        }
+      }
+    }
   }
 
   // Skills parents: list present child dirs, then snapshot every bundle the
   // planner can possibly touch — selected, recorded, or name-present.
   const skillRows: { app: string; dir: string; root: string; reserved: readonly string[] }[] = [];
   for (const appId of config.apps.enabled) {
-    const row = APP_ROWS.find((candidate) => candidate.id === appId);
+    const row = table.find((candidate) => candidate.id === appId);
     if (!row?.skills) continue;
     skillRows.push({
       app: appId,
@@ -194,10 +254,90 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
     }
   }
 
+  // OpenCode 0.4 wrote singular command/agent/skill directories. Recognition
+  // comes from the current library ids and row filename function, never from
+  // parsing arbitrary user filenames. A present but unreadable singular dir
+  // is captured as a failure instead of silently disabling cleanup.
+  const opencode = table.find((row) => row.id === 'opencode');
+  if (config.apps.enabled.includes('opencode') && opencode) {
+    for (const type of ['commands', 'agents'] as const) {
+      const row = opencode[type];
+      if (!row) continue;
+      const currentDir = row.dir(config.homes);
+      const legacyDir = path.join(
+        path.dirname(currentDir),
+        type === 'commands' ? 'command' : 'agent'
+      );
+      const scan: SyncCapture['legacy'][number] = { type, path: legacyDir, entries: [] };
+      if (fs.existsSync(legacyDir)) {
+        try {
+          const names = new Map<string, string[]>();
+          for (const component of inventory.components.filter((item) => item.type === type)) {
+            const filename = row.filename(component.id);
+            names.set(filename, [...(names.get(filename) ?? []), component.id]);
+          }
+          for (const entry of fs.readdirSync(legacyDir, { withFileTypes: true })) {
+            if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+            const ids = names.get(entry.name);
+            if (ids?.length !== 1) continue;
+            const legacyPath = path.join(legacyDir, entry.name);
+            captureFile(row.root(config.homes), legacyPath);
+            scan.entries.push({
+              type,
+              id: ids[0],
+              path: legacyPath,
+              currentPath: path.join(currentDir, entry.name),
+              root: row.root(config.homes),
+              bundle: false,
+            });
+          }
+        } catch (error) {
+          scan.error = error instanceof Error ? error.message : String(error);
+        }
+      }
+      capture.legacy.push(scan);
+    }
+
+    if (opencode.skills) {
+      const currentDir = opencode.skills.dir(config.homes);
+      const legacyDir = path.join(path.dirname(currentDir), 'skill');
+      const scan: SyncCapture['legacy'][number] = { type: 'skills', path: legacyDir, entries: [] };
+      if (fs.existsSync(legacyDir)) {
+        try {
+          const ids = new Set(
+            inventory.components.filter((item) => item.type === 'skills').map((item) => item.id)
+          );
+          for (const entry of fs.readdirSync(legacyDir, { withFileTypes: true })) {
+            if ((!entry.isDirectory() && !entry.isSymbolicLink()) || !ids.has(entry.name)) continue;
+            const legacyPath = path.join(legacyDir, entry.name);
+            const exists = fs.existsSync(legacyPath);
+            capture.bundles[legacyPath] = {
+              exists,
+              files: exists ? listTargetFiles(legacyPath) : null,
+              fingerprint: exists ? (bundleFingerprint(legacyPath) ?? null) : null,
+              escapes: targetEscapesRoot(opencode.skills.root(config.homes), legacyPath),
+            };
+            scan.entries.push({
+              type: 'skills',
+              id: entry.name,
+              path: legacyPath,
+              currentPath: path.join(currentDir, entry.name),
+              root: opencode.skills.root(config.homes),
+              bundle: true,
+            });
+          }
+        } catch (error) {
+          scan.error = error instanceof Error ? error.message : String(error);
+        }
+      }
+      capture.legacy.push(scan);
+    }
+  }
+
   // Hooks: the app config it merges into, the peer record that says which
   // groups are asb's, and every bundle directory that record can reclaim.
   for (const appId of config.apps.enabled) {
-    const row = APP_ROWS.find((candidate) => candidate.id === appId)?.hooks;
+    const row = table.find((candidate) => candidate.id === appId)?.hooks;
     if (!row) continue;
     const configPath = row.path(config.homes);
     const root = row.root(config.homes);
@@ -245,7 +385,7 @@ function captureFor(config: ReturnType<typeof loadConfig>, ledger: Ledger): Sync
   // resolved here (opencode prefers an existing .jsonc) so the planner reads
   // one settled location rather than probing the disk itself.
   for (const appId of config.apps.enabled) {
-    const row = APP_ROWS.find((candidate) => candidate.id === appId)?.mcp;
+    const row = table.find((candidate) => candidate.id === appId)?.mcp;
     if (!row) continue;
     const hostPath = row.path(config.homes);
     const captured: CapturedMcpHost = {
@@ -483,18 +623,23 @@ function reconcile(
 ): ReportEntry[] {
   const entries: ReportEntry[] = [];
   const failed = new Map<string, Set<string>>();
+  const failedPaths = new Set<string>();
 
   for (const action of actions) {
     const slotKey = `${action.app}\0${action.type}`;
     const slot = failed.get(slotKey) ?? NO_FAILURES;
 
     const blocker = action.requires?.find((id) => slot.has(id));
-    if (blocker !== undefined) {
+    const pathBlocker = action.requiresPaths?.find((required) => failedPaths.has(required));
+    if (blocker !== undefined || pathBlocker !== undefined) {
       entries.push({
         ...toEntry(action),
         outcome: 'skipped',
-        detail: 'bundle-failed',
-        reason: `hook bundle ${blocker} did not land this run; leaving this alone until it does`,
+        detail: blocker !== undefined ? 'bundle-failed' : 'replacement-failed',
+        reason:
+          blocker !== undefined
+            ? `hook bundle ${blocker} did not land this run; leaving this alone until it does`
+            : `replacement target ${pathBlocker} did not land this run; preserving the previous target`,
       });
       continue;
     }
@@ -523,6 +668,7 @@ function reconcile(
       if (bucket) bucket.add(entry.id);
       else failed.set(slotKey, new Set([entry.id]));
     }
+    if (entry.path !== null && FAILING_OUTCOMES.has(entry.outcome)) failedPaths.add(entry.path);
   }
   return entries;
 }
@@ -591,6 +737,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
 
   rejectUnwiredScope(opts);
   const config = loadConfig({ profile: opts.profile, env });
+  const table = appRows(config);
 
   // A real run takes the lock before ledger and capture: the whole
   // capture → plan → apply sequence executes against serialized state, so a
@@ -646,21 +793,24 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
     }
 
-    const capture = captureFor(resolved, ledger);
-    const nativeState = captureNative(resolved, catalog, APP_ROWS, env, capture.installed);
+    const capture = captureFor(resolved, ledger, table, inventory);
+    const nativeState = captureNative(resolved, catalog, table, env, capture.installed, dryRun);
 
     const planInput = {
       config: resolved,
       inventory,
       ledger,
       capture,
-      table: APP_ROWS,
+      table,
       now: new Date().toISOString(),
     };
     let actions = [
       ...planSources({ config: resolved, catalog, ...sources, entries: sourceEntries, dryRun }),
       ...planRules(planInput),
+      ...planCommands(planInput),
+      ...planAgents(planInput),
       ...planSkills(planInput),
+      ...planLegacyOpencode(planInput),
       ...planHooks(planInput),
       ...planMcp(planInput),
       // Native rows run last: their registration setting shares a document
@@ -669,7 +819,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         config: resolved,
         catalog,
         capture: nativeState,
-        table: APP_ROWS,
+        table,
         env,
         installed: capture.installed,
         dryRun,
@@ -693,6 +843,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         return source === null || wanted.has(source);
       });
     }
+    actions = groupKeyActions(actions);
 
     if (dryRun) {
       const preview = buildReport(scope, reconcile(actions, toEntry));
@@ -745,18 +896,19 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   const env = opts.env ?? process.env;
   rejectUnwiredScope(opts);
   const config = loadConfig({ profile: opts.profile, env });
+  const table = appRows(config);
   const ledger = loadLedger(config.homes.stateHome);
   const catalog = readSourceCatalog(config);
   const inventory = scanLibrary({ env, plugins: catalog.plugins });
   const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
-  const capture = captureFor(resolved, ledger);
+  const capture = captureFor(resolved, ledger, table, inventory);
 
   const planInput = {
     config: resolved,
     inventory,
     ledger,
     capture,
-    table: APP_ROWS,
+    table,
     now: new Date().toISOString(),
   };
   // Explain never clones or fetches: it reads what a preview would report.
@@ -906,6 +1058,68 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
   return buildReport(scope, entries);
 }
 
+export async function runImport(
+  app: string,
+  sourcePath: string | undefined,
+  options: ImportOptions = {}
+): Promise<ImportResult> {
+  const config = loadConfig();
+  const row = appRows(config).find((candidate) => candidate.id === app);
+  if (!row) throw new ConfigError(`Unknown app "${app}".`);
+  return importFromApp(row, config.homes, sourcePath, options);
+}
+
+export interface InitResult {
+  path: string;
+  outcome: 'written' | 'skipped';
+  agentsPath?: string;
+}
+
+/** Write the dormant M6 project example; M7 owns making project scope live. */
+export function runInit(
+  projectDir: string,
+  options: { force?: boolean; createAgentsMd?: boolean } = {}
+): InitResult {
+  const root = path.resolve(projectDir);
+  const configPath = path.join(root, '.asb.toml');
+  if (fs.existsSync(configPath) && !options.force) return { path: configPath, outcome: 'skipped' };
+
+  const homes = resolveHomes(process.env);
+  const detected = new Set(
+    APP_ROWS.filter((row) => fs.existsSync(row.detectDir(homes))).map((row) => row.id)
+  );
+  const appLines = APP_ROWS.map((row) =>
+    detected.has(row.id) ? `#   "${row.id}", # detected` : `#   # "${row.id}",`
+  );
+  const cells = (['rules', 'commands', 'agents', 'skills', 'hooks', 'mcp'] as const).flatMap(
+    (type) => ['', `# [${type}]`, '# enabled = [] # add library component ids']
+  );
+  const scaffold = [
+    '# ASB project configuration',
+    '# Docs: README.md#project-configuration',
+    '# Uncomment the sections you want M7 project scope to apply.',
+    '',
+    '# [applications]',
+    '# enabled = [',
+    ...appLines,
+    '# ]',
+    ...cells,
+    '',
+  ].join('\n');
+  fs.mkdirSync(root, { recursive: true });
+  writeFileAtomic(configPath, scaffold);
+
+  const agentsPath = path.join(root, 'AGENTS.md');
+  if (options.createAgentsMd && !fs.existsSync(agentsPath)) {
+    writeFileAtomic(
+      agentsPath,
+      '# AGENTS.md\n\n## Project\n\nDescribe the project.\n\n## Commands\n\n```bash\n# Add project commands.\n```\n'
+    );
+    return { path: configPath, outcome: 'written', agentsPath };
+  }
+  return { path: configPath, outcome: 'written' };
+}
+
 // ---------------------------------------------------------------------------
 // Argument parsing: scope flags are registered chain-wide and resolved once,
 // so any flag ordering yields identical behavior.
@@ -922,10 +1136,37 @@ export type CliInvocation =
   | { command: 'sync' | 'status'; options: CliOptions }
   | { command: 'explain'; target: string; options: CliOptions }
   | { command: 'add'; location: string; options: CliOptions & AddSourceOptions }
-  | { command: 'remove'; namespace: string; options: CliOptions };
+  | { command: 'remove'; namespace: string; options: CliOptions }
+  | {
+      command: 'import';
+      app: string;
+      path: string | undefined;
+      options: { types: string[]; recursive: boolean; force: boolean; json: boolean };
+    }
+  | { command: 'init'; options: { force: boolean; agentsMd: boolean; json: boolean } }
+  | { command: 'enable' | 'disable'; ids: string[]; options: CliOptions };
 
 function collect(value: string, previous: string[]): string[] {
   return [...previous, value];
+}
+
+export function resolvePickerOrder(value: string, selected: readonly string[]): string[] {
+  const tokens = value
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (tokens.length !== selected.length) {
+    throw new ConfigError(`Picker order must contain exactly ${selected.length} items.`);
+  }
+  const result = tokens.map((token) => {
+    if (/^\d+$/.test(token)) return selected[Number.parseInt(token, 10) - 1];
+    return selected.includes(token) ? token : undefined;
+  });
+  if (result.some((id) => id === undefined))
+    throw new ConfigError('Picker order contains an unknown item.');
+  if (new Set(result).size !== result.length)
+    throw new ConfigError('Picker order contains a duplicate item.');
+  return result as string[];
 }
 
 function registerScopeFlags(target: Command): Command {
@@ -983,6 +1224,17 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     parsed = { command: 'status', options: scopeOptions(cmd) };
   });
 
+  for (const command of ['enable', 'disable'] as const) {
+    registerScopeFlags(
+      program
+        .command(command)
+        .description(`${command} library components; enable with no ids opens the picker`)
+        .argument('[ids...]', 'component or plugin ids')
+    ).action((ids: string[], _args: unknown, cmd: Command) => {
+      parsed = { command, ids, options: scopeOptions(cmd) };
+    });
+  }
+
   registerScopeFlags(
     program
       .command('explain')
@@ -1022,6 +1274,55 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     parsed = { command: 'remove', namespace, options: scopeOptions(cmd) };
   });
 
+  program
+    .command('import')
+    .description('copy existing app-side files into the ASB library')
+    .argument('<app>', 'app id')
+    .argument('[path]', 'source path; requires exactly one --type')
+    .option('--type <type>', 'narrow to an importable type', collect, [])
+    .option('-r, --recursive', 'walk source directories recursively')
+    .option('-f, --force', 'overwrite existing library entries')
+    .option('--json', 'machine-readable output')
+    .action(
+      (
+        app: string,
+        sourcePath: string | undefined,
+        args: Record<string, unknown>,
+        cmd: Command
+      ) => {
+        const global = cmd.parent?.opts() ?? {};
+        parsed = {
+          command: 'import',
+          app,
+          path: sourcePath,
+          options: {
+            types: [...(global.type ?? []), ...((args.type as string[] | undefined) ?? [])],
+            recursive: args.recursive === true,
+            force: args.force === true,
+            json: args.json === true || global.json === true,
+          },
+        };
+      }
+    );
+
+  program
+    .command('init')
+    .description('write a commented project .asb.toml scaffold')
+    .option('-f, --force', 'overwrite an existing .asb.toml')
+    .option('--agents-md', 'create an AGENTS.md skeleton when absent')
+    .option('--json', 'machine-readable output')
+    .action((args: Record<string, unknown>, cmd: Command) => {
+      const global = cmd.parent?.opts() ?? {};
+      parsed = {
+        command: 'init',
+        options: {
+          force: args.force === true,
+          agentsMd: args.agentsMd === true,
+          json: args.json === true || global.json === true,
+        },
+      };
+    });
+
   program.parse([...argv], { from: 'user' });
 
   if (!parsed) {
@@ -1032,6 +1333,190 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
 
 class ConfigErrorLike extends Error {
   readonly exitCode = 2;
+}
+
+const SELECTABLE_TYPES = [
+  'rules',
+  'commands',
+  'agents',
+  'skills',
+  'hooks',
+  'mcp',
+  'plugins',
+] as const;
+type SelectableType = (typeof SELECTABLE_TYPES)[number];
+
+interface SelectionEntry {
+  type: SelectableType;
+  id: string;
+  outcome: 'written';
+}
+
+function selectedFor(
+  config: ResolvedConfig,
+  type: SelectableType,
+  app: string | undefined
+): string[] {
+  if (type === 'plugins') return app ? effectivePlugins(config, app) : config.selection.plugins;
+  return app ? effectiveSelection(config, app, type) : config.selection[type];
+}
+
+function selectionTypes(
+  id: string,
+  requested: readonly string[],
+  config: ResolvedConfig,
+  inventory: LibraryInventory,
+  catalog: SourceCatalog
+): SelectableType[] {
+  if (requested.length > 0) {
+    const types = [...new Set(requested)];
+    for (const type of types) {
+      if (!SELECTABLE_TYPES.includes(type as SelectableType)) {
+        throw new ConfigError(`Unknown selection type "${type}".`);
+      }
+    }
+    return types as SelectableType[];
+  }
+  if (catalog.plugins.some((plugin) => plugin.id === id) || config.selection.plugins.includes(id)) {
+    return ['plugins'];
+  }
+  const matches = SELECTABLE_TYPES.filter(
+    (type) =>
+      type !== 'plugins' &&
+      (inventory.components.some((component) => component.type === type && component.id === id) ||
+        config.selection[type].includes(id))
+  );
+  if (matches.length === 0) {
+    throw new ConfigError(`Unknown component "${id}"; pass --type to record an unresolved id.`);
+  }
+  if (matches.length > 1) {
+    throw new ConfigError(
+      `Ambiguous component "${id}"; use ${matches.map((type) => `--type ${type}`).join(' or ')}.`
+    );
+  }
+  return matches;
+}
+
+export async function runSelectionCommand(
+  command: 'enable' | 'disable',
+  ids: readonly string[],
+  options: CliOptions
+): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
+  const config = loadConfig({
+    profile: options.profile,
+    project: options.project,
+    env: options.env,
+  });
+  const catalog = readSourceCatalog(config);
+  const inventory = scanLibrary({ env: options.env, plugins: catalog.plugins });
+  const grouped = new Map<SelectableType, string[]>();
+  for (const id of ids) {
+    for (const type of selectionTypes(id, options.types ?? [], config, inventory, catalog)) {
+      grouped.set(type, [...(grouped.get(type) ?? []), id]);
+    }
+  }
+  const apps = options.apps?.length ? options.apps : [undefined];
+  const entries: SelectionEntry[] = [];
+  for (const [type, values] of grouped) {
+    for (const app of apps) {
+      editSelection({
+        type,
+        ...(command === 'enable' ? { enable: values } : { disable: values }),
+        ...(app ? { app } : {}),
+        profile: options.profile,
+        project: options.project,
+        env: options.env,
+      });
+    }
+    entries.push(...values.map((id) => ({ type, id, outcome: 'written' as const })));
+  }
+  return { entries, exitCode: 0 };
+}
+
+async function runSelectionPicker(
+  options: CliOptions
+): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
+  if ((options.apps?.length ?? 0) > 1) {
+    throw new ConfigError('The interactive picker accepts at most one --app.');
+  }
+  const config = loadConfig({
+    profile: options.profile,
+    project: options.project,
+    env: options.env,
+  });
+  const catalog = readSourceCatalog(config);
+  const inventory = scanLibrary({ env: options.env, plugins: catalog.plugins });
+  const app = options.apps?.[0];
+  const requested = options.types?.length ? options.types : SELECTABLE_TYPES;
+  const types = requested.map((type) => {
+    if (!SELECTABLE_TYPES.includes(type as SelectableType)) {
+      throw new ConfigError(`Unknown selection type "${type}".`);
+    }
+    return type as SelectableType;
+  });
+  const choices = new Map<string, { name: string; checked: boolean }>();
+  for (const type of types) {
+    const current = selectedFor(config, type, app);
+    const ids =
+      type === 'plugins'
+        ? catalog.plugins.map((plugin) => plugin.id)
+        : inventory.components
+            .filter((component) => component.type === type)
+            .map((component) => component.id);
+    for (const id of [...current, ...ids]) {
+      const value = `${type}\0${id}`;
+      choices.set(value, { name: `${type}: ${id}`, checked: current.includes(id) });
+    }
+  }
+  const picked = await checkbox({
+    message: 'Select components to enable',
+    choices: [...choices].map(([value, choice]) => ({ value, ...choice })),
+  });
+  const desired = new Map<SelectableType, string[]>();
+  for (const token of picked) {
+    const [type, id] = token.split('\0') as [SelectableType, string];
+    desired.set(type, [...(desired.get(type) ?? []), id]);
+  }
+  const entries: SelectionEntry[] = [];
+  for (const type of types) {
+    let order = desired.get(type) ?? [];
+    if (order.length > 1) {
+      while (true) {
+        const answer = await input({
+          message: `Order ${type} (comma-separated ids or positions; blank keeps order)`,
+        });
+        if (!answer.trim()) break;
+        try {
+          order = resolvePickerOrder(answer, order);
+          break;
+        } catch (error) {
+          process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+        }
+      }
+    }
+    const current = selectedFor(config, type, app);
+    if (app) {
+      editSelection({
+        type,
+        app,
+        enable: order.filter((id) => !current.includes(id)),
+        disable: current.filter((id) => !order.includes(id)),
+        profile: options.profile,
+        project: options.project,
+        env: options.env,
+      });
+    } else {
+      editSelection({
+        type,
+        replace: order,
+        profile: options.profile,
+        project: options.project,
+        env: options.env,
+      });
+    }
+    entries.push(...order.map((id) => ({ type, id, outcome: 'written' as const })));
+  }
+  return { entries, exitCode: 0 };
 }
 
 /**
@@ -1050,6 +1535,60 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   try {
+    if (invocation.command === 'enable' || invocation.command === 'disable') {
+      const result =
+        invocation.ids.length > 0
+          ? await runSelectionCommand(invocation.command, invocation.ids, invocation.options)
+          : await runSelectionPicker(invocation.options);
+      process.stdout.write(
+        invocation.options.json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : `${result.entries.map((entry) => `written ${entry.type}:${entry.id}`).join('\n')}\n`
+      );
+      return 0;
+    }
+
+    if (invocation.command === 'import') {
+      const result = await runImport(invocation.app, invocation.path, {
+        ...invocation.options,
+        confirm: (targetPath) =>
+          confirm({ message: `File exists: ${targetPath}. Overwrite?`, default: false }),
+      });
+      process.stdout.write(
+        invocation.options.json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : `${result.entries
+              .map(
+                (entry) =>
+                  `${entry.outcome} ${entry.type}:${entry.id || '(source)'} ${entry.path || entry.sourcePath}${entry.reason ? ` (${entry.reason})` : ''}`
+              )
+              .join('\n')}\n`
+      );
+      return result.exitCode;
+    }
+
+    if (invocation.command === 'init') {
+      const configPath = path.join(process.cwd(), '.asb.toml');
+      if (
+        fs.existsSync(configPath) &&
+        !invocation.options.force &&
+        !(await confirm({ message: '.asb.toml already exists. Overwrite?', default: false }))
+      ) {
+        return 0;
+      }
+      const createAgentsMd =
+        invocation.options.agentsMd ||
+        (!fs.existsSync(path.join(process.cwd(), 'AGENTS.md')) &&
+          (await confirm({ message: 'Create AGENTS.md skeleton?', default: true })));
+      const result = runInit(process.cwd(), { force: true, createAgentsMd });
+      process.stdout.write(
+        invocation.options.json
+          ? `${JSON.stringify(result, null, 2)}\n`
+          : `written ${result.path}${result.agentsPath ? `\nwritten ${result.agentsPath}` : ''}\n`
+      );
+      return 0;
+    }
+
     if (invocation.command === 'explain') {
       const slices = await runExplain(invocation.target, invocation.options);
       process.stdout.write(

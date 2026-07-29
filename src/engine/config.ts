@@ -34,6 +34,7 @@ export interface Homes {
   agentsHome: string;
   cacheHome: string;
   stateHome: string;
+  configHome?: string;
 }
 
 export class ConfigError extends Error {
@@ -54,6 +55,11 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
   }
 
   const agentsHome = env.ASB_AGENTS_HOME?.trim() || home;
+  const xdgConfig = env.XDG_CONFIG_HOME?.trim();
+  const configHome =
+    xdgConfig && !env.ASB_AGENTS_HOME?.trim()
+      ? path.resolve(xdgConfig)
+      : path.join(path.resolve(agentsHome), '.config');
 
   const cacheOverride = env.ASB_CACHE_HOME?.trim();
   const xdgCache = env.XDG_CACHE_HOME?.trim();
@@ -79,6 +85,7 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
     agentsHome: path.resolve(agentsHome),
     cacheHome: path.resolve(cacheHome),
     stateHome: path.resolve(stateHome),
+    configHome,
   };
 }
 
@@ -318,8 +325,90 @@ const uiSection = z.object({ page_size: z.number().int().min(5).max(50).optional
 
 const extensionsSection = z.record(z.string(), z.boolean());
 
-/** Custom-target rows keep an open grammar here; apps.ts validates them into table rows. */
-const targetSpec = z.object({}).passthrough();
+const targetPath = z.string().trim().min(1);
+const stringRecord = z.record(z.string(), z.string());
+const unknownRecord = z.record(z.string(), z.unknown());
+const frontmatterTransform = z
+  .object({
+    rename: stringRecord.optional(),
+    omit: idArray.optional(),
+    include: idArray.optional(),
+    join: stringRecord.optional(),
+    defaults: unknownRecord.optional(),
+  })
+  .strict();
+const filenamePattern = z
+  .string()
+  .trim()
+  .min(1)
+  .superRefine((pattern, context) => {
+    const placeholders = pattern.match(/\{id\}/g)?.length ?? 0;
+    if (placeholders !== 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'filename_pattern must contain exactly one "{id}" placeholder',
+      });
+    }
+    if (pattern.includes('/') || pattern.includes('\\')) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'filename_pattern must not contain path separators',
+      });
+    }
+    const suffix = pattern.slice(pattern.lastIndexOf('{id}') + 4);
+    if (!/^\.[A-Za-z0-9][A-Za-z0-9._-]*$/.test(suffix)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'filename_pattern must end in an extension after "{id}"',
+      });
+    }
+  });
+const customMcpTarget = z
+  .object({
+    format: z.enum(['json', 'yaml']),
+    config_path: targetPath,
+    project_config_path: targetPath.optional(),
+    root_key: targetPath.optional(),
+    structure: z.enum(['record', 'keyed-array']).optional(),
+    key_field: targetPath.optional(),
+    defaults: unknownRecord.optional(),
+    env_transform: z
+      .object({ key_name: targetPath.optional(), value_name: targetPath.optional() })
+      .strict()
+      .optional(),
+  })
+  .strict();
+const customRulesTarget = z
+  .object({
+    format: z.enum(['markdown', 'mdc']).optional(),
+    file_path: targetPath,
+    project_file_path: targetPath.optional(),
+  })
+  .strict();
+const customEntryTarget = z
+  .object({
+    target_dir: targetPath,
+    project_target_dir: targetPath.optional(),
+    filename_pattern: filenamePattern.optional(),
+    platform_key: targetPath.optional(),
+    frontmatter: frontmatterTransform.optional(),
+  })
+  .strict();
+const customSkillsTarget = z
+  .object({ parent_dir: targetPath, project_parent_dir: targetPath.optional() })
+  .strict();
+const targetSpec = z
+  .object({
+    detect: targetPath.optional(),
+    mcp: customMcpTarget.optional(),
+    rules: customRulesTarget.optional(),
+    commands: customEntryTarget.optional(),
+    agents: customEntryTarget.optional(),
+    skills: customSkillsTarget.optional(),
+  })
+  .strict();
+
+export type CustomTargetSpec = z.infer<typeof targetSpec>;
 
 const layerSchema = z
   .object({
@@ -431,13 +520,54 @@ function knownKeysFor(pathParts: readonly (string | number)[]): readonly string[
       return [];
     case 'ui':
       return ['page_size'];
+    case 'targets':
+      if (pathParts.length === 2) {
+        return ['detect', 'mcp', 'rules', 'commands', 'agents', 'skills'];
+      }
+      if (pathParts.length === 3) {
+        switch (third) {
+          case 'mcp':
+            return [
+              'format',
+              'config_path',
+              'project_config_path',
+              'root_key',
+              'structure',
+              'key_field',
+              'defaults',
+              'env_transform',
+            ];
+          case 'rules':
+            return ['format', 'file_path', 'project_file_path'];
+          case 'commands':
+          case 'agents':
+            return [
+              'target_dir',
+              'project_target_dir',
+              'filename_pattern',
+              'platform_key',
+              'frontmatter',
+            ];
+          case 'skills':
+            return ['parent_dir', 'project_parent_dir'];
+        }
+      }
+      if (pathParts.length === 4 && pathParts[3] === 'frontmatter') {
+        return ['rename', 'omit', 'include', 'join', 'defaults'];
+      }
+      if (pathParts.length === 4 && pathParts[3] === 'env_transform') {
+        return ['key_name', 'value_name'];
+      }
+      return [];
     default:
       return TOP_LEVEL_KEYS;
   }
 }
 
 function describeZodError(filePath: string, error: z.ZodError): ConfigError {
-  const [issue] = error.issues;
+  const issue =
+    error.issues.find((candidate) => candidate.code === z.ZodIssueCode.unrecognized_keys) ??
+    error.issues[0];
   if (issue && issue.code === z.ZodIssueCode.unrecognized_keys) {
     const key = issue.keys[0];
     const where = issue.path.length > 0 ? `${issue.path.join('.')}.${key}` : key;
@@ -669,7 +799,7 @@ export interface ResolvedConfig {
     };
   };
   extensions: Record<string, boolean>;
-  targets: Record<string, Record<string, unknown>>;
+  targets: Record<string, CustomTargetSpec>;
   ui: { pageSize: number };
   project: string | null;
   profile: string | null;
@@ -761,7 +891,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
       ? (merged.extensions as Record<string, boolean>)
       : {},
     targets: isPlainObject(merged.targets)
-      ? (merged.targets as Record<string, Record<string, unknown>>)
+      ? (merged.targets as Record<string, CustomTargetSpec>)
       : {},
     ui: { pageSize: typeof uiValues.page_size === 'number' ? uiValues.page_size : 20 },
     project: projectRoot,
@@ -789,7 +919,7 @@ function sectionEnd(content: string, headerEnd: number): number {
 }
 
 function findSection(content: string, name: string): { start: number; end: number } | null {
-  const pattern = new RegExp(`^[ \\t]*\\[${name.replace('.', '\\.')}\\][ \\t]*(#.*)?$`, 'm');
+  const pattern = new RegExp(`^[ \\t]*\\[${name.replace(/\\./g, '\\.')}\\][ \\t]*(#.*)?$`, 'm');
   const match = pattern.exec(content);
   if (!match) return null;
   const headerEnd = match.index + match[0].length;
@@ -801,12 +931,13 @@ function findSection(content: string, name: string): { start: number; end: numbe
  * assignments never match; strings and comments are honored while scanning
  * for the closing bracket.
  */
-function findEnabledArray(
+function findArray(
   content: string,
-  section: { start: number; end: number }
+  section: { start: number; end: number },
+  key: string
 ): ArraySpan | null {
   const body = content.slice(section.start, section.end);
-  const assignment = /^[ \t]*enabled[ \t]*=[ \t]*\[/m.exec(body);
+  const assignment = new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[`, 'm').exec(body);
   if (!assignment) return null;
   const open = section.start + assignment.index + assignment[0].length - 1;
 
@@ -969,8 +1100,8 @@ function spliceOut(
   const lineEnd = lineEndIdx === -1 ? content.length : lineEndIdx + 1;
   const before = content.slice(lineStart, removeStart);
   const after = content.slice(removeEnd, lineEnd === content.length ? lineEnd : lineEnd - 1);
-  const lineIsOnlyElement =
-    /^[ \t]*$/.test(before) && (/^[ \t]*(#.*)?$/.test(after) || after.trim() === '');
+  // Preserve comments even when the selected element beside them is removed.
+  const lineIsOnlyElement = /^[ \t]*$/.test(before) && after.trim() === '';
   if (lineIsOnlyElement && lineStart > span.open && lineEnd - 1 <= span.close + 1) {
     return content.slice(0, lineStart) + content.slice(lineEnd);
   }
@@ -1058,6 +1189,10 @@ export interface EditSelectionOptions {
   type: ComponentType | 'plugins';
   enable?: readonly string[];
   disable?: readonly string[];
+  replace?: readonly string[];
+  app?: string;
+  profile?: string;
+  project?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -1069,7 +1204,14 @@ export interface EditSelectionOptions {
 export function editSelection(options: EditSelectionOptions): void {
   const env = options.env ?? process.env;
   const homes = resolveHomes(env);
-  const filePath = userConfigPath(homes, env);
+  if (options.profile && options.project) {
+    throw new ConfigError('Selection edit accepts either profile or project scope, not both.');
+  }
+  const filePath = options.project
+    ? projectConfigPath(options.project)
+    : options.profile
+      ? profileConfigPath(homes, options.profile)
+      : userConfigPath(homes, env);
 
   const additionsInput = normalizeIds(options.enable ?? []);
   const removals = new Set(normalizeIds(options.disable ?? []));
@@ -1077,19 +1219,56 @@ export function editSelection(options: EditSelectionOptions): void {
   const original = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
   let content = original;
 
-  const sectionName = options.type;
+  const sectionName = options.app ? `applications.${options.app}.${options.type}` : options.type;
   let section = findSection(content, sectionName);
 
-  const currentValues = (): string[] => {
-    const span = section && findEnabledArray(content, section);
+  const currentValues = (key: string): string[] => {
+    const span = section && findArray(content, section, key);
     if (!span) return [];
     return arrayElements(content, span).map((element) => element.value);
   };
 
-  const existing = new Set(currentValues());
-  const additions = additionsInput.filter((id) => !existing.has(id));
+  const mutate = (key: string, additionsValue: readonly string[], removalsValue: Set<string>) => {
+    const existing = new Set(currentValues(key));
+    const additions = additionsValue.filter((id) => !existing.has(id));
+    if (additions.length > 0) {
+      if (!section) {
+        const separator =
+          content.length === 0 || content.endsWith('\n\n')
+            ? ''
+            : content.endsWith('\n')
+              ? '\n'
+              : '\n\n';
+        content += `${separator}[${sectionName}]\n${key} = ${renderArray(additions)}\n`;
+        section = findSection(content, sectionName);
+      } else {
+        const span = findArray(content, section, key);
+        if (!span) {
+          const insertAt = section.start;
+          content = `${content.slice(0, insertAt)}\n${key} = ${renderArray(additions)}${content.slice(insertAt)}`;
+        } else {
+          content = spliceInto(content, span, additions);
+        }
+        section = findSection(content, sectionName);
+      }
+    }
 
-  if (additions.length > 0) {
+    if (removalsValue.size > 0 && section) {
+      let span = findArray(content, section, key);
+      while (span) {
+        const target = arrayElements(content, span).find((element) =>
+          removalsValue.has(element.value)
+        );
+        if (!target) break;
+        content = spliceOut(content, span, target);
+        section = findSection(content, sectionName);
+        span = section ? findArray(content, section, key) : null;
+      }
+    }
+  };
+
+  if (options.replace !== undefined) {
+    const desired = normalizeIds(options.replace);
     if (!section) {
       const separator =
         content.length === 0 || content.endsWith('\n\n')
@@ -1097,29 +1276,35 @@ export function editSelection(options: EditSelectionOptions): void {
           : content.endsWith('\n')
             ? '\n'
             : '\n\n';
-      content += `${separator}[${sectionName}]\nenabled = ${renderArray(additions)}\n`;
+      content += `${separator}[${sectionName}]\nenabled = ${renderArray(desired)}\n`;
       section = findSection(content, sectionName);
-    } else {
-      const span = findEnabledArray(content, section);
-      if (!span) {
-        const insertAt = section.start;
-        content = `${content.slice(0, insertAt)}\nenabled = ${renderArray(additions)}${content.slice(insertAt)}`;
-      } else {
-        content = spliceInto(content, span, additions);
+    } else if (!findArray(content, section, 'enabled')) {
+      const insertAt = section.start;
+      content = `${content.slice(0, insertAt)}\nenabled = ${renderArray(desired)}${content.slice(insertAt)}`;
+      section = findSection(content, sectionName);
+    }
+    mutate(
+      'enabled',
+      desired,
+      new Set(currentValues('enabled').filter((id) => !desired.includes(id)))
+    );
+    const span = section && findArray(content, section, 'enabled');
+    if (span) {
+      const elements = arrayElements(content, span);
+      for (let index = elements.length - 1; index >= 0; index--) {
+        const element = elements[index];
+        const value = desired[index];
+        if (!element || value === undefined || element.value === value) continue;
+        content = `${content.slice(0, element.start)}${JSON.stringify(value)}${content.slice(element.end)}`;
       }
-      section = findSection(content, sectionName);
     }
-  }
-
-  if (removals.size > 0 && section) {
-    let span = findEnabledArray(content, section);
-    while (span) {
-      const target = arrayElements(content, span).find((element) => removals.has(element.value));
-      if (!target) break;
-      content = spliceOut(content, span, target);
-      section = findSection(content, sectionName);
-      span = section ? findEnabledArray(content, section) : null;
-    }
+  } else if (options.app) {
+    mutate('remove', [], new Set(additionsInput));
+    mutate('add', additionsInput, removals);
+    mutate('add', [], removals);
+    mutate('remove', [...removals], new Set());
+  } else {
+    mutate('enabled', additionsInput, removals);
   }
 
   if (content === original) return;

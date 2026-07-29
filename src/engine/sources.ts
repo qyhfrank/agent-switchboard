@@ -1072,6 +1072,10 @@ export interface NativeMeta {
     ref: string;
     /** Credential-free remote declaration, when the marketplace is a clone. */
     remote?: RemoteSource;
+    /** Bare Codex plugins are wrapped into an ASB-owned local marketplace. */
+    sourcePath?: string;
+    version?: string;
+    managedWrapper?: boolean;
   };
 }
 

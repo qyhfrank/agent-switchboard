@@ -88,6 +88,14 @@ const skillMetadataSchema = z
   })
   .passthrough();
 
+const entryMetadataSchema = z
+  .object({
+    description: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    extras: z.record(z.string(), z.unknown()).optional(),
+  })
+  .passthrough();
+
 /** Frozen 0.4.35 hook grammar: an app-native event map with per-type required fields. */
 const REQUIRED_HANDLER_FIELD = {
   command: 'command',
@@ -133,7 +141,7 @@ const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
 function parseFrontmatterMarkdown(
   source: string,
   schema: z.ZodTypeAny,
-  label: 'Rule' | 'Skill'
+  label: 'Rule' | 'Command' | 'Agent' | 'Skill'
 ): { metadata: RuleMetadata; content: string } {
   const sanitized = source.replace(/^\uFEFF/, '');
   const match = sanitized.match(FRONTMATTER_PATTERN);
@@ -206,50 +214,81 @@ interface ScanTarget {
 }
 
 function scanRulesDirectory(target: ScanTarget, inventory: LibraryInventory): void {
+  scanMarkdownDirectory(target, inventory, 'Rule', ruleMetadataSchema);
+}
+
+function scanEntryDirectory(target: ScanTarget, inventory: LibraryInventory): void {
+  scanMarkdownDirectory(
+    target,
+    inventory,
+    target.type === 'commands' ? 'Command' : 'Agent',
+    entryMetadataSchema
+  );
+}
+
+function scanMarkdownDirectory(
+  target: ScanTarget,
+  inventory: LibraryInventory,
+  label: 'Rule' | 'Command' | 'Agent',
+  schema: z.ZodTypeAny
+): void {
   if (!fs.existsSync(target.directory)) return;
 
   const entries = fs.readdirSync(target.directory, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isFile() || !isMarkdownFile(entry.name)) continue;
-
     const absolutePath = path.join(target.directory, entry.name);
-    const id = target.owner.prefix + componentIdFromFile(entry.name);
-    let raw: string;
-    try {
-      raw = fs.readFileSync(absolutePath, 'utf-8');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      inventory.failed.push({
-        type: target.type,
-        id,
-        source: target.owner.source,
-        path: absolutePath,
-        error: message,
-      });
-      continue;
-    }
-
-    try {
-      const parsed = parseRuleMarkdown(raw);
-      inventory.components.push({
-        type: target.type,
-        id,
-        source: target.owner.source,
-        path: absolutePath,
-        content: parsed.content,
-        metadata: parsed.metadata,
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      inventory.failed.push({
-        type: target.type,
-        id,
-        source: target.owner.source,
-        path: absolutePath,
-        error: message,
-      });
-    }
+    scanMarkdownFile(target, absolutePath, inventory, label, schema);
   }
+}
+
+function scanMarkdownFile(
+  target: ScanTarget,
+  absolutePath: string,
+  inventory: LibraryInventory,
+  label: 'Rule' | 'Command' | 'Agent',
+  schema: z.ZodTypeAny
+): void {
+  const id = target.owner.prefix + componentIdFromFile(absolutePath);
+  try {
+    const source = fs.readFileSync(absolutePath, 'utf-8');
+    const parsed =
+      label === 'Rule'
+        ? parseRuleMarkdown(source)
+        : parseFrontmatterMarkdown(source, schema, label);
+    inventory.components.push({
+      type: target.type,
+      id,
+      source: target.owner.source,
+      path: absolutePath,
+      content: parsed.content,
+      metadata: parsed.metadata,
+    });
+  } catch (error) {
+    inventory.failed.push({
+      type: target.type,
+      id,
+      source: target.owner.source,
+      path: absolutePath,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+function scanEntryPath(target: ScanTarget, inventory: LibraryInventory): void {
+  if (!fs.existsSync(target.directory)) return;
+  if (fs.statSync(target.directory).isDirectory()) {
+    scanEntryDirectory(target, inventory);
+    return;
+  }
+  if (!isMarkdownFile(target.directory)) return;
+  scanMarkdownFile(
+    target,
+    target.directory,
+    inventory,
+    target.type === 'commands' ? 'Command' : 'Agent',
+    entryMetadataSchema
+  );
 }
 
 const SKILL_FILE = 'SKILL.md';
@@ -531,6 +570,28 @@ function scanPlugin(
     scanRulesDirectory({ type: 'rules', directory: path.join(root, 'rules'), owner }, inventory);
   }
 
+  for (const type of ['commands', 'agents'] as const) {
+    if (!wanted.has(type)) continue;
+    const custom = plugin.customPaths?.[type];
+    if (custom) {
+      for (const relative of custom) {
+        try {
+          scanEntryPath({ type, directory: pluginComponentPath(root, relative), owner }, inventory);
+        } catch (error) {
+          inventory.failed.push({
+            type,
+            id: plugin.id,
+            source: owner.source,
+            path: root,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    } else {
+      scanEntryDirectory({ type, directory: path.join(root, type), owner }, inventory);
+    }
+  }
+
   if (wanted.has('skills')) {
     const custom = plugin.customPaths?.skills;
     if (custom) {
@@ -666,12 +727,26 @@ export interface ScanOptions {
 
 export function scanLibrary(opts: ScanOptions = {}): LibraryInventory {
   const homes = resolveHomes(opts.env ?? process.env);
-  const wanted = new Set<ComponentType>(opts.types ?? ['rules', 'skills', 'hooks', 'mcp']);
+  const wanted = new Set<ComponentType>(
+    opts.types ?? ['rules', 'commands', 'agents', 'skills', 'hooks', 'mcp']
+  );
   const inventory: LibraryInventory = { components: [], failed: [], duplicates: [] };
 
   if (wanted.has('rules')) {
     const directory = path.join(homes.asbHome, 'rules');
     scanRulesDirectory({ type: 'rules', directory, owner: LIBRARY }, inventory);
+  }
+  if (wanted.has('commands')) {
+    scanEntryDirectory(
+      { type: 'commands', directory: path.join(homes.asbHome, 'commands'), owner: LIBRARY },
+      inventory
+    );
+  }
+  if (wanted.has('agents')) {
+    scanEntryDirectory(
+      { type: 'agents', directory: path.join(homes.asbHome, 'agents'), owner: LIBRARY },
+      inventory
+    );
   }
   if (wanted.has('skills')) {
     scanSkillsDirectory(path.join(homes.asbHome, 'skills'), LIBRARY, inventory);

@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   AGENTS_SKILLS_UNION,
   type AppRow,
+  type EntryTargetRow,
   type HooksTargetRow,
   type McpTargetRow,
 } from './apps.js';
@@ -25,6 +26,9 @@ import {
   composeRules,
   hashContent,
   type KeysEdit,
+  type KeysFormat,
+  keyedArrayProblem,
+  keyedArraySegment,
   sliceHash,
   type TargetFile,
   targetModeMatchesSourceExecutableBits,
@@ -93,11 +97,29 @@ export interface CapturedMcpHost {
   escapes?: boolean;
 }
 
+export interface CapturedLegacyEntry {
+  type: 'commands' | 'agents' | 'skills';
+  id: string;
+  path: string;
+  currentPath: string;
+  root: string;
+  bundle: boolean;
+}
+
+export interface CapturedLegacyScan {
+  type: CapturedLegacyEntry['type'];
+  path: string;
+  entries: CapturedLegacyEntry[];
+  error?: string;
+}
+
 export interface SyncCapture {
   /** Detection probe results per app id. */
   installed: Record<string, boolean>;
   /** Current bytes per absolute target path (null when unreadable). */
   targets: Record<string, CapturedTarget>;
+  /** Rules path resolved once per app during capture (dynamic rows included). */
+  rulePaths: Record<string, string>;
   /** Live bundle state per absolute bundle directory. */
   bundles: Record<string, CapturedBundle>;
   /** Non-dot child directory names per managed skills parent. */
@@ -106,6 +128,8 @@ export interface SyncCapture {
   hooks: Record<string, CapturedHookApp>;
   /** MCP host document per app id. */
   mcp: Record<string, CapturedMcpHost>;
+  /** Recognized OpenCode singular-layout entries and any scan failure. */
+  legacy: CapturedLegacyScan[];
 }
 
 export type LedgerMutation = { op: 'put'; entry: LedgerEntry } | { op: 'delete'; key: string };
@@ -130,6 +154,8 @@ export interface Action {
    * the record that authorizes deleting it may not claim it either.
    */
   requires?: string[];
+  /** Target-path dependencies used when retiring a dynamically moved row. */
+  requiresPaths?: string[];
   /**
    * Own-dir payload: files to reconcile and the recorded rels no longer
    * desired. Present ⇒ the executor treats path as a bundle directory. For
@@ -161,6 +187,8 @@ export interface Action {
    * there is no path, hash, or ledger entry — the commands are the apply.
    */
   native?: NativeWork;
+  /** Structured edits retained so cells sharing one host can merge once. */
+  keyEdits?: { format: KeysFormat; edits: KeysEdit[]; baseContent: string };
 }
 
 export interface PlanInput {
@@ -220,6 +248,7 @@ function rulesResolver(
 export function planRules(input: PlanInput): Action[] {
   const { config, inventory, ledger, capture, table, now } = input;
   const actions: Action[] = [];
+  const staleActions: Action[] = [];
 
   // Library-level failures always surface, selected or not (containment: the
   // failed entry errors, everything else proceeds).
@@ -301,14 +330,63 @@ export function planRules(input: PlanInput): Action[] {
 
     if (!row.rules) continue;
 
-    const targetPath = row.rules.path(config.homes);
-    const root = row.rules.root(config.homes);
+    const targetPath = capture.rulePaths[appId] ?? row.rules.path(config.homes);
+    const root = row.rules.root(config.homes, targetPath);
     const current = capture.targets[targetPath] ?? { exists: false, content: null };
     const recorded = ledgerByKey.get(
       ledgerKey({ app: appId, type: 'rules', id: null, path: targetPath })
     );
 
     const { present, missing, content } = resolveFor(appId);
+
+    for (const stale of ledger.entries) {
+      if (
+        stale.app !== appId ||
+        stale.type !== 'rules' ||
+        stale.id !== null ||
+        stale.path === targetPath
+      ) {
+        continue;
+      }
+      const old = capture.targets[stale.path] ?? { exists: false, content: null };
+      const oldHash = old.content !== null ? hashContent(old.content) : null;
+      const drop: Action['ledger'] = { op: 'delete', key: ledgerKey(stale) };
+      const base = {
+        app: appId,
+        type: 'rules',
+        id: null,
+        path: stale.path,
+        ledger: drop,
+      };
+      if (!old.exists) {
+        staleActions.push({
+          ...base,
+          op: 'none',
+          outcome: 'removed',
+          detail: 'already-absent',
+        });
+      } else if (oldHash === stale.hash && stale.provenance !== 'convention') {
+        staleActions.push({
+          ...base,
+          op: 'remove',
+          outcome: 'removed',
+          root: row.rules.root(config.homes, stale.path),
+          expectedHash: oldHash,
+          ...(present.length + missing.length > 0 ? { requiresPaths: [targetPath] } : {}),
+        });
+      } else {
+        staleActions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: stale.provenance === 'convention' ? 'unproven' : 'modified',
+          reason:
+            stale.provenance === 'convention'
+              ? 'previous dynamic target was adopted by convention; preserved'
+              : 'previous dynamic target changed since asb wrote it; preserved',
+        });
+      }
+    }
 
     // A missing member blocks that app's aggregate slice: rendering without
     // it would silently drop content the user selected for this app.
@@ -326,7 +404,7 @@ export function planRules(input: PlanInput): Action[] {
       continue;
     }
 
-    const desired = content.length > 0 ? row.rules.render(content) : '';
+    const desired = content.length > 0 ? row.rules.render(content, targetPath) : '';
     const desiredHash = hashContent(desired);
     const currentHash = current.content !== null ? hashContent(current.content) : null;
 
@@ -541,7 +619,7 @@ export function planRules(input: PlanInput): Action[] {
 
   // Escaping targets are decided here, from the capture, so dry-run and the
   // real run report the identical blocked entry; the executor re-checks live.
-  return actions.map((action) => {
+  return [...actions, ...staleActions].map((action) => {
     if (
       (action.op === 'write' || action.op === 'remove') &&
       action.path !== null &&
@@ -1001,6 +1079,623 @@ export function planSkills(input: PlanInput): Action[] {
     }
     return action;
   });
+}
+
+// ---------------------------------------------------------------------------
+// Commands and agents: one owned file per selected component
+// ---------------------------------------------------------------------------
+
+type EntryType = 'commands' | 'agents';
+
+function removeEntryRecord(
+  app: string,
+  type: EntryType,
+  recorded: LedgerEntry,
+  current: CapturedTarget,
+  root: string
+): Action {
+  const base = { app, type, id: recorded.id, path: recorded.path };
+  const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
+  if (!current.exists) {
+    return { ...base, op: 'none', outcome: 'removed', detail: 'already-absent', ledger: drop };
+  }
+  if (current.escapes === true) {
+    return {
+      ...base,
+      op: 'none',
+      outcome: 'blocked',
+      detail: 'path-escape',
+      reason: `parent directory of ${recorded.path} resolves outside the app root; not touching it`,
+    };
+  }
+  if (recorded.provenance === 'convention') {
+    return {
+      ...base,
+      op: 'none',
+      outcome: 'left-behind',
+      detail: 'unproven',
+      reason: 'file was adopted by convention for update only; preserved',
+      ledger: drop,
+    };
+  }
+  const currentHash = current.content === null ? null : hashContent(current.content);
+  if (currentHash !== recorded.hash) {
+    return {
+      ...base,
+      op: 'none',
+      outcome: 'left-behind',
+      detail: 'modified',
+      reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash?.slice(0, 12) ?? 'unreadable'}); delete it yourself or re-enable it`,
+      ledger: drop,
+    };
+  }
+  return {
+    ...base,
+    op: 'remove',
+    outcome: 'removed',
+    root,
+    expectedHash: currentHash,
+    ledger: drop,
+  };
+}
+
+interface ConfigCandidate {
+  component: Component;
+  filename: string;
+  rolePath: string;
+}
+
+function tableCanSplice(captured: CapturedMcpHost, keyPath: readonly string[]): string | null {
+  const name = tomlHeaderName(keyPath);
+  const nested = captured.tables.find(
+    (parts) =>
+      parts.length > keyPath.length && keyPath.every((part, index) => parts[index] === part)
+  );
+  if (nested) return `[${tomlHeaderName(nested)}] nests under ${name} in ${captured.path}`;
+  const exact = captured.tables.some(
+    (parts) =>
+      parts.length === keyPath.length && keyPath.every((part, index) => parts[index] === part)
+  );
+  return exact ? null : `${name} is not written as a table in ${captured.path}`;
+}
+
+function planEntryConfig(
+  input: PlanInput,
+  app: string,
+  target: EntryTargetRow,
+  candidates: readonly ConfigCandidate[],
+  protectedIds: ReadonlySet<string>
+): Action[] {
+  const spec = target.config;
+  if (!spec) return [];
+  const { config, capture, ledger, now } = input;
+  const captured = capture.mcp[app];
+  const base = { app, type: 'agents', id: null, path: spec.path(config.homes) };
+  if (!captured || captured.path !== base.path) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'capture-error',
+        reason: 'structured config host was not captured',
+      },
+    ];
+  }
+  if (captured.escapes === true) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'path-escape',
+        reason: `parent directory of ${captured.path} resolves outside the app root; not touching it`,
+      },
+    ];
+  }
+  if (captured.root === null) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: `cannot read ${path.basename(captured.path)}, agent roles not merged: ${captured.error ?? 'document root must be an object'}`,
+      },
+    ];
+  }
+
+  const actions: Action[] = [];
+  const edits: KeysEdit[] = [];
+  const mutations: LedgerMutation[] = [];
+  const desiredKeys = new Set<string>();
+  const requiredPaths = new Set<string>();
+  const addSlice = (
+    id: string | null,
+    keyPath: string[],
+    value: unknown,
+    text: string | undefined,
+    rolePath?: string
+  ): void => {
+    const recordKey = ledgerKey({ app, type: 'agents', id, path: captured.path });
+    desiredKeys.add(recordKey);
+    if (rolePath) requiredPaths.add(rolePath);
+    const recorded = ledger.entries.find((entry) => ledgerKey(entry) === recordKey) ?? null;
+    const current = valueAtKeyPath(captured.root, keyPath);
+    const sliceBase = { app, type: 'agents', id, path: captured.path };
+    const put = (provenance: Provenance): LedgerMutation => ({
+      op: 'put',
+      entry: {
+        app,
+        type: 'agents',
+        id,
+        path: captured.path,
+        shape: 'keys',
+        hash: sliceHash(value),
+        keys: keyPath,
+        provenance,
+        updatedAt: now,
+      },
+    });
+    if (current === undefined) {
+      edits.push({ keyPath, value, ...(text ? { text } : { scalar: true as const }) });
+      mutations.push(put('written'));
+      return;
+    }
+    const unspliceable = text ? tableCanSplice(captured, keyPath) : null;
+    if (unspliceable) {
+      actions.push({
+        ...sliceBase,
+        op: 'none',
+        outcome: recorded ? 'conflict' : 'blocked',
+        detail: recorded ? undefined : 'foreign',
+        reason: `${unspliceable}; move it or remove it by hand`,
+      });
+      return;
+    }
+    const currentHash = sliceHash(current);
+    if (recorded) {
+      if (currentHash !== recorded.hash) {
+        actions.push({
+          ...sliceBase,
+          op: 'none',
+          outcome: 'conflict',
+          reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
+        });
+      } else if (currentHash === sliceHash(value)) {
+        actions.push({ ...sliceBase, op: 'none', outcome: 'unchanged' });
+      } else {
+        edits.push({ keyPath, value, ...(text ? { text } : { scalar: true as const }) });
+        mutations.push(put('written'));
+      }
+      return;
+    }
+    if (currentHash === sliceHash(value)) {
+      actions.push({
+        ...sliceBase,
+        op: 'adopt',
+        outcome: 'adopted',
+        detail: 'identity',
+        ledger: put('identity'),
+        ...(rolePath ? { requiresPaths: [rolePath] } : {}),
+      });
+    } else {
+      actions.push({
+        ...sliceBase,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'foreign',
+        reason: `${tomlHeaderName(keyPath)} is already in ${captured.path} and asb never wrote it`,
+      });
+    }
+  };
+
+  for (const candidate of candidates) {
+    const slice = spec.component(candidate.component, candidate.filename);
+    addSlice(candidate.component.id, slice.keyPath, slice.value, slice.text, candidate.rolePath);
+  }
+  if (candidates.length > 0 && spec.activation) {
+    addSlice(null, spec.activation.keyPath, spec.activation.value, undefined);
+  }
+
+  for (const recorded of ledger.entries) {
+    if (
+      recorded.app !== app ||
+      recorded.type !== 'agents' ||
+      recorded.path !== captured.path ||
+      recorded.shape !== 'keys' ||
+      desiredKeys.has(ledgerKey(recorded)) ||
+      (recorded.id !== null && protectedIds.has(recorded.id))
+    )
+      continue;
+    const keyPath = recorded.keys as string[];
+    const current = valueAtKeyPath(captured.root, keyPath);
+    const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
+    if (current === undefined) {
+      actions.push({
+        app,
+        type: 'agents',
+        id: recorded.id,
+        path: captured.path,
+        op: 'none',
+        outcome: 'removed',
+        detail: 'already-absent',
+        ledger: drop,
+      });
+    } else if (sliceHash(current) !== recorded.hash) {
+      actions.push({
+        app,
+        type: 'agents',
+        id: recorded.id,
+        path: captured.path,
+        op: 'none',
+        outcome: 'left-behind',
+        detail: 'modified',
+        reason: 'agent config key changed since asb wrote it; preserved',
+        ledger: drop,
+      });
+    } else {
+      edits.push({
+        keyPath,
+        remove: true,
+        ...(recorded.id === null ? { scalar: true as const } : {}),
+      });
+      mutations.push(drop);
+    }
+  }
+
+  if (edits.length === 0) return actions;
+  let content: string;
+  try {
+    content = applyKeysEdits(captured.content ?? '', spec.format, edits);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    actions.push({ ...base, op: 'none', outcome: 'failed', detail: 'parse-error', reason });
+    return actions;
+  }
+  actions.push({
+    ...base,
+    op: 'write',
+    outcome: 'written',
+    detail: captured.exists ? 'merged' : 'created',
+    content,
+    root: spec.root(config.homes),
+    expectedHash: captured.content === null ? null : hashContent(captured.content),
+    ledger: mutations,
+    requiresPaths: [...requiredPaths],
+    keyEdits: { format: spec.format, edits, baseContent: captured.content ?? '' },
+  });
+  return actions;
+}
+
+function planEntries(input: PlanInput, type: EntryType): Action[] {
+  const { config, inventory, ledger, capture, table, now } = input;
+  const actions: Action[] = [];
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === type)
+      .map((component) => [component.id, component])
+  );
+  const failedIds = new Set(
+    inventory.failed.filter((failure) => failure.type === type).map((failure) => failure.id)
+  );
+  const missing = new Set<string>();
+  for (const app of config.apps.enabled) {
+    for (const id of effectiveSelection(config, app, type)) {
+      if (!byId.has(id) && !failedIds.has(id)) missing.add(id);
+    }
+  }
+  for (const id of missing) {
+    actions.push({
+      app: null,
+      type,
+      id,
+      path: null,
+      op: 'none',
+      outcome: 'missing',
+      reason: `enabled but not in the library (expected ${config.homes.asbHome}/${type}/${id}.md)`,
+    });
+  }
+
+  const assumeInstalled = new Set(config.apps.assumeInstalled);
+  for (const app of config.apps.enabled) {
+    const target = table.find((row) => row.id === app)?.[type];
+    if (!target || (capture.installed[app] !== true && !assumeInstalled.has(app))) continue;
+    const selected = effectiveSelection(config, app, type);
+    const protectedIds = new Set(selected.filter((id) => !byId.has(id) || failedIds.has(id)));
+    const filenames = new Map<string, string[]>();
+    for (const id of selected) {
+      if (!byId.has(id)) continue;
+      const filename = target.filename(id);
+      filenames.set(filename, [...(filenames.get(filename) ?? []), id]);
+    }
+    const collisions = new Set<string>();
+    for (const [filename, ids] of filenames) {
+      if (ids.length < 2) continue;
+      for (const id of ids) {
+        collisions.add(id);
+        protectedIds.add(id);
+        actions.push({
+          app,
+          type,
+          id,
+          path: path.join(target.dir(config.homes), filename),
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'filename-collision',
+          reason: `${ids.map((value) => `"${value}"`).join(' and ')} both map to ${filename}; rename one component`,
+        });
+      }
+    }
+
+    const desiredRecords = new Set<string>();
+    const configCandidates: ConfigCandidate[] = [];
+    for (const id of selected) {
+      const component = byId.get(id);
+      if (!component || collisions.has(id)) continue;
+      const filename = target.filename(id);
+      const targetPath = path.join(target.dir(config.homes), filename);
+      let desired: string | null;
+      try {
+        desired = target.render(component);
+      } catch (error) {
+        protectedIds.add(id);
+        actions.push({
+          app,
+          type,
+          id,
+          path: targetPath,
+          op: 'none',
+          outcome: 'failed',
+          detail: 'render-error',
+          reason: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+      if (desired === null) {
+        actions.push({
+          app,
+          type,
+          id,
+          path: targetPath,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'no-codex-role',
+          reason: 'selected agent has no non-empty extras.codex role',
+        });
+        continue;
+      }
+      const recordKey = ledgerKey({ app, type, id, path: targetPath });
+      desiredRecords.add(recordKey);
+      const recorded = ledger.entries.find((entry) => ledgerKey(entry) === recordKey) ?? null;
+      const current = capture.targets[targetPath] ?? { exists: false, content: null };
+      const base = { app, type, id, path: targetPath };
+      const desiredHash = hashContent(desired);
+      let roleReady = false;
+      const put = (provenance: Provenance): LedgerMutation => ({
+        op: 'put',
+        entry: {
+          app,
+          type,
+          id,
+          path: targetPath,
+          shape: 'own-file',
+          hash: desiredHash,
+          provenance,
+          updatedAt: now,
+        },
+      });
+      if (current.escapes === true) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'blocked',
+          detail: 'path-escape',
+          reason: `parent directory of ${targetPath} resolves outside the app root; not touching it`,
+        });
+        protectedIds.add(id);
+        continue;
+      }
+      if (!current.exists) {
+        roleReady = true;
+        actions.push({
+          ...base,
+          op: 'write',
+          outcome: 'written',
+          detail: 'created',
+          content: desired,
+          root: target.root(config.homes),
+          expectedHash: null,
+          ledger: put('written'),
+        });
+      } else if (current.content === null) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: recorded ? 'conflict' : 'blocked',
+          detail: recorded ? undefined : 'foreign',
+          reason: 'target exists but cannot be read; not touching it',
+        });
+        protectedIds.add(id);
+        continue;
+      } else {
+        const currentHash = hashContent(current.content);
+        if (recorded && currentHash !== recorded.hash) {
+          actions.push({
+            ...base,
+            op: 'none',
+            outcome: 'conflict',
+            reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
+          });
+          protectedIds.add(id);
+          continue;
+        }
+        if (currentHash === desiredHash) {
+          roleReady = true;
+          actions.push(
+            recorded
+              ? { ...base, op: 'none', outcome: 'unchanged' }
+              : {
+                  ...base,
+                  op: 'adopt',
+                  outcome: 'adopted',
+                  detail: 'identity',
+                  ledger: put('identity'),
+                }
+          );
+        } else if (recorded) {
+          roleReady = true;
+          actions.push({
+            ...base,
+            op: 'write',
+            outcome: 'written',
+            detail: 'updated',
+            content: desired,
+            root: target.root(config.homes),
+            expectedHash: currentHash,
+            ledger: put('written'),
+          });
+        } else {
+          actions.push({
+            ...base,
+            op: 'adopt',
+            outcome: 'adopted',
+            detail: 'convention',
+            reason: 'existing filename adopted for update; the next sync writes desired content',
+            ledger: {
+              op: 'put',
+              entry: {
+                app,
+                type,
+                id,
+                path: targetPath,
+                shape: 'own-file',
+                hash: currentHash,
+                provenance: 'convention',
+                updatedAt: now,
+              },
+            },
+          });
+        }
+      }
+      if (roleReady) configCandidates.push({ component, filename, rolePath: targetPath });
+    }
+
+    for (const recorded of ledger.entries) {
+      if (recorded.app !== app || recorded.type !== type || recorded.shape !== 'own-file') continue;
+      if (
+        desiredRecords.has(ledgerKey(recorded)) ||
+        (recorded.id !== null && protectedIds.has(recorded.id))
+      )
+        continue;
+      const current = capture.targets[recorded.path] ?? { exists: false, content: null };
+      actions.push(removeEntryRecord(app, type, recorded, current, target.root(config.homes)));
+    }
+
+    const selectedSet = new Set(selected);
+    for (const component of byId.values()) {
+      if (selectedSet.has(component.id)) continue;
+      const targetPath = path.join(target.dir(config.homes), target.filename(component.id));
+      const current = capture.targets[targetPath];
+      if (!current?.exists) continue;
+      const recorded = ledger.entries.some(
+        (entry) => ledgerKey(entry) === ledgerKey({ app, type, id: component.id, path: targetPath })
+      );
+      if (!recorded)
+        actions.push({
+          app,
+          type,
+          id: component.id,
+          path: targetPath,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
+        });
+    }
+    actions.push(...planEntryConfig(input, app, target, configCandidates, protectedIds));
+  }
+  return actions;
+}
+
+export function planCommands(input: PlanInput): Action[] {
+  return planEntries(input, 'commands');
+}
+
+export function planAgents(input: PlanInput): Action[] {
+  return planEntries(input, 'agents');
+}
+
+/** Retire recognized OpenCode singular-layout entries after replacements land. */
+export function planLegacyOpencode(input: PlanInput): Action[] {
+  const { config, capture } = input;
+  const actions: Action[] = [];
+  for (const scan of capture.legacy) {
+    if (scan.error) {
+      actions.push({
+        app: 'opencode',
+        type: scan.type,
+        id: null,
+        path: scan.path,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'scan-error',
+        reason: `cannot scan legacy ${scan.type === 'commands' ? 'command' : scan.type === 'agents' ? 'agent' : 'skill'} directory: ${scan.error}`,
+      });
+      continue;
+    }
+    const selected = new Set(effectiveSelection(config, 'opencode', scan.type));
+    for (const entry of scan.entries) {
+      const replacement = selected.has(entry.id);
+      const base = { app: 'opencode', type: entry.type, id: entry.id, path: entry.path };
+      if (entry.bundle) {
+        const captured = capture.bundles[entry.path];
+        if (!captured?.exists || captured.files === null || captured.fingerprint === null) {
+          actions.push({
+            ...base,
+            op: 'none',
+            outcome: 'left-behind',
+            detail: 'unprovable',
+            reason: 'legacy bundle cannot be proven safe to remove',
+          });
+          continue;
+        }
+        actions.push({
+          ...base,
+          op: 'remove',
+          outcome: 'removed',
+          detail: replacement ? 'legacy-duplicate' : 'legacy-orphan',
+          root: entry.root,
+          expectedHash: captured.fingerprint,
+          bundle: { files: [], stale: captured.files.map((file) => file.rel) },
+          ...(replacement ? { requiresPaths: [entry.currentPath] } : {}),
+        });
+      } else {
+        const captured = capture.targets[entry.path];
+        if (!captured?.exists || captured.content === null) {
+          actions.push({
+            ...base,
+            op: 'none',
+            outcome: 'left-behind',
+            detail: 'unprovable',
+            reason: 'legacy file cannot be read safely',
+          });
+          continue;
+        }
+        actions.push({
+          ...base,
+          op: 'remove',
+          outcome: 'removed',
+          detail: replacement ? 'legacy-duplicate' : 'legacy-orphan',
+          root: entry.root,
+          expectedHash: hashContent(captured.content),
+          ...(replacement ? { requiresPaths: [entry.currentPath] } : {}),
+        });
+      }
+    }
+  }
+  return actions;
 }
 
 // ---------------------------------------------------------------------------
@@ -1510,17 +2205,21 @@ function planMcpHost(
   now: string
 ): McpHostPlan {
   const slices: McpSlice[] = [];
-  const keyPathFor = (id: string): string[] => [
-    row.rootKey,
-    row.sanitize ? sanitizeMcpName(id) : id,
-  ];
+  const diskIdFor = (id: string): string => (row.sanitize ? sanitizeMcpName(id) : id);
+  const identityField = row.keyField ?? 'name';
+  const keyPathFor = (id: string): string[] => {
+    const diskId = diskIdFor(id);
+    return row.structure === 'keyed-array'
+      ? [keyedArraySegment(row.rootKey, identityField, diskId)]
+      : [row.rootKey, diskId];
+  };
 
   // Two ids that sanitize to one key would take turns owning it and silently
   // erase each other; 0.4 threw, and the run reports it as this app's failure.
   const claimed = new Map<string, string>();
   for (const id of selected) {
     if (!byId.has(id)) continue;
-    const key = keyPathFor(id)[1];
+    const key = diskIdFor(id);
     const first = claimed.get(key);
     if (first !== undefined && first !== id) {
       return {
@@ -1539,13 +2238,22 @@ function planMcpHost(
   // absent server key, so every slice would take the create branch and hand
   // the writer a parent it cannot index; the host fails on its own instead.
   const container = valueAtKeyPath(captured.root, [row.rootKey]);
-  if (container !== undefined && !isPlainObject(container)) {
+  const keyedProblem =
+    row.structure === 'keyed-array' && captured.root !== null
+      ? keyedArrayProblem(captured.root, row.rootKey, identityField)
+      : null;
+  if (
+    keyedProblem !== null ||
+    (row.structure !== 'keyed-array' && container !== undefined && !isPlainObject(container))
+  ) {
     return {
       slices,
       failure: {
         outcome: 'failed',
         detail: 'parse-error',
-        reason: `cannot use ${path.basename(captured.path)}, MCP servers not merged: ${row.rootKey} is ${describeValue(container)}, not a table of servers`,
+        reason: `cannot use ${path.basename(captured.path)}, MCP servers not merged: ${
+          keyedProblem ?? `${row.rootKey} is ${describeValue(container)}, not a table of servers`
+        }`,
       },
     };
   }
@@ -1592,8 +2300,8 @@ function planMcpHost(
       ledger.entries.find(
         (entry) => ledgerKey(entry) === ledgerKey({ app, type: 'mcp', id, path: captured.path })
       ) ?? null;
-    const value = row.dialect(component.server);
-    if (value === null) {
+    const dialectValue = row.dialect(component.server);
+    if (dialectValue === null) {
       slices.push({
         id,
         keyPath,
@@ -1607,6 +2315,10 @@ function planMcpHost(
       continue;
     }
     desiredIds.add(id);
+    const value =
+      row.structure === 'keyed-array'
+        ? { ...dialectValue, [identityField]: diskIdFor(id) }
+        : dialectValue;
 
     const current = valueAtKeyPath(captured.root, keyPath);
     const base = { id, keyPath, desired: value, current, recorded };
@@ -1675,7 +2387,7 @@ function planMcpHost(
       ...base,
       outcome: 'blocked',
       detail: 'foreign',
-      reason: `${keyPath[1]} is already in ${captured.path} and asb never wrote it; rename yours, or delete that entry to let asb own the key`,
+      reason: `${diskIdFor(id)} is already in ${captured.path} and asb never wrote it; rename yours, or delete that entry to let asb own the key`,
     });
   }
 
@@ -1855,7 +2567,20 @@ export function planMcp(input: PlanInput): Action[] {
 
     if (edits.length === 0) continue;
 
-    const content = applyKeysEdits(captured.content ?? '', row.format, edits);
+    let content: string;
+    try {
+      content = applyKeysEdits(captured.content ?? '', row.format, edits);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: reason.includes('unmanaged YAML') ? 'conflict' : 'failed',
+        detail: 'parse-error',
+        reason,
+      });
+      continue;
+    }
     const summary = [
       wrote.length > 0 ? `wrote ${wrote.join(', ')}` : '',
       retired.length > 0 ? `retired ${retired.join(', ')}` : '',
@@ -1877,10 +2602,82 @@ export function planMcp(input: PlanInput): Action[] {
       root: row.root(config.homes),
       expectedHash: captured.content !== null ? hashContent(captured.content) : null,
       ledger: mutations,
+      keyEdits: { format: row.format, edits, baseContent: captured.content ?? '' },
     });
   }
 
   return actions;
+}
+
+/** Merge cells editing the same structured host after CLI action filters. */
+export function groupKeyActions(actions: readonly Action[]): Action[] {
+  const grouped: Action[] = [];
+  const byPath = new Map<string, number>();
+  for (const action of actions) {
+    if (action.op !== 'write' || !action.path || !action.keyEdits) {
+      grouped.push(action);
+      continue;
+    }
+    const index = byPath.get(action.path);
+    if (index === undefined) {
+      byPath.set(action.path, grouped.length);
+      grouped.push({ ...action });
+      continue;
+    }
+    const first = grouped[index];
+    if (
+      !first.keyEdits ||
+      first.keyEdits.format !== action.keyEdits.format ||
+      first.keyEdits.baseContent !== action.keyEdits.baseContent ||
+      first.root !== action.root ||
+      first.expectedHash !== action.expectedHash
+    ) {
+      grouped.push({
+        ...action,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'capture-error',
+        reason: 'structured cells captured incompatible views of one host',
+        ledger: undefined,
+        keyEdits: undefined,
+      });
+      continue;
+    }
+    const edits = [...first.keyEdits.edits, ...action.keyEdits.edits];
+    let content: string;
+    try {
+      content = applyKeysEdits(first.keyEdits.baseContent, first.keyEdits.format, edits);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      grouped[index] = {
+        ...first,
+        op: 'none',
+        outcome: reason.includes('unmanaged YAML') ? 'conflict' : 'failed',
+        detail: 'parse-error',
+        reason,
+        ledger: undefined,
+        keyEdits: undefined,
+      };
+      continue;
+    }
+    const mutations = [
+      ...(first.ledger ? (Array.isArray(first.ledger) ? first.ledger : [first.ledger]) : []),
+      ...(action.ledger ? (Array.isArray(action.ledger) ? action.ledger : [action.ledger]) : []),
+    ];
+    grouped[index] = {
+      ...first,
+      type: first.type === action.type ? first.type : null,
+      id: null,
+      reason: [first.reason, action.reason].filter(Boolean).join('; ') || undefined,
+      content,
+      ledger: mutations,
+      requiresPaths: [
+        ...new Set([...(first.requiresPaths ?? []), ...(action.requiresPaths ?? [])]),
+      ],
+      keyEdits: { ...first.keyEdits, edits },
+    };
+  }
+  return grouped;
 }
 
 /**
@@ -1932,6 +2729,7 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
         desiredHash: slice.desired === null ? null : sliceHash(slice.desired),
         desired: slice.desired === null ? null : `${JSON.stringify(slice.desired, null, 2)}\n`,
         components: component ? [{ id: component.id, path: component.path }] : [],
+        sources: component ? componentSources([component]) : [],
       };
       if (slice.detail !== undefined) explained.detail = slice.detail;
       if (slice.reason !== undefined) explained.reason = slice.reason;
@@ -2117,6 +2915,16 @@ export interface ExplainSlice {
   desired: string | null;
   /** Library components composing the slice. */
   components: { id: string; path: string }[];
+  /** Explicit source attribution for those components. */
+  sources?: { id: string; source: string; path: string }[];
+}
+
+function componentSources(components: readonly Component[]): NonNullable<ExplainSlice['sources']> {
+  return components.map((component) => ({
+    id: component.id,
+    source: component.source,
+    path: component.path,
+  }));
 }
 
 /** Library-level planner rows (app null) carried into an explain view. */
@@ -2189,6 +2997,7 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
       desiredHash: null,
       desired: null,
       components: component ? [{ id: component.id, path: component.path }] : [],
+      sources: component ? componentSources([component]) : [],
     };
     if (action.detail !== undefined) slice.detail = action.detail;
     slices.push(slice);
@@ -2249,6 +3058,7 @@ export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
       desiredHash: null,
       desired: null,
       components: component ? [{ id: component.id, path: component.path }] : [],
+      sources: component ? componentSources([component]) : [],
     };
     if (action.detail !== undefined) slice.detail = action.detail;
     if (action.reason !== undefined) slice.reason = action.reason;
@@ -2284,7 +3094,7 @@ export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
     const row = table.find((candidate) => candidate.id === action.app);
     const desired =
       action.path !== null && row?.rules && missing.length === 0 && content.length > 0
-        ? row.rules.render(content)
+        ? row.rules.render(content, action.path)
         : null;
     const recorded =
       action.path !== null
@@ -2304,6 +3114,7 @@ export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
       desiredHash: desired !== null ? hashContent(desired) : null,
       desired,
       components: present.map((component) => ({ id: component.id, path: component.path })),
+      sources: componentSources(present),
     };
     if (action.detail !== undefined) slice.detail = action.detail;
     slices.push(slice);

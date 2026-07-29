@@ -151,6 +151,9 @@ export function renderExplain(slices: readonly ExplainSlice[], target: string): 
         lines.push(`    ${component.id}  ${component.path}`);
       }
     }
+    for (const source of slice.sources ?? []) {
+      lines.push(`  source: ${source.id} <- ${source.source} (${source.path})`);
+    }
   }
 
   const withContent = slices.find((slice) => slice.desired !== null);

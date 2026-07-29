@@ -1,6 +1,8 @@
+import fs from 'node:fs';
 import os from 'node:os';
-import { stringify as tomlStringify } from '@iarna/toml';
-import type { HookEventMap, HookGroup, HookHandler } from './library.js';
+import { parse as tomlParse, stringify as tomlStringify } from '@iarna/toml';
+import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
+import type { Component, HookEventMap, HookGroup, HookHandler } from './library.js';
 import { tomlKey } from './shapes.js';
 
 /**
@@ -18,6 +20,357 @@ export function wrapMdcFrontmatter(body: string): string {
 /** Identity render for apps that read the composed document as-is. */
 export function rawBody(body: string): string {
   return body;
+}
+
+// ---------------------------------------------------------------------------
+// Commands and agents
+// ---------------------------------------------------------------------------
+
+/** Shared path-segment encoding; ownership maps the path back to the id. */
+export function encodeComponentId(id: string): string {
+  return id.replace(/[^A-Za-z0-9_.-]/g, '-');
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+export function platformExtras(
+  component: Component,
+  platform: string
+): Record<string, unknown> | undefined {
+  return record(record(component.metadata.extras)?.[platform]);
+}
+
+function platformFrontmatter(
+  component: Component,
+  platform: string,
+  passthrough: readonly string[] = []
+): Record<string, unknown> {
+  const frontmatter: Record<string, unknown> = {};
+  if (component.metadata.description) frontmatter.description = component.metadata.description;
+  for (const key of passthrough) {
+    const value = component.metadata[key];
+    if (value !== undefined) frontmatter[key] = value;
+  }
+  Object.assign(frontmatter, platformExtras(component, platform));
+  return frontmatter;
+}
+
+export function wrapFrontmatter(fields: Record<string, unknown>, body: string): string {
+  const yaml = yamlStringify(fields, { lineWidth: 0 }).trimEnd();
+  return `---\n${yaml}\n---\n${body.startsWith('\n') ? body : `\n${body}`}`;
+}
+
+const IMPORT_FRONTMATTER = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
+
+/** App Markdown → library Markdown; app-only fields survive under extras. */
+export function importFrontmatterEntry(filePath: string, platform: string): string {
+  const source = fs.readFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '');
+  const match = source.match(IMPORT_FRONTMATTER);
+  if (source.trimStart().startsWith('---') && !match) {
+    throw new Error(`frontmatter is missing a closing delimiter (---): ${filePath}`);
+  }
+  const parsed = match ? yamlParse(match[1] ?? '') : {};
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`frontmatter must evaluate to an object: ${filePath}`);
+  }
+  const metadata = parsed as Record<string, unknown>;
+  const { description, ...extras } = metadata;
+  const frontmatter: Record<string, unknown> = { extras: { [platform]: extras } };
+  if (typeof description === 'string' && description.trim()) frontmatter.description = description;
+  return wrapFrontmatter(frontmatter, source.slice(match?.[0].length ?? 0));
+}
+
+/** Body-only app Markdown → library Markdown. */
+export function importPlainEntry(filePath: string, platform: string): string {
+  return wrapFrontmatter(
+    { extras: { [platform]: {} } },
+    fs.readFileSync(filePath, 'utf-8').replace(/^\uFEFF/, '')
+  );
+}
+
+/** Gemini TOML → library Markdown, including fields 0.4 used to drop. */
+export function importGeminiCommand(filePath: string): string {
+  const parsed = tomlParse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  const { prompt, description, ...extras } = parsed;
+  const frontmatter: Record<string, unknown> = { extras: { gemini: extras } };
+  if (typeof description === 'string' && description.trim()) frontmatter.description = description;
+  return wrapFrontmatter(frontmatter, typeof prompt === 'string' ? prompt : '');
+}
+
+/** Codex role TOML → library agent Markdown. */
+export function importCodexAgent(filePath: string): string {
+  const parsed = tomlParse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  const { developer_instructions, ...extras } = parsed;
+  return wrapFrontmatter(
+    { extras: { codex: extras } },
+    typeof developer_instructions === 'string' ? developer_instructions : ''
+  );
+}
+
+export function renderClaudeCommand(component: Component): string {
+  return wrapFrontmatter(platformFrontmatter(component, 'claude-code'), component.content);
+}
+
+export function renderClaudeAgent(component: Component): string {
+  const frontmatter = platformFrontmatter(component, 'claude-code', ['model']);
+  if (typeof frontmatter.name !== 'string' || frontmatter.name.trim().length === 0) {
+    frontmatter.name = component.id;
+  }
+  return wrapFrontmatter(frontmatter, component.content);
+}
+
+export function renderCursorCommand(component: Component): string {
+  return `${component.content.trimEnd()}\n`;
+}
+
+const CURSOR_AGENT_FIELDS: ReadonlySet<string> = new Set([
+  'name',
+  'description',
+  'model',
+  'readonly',
+  'is_background',
+]);
+
+export function renderCursorAgent(component: Component): string {
+  const candidate = platformFrontmatter(component, 'cursor');
+  const frontmatter: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(candidate)) {
+    if (CURSOR_AGENT_FIELDS.has(key)) frontmatter[key] = value;
+  }
+  if (typeof frontmatter.name !== 'string' || frontmatter.name.trim().length === 0) {
+    frontmatter.name = component.id;
+  }
+  if (typeof frontmatter.model !== 'string' || frontmatter.model.trim().length === 0) {
+    frontmatter.model = 'inherit';
+  }
+  return wrapFrontmatter(frontmatter, component.content);
+}
+
+export function renderOpencodeCommand(component: Component): string {
+  return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
+}
+
+export function renderOpencodeAgent(component: Component): string {
+  return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
+}
+
+export function renderGeminiCommand(component: Component): string {
+  const value: Record<string, unknown> = { prompt: component.content.trimStart() };
+  if (component.metadata.description) value.description = component.metadata.description;
+  Object.assign(value, platformExtras(component, 'gemini'));
+  return tomlStringify(value as Parameters<typeof tomlStringify>[0]);
+}
+
+export function renderCodexCommand(component: Component): string {
+  const description = component.metadata.description?.trim();
+  const header = description ? `<!-- ${description} -->\n\n` : '';
+  return (
+    '<!-- [deprecated] Codex custom prompts are deprecated. ' +
+    'Consider migrating to skills: https://developers.openai.com/codex/skills -->\n\n' +
+    `${header}${component.content.trimStart()}`
+  );
+}
+
+const CODEX_ROLE_FIELDS = [
+  'model',
+  'model_reasoning_effort',
+  'model_reasoning_summary',
+  'model_verbosity',
+  'sandbox_mode',
+] as const;
+
+export function renderCodexAgent(component: Component): string | null {
+  const extras = platformExtras(component, 'codex');
+  if (!extras || Object.keys(extras).length === 0) return null;
+  const value: Record<string, unknown> = {};
+  for (const key of CODEX_ROLE_FIELDS) {
+    if (extras[key] !== undefined && extras[key] !== null) value[key] = extras[key];
+  }
+  const instructions = component.content.trim();
+  if (instructions) value.developer_instructions = instructions;
+  return `# managed-by: asb\n${tomlStringify(value as Parameters<typeof tomlStringify>[0])}`;
+}
+
+export function codexAgentConfigValue(
+  component: Component,
+  filename: string
+): Record<string, unknown> {
+  return {
+    description: component.metadata.description || `ASB-managed agent role: ${component.id}`,
+    config_file: `agents/${filename}`,
+  };
+}
+
+export function renderCodexAgentConfigTable(
+  keyPath: readonly string[],
+  value: Record<string, unknown>
+): string {
+  return [
+    `[${keyPath.map(tomlKey).join('.')}]`,
+    `description = ${tomlStringify.value(value.description as string)}`,
+    `config_file = ${tomlStringify.value(value.config_file as string)}`,
+  ].join('\n');
+}
+
+export function envMapToKvArray(
+  env: Record<string, string>,
+  keyName = 'key',
+  valueName = 'value'
+): Record<string, string>[] {
+  return Object.entries(env).map(([key, value]) => ({ [keyName]: key, [valueName]: value }));
+}
+
+export function kvArrayToEnvMap(
+  entries: readonly Record<string, string>[],
+  keyName = 'key',
+  valueName = 'value'
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const entry of entries) {
+    if (typeof entry[keyName] === 'string' && typeof entry[valueName] === 'string') {
+      env[entry[keyName]] = entry[valueName];
+    }
+  }
+  return env;
+}
+
+export function keyedArrayToRecord(
+  entries: readonly Record<string, unknown>[],
+  keyField: string
+): Record<string, Record<string, unknown>> {
+  const result: Record<string, Record<string, unknown>> = {};
+  for (const entry of entries) {
+    const identity = entry[keyField];
+    if (typeof identity !== 'string' || identity.length === 0) {
+      throw new Error(`keyed array member is missing identity field "${keyField}"`);
+    }
+    if (identity in result)
+      throw new Error(`keyed array contains duplicate identity "${identity}"`);
+    const { [keyField]: _identity, ...value } = entry;
+    result[identity] = value;
+  }
+  return result;
+}
+
+export function applyDefaults(
+  value: Record<string, unknown>,
+  defaults: Record<string, unknown>
+): Record<string, unknown> {
+  const result = { ...value };
+  for (const [key, item] of Object.entries(defaults)) {
+    if (result[key] === undefined) result[key] = item;
+  }
+  return result;
+}
+
+export function joinFields(
+  value: Record<string, unknown>,
+  joins: Record<string, string>
+): Record<string, unknown> {
+  const result = { ...value };
+  for (const [key, separator] of Object.entries(joins)) {
+    if (Array.isArray(result[key])) result[key] = result[key].join(separator);
+  }
+  return result;
+}
+
+export function omitFields(
+  value: Record<string, unknown>,
+  omitted: readonly string[]
+): Record<string, unknown> {
+  const skipped = new Set(omitted);
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !skipped.has(key)));
+}
+
+export function pickFields(
+  value: Record<string, unknown>,
+  included: readonly string[]
+): Record<string, unknown> {
+  return Object.fromEntries(included.filter((key) => key in value).map((key) => [key, value[key]]));
+}
+
+export function renameFields(
+  value: Record<string, unknown>,
+  renamed: Record<string, string>
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [renamed[key] ?? key, item])
+  );
+}
+
+export interface FrontmatterTransformSpec {
+  rename?: Record<string, string>;
+  omit?: readonly string[];
+  include?: readonly string[];
+  join?: Record<string, string>;
+  defaults?: Record<string, unknown>;
+}
+
+/** Fixed pipeline: defaults, join, include else omit, rename. */
+export function transformFrontmatter(
+  value: Record<string, unknown>,
+  spec: FrontmatterTransformSpec
+): Record<string, unknown> {
+  let result = spec.defaults ? applyDefaults(value, spec.defaults) : { ...value };
+  if (spec.join) result = joinFields(result, spec.join);
+  if (spec.include) result = pickFields(result, spec.include);
+  else if (spec.omit) result = omitFields(result, spec.omit);
+  if (spec.rename) result = renameFields(result, spec.rename);
+  return result;
+}
+
+export interface McpTransformSpec {
+  envTransform?: { keyName?: string; valueName?: string };
+  defaults?: Record<string, unknown>;
+}
+
+/** MCP member pipeline: env map to kv-array, then defaults. */
+export function transformMcpServer(value: McpServerValue, spec: McpTransformSpec): McpServerValue {
+  let result = { ...value };
+  if (spec.envTransform && record(result.env)) {
+    result.env = envMapToKvArray(
+      result.env as Record<string, string>,
+      spec.envTransform.keyName,
+      spec.envTransform.valueName
+    );
+  }
+  if (spec.defaults) result = applyDefaults(result, spec.defaults);
+  return result;
+}
+
+export function renderCustomEntry(
+  component: Component,
+  platform: string,
+  spec?: FrontmatterTransformSpec
+): string {
+  const base = platformFrontmatter(component, platform);
+  return wrapFrontmatter(spec ? transformFrontmatter(base, spec) : base, component.content);
+}
+
+export function renderCocoCommand(component: Component): string {
+  return wrapFrontmatter(
+    transformFrontmatter(platformFrontmatter(component, 'coco'), {
+      join: { allowed_tools: ',' },
+      rename: { allowed_tools: 'allowed-tools', argument_hint: 'argument-hint' },
+    }),
+    component.content
+  );
+}
+
+export function renderCocoAgent(component: Component): string {
+  const base = platformFrontmatter(component, 'coco');
+  if (typeof base.name !== 'string' || base.name.trim().length === 0) base.name = component.id;
+  return wrapFrontmatter(
+    transformFrontmatter(base, {
+      join: { allowed_tools: ',' },
+      rename: { allowed_tools: 'tools' },
+    }),
+    component.content
+  );
 }
 
 /**

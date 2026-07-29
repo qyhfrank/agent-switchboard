@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { AppRow, NativeManagerRow } from './apps.js';
-import { effectivePlugins, type ResolvedConfig } from './config.js';
+import { effectivePlugins, type Homes, type ResolvedConfig } from './config.js';
 import type { Action } from './plan.js';
 import { writeFileAtomic } from './shapes.js';
 import type { NativeMeta, PluginDescriptor, SourceCatalog } from './sources.js';
@@ -32,6 +32,16 @@ interface Registration {
   portable: boolean;
 }
 
+interface CodexWrapper {
+  root: string;
+  stateRoot: string;
+  marketplaceName: string;
+  pluginName: string;
+  ref: string;
+  sourcePath: string;
+  version?: string;
+}
+
 export interface NativeAppState {
   /** Parsed `plugin marketplace list --json`. */
   marketplaces: unknown;
@@ -41,6 +51,8 @@ export interface NativeAppState {
   settings: Record<string, unknown> | null;
   /** Per marketplace path: why `plugin validate` refused it. */
   invalid: Record<string, string>;
+  /** ASB-owned bare-plugin marketplaces reconstructed from wrapper manifests. */
+  managed: CodexWrapper[];
   /** Why the manager could not be probed at all. */
   error?: string;
 }
@@ -65,7 +77,17 @@ export interface NativeWork {
    * it already says what it should. A `source` of null removes the key.
    */
   setting: { path: string; marketplace: string; source: MarketplaceSource | null } | null;
+  /** Bare Codex plugin wrapper to materialize before manager verbs. */
+  prepare?: CodexWrapper;
+  /** ASB-owned wrapper root to remove after manager verbs. */
+  cleanup?: { root: string; stateRoot: string };
 }
+
+export type NativeCommandRunner = (
+  bin: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv
+) => { status: number; stdout: string; stderr: string };
 
 function run(
   bin: string,
@@ -85,8 +107,13 @@ function run(
   };
 }
 
-function runRequired(bin: string, args: readonly string[], env: NodeJS.ProcessEnv): string {
-  const result = run(bin, args, env);
+function runRequired(
+  bin: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  runner: NativeCommandRunner = run
+): string {
+  const result = runner(bin, args, env);
   if (result.status !== 0) {
     const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
     throw new Error(`${bin} ${args.join(' ')} failed: ${detail}`);
@@ -94,8 +121,13 @@ function runRequired(bin: string, args: readonly string[], env: NodeJS.ProcessEn
   return result.stdout;
 }
 
-function readManagerJson(bin: string, args: readonly string[], env: NodeJS.ProcessEnv): unknown {
-  const text = runRequired(bin, args, env).trim();
+function readManagerJson(
+  bin: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  runner: NativeCommandRunner = run
+): unknown {
+  const text = runRequired(bin, args, env, runner).trim();
   if (!text) throw new Error(`${bin} ${args.join(' ')} returned invalid JSON: empty stdout`);
   try {
     return JSON.parse(text);
@@ -130,6 +162,130 @@ function collectObjects(value: unknown, out: Record<string, unknown>[] = []) {
 // ---------------------------------------------------------------------------
 
 type Install = NonNullable<NativeMeta['install']>;
+
+function safeSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9_-]/g, '-') || 'plugin';
+}
+
+function codexStateRoot(homes: Homes): string {
+  return path.join(homes.asbHome, 'state', 'native-plugins', 'codex');
+}
+
+function hasCodexWrapperState(homes: Homes): boolean {
+  const root = codexStateRoot(homes);
+  try {
+    return fs.readdirSync(root).length > 0;
+  } catch {
+    return fs.existsSync(root);
+  }
+}
+
+function bareCodexInstall(plugin: PluginDescriptor, homes: Homes): Install | undefined {
+  if (plugin.native?.target !== 'codex' || plugin.native.install || !plugin.root) return undefined;
+  const manifestPath = plugin.native.manifestPath;
+  if (!manifestPath) return undefined;
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+      name?: unknown;
+      version?: unknown;
+    };
+    if (typeof manifest.name !== 'string' || manifest.name.length === 0) return undefined;
+    const marketplaceName = plugin.id;
+    return {
+      marketplaceName,
+      marketplacePath: path.join(codexStateRoot(homes), safeSegment(plugin.id)),
+      pluginName: manifest.name,
+      ref: `${manifest.name}@${marketplaceName}`,
+      sourcePath: plugin.root,
+      ...(typeof manifest.version === 'string' ? { version: manifest.version } : {}),
+      managedWrapper: true,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function installFor(plugin: PluginDescriptor, homes: Homes): Install | undefined {
+  return plugin.native?.install ?? bareCodexInstall(plugin, homes);
+}
+
+function contained(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function readCodexWrappers(homes: Homes): CodexWrapper[] {
+  const stateRoot = codexStateRoot(homes);
+  if (!fs.existsSync(stateRoot)) return [];
+  const wrappers: CodexWrapper[] = [];
+  for (const entry of fs.readdirSync(stateRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const root = path.join(stateRoot, entry.name);
+    const manifestPath = path.join(root, '.agents', 'plugins', 'marketplace.json');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+      name?: unknown;
+      plugins?: unknown;
+    };
+    if (
+      typeof manifest.name !== 'string' ||
+      !Array.isArray(manifest.plugins) ||
+      manifest.plugins.length !== 1
+    ) {
+      throw new Error(`unrecognized ASB Codex wrapper at ${root}`);
+    }
+    const plugin = manifest.plugins[0] as { name?: unknown; source?: unknown };
+    if (
+      typeof plugin.name !== 'string' ||
+      typeof plugin.source !== 'string' ||
+      !plugin.source.startsWith('./plugins/')
+    ) {
+      throw new Error(`unrecognized ASB Codex wrapper at ${root}`);
+    }
+    const link = path.resolve(root, plugin.source);
+    if (!contained(root, link)) throw new Error(`ASB Codex wrapper escapes its root at ${root}`);
+    wrappers.push({
+      root,
+      stateRoot,
+      marketplaceName: manifest.name,
+      pluginName: plugin.name,
+      ref: `${plugin.name}@${manifest.name}`,
+      sourcePath: realPath(link),
+    });
+  }
+  return wrappers;
+}
+
+function materializeCodexWrapper(wrapper: CodexWrapper): void {
+  if (!contained(wrapper.stateRoot, wrapper.root)) {
+    throw new Error(`refusing to write Codex wrapper outside ASB state: ${wrapper.root}`);
+  }
+  const manifestDir = path.join(wrapper.root, '.agents', 'plugins');
+  const pluginsDir = path.join(wrapper.root, 'plugins');
+  const link = path.join(pluginsDir, safeSegment(wrapper.pluginName));
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.mkdirSync(pluginsDir, { recursive: true });
+  if (fs.existsSync(link) || fs.lstatSync(link, { throwIfNoEntry: false })) {
+    const stat = fs.lstatSync(link);
+    if (!stat.isSymbolicLink() && !(process.platform === 'win32' && stat.isDirectory())) {
+      throw new Error(`refusing to replace non-link Codex wrapper member: ${link}`);
+    }
+    fs.rmSync(link, { recursive: true, force: true });
+  }
+  fs.symlinkSync(wrapper.sourcePath, link, process.platform === 'win32' ? 'junction' : 'dir');
+  writeFileAtomic(
+    path.join(manifestDir, 'marketplace.json'),
+    `${JSON.stringify(
+      {
+        name: wrapper.marketplaceName,
+        plugins: [
+          { name: wrapper.pluginName, source: `./plugins/${safeSegment(wrapper.pluginName)}` },
+        ],
+      },
+      null,
+      2
+    )}\n`
+  );
+}
 
 function githubRepo(url: string): string | undefined {
   const match = url.match(
@@ -173,7 +329,10 @@ function findMarketplace(state: unknown, name: string): Record<string, unknown> 
   );
 }
 
-function findPlugin(state: unknown, install: Install): Record<string, unknown> | undefined {
+function findPlugin(
+  state: unknown,
+  install: Pick<Install, 'marketplaceName' | 'pluginName' | 'ref'>
+): Record<string, unknown> | undefined {
   return collectObjects(state).find((entry) => {
     if (entry.pluginId === install.ref || entry.id === install.ref || entry.ref === install.ref) {
       return true;
@@ -236,21 +395,23 @@ function isDisabled(entry: Record<string, unknown>): boolean {
 export function resolveNativeRefs(
   catalog: SourceCatalog,
   row: NativeManagerRow,
-  refs: readonly string[]
+  refs: readonly string[],
+  homes: Homes
 ): { ref: string; plugin?: PluginDescriptor; install?: Install; error?: string }[] {
   const byId = new Map<string, PluginDescriptor>();
   const byInstallRef = new Map<string, PluginDescriptor>();
   for (const plugin of catalog.plugins) {
     if (plugin.native?.target !== row.target) continue;
     byId.set(plugin.id, plugin);
-    if (plugin.native.install) byInstallRef.set(plugin.native.install.ref, plugin);
+    const install = installFor(plugin, homes);
+    if (install) byInstallRef.set(install.ref, plugin);
   }
 
   return refs.map((ref) => {
     const plugin = byId.get(ref) ?? byInstallRef.get(ref);
     if (!plugin)
       return { ref, error: `not a ${row.target} native plugin in any configured source` };
-    const install = plugin.native?.install;
+    const install = installFor(plugin, homes);
     if (!install) {
       return {
         ref,
@@ -283,7 +444,10 @@ function activeManagers(
     if (!row) continue;
     if (installed[appId] !== true && !assumed.has(appId)) continue;
     const enabled = config.apps.overrides[appId]?.native_plugins?.enabled ?? [];
-    if (enabled.length > 0) active.push({ app: appId, row, enabled: [...new Set(enabled)] });
+    const hasManagedCodexState = row.target === 'codex' && hasCodexWrapperState(config.homes);
+    if (enabled.length > 0 || hasManagedCodexState) {
+      active.push({ app: appId, row, enabled: [...new Set(enabled)] });
+    }
   }
   return active;
 }
@@ -298,7 +462,9 @@ export function captureNative(
   catalog: SourceCatalog,
   table: readonly AppRow[],
   env: NodeJS.ProcessEnv,
-  installed: Record<string, boolean>
+  installed: Record<string, boolean>,
+  dryRun = false,
+  runner: NativeCommandRunner = run
 ): NativeCapture {
   const capture: NativeCapture = {};
   for (const { app, row, enabled } of activeManagers(config, table, installed)) {
@@ -307,16 +473,27 @@ export function captureNative(
       plugins: null,
       settings: null,
       invalid: {},
+      managed: [],
     };
     capture[app] = state;
 
-    for (const resolved of resolveNativeRefs(catalog, row, enabled)) {
-      const marketplacePath = resolved.install?.marketplacePath;
-      if (marketplacePath === undefined || marketplacePath in state.invalid) continue;
+    if (row.target === 'codex') {
       try {
-        runRequired(row.bin, ['plugin', 'validate', marketplacePath], env);
+        state.managed = readCodexWrappers(config.homes);
       } catch (error) {
-        state.invalid[marketplacePath] = error instanceof Error ? error.message : String(error);
+        state.error = error instanceof Error ? error.message : String(error);
+        continue;
+      }
+      if (dryRun) continue;
+    } else {
+      for (const resolved of resolveNativeRefs(catalog, row, enabled, config.homes)) {
+        const marketplacePath = resolved.install?.marketplacePath;
+        if (marketplacePath === undefined || marketplacePath in state.invalid) continue;
+        try {
+          runRequired(row.bin, ['plugin', 'validate', marketplacePath], env, runner);
+        } catch (error) {
+          state.invalid[marketplacePath] = error instanceof Error ? error.message : String(error);
+        }
       }
     }
 
@@ -324,14 +501,29 @@ export function captureNative(
       state.marketplaces = readManagerJson(
         row.bin,
         ['plugin', 'marketplace', 'list', '--json'],
-        env
+        env,
+        runner
       );
-      state.plugins = readManagerJson(row.bin, ['plugin', 'list', '--json'], env);
+      if (row.target === 'codex') {
+        const relevant = new Set([
+          ...resolveNativeRefs(catalog, row, enabled, config.homes).flatMap((resolved) =>
+            resolved.install ? [resolved.install.marketplaceName] : []
+          ),
+          ...state.managed.map((wrapper) => wrapper.marketplaceName),
+        ]);
+        const present = [...relevant].filter((name) => findMarketplace(state.marketplaces, name));
+        state.plugins = present.map((name) =>
+          readManagerJson(row.bin, ['plugin', 'list', '--marketplace', name, '--json'], env, runner)
+        );
+      } else {
+        state.plugins = readManagerJson(row.bin, ['plugin', 'list', '--json'], env, runner);
+      }
     } catch (error) {
       state.error = error instanceof Error ? error.message : String(error);
       continue;
     }
 
+    if (row.target === 'codex') continue;
     try {
       const settingsPath = row.settings(config.homes);
       if (fs.existsSync(settingsPath)) {
@@ -403,6 +595,242 @@ function settingNeedsWrite(
   return JSON.stringify(declared) !== JSON.stringify(source);
 }
 
+function reportedMarketplaceRoot(entry: Record<string, unknown>): string | undefined {
+  for (const key of ['root', 'installedRoot', 'path']) {
+    if (typeof entry[key] === 'string') return entry[key] as string;
+  }
+  const marketplaceSource = entry.marketplaceSource;
+  if (
+    marketplaceSource !== null &&
+    typeof marketplaceSource === 'object' &&
+    typeof (marketplaceSource as Record<string, unknown>).source === 'string'
+  ) {
+    return (marketplaceSource as Record<string, string>).source;
+  }
+  return undefined;
+}
+
+function wrapperFor(install: Install): CodexWrapper | undefined {
+  if (!install.managedWrapper || !install.sourcePath) return undefined;
+  return {
+    root: install.marketplacePath,
+    stateRoot: path.dirname(install.marketplacePath),
+    marketplaceName: install.marketplaceName,
+    pluginName: install.pluginName,
+    ref: install.ref,
+    sourcePath: install.sourcePath,
+    ...(install.version ? { version: install.version } : {}),
+  };
+}
+
+function planCodexNative(
+  input: NativePlanInput,
+  app: string,
+  row: NativeManagerRow,
+  enabled: readonly string[],
+  genericPlugins: ReadonlySet<string>
+): Action[] {
+  const { config, catalog, capture, env, dryRun } = input;
+  const state = capture[app];
+  const actions: Action[] = [];
+  const resolvedRows = resolveNativeRefs(catalog, row, enabled, config.homes);
+  const pathCounts = new Map<string, number>();
+  for (const resolved of resolvedRows) {
+    if (resolved.install?.managedWrapper) {
+      const root = path.resolve(resolved.install.marketplacePath);
+      pathCounts.set(root, (pathCounts.get(root) ?? 0) + 1);
+    }
+  }
+
+  for (const resolved of resolvedRows) {
+    const { ref, plugin, install } = resolved;
+    if (!install) {
+      actions.push(
+        nativeRow(app, ref, null, 'failed', resolved.error ?? 'unknown', 'source-error')
+      );
+      continue;
+    }
+    if (plugin && genericPlugins.has(plugin.id)) {
+      actions.push(
+        nativeRow(
+          app,
+          install.ref,
+          install.marketplacePath,
+          'failed',
+          'also enabled through [plugins].enabled; a native plugin belongs to exactly one channel',
+          'source-error'
+        )
+      );
+      continue;
+    }
+    if ((pathCounts.get(path.resolve(install.marketplacePath)) ?? 0) > 1) {
+      actions.push(
+        nativeRow(
+          app,
+          install.ref,
+          install.marketplacePath,
+          'conflict',
+          'multiple native plugin ids encode to the same Codex wrapper path',
+          'collision'
+        )
+      );
+      continue;
+    }
+    if (state?.error) {
+      actions.push(
+        nativeRow(app, install.ref, install.marketplacePath, 'failed', state.error, 'source-error')
+      );
+      continue;
+    }
+
+    const wrapper = wrapperFor(install);
+    const knownWrapper = state?.managed.some(
+      (managed) => realPath(managed.root) === realPath(install.marketplacePath)
+    );
+    if (wrapper && fs.existsSync(wrapper.root) && !knownWrapper) {
+      actions.push(
+        nativeRow(
+          app,
+          install.ref,
+          install.marketplacePath,
+          'conflict',
+          'Codex wrapper path exists but is not a recognized ASB-owned wrapper',
+          'registered'
+        )
+      );
+      continue;
+    }
+
+    const marketplace = findMarketplace(state?.marketplaces, install.marketplaceName);
+    if (marketplace) {
+      const reported = reportedMarketplaceRoot(marketplace);
+      if (!reported || realPath(reported) !== realPath(install.marketplacePath)) {
+        actions.push(
+          nativeRow(
+            app,
+            install.ref,
+            install.marketplacePath,
+            'conflict',
+            `marketplace "${install.marketplaceName}" is registered from a different source; remove it from ${row.bin} first`,
+            'registered'
+          )
+        );
+        continue;
+      }
+    }
+
+    const commands: string[][] = [];
+    const notes: string[] = [];
+    if (!marketplace) {
+      commands.push(
+        ['plugin', 'marketplace', 'add', install.marketplacePath, '--json'],
+        ['plugin', 'list', '--marketplace', install.marketplaceName, '--json'],
+        ['plugin', 'add', install.ref, '--json']
+      );
+      notes.push('marketplace added', 'installed');
+    } else {
+      const installedPlugin = findPlugin(state?.plugins, install);
+      const stale =
+        installedPlugin !== undefined &&
+        install.version !== undefined &&
+        installedPlugin.version !== install.version;
+      if (!installedPlugin || isDisabled(installedPlugin) || stale) {
+        commands.push(['plugin', 'add', install.ref, '--json']);
+        notes.push(!installedPlugin ? 'installed' : stale ? 'updated' : 'enabled');
+      }
+    }
+
+    if (notes.length === 0) {
+      actions.push(
+        nativeRow(
+          app,
+          install.ref,
+          install.marketplacePath,
+          'unchanged',
+          `up to date in ${row.bin}`
+        )
+      );
+      continue;
+    }
+    const action = nativeRow(
+      app,
+      install.ref,
+      install.marketplacePath,
+      'written',
+      dryRun ? `would sync native plugin: ${notes.join(', ')}` : notes.join(', ')
+    );
+    if (!dryRun) {
+      action.native = {
+        bin: row.bin,
+        env,
+        commands,
+        compensate: [],
+        setting: null,
+        ...(wrapper ? { prepare: wrapper } : {}),
+      };
+    }
+    actions.push(action);
+  }
+
+  const desired = new Set(
+    resolvedRows.flatMap((resolved) => (resolved.install ? [resolved.install.ref] : []))
+  );
+  for (const wrapper of state?.managed ?? []) {
+    if (desired.has(wrapper.ref)) continue;
+    if (state?.error) {
+      actions.push(
+        nativeRow(app, wrapper.ref, wrapper.root, 'failed', state.error, 'source-error')
+      );
+      continue;
+    }
+    const marketplace = findMarketplace(state?.marketplaces, wrapper.marketplaceName);
+    if (marketplace) {
+      const reported = reportedMarketplaceRoot(marketplace);
+      if (!reported || realPath(reported) !== realPath(wrapper.root)) {
+        actions.push(
+          nativeRow(
+            app,
+            wrapper.ref,
+            wrapper.root,
+            'conflict',
+            `marketplace "${wrapper.marketplaceName}" is registered from a different source; remove it from ${row.bin} first`,
+            'registered'
+          )
+        );
+        continue;
+      }
+    }
+    const commands: string[][] = [];
+    if (findPlugin(state?.plugins, wrapper)) {
+      commands.push(['plugin', 'remove', wrapper.ref, '--json']);
+    }
+    if (marketplace) {
+      commands.push(['plugin', 'marketplace', 'remove', wrapper.marketplaceName, '--json']);
+    }
+    const action = nativeRow(
+      app,
+      wrapper.ref,
+      wrapper.root,
+      'removed',
+      dryRun
+        ? 'would remove native plugin and ASB wrapper'
+        : 'native plugin and ASB wrapper removed'
+    );
+    if (!dryRun) {
+      action.native = {
+        bin: row.bin,
+        env,
+        commands,
+        compensate: [],
+        setting: null,
+        cleanup: { root: wrapper.root, stateRoot: wrapper.stateRoot },
+      };
+    }
+    actions.push(action);
+  }
+  return actions;
+}
+
 /**
  * One row per enabled native plugin, decided against the manager's reported
  * state. A registration the manager already holds from somewhere else is only
@@ -423,7 +851,12 @@ export function planNative(input: NativePlanInput): Action[] {
       config.apps.enabled.flatMap((appId) => effectivePlugins(config, appId))
     );
 
-    for (const resolved of resolveNativeRefs(catalog, row, enabled)) {
+    if (row.target === 'codex') {
+      actions.push(...planCodexNative(input, app, row, enabled, genericPlugins));
+      continue;
+    }
+
+    for (const resolved of resolveNativeRefs(catalog, row, enabled, config.homes)) {
       const { ref, plugin, install } = resolved;
       if (!install) {
         actions.push(
@@ -603,15 +1036,27 @@ export function planNative(input: NativePlanInput): Action[] {
  * list so the manager is left holding what it held before, and reports both
  * the original failure and any failure to undo.
  */
-export function applyNative(work: NativeWork): string | undefined {
+export function applyNative(
+  work: NativeWork,
+  runner: NativeCommandRunner = run
+): string | undefined {
+  const preparedNew = work.prepare !== undefined && !fs.existsSync(work.prepare.root);
+  if (work.prepare) {
+    try {
+      materializeCodexWrapper(work.prepare);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
   for (const [index, args] of work.commands.entries()) {
-    const result = run(work.bin, args, work.env);
+    const result = runner(work.bin, args, work.env);
     if (result.status === 0) continue;
     const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
     const failure = `${work.bin} ${args.join(' ')} failed: ${detail}`;
+    if (preparedNew && work.prepare) fs.rmSync(work.prepare.root, { recursive: true, force: true });
     if (index === 0 || work.compensate.length === 0) return failure;
     for (const undo of work.compensate) {
-      const restored = run(work.bin, undo, work.env);
+      const restored = runner(work.bin, undo, work.env);
       if (restored.status !== 0) {
         const why = restored.stderr.trim() || restored.stdout.trim() || `exit ${restored.status}`;
         return `${failure}; restoring the previous registration failed: ${work.bin} ${undo.join(' ')}: ${why}`;
@@ -620,11 +1065,22 @@ export function applyNative(work: NativeWork): string | undefined {
     return failure;
   }
 
-  if (!work.setting) return undefined;
-  try {
-    reconcileSetting(work.setting);
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+  if (work.setting) {
+    try {
+      reconcileSetting(work.setting);
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (work.cleanup) {
+    if (!contained(work.cleanup.stateRoot, work.cleanup.root)) {
+      return `refusing to remove Codex wrapper outside ASB state: ${work.cleanup.root}`;
+    }
+    try {
+      fs.rmSync(work.cleanup.root, { recursive: true, force: true });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
   }
   return undefined;
 }
