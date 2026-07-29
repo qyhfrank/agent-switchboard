@@ -39,8 +39,11 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Test (if present)
-        run: pnpm run --if-present test
-
       - name: Build
         run: pnpm run build
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Smoke (0.4.35 peer baseline)
+        run: pnpm run smoke:baseline

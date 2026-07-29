@@ -292,21 +292,6 @@ test('A7 hook key edits preserve unrelated JSONC bytes and retire only the legac
   });
 });
 
-test('A8 smoke owns the pinned 0.4 peer leg and the in-tree test names 0.5 resync', () => {
-  const smoke = fs.readFileSync(
-    new URL('../../scripts/smoke-baseline.mjs', import.meta.url),
-    'utf-8'
-  );
-  assert.match(smoke, /peerDryRun/);
-  assert.match(smoke, /stateIntact/);
-  assert.equal(
-    fs.existsSync(new URL('hooks-peer-probe.test.ts', import.meta.url)),
-    false,
-    'the in-tree 0.5 test must not claim to execute 0.4.35'
-  );
-  assert.equal(fs.existsSync(new URL('hooks-resync.test.ts', import.meta.url)), true);
-});
-
 test('A9a bare asb is a compact read-only status with one next action', async () => {
   await withScratchHomes(async (homes) => {
     const before = fs.readdirSync(homes.root, { recursive: true }).map(String).sort();

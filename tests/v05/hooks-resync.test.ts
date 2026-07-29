@@ -27,11 +27,10 @@ function seedHook(asbHome: string, id: string): void {
   );
 }
 
-test('the built 0.5 binary re-syncs hook state without duplicates or removals', async (t) => {
-  if (!fs.existsSync(DIST)) {
-    t.skip('dist/index.js absent — run npm run build first; the gate must not skip this');
-    return;
-  }
+test('the built 0.5 binary re-syncs hook state without duplicates or removals', async () => {
+  // The resync case is the suite's only executable evidence on the built
+  // binary; a missing dist is a broken gate, never a skip. CI builds first.
+  assert.ok(fs.existsSync(DIST), 'dist/index.js absent — run npm run build first');
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedHook(homes.asbHome, 'probe');

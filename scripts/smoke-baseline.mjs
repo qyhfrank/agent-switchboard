@@ -374,7 +374,7 @@ async function main() {
     });
 
     const peerBefore = peerStateSnapshot(candidateEnv);
-    await run(
+    const peerRun = await run(
       baselineBins.asb,
       ['sync', '--dry-run', '--profile', options.profile, '--no-update'],
       { env: candidateEnv }
@@ -384,6 +384,15 @@ async function main() {
     const peerStateIntact = peerChanges.length === 0;
     if (!peerStateIntact) {
       throw new Error(`0.4.35 peer dry-run changed candidate state: ${peerChanges.join(', ')}`);
+    }
+    // A dry-run writes nothing by construction, so the plan output is the
+    // only place a misread appears: a 0.4.35 that stopped recognizing 0.5's
+    // slices renders written/updated/merged rows while every byte stays put.
+    const peerMisread = peerRun.stdout.match(/^.*\b(written|updated|merged)\b.*$/m);
+    if (peerMisread) {
+      throw new Error(
+        `0.4.35 peer dry-run planned a write over candidate state: ${peerMisread[0].trim()}`
+      );
     }
 
     const baselineSnapshot = snapshot(baselineRoot, targets);
@@ -435,8 +444,10 @@ async function main() {
       peerDryRun: {
         version: expectedVersions.baseline,
         command: `sync --dry-run --profile ${options.profile} --no-update`,
+        // run() throws on a non-zero exit, so reaching this block proves 0.
         exitCode: 0,
         stateIntact: peerStateIntact,
+        planClean: true,
         snapshotSha256: snapshotHash(peerAfter),
       },
       profile: options.profile,
