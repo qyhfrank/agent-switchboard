@@ -17,6 +17,7 @@ import { acquireRunLock, loadLedger } from '../../src/engine/ledger.js';
 import { projectManifestPath } from '../../src/engine/peer.js';
 import { type Action, groupKeyActions } from '../../src/engine/plan.js';
 import { renderExplain } from '../../src/engine/report.js';
+import { applyKeysEdits } from '../../src/engine/shapes.js';
 import { readSourceCatalog } from '../../src/engine/sources.js';
 import {
   installApps,
@@ -232,30 +233,34 @@ test('A5 explain masks every credential value after every builtin MCP dialect', 
 });
 
 test('A6 removing the project marker span preserves every user byte around it', async () => {
-  await withScratchHomes(async (homes) => {
-    const project = path.join(homes.root, 'project');
-    fs.mkdirSync(project);
-    const projectConfig =
-      '[distribution.project]\nmode = "managed"\n\n[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n';
-    fs.writeFileSync(path.join(project, '.asb.toml'), projectConfig);
-    const agents = path.join(project, 'AGENTS.md');
-    const userBytes = '# First user section\n\n\n# Second user section\n';
-    fs.writeFileSync(agents, userBytes);
-    installApps(homes, 'codex');
-    seedRule(homes, 'shared.md', 'Managed.\n');
-    writeUserConfig(
-      homes,
-      '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
-    );
-    assert.equal((await runSync({ project })).exitCode, 0);
+  // Trailing-boundary contract: the managed region joins user content with
+  // exactly one blank line and the file ends with one newline; interior and
+  // leading user bytes round-trip exactly under both placements.
+  for (const placement of ['prepend', 'append'] as const) {
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, `project-${placement}`);
+      fs.mkdirSync(project);
+      const projectConfig = `[distribution.project]\nmode = "managed"\n\n[distribution.project.rules]\nplacement = "${placement}"\n\n[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n`;
+      fs.writeFileSync(path.join(project, '.asb.toml'), projectConfig);
+      const agents = path.join(project, 'AGENTS.md');
+      const userBytes = '# First user section\n\n\n# Second user section\n';
+      fs.writeFileSync(agents, userBytes);
+      installApps(homes, 'codex');
+      seedRule(homes, 'shared.md', 'Managed.\n');
+      writeUserConfig(
+        homes,
+        '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
+      );
+      assert.equal((await runSync({ project })).exitCode, 0, placement);
 
-    fs.writeFileSync(
-      path.join(project, '.asb.toml'),
-      projectConfig.replace('enabled = ["shared"]', 'enabled = []')
-    );
-    assert.equal((await runSync({ project })).exitCode, 0);
-    assert.equal(fs.readFileSync(agents, 'utf-8'), userBytes);
-  });
+      fs.writeFileSync(
+        path.join(project, '.asb.toml'),
+        projectConfig.replace('enabled = ["shared"]', 'enabled = []')
+      );
+      assert.equal((await runSync({ project })).exitCode, 0, placement);
+      assert.equal(fs.readFileSync(agents, 'utf-8'), userBytes, placement);
+    });
+  }
 });
 
 test('A7 hook key edits preserve unrelated JSONC bytes and retire only the legacy key', async () => {
@@ -312,6 +317,22 @@ test('A9a bare asb is a compact read-only status with one next action', async ()
     assert.match(result.out, /^Status:/);
     assert.equal(result.out.match(/^Next:/gm)?.length, 1, result.out);
     assert.deepEqual(after, before);
+
+    // The routing among the real branches: pending work points at sync,
+    // an all-current home points at the detailed view.
+    installApps(homes, 'claude-code');
+    seedRule(homes, 'core.md', 'Core.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["core"]\n'
+    );
+    const pending = await runMain([]);
+    assert.match(pending.out, /^Next: asb sync$/m, pending.out);
+
+    assert.equal((await runSync()).exitCode, 0);
+    const current = await runMain([]);
+    assert.match(current.out, /^Next: asb status --all$/m, current.out);
+    assert.equal(current.code, 0, current.err || current.out);
   });
 });
 
@@ -568,26 +589,37 @@ test('B4 default app directories import immediate files without recursive mode',
   });
 });
 
-test('B6 a stale-lock reaper never steals a fresh replacement generation', async () => {
+test('B6 a stale lock fails closed with the holder identity and is never reaped', async () => {
   await withScratchHomes(async (homes) => {
     fs.mkdirSync(homes.stateHome, { recursive: true });
     const lockFile = path.join(homes.stateHome, 'run.lock');
-    fs.writeFileSync(lockFile, '999999 2000-01-01T00:00:00.000Z\n');
+    const stale = '999999 2000-01-01T00:00:00.000Z\n';
+    fs.writeFileSync(lockFile, stale);
     const old = new Date(Date.now() - 20 * 60 * 1000);
     fs.utimesSync(lockFile, old, old);
 
-    const fresh = `${process.pid} 2099-01-01T00:00:00.000Z\n`;
-    const originalRename = fs.renameSync;
-    fs.renameSync = ((from: fs.PathLike, to: fs.PathLike) => {
-      if (path.resolve(String(from)) === lockFile) fs.writeFileSync(lockFile, fresh);
-      return originalRename(from, to);
-    }) as typeof fs.renameSync;
-    try {
-      assert.throws(() => acquireRunLock(homes.stateHome), /Another asb run/);
-    } finally {
-      fs.renameSync = originalRename;
-    }
-    assert.equal(fs.readFileSync(lockFile, 'utf-8'), fresh);
+    assert.throws(() => acquireRunLock(homes.stateHome), /Another asb run.*not running/s);
+    assert.equal(fs.readFileSync(lockFile, 'utf-8'), stale);
+    assert.deepEqual(
+      fs.readdirSync(homes.stateHome).filter((name) => name.startsWith('run.lock.')),
+      []
+    );
+  });
+});
+
+test('B6 release only unlinks the lock generation this process wrote', async () => {
+  await withScratchHomes(async (homes) => {
+    const lockFile = path.join(homes.stateHome, 'run.lock');
+    const lock = acquireRunLock(homes.stateHome);
+    const foreign = `${process.pid} 2099-01-01T00:00:00.000Z (foreign)\n`;
+    fs.writeFileSync(lockFile, foreign);
+    lock.release();
+    assert.equal(fs.readFileSync(lockFile, 'utf-8'), foreign);
+
+    fs.unlinkSync(lockFile);
+    const second = acquireRunLock(homes.stateHome);
+    second.release();
+    assert.equal(fs.existsSync(lockFile), false);
   });
 });
 
@@ -669,4 +701,128 @@ test('B9 changelog enumerates all eight ratified migration-visible changes', () 
   ]) {
     assert.ok(changelog.includes(phrase), phrase);
   }
+});
+
+test('a project sync records ownership in the manifest only, never the machine ledger', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'proj-ledger');
+    fs.mkdirSync(project);
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[distribution.project]\nmode = "managed"\n\n[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
+    );
+    installApps(homes, 'codex');
+    seedRule(homes, 'shared.md', 'Managed.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
+    );
+
+    const report = await runSync({ project });
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.ok(report.entries.some((entry) => entry.outcome === 'written'));
+    assert.deepEqual(loadLedger(homes.stateHome).entries, []);
+  });
+});
+
+test('a canceled structured write never publishes peer ownership', () => {
+  const peer = {
+    asbHome: '/tmp/none',
+    target: { app: 'claude-code' },
+    state: { version: 1, groups: {}, bundles: [], updatedAt: '' },
+  } as unknown as NonNullable<Action['peer']>;
+  const base: Action = {
+    app: 'claude-code',
+    type: 'hooks',
+    id: null,
+    path: '/tmp/none/settings.json',
+    op: 'write',
+    outcome: 'written',
+    root: '/tmp/none',
+    expectedHash: null,
+    content: '{}',
+    peer,
+    keyEdits: {
+      format: 'json',
+      edits: [{ keyPath: ['hooks'], value: { a: 1 } }],
+      baseContent: '{}',
+    },
+  };
+  const other: Action = {
+    ...base,
+    type: 'mcp',
+    peer: undefined,
+    keyEdits: {
+      format: 'json',
+      edits: [{ keyPath: ['hooks', 'x'], value: 2 }],
+      baseContent: '{}',
+    },
+  };
+  const grouped = groupKeyActions([base, other]);
+  assert.equal(grouped.length, 2);
+  for (const action of grouped) {
+    assert.equal(action.outcome, 'conflict', JSON.stringify(action));
+    assert.equal(action.peer, undefined, 'a canceled action must carry no peer publication');
+  }
+});
+
+test('JSON key edits fail closed on duplicate addressed keys', () => {
+  const doc = '{"hooks": {"a": 1}, "other": 2, "hooks": {"b": 2}}';
+  assert.throws(
+    () => applyKeysEdits(doc, 'json', [{ keyPath: ['hooks'], value: { c: 3 } }]),
+    /duplicate key "hooks"/
+  );
+});
+
+test(
+  'init --json on an existing config answers with a skipped envelope, no prompt',
+  { timeout: 15000 },
+  async () => {
+    await withScratchHomes(async (homes) => {
+      const previous = process.cwd();
+      const dir = path.join(homes.root, 'proj-init');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, '.asb.toml'), '# existing\n');
+      process.chdir(dir);
+      try {
+        const result = await runMain(['init', '--json']);
+        assert.equal(result.code, 0, result.err || result.out);
+        const envelope = JSON.parse(result.out) as {
+          exitCode: number;
+          entries: { outcome?: string }[];
+        };
+        assert.equal(envelope.exitCode, 0);
+        assert.ok(
+          envelope.entries.some((entry) => entry.outcome === 'skipped'),
+          result.out
+        );
+        assert.equal(fs.readFileSync(path.join(dir, '.asb.toml'), 'utf-8'), '# existing\n');
+        assert.equal(fs.existsSync(path.join(dir, 'AGENTS.md')), false);
+      } finally {
+        process.chdir(previous);
+      }
+    });
+  }
+);
+
+test('a custom target env_transform with identical field names is rejected', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(
+      homes,
+      [
+        '[targets.mine]',
+        'detect = "~/.mine"',
+        '',
+        '[targets.mine.mcp]',
+        'format = "yaml"',
+        'config_path = "~/.mine/config.yaml"',
+        'root_key = "servers"',
+        'structure = "keyed-array"',
+        'key_field = "name"',
+        'env_transform = { key_name = "env", value_name = "env" }',
+        '',
+      ].join('\n')
+    );
+    assert.throws(() => loadConfig(), /key_name and value_name must differ/);
+  });
 });

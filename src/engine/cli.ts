@@ -179,9 +179,6 @@ function globalPlanningEntry(
   if (entry.type === 'skills' && row.skills) {
     return pathInside(row.skills.root(config.homes), entry.path);
   }
-  if (entry.type === 'hooks' && row.hooks) {
-    return pathInside(row.hooks.root(config.homes), entry.path);
-  }
   if (entry.type === 'mcp' && row.mcp) {
     return path.resolve(entry.path) === path.resolve(row.mcp.path(config.homes));
   }
@@ -711,7 +708,14 @@ function applyProjectManifestMutation(action: Action): void {
   }
 }
 
-export function executeAction(action: Action, ledger: Ledger): ReportEntry {
+export function executeAction(
+  action: Action,
+  ledger: Ledger,
+  // Project runs prove ownership in the project manifest alone; a machine
+  // ledger holding project rows hands global planning claims over files a
+  // project owns (a project rooted inside an app root would lose them).
+  recordInLedger = true
+): ReportEntry {
   // Native rows own no file: the manager's own verbs are the apply, and its
   // reported state is the proof, so nothing here reaches the ledger.
   if (action.native) {
@@ -827,7 +831,7 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
             },
           },
         } satisfies Action;
-        applyLedgerMutation(ledger, applied);
+        if (recordInLedger) applyLedgerMutation(ledger, applied);
         applyProjectManifestMutation(applied);
         if (leftBehind.length > 0) {
           return failure(
@@ -847,7 +851,7 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
         );
       }
 
-      applyLedgerMutation(ledger, action);
+      if (recordInLedger) applyLedgerMutation(ledger, action);
       applyProjectManifestMutation(action);
       return toEntry(action);
     }
@@ -877,7 +881,7 @@ export function executeAction(action: Action, ledger: Ledger): ReportEntry {
     }
   }
 
-  applyLedgerMutation(ledger, action);
+  if (recordInLedger) applyLedgerMutation(ledger, action);
   applyProjectManifestMutation(action);
 
   // The peer record is published only once its own slice landed: a config
@@ -989,8 +993,18 @@ function sourceAttribution(catalog: SourceCatalog): (action: Action) => string |
     const direct = owners.get(action.id);
     if (direct !== undefined) return direct;
     const cut = action.id.lastIndexOf(':');
-    if (cut < 0) return 'library';
-    return owners.get(action.id.slice(0, cut)) ?? 'library';
+    if (cut >= 0) return owners.get(action.id.slice(0, cut)) ?? 'library';
+    if (action.type === 'plugins') {
+      // A plugin ref nothing resolved still names its source after the `@`;
+      // a ref with no recognizable source is never hidden by the filter.
+      const at = action.id.lastIndexOf('@');
+      if (at > 0) {
+        const namespace = action.id.slice(at + 1);
+        return owners.has(namespace) ? namespace : null;
+      }
+      return null;
+    }
+    return 'library';
   };
 }
 
@@ -1342,7 +1356,17 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     if (opts.all === true || opts.types?.includes('plugins') === true) {
       actions.push(...planCatalogStatus(resolved, catalog, inventory));
     }
-    actions.push(...planSelectedPluginGaps(resolved, catalog));
+    actions.push(
+      ...planSelectedPluginGaps(
+        resolved,
+        catalog,
+        new Set(
+          sources.readiness
+            .filter((row) => row.action && row.status !== 'error')
+            .map((row) => row.namespace)
+        )
+      )
+    );
 
     // Filters select which actions execute, never which inputs the planner saw.
     if (opts.apps && opts.apps.length > 0) {
@@ -1391,7 +1415,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       return preview;
     }
 
-    const entries = reconcile(actions, (action) => executeAction(action, ledger));
+    const entries = reconcile(actions, (action) => executeAction(action, ledger, !config.project));
 
     // Every real run stamps the last-run fact; `status` (dry) reports it.
     const previousLastRun = ledger.lastRun;
@@ -2391,16 +2415,40 @@ export async function main(argv: readonly string[]): Promise<number> {
 
     if (invocation.command === 'init') {
       const configPath = path.join(process.cwd(), '.asb.toml');
-      if (
-        fs.existsSync(configPath) &&
-        !invocation.options.force &&
-        !(await confirm({ message: '.asb.toml already exists. Overwrite?', default: false }))
-      ) {
-        return 0;
+      const json = invocation.options.json;
+      if (fs.existsSync(configPath) && !invocation.options.force) {
+        // A machine consumer never gets a prompt: without --force an existing
+        // config is answered with a skipped envelope instead of a question.
+        const declined =
+          json ||
+          !(await confirm({ message: '.asb.toml already exists. Overwrite?', default: false }));
+        if (declined) {
+          process.stdout.write(
+            json
+              ? `${JSON.stringify(
+                  buildJsonEnvelope(
+                    jsonScope(),
+                    [
+                      {
+                        path: configPath,
+                        outcome: 'skipped',
+                        reason: '.asb.toml already exists; pass --force to overwrite',
+                      },
+                    ],
+                    0
+                  ),
+                  null,
+                  2
+                )}\n`
+              : `skipped ${configPath} (.asb.toml already exists; pass --force to overwrite)\n`
+          );
+          return 0;
+        }
       }
       const createAgentsMd =
         invocation.options.agentsMd ||
-        (!fs.existsSync(path.join(process.cwd(), 'AGENTS.md')) &&
+        (!json &&
+          !fs.existsSync(path.join(process.cwd(), 'AGENTS.md')) &&
           (await confirm({ message: 'Create AGENTS.md skeleton?', default: true })));
       const result = runInit(process.cwd(), { force: true, createAgentsMd });
       process.stdout.write(

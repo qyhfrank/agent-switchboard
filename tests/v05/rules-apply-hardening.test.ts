@@ -47,16 +47,24 @@ test('a lock held by a live process refuses the run, however old the file', asyn
   });
 });
 
-test('a stale lock from a dead process is stolen and the run proceeds', async () => {
+test('a stale lock from a dead process fails closed and names the holder', async () => {
   await withScratchHomes(async (homes) => {
     seedRule(homes, 'base.md', 'Always be kind.\n');
     writeUserConfig(homes, CODEX_CONFIG);
     installApps(homes, 'codex');
     fs.mkdirSync(homes.stateHome, { recursive: true });
     const lockFile = path.join(homes.stateHome, 'run.lock');
-    fs.writeFileSync(lockFile, `${deadPid()} test\n`);
+    const dead = deadPid();
+    fs.writeFileSync(lockFile, `${dead} test\n`);
     ageFile(lockFile, 20);
 
+    // No automatic reaping: any steal of the live path races a concurrent
+    // O_EXCL create, so the run stops and tells the user what to remove.
+    await assert.rejects(() => runSync(), new RegExp(`${dead}.*not running`));
+    assert.equal(fs.existsSync(ruleFilePath(homes, 'codex')), false, 'nothing written');
+    assert.equal(fs.existsSync(lockFile), true, 'lock left for manual removal');
+
+    fs.unlinkSync(lockFile);
     const report = await runSync();
     assert.equal(report.exitCode, 0);
     assert.equal(

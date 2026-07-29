@@ -212,10 +212,11 @@ function lockHolderAlive(generation: string): boolean {
 
 /**
  * Single O_EXCL lock file serializes same-machine runs; there is deliberately
- * no cross-machine locking. A lock is stale only when its mtime is old AND
- * its recorded pid is dead; stealing goes through an atomic rename so two
- * reapers can never both unlink their way past each other — exactly one
- * process removes the corpse, and everyone re-contends on O_EXCL create.
+ * no cross-machine locking and no automatic reaping: any steal of a live path
+ * needs an observe-then-displace step that a concurrent O_EXCL creator can
+ * interleave with, so a leftover lock fails closed instead. The error names
+ * the recorded holder and whether it is still running; a crashed run costs
+ * one manual removal.
  */
 export function acquireRunLock(stateHome: string): RunLock {
   fs.mkdirSync(stateHome, { recursive: true });
@@ -232,52 +233,42 @@ export function acquireRunLock(stateHome: string): RunLock {
 
   let fd = tryAcquire();
   if (fd === null) {
-    let stale = false;
     let observed: string | null = null;
     try {
       observed = fs.readFileSync(lockFile, 'utf-8');
-      stale =
-        Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS && !lockHolderAlive(observed);
     } catch {
-      stale = true;
-    }
-    let replacementRace = false;
-    if (stale && observed !== null) {
-      const reap = `${lockFile}.reap-${process.pid}`;
-      try {
-        fs.renameSync(lockFile, reap);
-        if (fs.readFileSync(reap, 'utf-8') === observed) {
-          fs.unlinkSync(reap);
-        } else {
-          replacementRace = true;
-          try {
-            fs.linkSync(reap, lockFile);
-            fs.unlinkSync(reap);
-          } catch {
-            // A newer contender may already have restored a live lock.
-          }
-        }
-      } catch {
-        // lost the steal race to another reaper; contend on create below
-      }
-      if (!replacementRace) fd = tryAcquire();
-    } else if (stale) {
+      // The holder released between the failed create and this read; contend
+      // once more. Any other read failure keeps the fail-closed error below.
       fd = tryAcquire();
     }
-  }
-  if (fd === null) {
-    throw new LedgerError(
-      `Another asb run appears to be active (${lockFile}); wait for it or remove the stale lock.`
-    );
+    if (fd === null) {
+      const holder = observed?.trim().split(/\s+/)[0];
+      const dead =
+        observed !== null &&
+        !lockHolderAlive(observed) &&
+        (() => {
+          try {
+            return Date.now() - fs.statSync(lockFile).mtimeMs > LOCK_STALE_MS;
+          } catch {
+            return false;
+          }
+        })();
+      throw new LedgerError(
+        dead
+          ? `Another asb run left ${lockFile} behind: its recorded pid ${holder} is not running. If no asb run is active, remove the file and retry.`
+          : `Another asb run appears to be active (${lockFile}); wait for it or remove the stale lock.`
+      );
+    }
   }
 
+  const generation = `${process.pid} ${new Date().toISOString()}\n`;
   try {
-    fs.writeSync(fd, `${process.pid} ${new Date().toISOString()}\n`);
+    fs.writeSync(fd, generation);
   } catch (error) {
     try {
       fs.unlinkSync(lockFile);
     } catch {
-      // leave the empty lock to the staleness reaper
+      // an unreadable empty lock still fails closed with the message above
     }
     throw error;
   } finally {
@@ -286,7 +277,11 @@ export function acquireRunLock(stateHome: string): RunLock {
 
   return {
     release() {
+      // The lock is removed only while it still holds this process's own
+      // generation: after a manual removal plus a new acquire, unlinking
+      // blindly would release a lock some other run now owns.
       try {
+        if (fs.readFileSync(lockFile, 'utf-8') !== generation) return;
         fs.unlinkSync(lockFile);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {

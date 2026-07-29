@@ -345,16 +345,40 @@ export function planCatalogStatus(
 }
 
 /** Selected plugin refs nothing resolves or declares: visible in every run. */
-export function planSelectedPluginGaps(config: ResolvedConfig, catalog: SourceCatalog): Action[] {
+export function planSelectedPluginGaps(
+  config: ResolvedConfig,
+  catalog: SourceCatalog,
+  pendingNamespaces: ReadonlySet<string> = new Set()
+): Action[] {
   const aliases = config.plugins.expansion?.pluginAliases ?? {};
+  // Bare names stay out of `known`: an unambiguous name has an alias, so a
+  // known bare name that reaches the filter is an ambiguous one that resolves
+  // to nothing and must be visible.
   const known = new Set([
-    ...catalog.plugins.flatMap((plugin) => [plugin.id, plugin.name]),
+    ...catalog.plugins.map((plugin) => plugin.id),
     ...catalog.absent.map((plugin) => plugin.id),
   ]);
-  return config.selection.plugins
+  const claimants = new Map<string, string[]>();
+  for (const plugin of catalog.plugins) {
+    claimants.set(plugin.name, [...(claimants.get(plugin.name) ?? []), plugin.source]);
+  }
+  const selected = [
+    ...new Set([
+      ...config.selection.plugins,
+      ...config.apps.enabled.flatMap((appId) => effectivePlugins(config, appId)),
+    ]),
+  ];
+  return selected
     .filter((ref) => aliases[ref] === undefined && !known.has(ref))
-    .map(
-      (ref): Action => ({
+    .filter((ref) => {
+      // A ref of a source this run still plans to materialize is not a gap:
+      // the source's own pending row carries the next step.
+      const at = ref.lastIndexOf('@');
+      return at <= 0 || !pendingNamespaces.has(ref.slice(at + 1));
+    })
+    .map((ref): Action => {
+      const providers = claimants.get(ref) ?? [];
+      return {
         app: null,
         type: 'plugins',
         id: ref,
@@ -362,9 +386,14 @@ export function planSelectedPluginGaps(config: ResolvedConfig, catalog: SourceCa
         op: 'none',
         outcome: 'missing',
         detail: 'unavailable',
-        reason: 'selected, but no source provides it; disable it or add its source',
-      })
-    );
+        reason:
+          providers.length > 1
+            ? `${providers.length} sources provide "${ref}"; spell it name@source (${providers
+                .map((source) => `${ref}@${source}`)
+                .join(', ')})`
+            : 'selected, but no source provides it; disable it or add its source',
+      };
+    });
 }
 
 interface ResolvedRuleSet {
@@ -2728,8 +2757,22 @@ export function planHooks(input: PlanInput): Action[] {
       : undefined;
     const currentHash = captured.content !== null ? hashContent(captured.content) : null;
     const baseContent = captured.content ?? '';
-    const content =
-      configEdits.length > 0 ? applyKeysEdits(baseContent, 'json', configEdits) : baseContent;
+    let content: string;
+    try {
+      content =
+        configEdits.length > 0 ? applyKeysEdits(baseContent, 'json', configEdits) : baseContent;
+    } catch (error) {
+      // An uneditable host (duplicate keys, malformed structure) is contained:
+      // nothing lands, nothing is removed, no ownership is published for it.
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: error instanceof Error ? error.message : String(error),
+      });
+      continue;
+    }
 
     // A file that exists only to carry hooks goes away with them; one asb
     // shares with the app (settings.json) never does.
@@ -3588,6 +3631,9 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
     reason,
     ledger: undefined,
     keyEdits: undefined,
+    // A canceled write publishes no ownership: a peer record claiming groups
+    // the config never received authorizes deleting the user's own groups.
+    peer: undefined,
   });
   const pathsOverlap = (left: readonly string[], right: readonly string[]): boolean => {
     const length = Math.min(left.length, right.length);
@@ -3649,6 +3695,7 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
         reason,
         ledger: undefined,
         keyEdits: undefined,
+        peer: undefined,
       };
       continue;
     }

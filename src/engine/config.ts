@@ -375,6 +375,15 @@ const customMcpTarget = z
     env_transform: z
       .object({ key_name: targetPath.optional(), value_name: targetPath.optional() })
       .strict()
+      // With equal names the converted member holds only the value under the
+      // field masking treats as the visible name, so the credential leaks.
+      .refine(
+        (transform) =>
+          !transform.key_name ||
+          !transform.value_name ||
+          transform.key_name !== transform.value_name,
+        { message: 'env_transform key_name and value_name must differ' }
+      )
       .optional(),
   })
   .strict();
@@ -1140,8 +1149,9 @@ function removeSourceDeclaration(content: string, namespace: string): string {
     const end = sectionEnd(content, tableMatch.index + tableMatch[0].length + 1);
     const body = content.slice(start, end);
     // A trailing run of comment lines documents whatever follows this table,
-    // not the table itself; the removal stops before it.
-    const trailing = /(?:[ \t]*(?:#[^\n]*)?\n)*$/.exec(body);
+    // not the table itself; the removal stops before it. The run may end with
+    // one comment line the file terminates without a newline.
+    const trailing = /(?:[ \t]*(?:#[^\n]*)?\n)*(?:[ \t]*#[^\n]*)?$/.exec(body);
     let cut = body.length;
     if (trailing && trailing[0].includes('#')) {
       const firstComment = trailing[0].indexOf('#');

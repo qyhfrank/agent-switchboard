@@ -2,7 +2,14 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { parse as parseToml, stringify as tomlStringify } from '@iarna/toml';
-import { applyEdits, modify, type ParseError, parse as parseJsonc } from 'jsonc-parser';
+import {
+  applyEdits,
+  modify,
+  type Node,
+  type ParseError,
+  parse as parseJsonc,
+  parseTree,
+} from 'jsonc-parser';
 import { Document, isMap, isSeq, parseDocument, type YAMLSeq } from 'yaml';
 
 /**
@@ -738,10 +745,38 @@ function applyYamlEdits(content: string, edits: readonly KeysEdit[]): string {
   return document.toString();
 }
 
+/**
+ * `modify` edits the first occurrence of a key while `JSON.parse` (and every
+ * consuming application) honors the last, so an addressed duplicate would be
+ * edited in a dead occurrence and the effective value would not change. Fail
+ * closed instead of publishing a write that does not take effect.
+ */
+function assertUniqueAddressedKeys(text: string, keyPath: readonly string[]): void {
+  let node: Node | undefined = parseTree(text) ?? undefined;
+  for (const segment of keyPath) {
+    if (!node || node.type !== 'object') return;
+    const matches = (node.children ?? []).filter(
+      (property) => property.type === 'property' && property.children?.[0]?.value === segment
+    );
+    if (matches.length > 1) {
+      throw new Error(
+        `duplicate key "${segment}" in the JSON document; remove the duplicate by hand, then re-run asb sync`
+      );
+    }
+    node = matches[0]?.children?.[1];
+  }
+}
+
 function applyJsonEdits(content: string, edits: readonly KeysEdit[]): string {
   const formattingOptions = jsonFormatting(content);
   let text = content.trim().length === 0 ? '{}\n' : content;
   for (const edit of edits) {
+    assertUniqueAddressedKeys(
+      text,
+      edit.keyPath.length === 1 && parseKeyedArraySegment(edit.keyPath[0])
+        ? [parseKeyedArraySegment(edit.keyPath[0])?.key ?? edit.keyPath[0]]
+        : edit.keyPath
+    );
     const address = edit.keyPath.length === 1 ? parseKeyedArraySegment(edit.keyPath[0]) : null;
     if (address) {
       const parsed = parseStructured(text, 'json');
