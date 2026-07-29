@@ -19,7 +19,13 @@ import { preferHomeVar, sanitizeMcpName } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, HookEventMap, LibraryInventory } from './library.js';
 import { type NativePlanInput, type NativeWork, planNative } from './native.js';
-import { type HookTarget, type PeerState, peerStateHasContent } from './peer.js';
+import {
+  type HookTarget,
+  manifestBundleKey,
+  type PeerState,
+  type ProjectManifest,
+  peerStateHasContent,
+} from './peer.js';
 import type { Outcome } from './report.js';
 import {
   applyKeysEdits,
@@ -30,6 +36,8 @@ import {
   type KeysFormat,
   keyedArrayProblem,
   keyedArraySegment,
+  mergeProjectRegion,
+  projectRegion,
   sliceHash,
   type TargetFile,
   targetModeMatchesSourceExecutableBits,
@@ -129,6 +137,10 @@ export interface SyncCapture {
   hooks: Record<string, CapturedHookApp>;
   /** MCP host document per app id. */
   mcp: Record<string, CapturedMcpHost>;
+  /** In-memory project authority shared by capture, apply, and checkpoint. */
+  projectManifest?: ProjectManifest;
+  /** Global Codex TOML captured separately from the project MCP host. */
+  projectTrust?: CapturedMcpHost;
   /** Recognized OpenCode singular-layout entries and any scan failure. */
   legacy: CapturedLegacyScan[];
 }
@@ -163,7 +175,7 @@ export interface Action {
    * `put` mutations the executor stamps the measured post-write fingerprint
    * into the ledger entry hash.
    */
-  bundle?: { files: BundleFile[]; stale: string[] };
+  bundle?: { files: BundleFile[]; stale: string[]; exclusive?: boolean };
   /** Containment root for write/remove actions. */
   root?: string;
   /**
@@ -183,6 +195,16 @@ export interface Action {
    * with this record instead of a ledger entry.
    */
   peer?: { asbHome: string; target: HookTarget; state: PeerState };
+  /** Project hook ownership checkpointed after the config action succeeds. */
+  projectPeer?: {
+    manifest: ProjectManifest;
+    projectRoot: string;
+    appId: string;
+    configPath: string;
+    bundleDir: string;
+    state: PeerState;
+    preserveBundles: string[];
+  };
   /**
    * Native-manager work: the app's own plugin manager owns the result, so
    * there is no path, hash, or ledger entry — the commands are the apply.
@@ -190,6 +212,16 @@ export interface Action {
   native?: NativeWork;
   /** Structured edits retained so cells sharing one host can merge once. */
   keyEdits?: { format: KeysFormat; edits: KeysEdit[]; baseContent: string };
+  /** Apps contributing to one shared project slice. */
+  members?: string[];
+  /** Project-triggered work outside the project root (Codex trust). */
+  projectAction?: boolean;
+}
+
+export interface ProjectPlanPolicy {
+  root: string;
+  mode: 'managed' | 'exclusive';
+  collision: 'warn-skip' | 'error' | 'takeover';
 }
 
 export interface PlanInput {
@@ -199,6 +231,7 @@ export interface PlanInput {
   capture: SyncCapture;
   table: readonly AppRow[];
   now: string;
+  project?: ProjectPlanPolicy;
 }
 
 export const STATUS_TYPES = [...SELECTION_TYPES, 'native_plugins'] as const;
@@ -309,6 +342,178 @@ function rulesResolver(
   };
 }
 
+function planSharedProjectRules(
+  input: PlanInput,
+  resolveFor: (appId: string) => ResolvedRuleSet
+): Action[] {
+  if (!input.project) return [];
+  const { config, capture, ledger, table, now, project } = input;
+  const targetPath = path.join(project.root, 'AGENTS.md');
+  const assumeInstalled = new Set(config.apps.assumeInstalled);
+  const members = config.apps.enabled.filter((appId) => {
+    const rules = table.find((row) => row.id === appId)?.rules;
+    return (
+      rules?.path(config.homes) === targetPath &&
+      (capture.installed[appId] === true || assumeInstalled.has(appId))
+    );
+  });
+  if (members.length === 0) return [];
+
+  const missing = [...new Set(members.flatMap((appId) => resolveFor(appId).missing))];
+  const base = {
+    app: 'project',
+    type: 'rules',
+    id: null,
+    path: targetPath,
+    members,
+    projectAction: true,
+  };
+  if (missing.length > 0) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'aggregate-blocked',
+        reason: `missing rule(s): ${missing.join(', ')}; the previous project block is left in place`,
+      },
+    ];
+  }
+  const bodies = [...new Set(members.map((appId) => resolveFor(appId).content))];
+  if (bodies.length > 1) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'shared-writer',
+        reason: `shared AGENTS.md contributors render different rule sets (${members.join(', ')}); align their project selections`,
+      },
+    ];
+  }
+
+  const current = capture.targets[targetPath] ?? { exists: false, content: null };
+  if (current.escapes === true) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'path-escape',
+        reason: `parent directory of ${targetPath} resolves outside the project root; not touching it`,
+      },
+    ];
+  }
+  if (current.exists && current.content === null) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'foreign',
+        reason: 'AGENTS.md exists but cannot be read; not touching it',
+      },
+    ];
+  }
+
+  const existing = current.content ?? '';
+  let currentSlice: string | null;
+  let desiredHost: string;
+  try {
+    currentSlice = projectRegion(existing);
+    desiredHost = mergeProjectRegion(
+      existing,
+      bodies[0] ?? '',
+      config.distribution.project.rulesPlacement
+    );
+  } catch (error) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'malformed-marker',
+        reason: `${error instanceof Error ? error.message : String(error)}; AGENTS.md left unchanged`,
+      },
+    ];
+  }
+  const desiredSlice = projectRegion(desiredHost);
+  const recorded = ledger.entries.find(
+    (entry) => entry.path === targetPath && entry.type === 'rules' && entry.shape === 'region'
+  );
+  const currentSliceHash = currentSlice === null ? null : hashContent(currentSlice);
+  const desiredSliceHash = desiredSlice === null ? null : hashContent(desiredSlice);
+  const put =
+    desiredSliceHash === null
+      ? undefined
+      : ({
+          op: 'put',
+          entry: {
+            app: 'project',
+            type: 'rules',
+            id: null,
+            path: targetPath,
+            shape: 'region',
+            hash: desiredSliceHash,
+            provenance: currentSlice === null ? 'written' : 'marker',
+            updatedAt: now,
+          },
+        } satisfies LedgerMutation);
+
+  if (desiredHost === existing) {
+    if (desiredSlice === null && recorded) {
+      return [
+        {
+          ...base,
+          op: 'none',
+          outcome: 'removed',
+          detail: 'already-absent',
+          ledger: { op: 'delete', key: ledgerKey(recorded) },
+        },
+      ];
+    }
+    if (desiredSlice !== null && !recorded && put) {
+      return [{ ...base, op: 'adopt', outcome: 'adopted', detail: 'marker', ledger: put }];
+    }
+    return desiredSlice === null ? [] : [{ ...base, op: 'none', outcome: 'unchanged' }];
+  }
+
+  if (
+    recorded &&
+    currentSliceHash !== null &&
+    currentSliceHash !== recorded.hash &&
+    project.collision !== 'takeover'
+  ) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: desiredSlice === null ? 'left-behind' : 'conflict',
+        detail: 'modified',
+        reason: 'ASB project region changed since the peer manifest was written; preserved',
+      },
+    ];
+  }
+
+  return [
+    {
+      ...base,
+      op: desiredSlice === null && desiredHost.length === 0 ? 'remove' : 'write',
+      outcome: desiredSlice === null ? 'removed' : 'written',
+      detail: current.exists ? 'updated' : 'created',
+      content: desiredHost,
+      root: project.root,
+      expectedHash: current.content === null ? null : hashContent(current.content),
+      ledger:
+        desiredSlice === null
+          ? recorded
+            ? { op: 'delete', key: ledgerKey(recorded) }
+            : undefined
+          : put,
+    },
+  ];
+}
+
 export function planRules(input: PlanInput): Action[] {
   const { config, inventory, ledger, capture, table, now } = input;
   const actions: Action[] = [];
@@ -395,6 +600,7 @@ export function planRules(input: PlanInput): Action[] {
     if (!row.rules) continue;
 
     const targetPath = capture.rulePaths[appId] ?? row.rules.path(config.homes);
+    if (input.project && targetPath === path.join(input.project.root, 'AGENTS.md')) continue;
     const root = row.rules.root(config.homes, targetPath);
     const current = capture.targets[targetPath] ?? { exists: false, content: null };
     const recorded = ledgerByKey.get(
@@ -500,7 +706,9 @@ export function planRules(input: PlanInput): Action[] {
             op: 'none',
             outcome: 'removed',
             detail: 'already-absent',
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
+            ...(input.project
+              ? {}
+              : { ledger: { op: 'delete' as const, key: ledgerKey(recorded) } }),
           });
         }
         continue;
@@ -624,6 +832,20 @@ export function planRules(input: PlanInput): Action[] {
           expectedHash: currentHash,
           ledger: putEntry('written'),
         });
+      } else if (input.project?.collision === 'takeover' && currentHash !== null) {
+        actions.push({
+          app: appId,
+          type: 'rules',
+          id: null,
+          path: targetPath,
+          op: 'write',
+          outcome: 'written',
+          detail: 'takeover',
+          content: desired,
+          root,
+          expectedHash: currentHash,
+          ledger: putEntry('written'),
+        });
       } else {
         actions.push({
           app: appId,
@@ -656,56 +878,88 @@ export function planRules(input: PlanInput): Action[] {
       });
       continue;
     }
-    actions.push({
-      app: appId,
-      type: 'rules',
-      id: null,
-      path: targetPath,
-      op: 'adopt',
-      outcome: 'adopted',
-      detail: 'convention',
-      reason: 'existing file adopted for update; the next sync writes the composed rules',
-      ledger: {
-        op: 'put',
-        entry: {
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
-          shape: 'own-file',
-          hash: currentHash,
-          provenance: 'convention',
-          updatedAt: now,
+    if (input.project) {
+      actions.push(
+        input.project.collision === 'takeover'
+          ? {
+              app: appId,
+              type: 'rules',
+              id: null,
+              path: targetPath,
+              op: 'write',
+              outcome: 'written',
+              detail: 'takeover',
+              content: desired,
+              root,
+              expectedHash: currentHash,
+              ledger: putEntry('written'),
+            }
+          : {
+              app: appId,
+              type: 'rules',
+              id: null,
+              path: targetPath,
+              op: 'none',
+              outcome: 'conflict',
+              detail: 'foreign',
+              reason: 'project target is occupied and the peer manifest does not own it; preserved',
+            }
+      );
+    } else {
+      actions.push({
+        app: appId,
+        type: 'rules',
+        id: null,
+        path: targetPath,
+        op: 'adopt',
+        outcome: 'adopted',
+        detail: 'convention',
+        reason: 'existing file adopted for update; the next sync writes the composed rules',
+        ledger: {
+          op: 'put',
+          entry: {
+            app: appId,
+            type: 'rules',
+            id: null,
+            path: targetPath,
+            shape: 'own-file',
+            hash: currentHash,
+            provenance: 'convention',
+            updatedAt: now,
+          },
         },
-      },
-    });
+      });
+    }
   }
 
   // Escaping targets are decided here, from the capture, so dry-run and the
   // real run report the identical blocked entry; the executor re-checks live.
-  return [...actions, ...staleActions].map((action) => {
-    if (
-      (action.op === 'write' || action.op === 'remove') &&
-      action.path !== null &&
-      capture.targets[action.path]?.escapes === true
-    ) {
-      return {
-        app: action.app,
-        type: action.type,
-        id: action.id,
-        path: action.path,
-        op: 'none' as const,
-        outcome: 'blocked' as const,
-        detail: 'path-escape',
-        reason: `parent directory of ${action.path} resolves outside the app root; not touching it`,
-      };
+  return [...actions, ...staleActions, ...planSharedProjectRules(input, resolveFor)].map(
+    (action) => {
+      if (
+        (action.op === 'write' || action.op === 'remove') &&
+        action.path !== null &&
+        capture.targets[action.path]?.escapes === true
+      ) {
+        return {
+          app: action.app,
+          type: action.type,
+          id: action.id,
+          path: action.path,
+          op: 'none' as const,
+          outcome: 'blocked' as const,
+          detail: 'path-escape',
+          reason: `parent directory of ${action.path} resolves outside the app root; not touching it`,
+        };
+      }
+      return action;
     }
-    return action;
-  });
+  );
 }
 
 interface SkillRowPlan {
   app: string;
+  members: string[];
   dir: string;
   root: string;
   reserved: readonly string[];
@@ -736,7 +990,6 @@ export function planSkills(input: PlanInput): Action[] {
   const failedIds = new Set(
     inventory.failed.filter((failure) => failure.type === 'skills').map((failure) => failure.id)
   );
-  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
   const assumeInstalled = new Set(config.apps.assumeInstalled);
   const detected = (appId: string): boolean =>
     capture.installed[appId] === true || assumeInstalled.has(appId);
@@ -765,6 +1018,7 @@ export function planSkills(input: PlanInput): Action[] {
     }
     rows.push({
       app: appId,
+      members: [appId],
       dir: row.skills.dir(config.homes),
       root: row.skills.root(config.homes),
       reserved: row.skills.reserved,
@@ -805,7 +1059,7 @@ export function planSkills(input: PlanInput): Action[] {
           ),
         ]
       : [];
-  const unionDir = AGENTS_SKILLS_UNION.dir(config.homes);
+  const unionDir = AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined);
   const unionRowActive =
     AGENTS_SKILLS_UNION.participates(config.apps.enabled) &&
     (ledger.entries.some((entry) => entry.app === 'agents' && entry.type === 'skills') ||
@@ -813,8 +1067,9 @@ export function planSkills(input: PlanInput): Action[] {
   if (unionRowActive) {
     rows.push({
       app: 'agents',
+      members: activeMembers,
       dir: unionDir,
-      root: AGENTS_SKILLS_UNION.root(config.homes),
+      root: AGENTS_SKILLS_UNION.root(config.homes, config.project ?? undefined),
       reserved: AGENTS_SKILLS_UNION.reserved,
       selected: unionSelected,
     });
@@ -832,12 +1087,26 @@ export function planSkills(input: PlanInput): Action[] {
     });
   }
 
+  const physicalRows: SkillRowPlan[] = [];
   for (const row of rows) {
+    const shared = input.project
+      ? physicalRows.find((candidate) => candidate.dir === row.dir)
+      : undefined;
+    if (!shared) {
+      physicalRows.push({ ...row, members: [...row.members], selected: [...row.selected] });
+      continue;
+    }
+    shared.members = [...new Set([...shared.members, ...row.members])];
+    shared.selected = [...new Set([...shared.selected, ...row.selected])];
+    shared.reserved = [...new Set([...shared.reserved, ...row.reserved])];
+  }
+
+  for (const row of physicalRows) {
     const present = capture.bundleDirs[row.dir] ?? [];
     const recordedIds = ledger.entries
       .filter(
         (entry) =>
-          entry.app === row.app &&
+          (entry.app === row.app || row.members.includes(entry.app)) &&
           entry.type === 'skills' &&
           entry.id !== null &&
           entry.shape === 'own-dir' &&
@@ -845,7 +1114,11 @@ export function planSkills(input: PlanInput): Action[] {
       )
       .map((entry) => entry.id as string);
     const candidates = [
-      ...new Set([...row.selected, ...recordedIds, ...present.filter((name) => byId.has(name))]),
+      ...new Set([
+        ...row.selected,
+        ...recordedIds,
+        ...present.filter((name) => input.project?.mode === 'exclusive' || byId.has(name)),
+      ]),
     ].filter((id) => !row.reserved.includes(id) && !id.startsWith('.'));
 
     for (const id of candidates) {
@@ -855,8 +1128,13 @@ export function planSkills(input: PlanInput): Action[] {
         files: null,
         fingerprint: null,
       };
-      const recorded = ledgerByKey.get(
-        ledgerKey({ app: row.app, type: 'skills', id, path: bundlePath })
+      const recorded = ledger.entries.find(
+        (entry) =>
+          (entry.app === row.app || row.members.includes(entry.app)) &&
+          entry.type === 'skills' &&
+          entry.id === id &&
+          entry.path === bundlePath &&
+          entry.shape === 'own-dir'
       );
       const isSelected = row.selected.includes(id);
       const component = byId.get(id);
@@ -905,7 +1183,13 @@ export function planSkills(input: PlanInput): Action[] {
           updatedAt: now,
         },
       });
-      const base = { app: row.app, type: 'skills', id, path: bundlePath };
+      const base = {
+        app: row.app,
+        type: 'skills',
+        id,
+        path: bundlePath,
+        ...(row.members.length > 1 ? { members: row.members } : {}),
+      };
 
       if (!captured.exists) {
         if (isSelected) {
@@ -926,7 +1210,9 @@ export function planSkills(input: PlanInput): Action[] {
             op: 'none',
             outcome: 'removed',
             detail: 'already-absent',
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
+            ...(input.project
+              ? {}
+              : { ledger: { op: 'delete' as const, key: ledgerKey(recorded) } }),
           });
         }
         continue;
@@ -1030,6 +1316,34 @@ export function planSkills(input: PlanInput): Action[] {
           return true;
         };
         if (isSelected) {
+          if (input.project?.collision === 'takeover' && captured.fingerprint !== null) {
+            actions.push({
+              ...base,
+              op: 'write',
+              outcome: 'written',
+              detail: 'takeover',
+              bundle: {
+                files: desired,
+                stale: (captured.files ?? [])
+                  .map((file) => file.rel)
+                  .filter((rel) => !desiredByRel.has(rel)),
+              },
+              root: row.root,
+              expectedHash: captured.fingerprint,
+              ledger: putEntry('written', ''),
+            });
+            continue;
+          }
+          if (input.project) {
+            actions.push({
+              ...base,
+              op: 'none',
+              outcome: 'conflict',
+              detail: 'modified',
+              reason: `project bundle changed since the peer manifest was written (recorded ${recorded.hash.slice(0, 17)}, current ${captured.fingerprint?.slice(0, 17) ?? 'unprovable'}); preserved`,
+            });
+            continue;
+          }
           if (captured.fingerprint !== null && bytesClean()) {
             actions.push({
               ...base,
@@ -1056,7 +1370,36 @@ export function planSkills(input: PlanInput): Action[] {
             outcome: 'left-behind',
             detail: 'modified',
             reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 17)}, current ${captured.fingerprint?.slice(0, 17) ?? 'unprovable'}); delete it yourself or re-enable the skill`,
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
+            ...(input.project
+              ? {}
+              : { ledger: { op: 'delete' as const, key: ledgerKey(recorded) } }),
+          });
+        }
+        continue;
+      }
+
+      if (input.project?.mode === 'exclusive' && !isSelected) {
+        if (captured.files === null || captured.fingerprint === null) {
+          actions.push({
+            ...base,
+            op: 'none',
+            outcome: 'failed',
+            detail: 'scan-error',
+            reason: 'exclusive project bundle cannot be proven safe to remove',
+          });
+        } else {
+          actions.push({
+            ...base,
+            op: 'remove',
+            outcome: 'removed',
+            detail: 'exclusive-cleanup',
+            bundle: {
+              files: [],
+              stale: captured.files.map((file) => file.rel),
+              exclusive: true,
+            },
+            root: row.root,
+            expectedHash: captured.fingerprint,
           });
         }
         continue;
@@ -1080,6 +1423,32 @@ export function planSkills(input: PlanInput): Action[] {
             reason:
               'directory matches this skill by name but contains symlinks or special files asb cannot prove ownership of; move it away or delete it yourself',
           });
+        } else if (input.project) {
+          if (input.project.collision === 'takeover') {
+            actions.push({
+              ...base,
+              op: 'write',
+              outcome: 'written',
+              detail: 'takeover',
+              bundle: {
+                files: desired,
+                stale: (captured.files ?? [])
+                  .map((file) => file.rel)
+                  .filter((rel) => !desiredByRel.has(rel)),
+              },
+              root: row.root,
+              expectedHash: captured.fingerprint,
+              ledger: putEntry('written', ''),
+            });
+          } else {
+            actions.push({
+              ...base,
+              op: 'none',
+              outcome: 'conflict',
+              detail: 'foreign',
+              reason: 'project bundle is occupied and the peer manifest does not own it; preserved',
+            });
+          }
         } else {
           // Convention: name-matched child of the managed parent adopts for
           // update only — nothing is written this run. The entry records the
@@ -1156,7 +1525,8 @@ function removeEntryRecord(
   type: EntryType,
   recorded: LedgerEntry,
   current: CapturedTarget,
-  root: string
+  root: string,
+  keepProofOnLeftBehind = false
 ): Action {
   const base = { app, type, id: recorded.id, path: recorded.path };
   const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
@@ -1179,7 +1549,7 @@ function removeEntryRecord(
       outcome: 'left-behind',
       detail: 'unproven',
       reason: 'file was adopted by convention for update only; preserved',
-      ledger: drop,
+      ...(keepProofOnLeftBehind ? {} : { ledger: drop }),
     };
   }
   const currentHash = current.content === null ? null : hashContent(current.content);
@@ -1190,7 +1560,7 @@ function removeEntryRecord(
       outcome: 'left-behind',
       detail: 'modified',
       reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash?.slice(0, 12) ?? 'unreadable'}); delete it yourself or re-enable it`,
-      ledger: drop,
+      ...(keepProofOnLeftBehind ? {} : { ledger: drop }),
     };
   }
   return {
@@ -1593,13 +1963,28 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       } else {
         const currentHash = hashContent(current.content);
         if (recorded && currentHash !== recorded.hash) {
-          actions.push({
-            ...base,
-            op: 'none',
-            outcome: 'conflict',
-            reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
-          });
-          protectedIds.add(id);
+          if (input.project?.collision === 'takeover') {
+            roleReady = true;
+            actions.push({
+              ...base,
+              op: 'write',
+              outcome: 'written',
+              detail: 'takeover',
+              content: desired,
+              root: target.root(config.homes),
+              expectedHash: currentHash,
+              ledger: put('written'),
+            });
+          } else {
+            actions.push({
+              ...base,
+              op: 'none',
+              outcome: 'conflict',
+              reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
+            });
+            protectedIds.add(id);
+          }
+          if (roleReady) configCandidates.push({ component, filename, rolePath: targetPath });
           continue;
         }
         if (currentHash === desiredHash) {
@@ -1627,6 +2012,28 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
             expectedHash: currentHash,
             ledger: put('written'),
           });
+        } else if (input.project) {
+          if (input.project.collision === 'takeover') {
+            roleReady = true;
+            actions.push({
+              ...base,
+              op: 'write',
+              outcome: 'written',
+              detail: 'takeover',
+              content: desired,
+              root: target.root(config.homes),
+              expectedHash: currentHash,
+              ledger: put('written'),
+            });
+          } else {
+            actions.push({
+              ...base,
+              op: 'none',
+              outcome: 'conflict',
+              detail: 'foreign',
+              reason: 'project target is occupied and the peer manifest does not own it; preserved',
+            });
+          }
         } else {
           actions.push({
             ...base,
@@ -1661,7 +2068,16 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       )
         continue;
       const current = capture.targets[recorded.path] ?? { exists: false, content: null };
-      actions.push(removeEntryRecord(app, type, recorded, current, target.root(config.homes)));
+      actions.push(
+        removeEntryRecord(
+          app,
+          type,
+          recorded,
+          current,
+          target.root(config.homes),
+          input.project !== undefined
+        )
+      );
     }
 
     const selectedSet = new Set(selected);
@@ -1673,18 +2089,33 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       const recorded = ledger.entries.some(
         (entry) => ledgerKey(entry) === ledgerKey({ app, type, id: component.id, path: targetPath })
       );
-      if (!recorded)
-        actions.push({
-          app,
-          type,
-          id: component.id,
-          path: targetPath,
-          op: 'none',
-          outcome: 'left-behind',
-          detail: 'unproven',
-          reason:
-            'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
-        });
+      if (!recorded) {
+        actions.push(
+          input.project?.mode === 'exclusive' && current.content !== null
+            ? {
+                app,
+                type,
+                id: component.id,
+                path: targetPath,
+                op: 'remove',
+                outcome: 'removed',
+                detail: 'exclusive-cleanup',
+                root: target.root(config.homes),
+                expectedHash: hashContent(current.content),
+              }
+            : {
+                app,
+                type,
+                id: component.id,
+                path: targetPath,
+                op: 'none',
+                outcome: 'left-behind',
+                detail: 'unproven',
+                reason:
+                  'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
+              }
+        );
+      }
     }
     actions.push(
       ...planEntryConfig(input, app, target, configCandidates, protectedIds, selectedEligible)
@@ -2058,6 +2489,29 @@ export function planHooks(input: PlanInput): Action[] {
             targetModeMatchesSourceExecutableBits(file.mode, target.mode)
           );
         });
+      const projectRecord = input.project
+        ? capture.projectManifest?.bundles[manifestBundleKey(app, 'hooks', id)]
+        : undefined;
+      const projectCollision =
+        input.project &&
+        live.exists &&
+        ((!projectRecord && !clean) ||
+          (projectRecord !== undefined && live.fingerprint !== projectRecord.hash));
+      if (projectCollision && input.project?.collision !== 'takeover') {
+        writes.push({
+          app,
+          type: 'hooks',
+          id,
+          path: bundlePath,
+          op: 'none',
+          outcome: 'conflict',
+          detail: projectRecord ? 'modified' : 'foreign',
+          reason: projectRecord
+            ? 'project hook bundle changed since the peer manifest was written; preserved'
+            : 'project hook bundle is occupied and the peer manifest does not own it; preserved',
+        });
+        continue;
+      }
       writes.push(
         clean
           ? { app, type: 'hooks', id, path: bundlePath, op: 'none', outcome: 'unchanged' }
@@ -2076,11 +2530,12 @@ export function planHooks(input: PlanInput): Action[] {
                 // directory asb has never distributed is adopted for update
                 // only: its other files stay, the id enters the record with
                 // this write, and later syncs reconcile the tree normally.
-                stale: state.bundles.includes(id)
-                  ? (live.files ?? [])
-                      .map((file) => file.rel)
-                      .filter((rel) => !desiredRels.has(rel))
-                  : [],
+                stale:
+                  state.bundles.includes(id) || input.project?.collision === 'takeover'
+                    ? (live.files ?? [])
+                        .map((file) => file.rel)
+                        .filter((rel) => !desiredRels.has(rel))
+                    : [],
               },
               root,
               expectedHash: live.fingerprint,
@@ -2158,6 +2613,25 @@ export function planHooks(input: PlanInput): Action[] {
         });
         continue;
       }
+      const projectRecord = input.project
+        ? capture.projectManifest?.bundles[manifestBundleKey(app, 'hooks', id)]
+        : undefined;
+      if (input.project && (!projectRecord || projectRecord.hash !== live.fingerprint)) {
+        retained.push(id);
+        removals.push({
+          app,
+          type: 'hooks',
+          id,
+          path: bundlePath,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: projectRecord ? 'modified' : 'unproven',
+          reason: projectRecord
+            ? 'project hook bundle changed since the peer manifest was written; preserved'
+            : 'project manifest has no bundle proof; preserved',
+        });
+        continue;
+      }
       removals.push({
         app,
         type: 'hooks',
@@ -2181,11 +2655,26 @@ export function planHooks(input: PlanInput): Action[] {
     if (Object.keys(merged).length === 0) delete next.hooks;
     else next.hooks = merged;
 
-    const peer: Action['peer'] = {
-      asbHome: config.homes.asbHome,
-      target: row.stateTarget,
-      state: { version: 1, events: desired, bundles: [...owned, ...retained], legacyBundles: [] },
+    const stateAfter: PeerState = {
+      version: 1,
+      events: desired,
+      bundles: [...owned, ...retained],
+      legacyBundles: [],
     };
+    const peer: Action['peer'] = input.project
+      ? undefined
+      : { asbHome: config.homes.asbHome, target: row.stateTarget, state: stateAfter };
+    const projectPeer: Action['projectPeer'] = input.project
+      ? {
+          manifest: capture.projectManifest as ProjectManifest,
+          projectRoot: input.project.root,
+          appId: app,
+          configPath,
+          bundleDir: row.bundleDir(config.homes),
+          state: stateAfter,
+          preserveBundles: retained,
+        }
+      : undefined;
     const currentHash = captured.content !== null ? hashContent(captured.content) : null;
     const content = `${JSON.stringify(next, null, 2)}\n`;
 
@@ -2207,10 +2696,11 @@ export function planHooks(input: PlanInput): Action[] {
             root,
             expectedHash: currentHash,
             peer,
+            projectPeer,
           }
-        : { ...base, op: 'none', outcome: 'unchanged', peer };
+        : { ...base, op: 'none', outcome: 'unchanged', peer, projectPeer };
     } else if (captured.content === content) {
-      configAction = { ...base, op: 'none', outcome: 'unchanged', peer };
+      configAction = { ...base, op: 'none', outcome: 'unchanged', peer, projectPeer };
     } else {
       configAction = {
         ...base,
@@ -2221,6 +2711,7 @@ export function planHooks(input: PlanInput): Action[] {
         root,
         expectedHash: currentHash,
         peer,
+        projectPeer,
       };
     }
 
@@ -2261,6 +2752,63 @@ export function planHooks(input: PlanInput): Action[] {
 // ---------------------------------------------------------------------------
 // MCP: named slices inside a structured document the user also owns
 // ---------------------------------------------------------------------------
+
+/**
+ * Project MCP peer proof carries placement but no hash. The expected hash is
+ * recomputed from the current library render; drift therefore preserves the
+ * key, while an unchanged deselected key is removable.
+ */
+export function projectMcpPeerLedgerEntries(
+  config: ResolvedConfig,
+  inventory: LibraryInventory,
+  capture: SyncCapture,
+  table: readonly AppRow[],
+  manifest: ProjectManifest,
+  now: string
+): LedgerEntry[] {
+  const components = inventory.components.filter(
+    (component): component is Component & { server: NonNullable<Component['server']> } =>
+      component.type === 'mcp' && component.server !== undefined
+  );
+  const entries: LedgerEntry[] = [];
+  for (const peer of Object.values(manifest.mcp)) {
+    const row = table.find((candidate) => candidate.id === peer.appId)?.mcp;
+    const captured = capture.mcp[peer.appId];
+    if (!row || !captured) continue;
+    const expectedPath = path.resolve(config.project as string, peer.relativePath);
+    if (expectedPath !== captured.path) continue;
+    const candidates = components.filter(
+      (component) =>
+        (row.sanitize ? sanitizeMcpName(component.id) : component.id) === peer.serverKey
+    );
+    const component = candidates.length === 1 ? candidates[0] : undefined;
+    const identityField = row.keyField ?? 'name';
+    const keyPath =
+      row.structure === 'keyed-array'
+        ? [keyedArraySegment(row.rootKey, identityField, peer.serverKey)]
+        : [row.rootKey, peer.serverKey];
+    const dialect = component ? row.dialect(component.server) : null;
+    const desired =
+      dialect === null
+        ? null
+        : row.structure === 'keyed-array'
+          ? { ...dialect, [identityField]: peer.serverKey }
+          : dialect;
+    entries.push({
+      app: peer.appId,
+      type: 'mcp',
+      id: component?.id ?? peer.serverKey,
+      path: captured.path,
+      shape: 'keys',
+      hash: desired === null ? 'peer-placement-only' : sliceHash(desired),
+      keys: keyPath,
+      serverKey: peer.serverKey,
+      provenance: 'peer-record',
+      updatedAt: now,
+    });
+  }
+  return entries;
+}
 
 interface McpSlice {
   /** Library component id: the key as authored. */
@@ -2307,7 +2855,8 @@ function planMcpHost(
   selected: readonly string[],
   byId: ReadonlyMap<string, Component>,
   ledger: Ledger,
-  now: string
+  now: string,
+  project?: ProjectPlanPolicy
 ): McpHostPlan {
   const slices: McpSlice[] = [];
   const diskIdFor = (id: string): string => (row.sanitize ? sanitizeMcpName(id) : id);
@@ -2392,11 +2941,13 @@ function planMcpHost(
     shape: 'keys',
     hash: '',
     keys: keyPath,
+    ...(project ? { serverKey: diskIdFor(id) } : {}),
     provenance: 'written',
     updatedAt: now,
   });
 
   const desiredIds = new Set<string>();
+  const desiredServerKeys = new Set<string>();
   for (const id of selected) {
     const component = byId.get(id);
     if (!component?.server) continue;
@@ -2419,6 +2970,7 @@ function planMcpHost(
       });
       continue;
     }
+    desiredServerKeys.add(diskIdFor(id));
     desiredIds.add(id);
     const value =
       row.structure === 'keyed-array'
@@ -2469,11 +3021,21 @@ function planMcpHost(
     const currentHash = sliceHash(current);
     if (recorded) {
       if (currentHash !== recorded.hash) {
-        slices.push({
-          ...base,
-          outcome: 'conflict',
-          reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand, or disable this server for ${app}`,
-        });
+        slices.push(
+          project?.collision === 'takeover'
+            ? {
+                ...base,
+                outcome: 'written',
+                detail: 'takeover',
+                edit,
+                ledger: put('written'),
+              }
+            : {
+                ...base,
+                outcome: 'conflict',
+                reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand, or disable this server for ${app}`,
+              }
+        );
         continue;
       }
       if (currentHash === sliceHash(value)) {
@@ -2488,12 +3050,22 @@ function planMcpHost(
       slices.push({ ...base, outcome: 'adopted', detail: 'identity', ledger: put('identity') });
       continue;
     }
-    slices.push({
-      ...base,
-      outcome: 'blocked',
-      detail: 'foreign',
-      reason: `${diskIdFor(id)} is already in ${captured.path} and asb never wrote it; rename yours, or delete that entry to let asb own the key`,
-    });
+    slices.push(
+      project?.collision === 'takeover'
+        ? {
+            ...base,
+            outcome: 'written',
+            detail: 'takeover',
+            edit,
+            ledger: put('written'),
+          }
+        : {
+            ...base,
+            outcome: 'blocked',
+            detail: 'foreign',
+            reason: `${diskIdFor(id)} is already in ${captured.path} and asb never wrote it; rename yours, or delete that entry to let asb own the key`,
+          }
+    );
   }
 
   // Recorded keys nothing selects any more. Removal needs the recorded hash
@@ -2529,7 +3101,7 @@ function planMcpHost(
         outcome: 'left-behind',
         detail: 'modified',
         reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${sliceHash(current).slice(0, 12)}); delete it yourself or re-enable the server`,
-        ledger: drop,
+        ...(project ? {} : { ledger: drop }),
       });
       continue;
     }
@@ -2539,6 +3111,52 @@ function planMcpHost(
       edit: { keyPath: [...keyPath], remove: true },
       ledger: drop,
     });
+  }
+
+  if (project?.mode === 'exclusive') {
+    const presentServerKeys =
+      row.structure === 'keyed-array'
+        ? Array.isArray(container)
+          ? container.flatMap((value) =>
+              isPlainObject(value) && typeof value[identityField] === 'string'
+                ? [value[identityField] as string]
+                : []
+            )
+          : []
+        : isPlainObject(container)
+          ? Object.keys(container)
+          : [];
+    for (const serverKey of presentServerKeys) {
+      if (desiredServerKeys.has(serverKey)) continue;
+      const keyPath =
+        row.structure === 'keyed-array'
+          ? [keyedArraySegment(row.rootKey, identityField, serverKey)]
+          : [row.rootKey, serverKey];
+      const current = valueAtKeyPath(captured.root, keyPath);
+      const problem = unspliceable(keyPath);
+      slices.push(
+        problem
+          ? {
+              id: serverKey,
+              keyPath,
+              outcome: 'left-behind',
+              detail: 'modified',
+              reason: `${problem}; delete it yourself`,
+              desired: null,
+              current,
+              recorded: null,
+            }
+          : {
+              id: serverKey,
+              keyPath,
+              outcome: 'removed',
+              desired: null,
+              current,
+              recorded: null,
+              edit: { keyPath, remove: true },
+            }
+      );
+    }
   }
 
   return { slices };
@@ -2567,13 +3185,21 @@ export function planMcp(input: PlanInput): Action[] {
   );
   const assumeInstalled = new Set(config.apps.assumeInstalled);
 
-  const rows: { app: string; row: McpTargetRow; selected: string[] }[] = [];
+  const enabledApps = new Set(config.apps.enabled);
+  const rows: { app: string; row: McpTargetRow; selected: string[]; enabled: boolean }[] = [];
   const missingUnion = new Set<string>();
-  for (const appId of config.apps.enabled) {
+  const appIds = new Set([
+    ...config.apps.enabled,
+    ...(input.project?.mode === 'managed'
+      ? ledger.entries.filter((entry) => entry.type === 'mcp').map((entry) => entry.app)
+      : []),
+  ]);
+  for (const appId of appIds) {
     const row = table.find((candidate) => candidate.id === appId)?.mcp;
     if (!row) continue;
-    if (capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
-    const selected = effectiveSelection(config, appId, 'mcp');
+    const enabled = enabledApps.has(appId);
+    if (enabled && capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
+    const selected = enabled ? effectiveSelection(config, appId, 'mcp') : [];
     for (const id of selected) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
@@ -2583,9 +3209,31 @@ export function planMcp(input: PlanInput): Action[] {
       (entry) =>
         entry.app === appId && entry.type === 'mcp' && entry.path === capture.mcp[appId]?.path
     );
-    if (selected.length === 0 && !claimedHere && byId.size === 0) continue;
-    rows.push({ app: appId, row, selected });
+    if (
+      selected.length === 0 &&
+      !claimedHere &&
+      byId.size === 0 &&
+      !(input.project?.mode === 'exclusive' && capture.mcp[appId]?.exists)
+    )
+      continue;
+    rows.push({ app: appId, row, selected, enabled });
   }
+
+  const activePlacements = rows.flatMap(({ row, selected, enabled, app }) => {
+    if (!enabled) return [];
+    const captured = capture.mcp[app];
+    if (!captured) return [];
+    return selected.flatMap((id) => {
+      const component = byId.get(id);
+      if (!component?.server || row.dialect(component.server) === null) return [];
+      const serverKey = row.sanitize ? sanitizeMcpName(id) : id;
+      const keys =
+        row.structure === 'keyed-array'
+          ? [keyedArraySegment(row.rootKey, row.keyField ?? 'name', serverKey)]
+          : [row.rootKey, serverKey];
+      return [{ path: captured.path, keys }];
+    });
+  });
 
   for (const id of missingUnion) {
     actions.push({
@@ -2599,7 +3247,7 @@ export function planMcp(input: PlanInput): Action[] {
     });
   }
 
-  for (const { app, row, selected } of rows) {
+  for (const { app, row, selected, enabled } of rows) {
     const captured = capture.mcp[app];
     if (!captured) continue;
     const base = { app, type: 'mcp', id: null, path: captured.path };
@@ -2625,7 +3273,57 @@ export function planMcp(input: PlanInput): Action[] {
       continue;
     }
 
-    const { slices, failure } = planMcpHost(app, row, captured, selected, byId, ledger, now);
+    const inactiveDrops = new Set<string>();
+    if (!enabled) {
+      const records = ledger.entries.filter(
+        (entry) => entry.app === app && entry.type === 'mcp' && entry.path === captured.path
+      );
+      for (const record of records) {
+        const owners = ledger.entries.filter(
+          (candidate) =>
+            candidate.type === 'mcp' &&
+            candidate.path === record.path &&
+            isDeepStrictEqual(candidate.keys, record.keys)
+        );
+        const cleanupOwner = owners
+          .filter((owner) => !enabledApps.has(owner.app))
+          .sort((left, right) => ledgerKey(left).localeCompare(ledgerKey(right)))[0];
+        const active = activePlacements.some(
+          (placement) =>
+            placement.path === record.path && isDeepStrictEqual(placement.keys, record.keys)
+        );
+        if (!active && cleanupOwner && ledgerKey(cleanupOwner) === ledgerKey(record)) continue;
+        const key = ledgerKey(record);
+        inactiveDrops.add(key);
+        actions.push({
+          app,
+          type: 'mcp',
+          id: record.id,
+          path: captured.path,
+          op: 'none',
+          outcome: 'removed',
+          detail: 'inactive-owner',
+          ledger: { op: 'delete', key },
+        });
+      }
+    }
+    const hostLedger =
+      inactiveDrops.size === 0
+        ? ledger
+        : {
+            ...ledger,
+            entries: ledger.entries.filter((entry) => !inactiveDrops.has(ledgerKey(entry))),
+          };
+    const { slices, failure } = planMcpHost(
+      app,
+      row,
+      captured,
+      selected,
+      byId,
+      hostLedger,
+      now,
+      input.project
+    );
     if (failure) {
       actions.push({ ...base, op: 'none', ...failure });
       continue;
@@ -2714,6 +3412,110 @@ export function planMcp(input: PlanInput): Action[] {
   return actions;
 }
 
+/** Add-only Codex trust for a project whose MCP destination is active. */
+export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Action[]): Action[] {
+  if (!input.project) return [];
+  const planned = mcpActions.some(
+    (action) =>
+      action.app === 'codex' &&
+      action.type === 'mcp' &&
+      ((action.op === 'write' && action.reason?.includes('wrote ') === true) ||
+        (action.id !== null && (action.outcome === 'unchanged' || action.outcome === 'adopted')))
+  );
+  if (!planned) return [];
+
+  const captured = input.capture.projectTrust;
+  if (!captured) return [];
+  const base = {
+    app: 'codex',
+    type: 'mcp',
+    id: null,
+    path: captured.path,
+    projectAction: true,
+  } as const;
+  if (captured.escapes === true) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'path-escape',
+        reason: `parent directory of ${captured.path} resolves outside the Codex root; not touching it`,
+      },
+    ];
+  }
+  if (captured.root === null) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: `cannot read ${path.basename(captured.path)}, project trust not merged: ${captured.error ?? 'document root must be an object'}`,
+      },
+    ];
+  }
+
+  const projects = valueAtKeyPath(captured.root, ['projects']);
+  const existing = valueAtKeyPath(captured.root, ['projects', input.project.root]);
+  if (existing !== undefined) {
+    if (isPlainObject(existing) && existing.trust_level === 'trusted') {
+      return [{ ...base, op: 'none', outcome: 'unchanged' }];
+    }
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'foreign',
+        reason: `Codex project trust is untrusted or malformed for ${input.project.root}; preserving it`,
+      },
+    ];
+  }
+  if (projects !== undefined && !isPlainObject(projects)) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'foreign',
+        reason: 'Codex projects trust table is malformed; preserving it',
+      },
+    ];
+  }
+
+  const edit: KeysEdit = {
+    keyPath: ['projects', input.project.root, 'trust_level'],
+    value: 'trusted',
+    scalar: true,
+  };
+  try {
+    const content = applyKeysEdits(captured.content ?? '', 'toml', [edit]);
+    return [
+      {
+        ...base,
+        op: 'write',
+        outcome: 'written',
+        detail: captured.exists ? 'merged' : 'created',
+        content,
+        root: path.dirname(captured.path),
+        expectedHash: captured.content === null ? null : hashContent(captured.content),
+        keyEdits: { format: 'toml', edits: [edit], baseContent: captured.content ?? '' },
+      },
+    ];
+  } catch (error) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: error instanceof Error ? error.message : String(error),
+      },
+    ];
+  }
+}
+
 /** Merge cells editing the same structured host after CLI action filters. */
 export function groupKeyActions(actions: readonly Action[]): Action[] {
   const grouped: Action[] = [];
@@ -2785,6 +3587,50 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
   return grouped;
 }
 
+function pathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative === '' || (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
+  );
+}
+
+/** `collision=error` suppresses every project mutation after the full plan is known. */
+export function preflightProjectActions(
+  actions: readonly Action[],
+  project: ProjectPlanPolicy
+): Action[] {
+  if (project.collision !== 'error') return [...actions];
+  const belongs = (action: Action): boolean =>
+    action.projectAction === true ||
+    (action.path !== null && pathInside(project.root, action.path));
+  const collision = actions.find(
+    (action) =>
+      belongs(action) &&
+      (action.outcome === 'conflict' ||
+        (action.outcome === 'blocked' && action.detail === 'foreign'))
+  );
+  if (!collision) return [...actions];
+  const reason = `project collision preflight failed at ${collision.path ?? collision.id ?? 'unknown target'}; no project write was applied`;
+  return actions.map((action) => {
+    if (!belongs(action) || (action.op === 'none' && action.ledger === undefined)) return action;
+    return {
+      ...action,
+      op: 'none',
+      outcome: 'skipped',
+      detail: 'project-preflight',
+      reason,
+      content: undefined,
+      bundle: undefined,
+      root: undefined,
+      expectedHash: undefined,
+      ledger: undefined,
+      peer: undefined,
+      keyEdits: undefined,
+      native: undefined,
+    };
+  });
+}
+
 /**
  * MCP view over the same planner. A server is identified by its key, so a
  * target matches a library id, an app id, or a host path, and each matched
@@ -2818,7 +3664,8 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
       effectiveSelection(config, appId, 'mcp'),
       byId,
       ledger,
-      now
+      now,
+      input.project
     );
     for (const slice of hostSlices) {
       const pathMatch = captured.path === target || captured.path.endsWith(`${path.sep}${target}`);

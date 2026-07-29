@@ -29,6 +29,8 @@ export interface LedgerEntry {
    * and removal cannot know which key to reclaim.
    */
   keys?: string[];
+  /** Project MCP only: the peer schema's on-disk identity, never an @array address. */
+  serverKey?: string;
   provenance: Provenance;
   updatedAt: string;
 }
@@ -169,6 +171,12 @@ function describeEntryProblem(entry: unknown): string | null {
     }
   }
   if (record.shape === 'keys' && record.keys === undefined) return 'keys entry records no key path';
+  if (
+    record.serverKey !== undefined &&
+    (record.shape !== 'keys' || typeof record.serverKey !== 'string')
+  ) {
+    return 'serverKey on a non keys entry or not a string';
+  }
   if (typeof record.updatedAt !== 'string') return 'updatedAt is not a string';
   return null;
 }

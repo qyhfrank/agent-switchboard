@@ -21,9 +21,12 @@ test('relative home overrides resolve once against the invocation cwd', async ()
   });
 });
 
-test('scope flags without engine wiring fail closed instead of misrouting', async () => {
+test('project scope rejects a missing root before planning', async () => {
   await withScratchHomes(async () => {
-    await assert.rejects(runSync({ project: '/tmp/some-repo' }), /project scope is not available/);
+    await assert.rejects(
+      runSync({ project: '/tmp/some-repo' }),
+      /does not exist or cannot be resolved/
+    );
   });
 });
 

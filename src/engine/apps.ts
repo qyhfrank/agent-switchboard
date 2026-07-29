@@ -76,6 +76,8 @@ export interface RulesTargetRow {
   /** Directory whose resolved tree contains the target; the containment root. */
   root(homes: Homes, targetPath?: string): string;
   path(homes: Homes): string;
+  /** Project destination; absent means this cell is global-only. */
+  projectPath?(projectRoot: string): string;
   render(body: string, targetPath?: string): string;
   /** Dedicated asb-named file (full ownership by name) vs shared host. */
   dedicated: boolean;
@@ -86,6 +88,8 @@ export interface SkillsTargetRow {
   root(homes: Homes): string;
   /** Managed parent directory: each distributed skill is a child bundle of this. */
   dir(homes: Homes): string;
+  /** Project managed parent; absent means this cell is global-only. */
+  projectDir?(projectRoot: string): string;
   /** Child directory names that belong to the app itself, never scanned or claimed. */
   reserved: readonly string[];
   /** The predecessor exposed a library-ward importer for this app path. */
@@ -123,6 +127,8 @@ export interface HooksTargetRow {
   path(homes: Homes): string;
   /** Managed parent: each distributed bundle hook is a child directory of this. */
   bundleDir(homes: Homes): string;
+  projectPath?(projectRoot: string): string;
+  projectBundleDir?(projectRoot: string): string;
   /** The file exists only to carry hooks, so an emptied one is removed outright. */
   deleteWhenEmpty: boolean;
   /** The app-native subset of the library shape, when the app supports less than Claude. */
@@ -160,6 +166,8 @@ export interface McpTargetRow {
    * reads the disk, so the planner takes the path from the capture.
    */
   path(homes: Homes): string;
+  /** Project host document; absent means this cell is global-only. */
+  projectPath?(projectRoot: string): string;
   format: KeysFormat;
   /** Container key holding the server map. */
   rootKey: string;
@@ -214,8 +222,10 @@ const JSON_MCP_ROW = {
  */
 export const AGENTS_SKILLS_UNION = {
   members: ['codex', 'gemini', 'opencode'] as readonly string[],
-  root: (homes: Homes): string => path.join(homes.agentsHome, '.agents'),
-  dir: (homes: Homes): string => path.join(homes.agentsHome, '.agents', 'skills'),
+  root: (homes: Homes, projectRoot?: string): string =>
+    path.join(projectRoot ?? homes.agentsHome, '.agents'),
+  dir: (homes: Homes, projectRoot?: string): string =>
+    path.join(projectRoot ?? homes.agentsHome, '.agents', 'skills'),
   reserved: ['.system'] as readonly string[],
   // Capture and planner must agree on this predicate: a row the planner
   // builds over an uncaptured directory reads as absent and mis-reports
@@ -232,6 +242,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.claude'),
       path: (homes) => path.join(homes.agentsHome, '.claude', 'CLAUDE.md'),
+      projectPath: (root) => path.join(root, '.claude', 'CLAUDE.md'),
       render: rawBody,
       dedicated: false,
     },
@@ -260,6 +271,7 @@ export const APP_ROWS: readonly AppRow[] = [
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.claude'),
       dir: (homes) => path.join(homes.agentsHome, '.claude', 'skills'),
+      projectDir: (root) => path.join(root, '.claude', 'skills'),
       reserved: [],
       importable: true,
     },
@@ -267,6 +279,8 @@ export const APP_ROWS: readonly AppRow[] = [
       root: (homes) => path.join(homes.agentsHome, '.claude'),
       path: (homes) => path.join(homes.agentsHome, '.claude', 'settings.json'),
       bundleDir: (homes) => path.join(homes.agentsHome, '.claude', 'hooks', 'managed'),
+      projectPath: (root) => path.join(root, '.claude', 'settings.local.json'),
+      projectBundleDir: (root) => path.join(root, '.claude', 'hooks', 'managed'),
       deleteWhenEmpty: false,
       stateTarget: 'claude-code',
       importable: true,
@@ -276,6 +290,7 @@ export const APP_ROWS: readonly AppRow[] = [
       // Claude Code reads ~/.claude.json, not a file under .claude/.
       root: (homes) => homes.agentsHome,
       path: (homes) => path.join(homes.agentsHome, '.claude.json'),
+      projectPath: (root) => path.join(root, '.mcp.json'),
       // Claude Code accepts colons and dots in server names.
       sanitize: false,
     },
@@ -303,6 +318,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       path: (homes) => path.join(homes.agentsHome, '.codex', 'AGENTS.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
       render: rawBody,
       dedicated: false,
     },
@@ -337,6 +353,7 @@ export const APP_ROWS: readonly AppRow[] = [
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       dir: (homes) => path.join(homes.agentsHome, '.codex', 'skills'),
+      projectDir: (root) => path.join(root, '.agents', 'skills'),
       reserved: ['.system'],
       importable: true,
     },
@@ -344,6 +361,8 @@ export const APP_ROWS: readonly AppRow[] = [
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       path: (homes) => path.join(homes.agentsHome, '.codex', 'hooks.json'),
       bundleDir: (homes) => path.join(homes.agentsHome, '.codex', 'hooks', 'managed'),
+      projectPath: (root) => path.join(root, '.codex', 'hooks.json'),
+      projectBundleDir: (root) => path.join(root, '.codex', 'hooks', 'managed'),
       deleteWhenEmpty: true,
       filter: filterCodexHooks,
       stateTarget: 'codex',
@@ -351,6 +370,7 @@ export const APP_ROWS: readonly AppRow[] = [
     mcp: {
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       path: (homes) => path.join(homes.agentsHome, '.codex', 'config.toml'),
+      projectPath: (root) => path.join(root, '.codex', 'config.toml'),
       format: 'toml',
       rootKey: 'mcp_servers',
       sanitize: true,
@@ -370,6 +390,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.gemini'),
       path: (homes) => path.join(homes.agentsHome, '.gemini', 'AGENTS.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
       render: rawBody,
       dedicated: false,
     },
@@ -384,6 +405,7 @@ export const APP_ROWS: readonly AppRow[] = [
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.gemini'),
       dir: (homes) => path.join(homes.agentsHome, '.gemini', 'skills'),
+      projectDir: (root) => path.join(root, '.gemini', 'skills'),
       reserved: [],
     },
     mcp: {
@@ -392,6 +414,7 @@ export const APP_ROWS: readonly AppRow[] = [
       // settings.json carries every other Gemini CLI setting; only the
       // addressed slice is ever rewritten.
       path: (homes) => path.join(homes.agentsHome, '.gemini', 'settings.json'),
+      projectPath: (root) => path.join(root, '.gemini', 'settings.json'),
       sanitize: false,
       dialect: geminiServer,
     },
@@ -402,6 +425,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => opencodeRoot(homes.agentsHome),
       path: (homes) => path.join(opencodeRoot(homes.agentsHome), 'AGENTS.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
       render: rawBody,
       dedicated: false,
     },
@@ -430,12 +454,14 @@ export const APP_ROWS: readonly AppRow[] = [
     skills: {
       root: (homes) => opencodeRoot(homes.agentsHome),
       dir: (homes) => path.join(opencodeRoot(homes.agentsHome), 'skills'),
+      projectDir: (root) => path.join(root, '.opencode', 'skills'),
       reserved: [],
     },
     mcp: {
       ...JSON_MCP_ROW,
       root: (homes) => opencodeRoot(homes.agentsHome),
       path: (homes) => opencodeConfigPath(opencodeRoot(homes.agentsHome)),
+      projectPath: (root) => opencodeConfigPath(path.join(root, '.opencode')),
       rootKey: 'mcp',
       sanitize: false,
       dialect: opencodeServer,
@@ -447,6 +473,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
       path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'asb-rules.mdc'),
+      projectPath: (root) => path.join(root, '.cursor', 'rules', 'asb-rules.mdc'),
       render: wrapMdcFrontmatter,
       dedicated: true,
     },
@@ -475,6 +502,7 @@ export const APP_ROWS: readonly AppRow[] = [
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
       dir: (homes) => path.join(homes.agentsHome, '.cursor', 'skills'),
+      projectDir: (root) => path.join(root, '.cursor', 'skills'),
       reserved: [],
       importable: true,
     },
@@ -482,6 +510,7 @@ export const APP_ROWS: readonly AppRow[] = [
       ...JSON_MCP_ROW,
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
       path: (homes) => path.join(homes.agentsHome, '.cursor', 'mcp.json'),
+      projectPath: (root) => path.join(root, '.cursor', 'mcp.json'),
       sanitize: true,
     },
   },
@@ -504,14 +533,12 @@ export const APP_ROWS: readonly AppRow[] = [
     commands: {
       root: cocoDataDir,
       dir: (homes) => path.join(cocoDataDir(homes), 'commands'),
-      projectDir: (root) => path.join(path.resolve(root), '.coco', 'commands'),
       filename: (id) => `${encodeComponentId(id)}.md`,
       render: renderCocoCommand,
     },
     agents: {
       root: cocoDataDir,
       dir: (homes) => path.join(cocoDataDir(homes), 'agents'),
-      projectDir: (root) => path.join(path.resolve(root), '.coco', 'agents'),
       filename: (id) => `${encodeComponentId(id)}.md`,
       render: renderCocoAgent,
     },
@@ -543,12 +570,14 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
       path: (homes) => path.join(homes.agentsHome, '.trae', 'user_rules', 'asb-rules.md'),
+      projectPath: (root) => path.join(root, '.trae', 'rules', 'asb-rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
     },
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
       dir: (homes) => path.join(homes.agentsHome, '.trae', 'skills'),
+      projectDir: (root) => path.join(root, '.trae', 'skills'),
       reserved: [],
     },
     mcp: {
@@ -557,6 +586,7 @@ export const APP_ROWS: readonly AppRow[] = [
       // the rules row writes.
       root: (homes) => vendorDataDir(homes.agentsHome, 'Trae'),
       path: (homes) => path.join(vendorDataDir(homes.agentsHome, 'Trae'), 'User', 'mcp.json'),
+      projectPath: (root) => path.join(root, '.trae', 'mcp.json'),
       sanitize: true,
       dialect: traeServer,
     },
@@ -567,18 +597,21 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),
       path: (homes) => path.join(homes.agentsHome, '.trae-cn', 'user_rules', 'asb-rules.md'),
+      projectPath: (root) => path.join(root, '.trae', 'rules', 'asb-rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
     },
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),
       dir: (homes) => path.join(homes.agentsHome, '.trae-cn', 'skills'),
+      projectDir: (root) => path.join(root, '.trae', 'skills'),
       reserved: [],
     },
     mcp: {
       ...JSON_MCP_ROW,
       root: (homes) => vendorDataDir(homes.agentsHome, 'Trae CN'),
       path: (homes) => path.join(vendorDataDir(homes.agentsHome, 'Trae CN'), 'User', 'mcp.json'),
+      projectPath: (root) => path.join(root, '.trae', 'mcp.json'),
       sanitize: true,
       dialect: traeServer,
     },
@@ -628,6 +661,11 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
     row.rules = {
       root: (homes) => path.dirname(customPath(rules.file_path, homes)),
       path: (homes) => customPath(rules.file_path, homes),
+      ...(rules.project_file_path
+        ? {
+            projectPath: (root: string) => path.resolve(root, rules.project_file_path as string),
+          }
+        : {}),
       render: rules.format === 'mdc' ? wrapMdcFrontmatter : rawBody,
       dedicated: true,
     };
@@ -639,6 +677,11 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
     row.skills = {
       root: (homes) => customPath(skills.parent_dir, homes),
       dir: (homes) => customPath(skills.parent_dir, homes),
+      ...(skills.project_parent_dir
+        ? {
+            projectDir: (root: string) => path.resolve(root, skills.project_parent_dir as string),
+          }
+        : {}),
       reserved: [],
     };
   }
@@ -650,6 +693,11 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
     row.mcp = {
       root: (homes) => path.dirname(customPath(mcp.config_path, homes)),
       path: (homes) => customPath(mcp.config_path, homes),
+      ...(mcp.project_config_path
+        ? {
+            projectPath: (root: string) => path.resolve(root, mcp.project_config_path as string),
+          }
+        : {}),
       format: mcp.format,
       rootKey: mcp.root_key ?? 'mcpServers',
       structure: mcp.structure ?? 'record',
@@ -680,4 +728,60 @@ export function appRows(config: Pick<ResolvedConfig, 'targets'>): readonly AppRo
     custom.push(compileCustomRow(id, spec));
   }
   return [...APP_ROWS, ...custom];
+}
+
+/**
+ * Project scope is the same data table with unsupported cells removed and
+ * explicit project columns fixed to one canonical root. No global path is a
+ * fallback, and native managers are global-only.
+ */
+export function projectAppRows(table: readonly AppRow[], projectRoot: string): readonly AppRow[] {
+  const root = path.resolve(projectRoot);
+  return table.map((row) => {
+    const project: AppRow = { id: row.id, detectDir: row.detectDir };
+    if (row.rules?.projectPath) {
+      const rules = row.rules;
+      project.rules = {
+        ...rules,
+        root: () => root,
+        path: () => rules.projectPath?.(root) as string,
+      };
+    }
+    for (const type of ['commands', 'agents'] as const) {
+      const entry = row[type];
+      if (!entry?.projectDir) continue;
+      project[type] = {
+        ...entry,
+        root: () => root,
+        dir: () => entry.projectDir?.(root) as string,
+        config: undefined,
+      };
+    }
+    if (row.skills?.projectDir) {
+      const skills = row.skills;
+      project.skills = {
+        ...skills,
+        root: () => root,
+        dir: () => skills.projectDir?.(root) as string,
+      };
+    }
+    if (row.hooks?.projectPath && row.hooks.projectBundleDir) {
+      const hooks = row.hooks;
+      project.hooks = {
+        ...hooks,
+        root: () => root,
+        path: () => hooks.projectPath?.(root) as string,
+        bundleDir: () => hooks.projectBundleDir?.(root) as string,
+      };
+    }
+    if (row.mcp?.projectPath) {
+      const mcp = row.mcp;
+      project.mcp = {
+        ...mcp,
+        root: () => root,
+        path: () => mcp.projectPath?.(root) as string,
+      };
+    }
+    return project;
+  });
 }

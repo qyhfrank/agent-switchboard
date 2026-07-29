@@ -820,7 +820,15 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
   const profileName = opts.profile?.trim() || env.ASB_PROFILE?.trim() || null;
   if (profileName) layers.push(readLayer('profile', profileConfigPath(homes, profileName)));
 
-  const projectRoot = opts.project ? path.resolve(opts.project) : null;
+  let projectRoot: string | null = null;
+  if (opts.project) {
+    const requested = path.resolve(opts.project);
+    try {
+      projectRoot = fs.realpathSync(requested);
+    } catch {
+      throw new ConfigError(`Project root does not exist or cannot be resolved: ${requested}`);
+    }
+  }
   if (projectRoot) layers.push(readLayer('project', projectConfigPath(projectRoot)));
 
   const merged: Record<string, unknown> = {};
