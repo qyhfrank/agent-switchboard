@@ -895,15 +895,6 @@ function reconcile(
   return entries;
 }
 
-/** Scope flags whose engine wiring lands with a later cell fail closed. */
-function rejectUnwiredScope(opts: SyncOptions): void {
-  if (opts.project) {
-    throw new ConfigError(
-      'project scope is not wired into explain yet; use status -P for a project preview'
-    );
-  }
-}
-
 /**
  * Which source a row belongs to, for `--source`. Component ids carry their
  * plugin as a prefix, so attribution is a lookup, not a guess. A row nothing
@@ -983,11 +974,38 @@ function runSourcesPhase(
   return { readiness, updates: updateSources(config, only ? { only } : {}), pendingRefresh: [] };
 }
 
+function extensionCutoverWarning(asbHome: string): Action[] {
+  const extensions = path.join(asbHome, 'extensions');
+  let found = false;
+  try {
+    found = fs
+      .readdirSync(extensions, { withFileTypes: true })
+      .some((entry) => entry.isFile() && /\.(?:mjs|js)$/.test(entry.name));
+  } catch {
+    return [];
+  }
+  if (!found) return [];
+  return [
+    {
+      app: null,
+      type: null,
+      id: null,
+      path: extensions,
+      op: 'none',
+      outcome: 'skipped',
+      detail: 'extensions-removed',
+      reason:
+        'executable .mjs/.js extensions were removed in 0.5; replace them with [targets.<id>]. These files still serve a 0.4 peer sharing the library and are not deleted at cut-over',
+    },
+  ];
+}
+
 export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   const env = opts.env ?? process.env;
   const dryRun = opts.dryRun === true;
 
   const config = loadConfig({ profile: opts.profile, project: opts.project, env });
+  const cutoverWarnings = extensionCutoverWarning(config.homes.asbHome);
   const globalTable = appRows(config);
   const projectMode = config.project ? config.distribution.project.mode : null;
   const activeProjectMode =
@@ -1046,6 +1064,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         : null;
     if (manifestLoad?.collision) {
       const report = buildReport(scope, [
+        ...cutoverWarnings.map(toEntry),
         {
           app: 'project',
           type: null,
@@ -1061,6 +1080,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     }
     if (manifestLoad?.corrupt || (manifestLoad && manifestLoad.manifest === null)) {
       const report = buildReport(scope, [
+        ...cutoverWarnings.map(toEntry),
         {
           app: 'project',
           type: null,
@@ -1111,13 +1131,16 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     ) {
       const aborted = buildReport(
         scope,
-        planSources({
-          config,
-          catalog: { ...catalog, absent: [] },
-          ...sources,
-          entries: [],
-          dryRun,
-        }).map(toEntry),
+        [
+          ...cutoverWarnings,
+          ...planSources({
+            config,
+            catalog: { ...catalog, absent: [] },
+            ...sources,
+            entries: [],
+            dryRun,
+          }),
+        ].map(toEntry),
         { aborted: true }
       );
       if (ledger.lastRun) aborted.lastRun = ledger.lastRun;
@@ -1182,6 +1205,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     };
     const mcpActions = planMcp(planInput);
     let actions = [
+      ...cutoverWarnings,
       ...planSources({ config: resolved, catalog, ...sources, entries: sourceEntries, dryRun }),
       ...planRules(planInput),
       ...planCommands(planInput),
@@ -1250,8 +1274,10 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       });
     }
     if (opts.idGlob) {
-      actions = actions.filter((action) =>
-        statusActionMatchesId(action, opts.idGlob as string, resolved)
+      actions = actions.filter(
+        (action) =>
+          action.detail === 'extensions-removed' ||
+          statusActionMatchesId(action, opts.idGlob as string, resolved)
       );
     }
     actions = groupKeyActions(actions);
@@ -1359,23 +1385,101 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
 
 export async function runExplain(target: string, opts: SyncOptions = {}): Promise<ExplainSlice[]> {
   const env = opts.env ?? process.env;
-  rejectUnwiredScope(opts);
-  const config = loadConfig({ profile: opts.profile, env });
-  const table = appRows(config);
+  const config = loadConfig({ profile: opts.profile, project: opts.project, env });
+  const globalTable = appRows(config);
+  const projectMode = config.project ? config.distribution.project.mode : null;
+  const activeProjectMode =
+    projectMode === 'managed' || projectMode === 'exclusive' ? projectMode : undefined;
+  const projectPolicy: ProjectPlanPolicy | undefined =
+    config.project && activeProjectMode
+      ? {
+          root: config.project,
+          mode: activeProjectMode,
+          collision:
+            activeProjectMode === 'exclusive' ? 'takeover' : config.distribution.project.collision,
+        }
+      : undefined;
+  const projectTable = config.project ? projectAppRows(globalTable, config.project) : globalTable;
+  const table =
+    projectMode === 'none'
+      ? projectTable.map((row) => ({ id: row.id, detectDir: row.detectDir }))
+      : projectTable;
   const ledger = loadLedger(config.homes.stateHome);
+  const manifestLoad =
+    config.project && projectMode !== 'none'
+      ? (() => {
+          uniqueProjectManifestPaths(config.homes.asbHome, [config.project as string]);
+          return loadProjectManifest(config.homes.asbHome, config.project as string);
+        })()
+      : null;
+  if (manifestLoad?.collision) {
+    throw new ConfigError(manifestLoad.error ?? 'project manifest slug collision');
+  }
+  if (manifestLoad?.corrupt || (manifestLoad && manifestLoad.manifest === null)) {
+    throw new ConfigError(
+      `project manifest is corrupt (${manifestLoad.error ?? 'unrecognized shape'})`
+    );
+  }
+  if (config.project && projectMode !== 'none') {
+    const root = config.project;
+    ledger.entries = ledger.entries.filter((entry) => {
+      const relative = path.relative(root, entry.path);
+      return !(
+        relative === '' ||
+        (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
+      );
+    });
+  }
+  let planningLedger: Ledger = ledger;
+  if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
+    planningLedger = {
+      ...ledger,
+      entries: [...ledger.entries, ...projectManifestProofs(manifestLoad.manifest, config.project)],
+    };
+  }
   const catalog = readSourceCatalog(config);
   const inventory = scanLibrary({ env, plugins: catalog.plugins });
   const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
-  const capture = captureFor(resolved, ledger, table, inventory);
-  const nativeState = captureNative(resolved, catalog, table, env, capture.installed, true);
+  const capture = captureFor(
+    resolved,
+    planningLedger,
+    table,
+    inventory,
+    false,
+    manifestLoad?.manifest
+  );
+  const now = new Date().toISOString();
+  if (projectMode === 'managed' && manifestLoad?.manifest) {
+    for (const proof of planningLedger.entries) {
+      if (proof.type !== 'skills' || proof.shape !== 'own-dir') continue;
+      const files = capture.bundles[proof.path]?.files;
+      if (files) proof.files = files.map((file) => file.rel);
+    }
+    planningLedger = {
+      ...planningLedger,
+      entries: [
+        ...planningLedger.entries,
+        ...projectMcpPeerLedgerEntries(
+          resolved,
+          inventory,
+          capture,
+          table,
+          manifestLoad.manifest,
+          now
+        ),
+      ],
+    };
+  }
+  const nativeState = captureNative(resolved, catalog, globalTable, env, capture.installed, true);
 
   const planInput = {
     config: resolved,
     inventory,
-    ledger,
+    ledger: planningLedger,
     capture,
     table,
-    now: new Date().toISOString(),
+    now,
+    project: projectPolicy,
   };
   const wantedTypes = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
   const wants = (type: string): boolean => wantedTypes === null || wantedTypes.has(type);
@@ -1405,7 +1509,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
             config: resolved,
             catalog,
             capture: nativeState,
-            table,
+            table: globalTable,
             env,
             installed: capture.installed,
             dryRun: true,
@@ -1675,8 +1779,14 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   let parsed: CliInvocation | null = null;
 
   const program = new Command();
-  program.name('asb').exitOverride();
-  program.configureOutput({ writeOut: () => {}, writeErr: () => {} });
+  const version = JSON.parse(
+    fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8')
+  ).version as string;
+  program.name('asb').version(version).exitOverride();
+  program.configureOutput({
+    writeOut: (message) => process.stdout.write(message),
+    writeErr: () => {},
+  });
   registerScopeFlags(program);
 
   // Merge by hand: optsWithGlobals lets a subcommand's [] defaults shadow
@@ -2033,6 +2143,7 @@ export async function main(argv: readonly string[]): Promise<number> {
   try {
     invocation = parseCliArgs(argv);
   } catch (error) {
+    if ((error as { exitCode?: number }).exitCode === 0) return 0;
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`${message}\n`);
     return 2;
@@ -2100,7 +2211,9 @@ export async function main(argv: readonly string[]): Promise<number> {
           ? `${JSON.stringify(slices, null, 2)}\n`
           : renderExplain(slices, invocation.target)
       );
-      return slices.length > 0 ? 0 : 1;
+      return slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome))
+        ? 0
+        : 1;
     }
 
     const report =

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runSync } from '../../src/engine/cli.js';
@@ -58,5 +59,36 @@ test('status reports the last completed real run', async () => {
     assert.ok(status.lastRun, 'the real run stamped the fact');
     assert.match(status.lastRun?.summary ?? '', /1 written/);
     assert.match(renderReport(status), /last run: .* — 1 written/);
+  });
+});
+
+test('leftover executable extensions produce one non-failing peer-aware warning', async () => {
+  await withScratchHomes(async (homes) => {
+    const extensions = path.join(homes.asbHome, 'extensions');
+    const first = path.join(extensions, 'first.mjs');
+    const second = path.join(extensions, 'second.js');
+    const ignored = path.join(extensions, 'notes.txt');
+    fs.mkdirSync(extensions);
+    fs.writeFileSync(first, 'throw new Error("must not import");\n');
+    fs.writeFileSync(second, 'throw new Error("must not import");\n');
+    fs.writeFileSync(ignored, 'not executable\n');
+    const before = [first, second, ignored].map((file) => fs.readFileSync(file));
+
+    for (const options of [{ dryRun: true }, { dryRun: true, idGlob: 'does-not-match' }]) {
+      const report = await runSync(options);
+      const warnings = report.entries.filter((entry) => entry.detail === 'extensions-removed');
+
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+      assert.equal(warnings.length, 1, JSON.stringify(report.entries, null, 2));
+      assert.equal(warnings[0].outcome, 'skipped');
+      assert.match(warnings[0].reason ?? '', /executable .* extensions .* removed/i);
+      assert.match(warnings[0].reason ?? '', /\[targets\.<id>\]/);
+      assert.match(warnings[0].reason ?? '', /0\.4 peer sharing .* library/i);
+      assert.match(warnings[0].reason ?? '', /not deleted at cut-over/i);
+    }
+    assert.deepEqual(
+      [first, second, ignored].map((file) => fs.readFileSync(file)),
+      before
+    );
   });
 });

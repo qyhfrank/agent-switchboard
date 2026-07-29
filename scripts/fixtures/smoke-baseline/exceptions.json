@@ -1,0 +1,8 @@
+[
+  {
+    "path": "agents-home/.claude.json",
+    "slice": "file-presence",
+    "reason": "0.5 omits empty MCP host files",
+    "anchor": "CHANGELOG.md:MIG-04"
+  }
+]

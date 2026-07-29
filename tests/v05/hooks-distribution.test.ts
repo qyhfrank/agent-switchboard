@@ -20,11 +20,9 @@ import {
  * settings.json / hooks.json / the distributed bundle dir; the report rows
  * are asserted alongside them, never in their place.
  *
- * Frozen 0.4 anchors: src/hooks/distribution.ts:90-136 (render), :412-437
- * (merge and empty-map delete), :319-341 (shape validation),
- * src/hooks/ownership.ts:160-209 (count-bounded splice),
- * src/hooks/codex-distribute.ts:623-647 (hooks.json deletion),
- * src/hooks/target-config.ts:53-72,148-160 (publish format, $HOME).
+ * Frozen 0.4 anchors cover rendering, merge and empty-map deletion, shape
+ * validation, count-bounded ownership splice, hooks.json deletion, publish
+ * format, and $HOME portability.
  */
 
 type HookApp = 'claude-code' | 'codex';
@@ -111,7 +109,7 @@ function modeOf(filePath: string): number {
 }
 
 /**
- * Frozen 0.4 `preferHomeVar` (src/hooks/target-config.ts:148-160): the home
+ * Frozen 0.4 `preferHomeVar`: the home
  * prefix keys off os.homedir() while the app root keys off ASB_AGENTS_HOME, so
  * under scratch homes (a tmpdir tree) nothing is rewritten and the command
  * keeps its absolute path. The rule is frozen, not one environment's answer.
@@ -447,7 +445,7 @@ test('a missing library entry and a malformed hook file contain to their own row
     assert.equal(fs.existsSync(settings), true, 'the healthy hook still reaches the app config');
     assert.deepEqual(eventGroups(settings, 'UserPromptSubmit'), [LINT_RENDERED]);
 
-    // 0.4 THREW on a malformed ~/.asb/hooks file (src/hooks/library.ts:134-137,
+    // 0.4 THREW on a malformed ~/.asb/hooks file
     // `Failed to parse hook "broken": ...`), aborting the whole load, and
     // skipped an unknown enabled id silently. Per-entry containment is the
     // 0.5 deviation, reported as the sibling rules/skills library-level rows.

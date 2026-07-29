@@ -3801,6 +3801,7 @@ export function planSources(input: SourcePlanInput): Action[] {
   // ready; only what failed is worth a row.
   for (const row of updates) {
     if (row.status !== 'error') continue;
+    if (unresolved.has(row.namespace)) continue;
     const where = row.phase === 'readiness' ? 'before it could refresh: ' : '';
     actions.push(
       sourceRow(

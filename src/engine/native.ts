@@ -43,15 +43,15 @@ interface CodexWrapper {
 }
 
 export interface NativeAppState {
-  /** Parsed `plugin marketplace list --json`. */
+  /** Parsed marketplace inventory JSON. */
   marketplaces: unknown;
-  /** Parsed `plugin list --json`. */
+  /** Parsed plugin inventory JSON. */
   plugins: unknown;
   /** Current settings document, or null when it is absent or unreadable. */
   settings: Record<string, unknown> | null;
   /** Per marketplace path: why `plugin validate` refused it. */
   invalid: Record<string, string>;
-  /** ASB-owned bare-plugin marketplaces reconstructed from wrapper manifests. */
+  /** Owned bare marketplaces reconstructed from wrapper manifests. */
   managed: CodexWrapper[];
   /** Per-directory wrapper state that could not be recognized safely. */
   wrapperErrors: { root: string; error: string }[];

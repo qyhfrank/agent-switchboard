@@ -1,0 +1,3 @@
+[applications]
+enabled = ["claude-code"]
+assume_installed = ["claude-code"]

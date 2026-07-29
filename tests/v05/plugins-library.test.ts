@@ -194,7 +194,7 @@ test('an external entry stays offline until something fetches it', async () => {
   });
 });
 
-test('a Copilot hook file in a plugin is skipped, and a broken asb hook fails alone', async () => {
+test('a Copilot hook file in a plugin is skipped, and a broken portable hook fails alone', async () => {
   await withScratchHomes(async (scratch) => {
     seedSource(scratch, 'pack', {
       'hooks/copilot.json': JSON.stringify({
@@ -219,7 +219,7 @@ test('a Copilot hook file in a plugin is skipped, and a broken asb hook fails al
   });
 });
 
-test('a Copilot hook file in the asb library is still read as a broken asb hook', async () => {
+test('a Copilot hook file in the library is still read as a broken portable hook', async () => {
   await withScratchHomes(async (scratch) => {
     seedTree(scratch.asbHome, {
       'hooks/copilot.json': JSON.stringify({

@@ -18,10 +18,8 @@ import {
  * with the report row asserted beside it.
  *
  * Frozen anchors: design lines 84-87 (removal by deselection only; convention
- * grants update, never deletion), 0.4 `src/hooks/distribution.ts:296-304`
- * (bundle-copy error aborts before the config merge),
- * `src/hooks/target-config.ts:100-112` (`deleteJsonConfig` empties a symlinked
- * config through the link).
+ * grants update, never deletion), the 0.4 bundle-copy abort before config
+ * merge, and `deleteJsonConfig` emptying a symlinked config through the link.
  */
 
 type HookApp = 'claude-code' | 'codex';

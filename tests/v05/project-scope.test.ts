@@ -584,14 +584,51 @@ test('shared Trae project skills plan one physical writer from both app selectio
   });
 });
 
-test('project explain refusal points to status project preview', async () => {
+test('project explain matches status project slices without writes or credential leaks', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
-    fs.writeFileSync(path.join(project, '.asb.toml'), '');
-    await assert.rejects(
-      runExplain('build', { project }),
-      /project scope is not wired into explain yet; use status -P for a project preview/i
+    installApps(homes, 'claude-code');
+    seedRule(homes, 'project-rule.md', '# Project rule\n');
+    seed(
+      homes.asbHome,
+      'hooks/notify.json',
+      `${JSON.stringify({
+        name: 'notify',
+        hooks: { UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo notify' }] }] },
+      })}\n`
     );
+    seed(
+      homes.asbHome,
+      'mcp.json',
+      `${JSON.stringify({
+        mcpServers: { alpha: { command: 'run', env: { API_TOKEN: 'PROJECT-SECRET-123' } } },
+      })}\n`
+    );
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["project-rule"]\n\n[hooks]\nenabled = ["notify"]\n\n[mcp]\nenabled = ["alpha"]\n'
+    );
+    projectConfig(project);
+
+    const before = fs.readdirSync(homes.root, { recursive: true }).sort();
+    const status = await runSync({ project, dryRun: true });
+    for (const target of ['project-rule', 'notify', 'alpha']) {
+      const slices = await runExplain(target, { project });
+      assert.ok(slices.length > 0, target);
+      for (const slice of slices) {
+        assert.ok(
+          status.entries.some(
+            (entry) =>
+              entry.app === slice.app &&
+              entry.path === slice.path &&
+              entry.outcome === slice.outcome
+          ),
+          `${target}: ${JSON.stringify(slice, null, 2)}`
+        );
+      }
+      assert.equal(JSON.stringify(slices).includes('PROJECT-SECRET-123'), false);
+    }
+    assert.deepEqual(fs.readdirSync(homes.root, { recursive: true }).sort(), before);
   });
 });

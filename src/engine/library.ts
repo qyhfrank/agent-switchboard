@@ -361,13 +361,13 @@ const HOOK_FILE = 'hook.json';
 
 /**
  * A GitHub Copilot v1 hook file shares the hooks/ directory with asb's own
- * grammar, so a plugin shipping one is not shipping a broken asb hook. What
+ * grammar, so a plugin shipping one is not shipping a broken ASB-managed hook. What
  * separates the two: Copilot declares `version: 1` and maps each event to
- * handlers directly, where an asb event maps to groups that nest their own
+ * handlers directly, where an ASB event maps to groups that nest their own
  * `hooks` array.
  *
  * ponytail: a shape probe, not 0.4's full Copilot validator (event allow-list,
- * https-only handlers, prompt-only-on-sessionStart). Ceiling: an asb-invalid
+ * https-only handlers, prompt-only-on-sessionStart). Ceiling: an invalid ASB
  * file carrying `version: 1` and handler-shaped events is skipped silently
  * instead of reported. Upgrade path is validating the events against Copilot's
  * own list, which only ever narrows what this skips.

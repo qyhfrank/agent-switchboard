@@ -23,11 +23,9 @@ import {
 /**
  * The MCP value transforms and the keys-shape writer, as pure functions.
  *
- * Carried from 0.4.35: the 14 `buildNestedToml` cases
- * (`tests/codex-toml.test.ts`), `mapServerForGemini` (`src/agents/gemini.ts`),
- * the opencode local/remote mapping (`tests/opencode-adapter.test.ts`),
- * `sanitizeMcpName` and the load-time type inference
- * (`tests/mcp-config-infer.test.ts`). New here: the byte-splice TOML writer
+ * Carried from 0.4.35: the 14 `buildNestedToml` cases, `mapServerForGemini`,
+ * the OpenCode local/remote mapping, `sanitizeMcpName`, and load-time type
+ * inference. New here: the byte-splice TOML writer
  * and the jsonc JSON writer that replace 0.4's whole-file re-serialization,
  * including the failure 0.4 turned into whole-document loss (quarry R-3).
  */

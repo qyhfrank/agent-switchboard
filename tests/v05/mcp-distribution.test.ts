@@ -22,11 +22,9 @@ import {
  * MCP distribution on the engine surface: which document each app gets, in
  * which dialect, and what the run refuses to create.
  *
- * Adapted from 0.4.35 `tests/mcp-distribution.test.ts` (the `distributeMcp`
- * integration cases), `tests/cursor-support.test.ts:428-473` and
- * `tests/trae-support.test.ts` (per-app paths and name sanitization), and
- * `tests/dsl-compiler.test.ts`'s JSON host cases (other top-level keys
- * preserved, a parse error modifies nothing, a non-object root is refused).
+ * Adapted from 0.4.35 integration cases for per-app paths, name sanitization,
+ * and JSON hosts (other top-level keys preserved, a parse error modifies
+ * nothing, a non-object root is refused).
  *
  * One expectation is deliberately inverted: 0.4.35 created every host it could
  * reach and wrote an empty server map into it. Reproduced on the 0.4.35 binary

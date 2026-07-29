@@ -24,13 +24,12 @@ import {
  * The owned slice of a managed server key is asb's full render, so a write is
  * a wholesale value replace and protection comes from the drift check rather
  * than from merging around the user's edits. That resolves the tension the
- * quarry recorded as R-6 vs R-7: 0.4's per-server field merge
- * (`src/agents/json-utils.ts:100-101`, pinned by
- * `tests/managed-mcp.test.ts:68-84`) let a foreign sub-key survive an update
+ * quarry recorded as R-6 vs R-7: 0.4's per-server field merge let a foreign
+ * sub-key survive an update
  * while Trae's dialect needed the same key erased. Both cannot hold; the
  * replace is strictly safer because an edited slice conflicts instead of being
- * silently half-merged. `tests/managed-mcp.test.ts:68-84` is adapted here with
- * that changed expectation.
+ * silently half-merged. The predecessor case is adapted here with that
+ * changed expectation.
  *
  * Also adapted: 0.4's global write reset `mcpServers` to `{}` and repopulated
  * it, destroying any hand-written server (quarry R-2). Here an unrecorded key

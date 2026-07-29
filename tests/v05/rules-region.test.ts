@@ -14,7 +14,7 @@ test('mergeRegion inserts block at top (prepend) in empty file', () => {
 
 test('mergeRegion inserts block at top (prepend) with existing content', () => {
   const existing = 'Project-specific instructions\n';
-  const result = mergeRegion(existing, 'ASB rules', 'prepend');
+  const result = mergeRegion(existing, 'managed rules', 'prepend');
   const startIdx = result.indexOf(START);
   const existingIdx = result.indexOf('Project-specific instructions');
   assert.ok(startIdx < existingIdx, 'ASB block should come before existing content');
@@ -22,7 +22,7 @@ test('mergeRegion inserts block at top (prepend) with existing content', () => {
 
 test('mergeRegion inserts block at bottom (append) with existing content', () => {
   const existing = 'Project-specific instructions\n';
-  const result = mergeRegion(existing, 'ASB rules', 'append');
+  const result = mergeRegion(existing, 'managed rules', 'append');
   const endIdx = result.indexOf(END);
   const existingIdx = result.indexOf('Project-specific instructions');
   assert.ok(existingIdx < endIdx, 'Existing content should come before ASB block');

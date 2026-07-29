@@ -532,3 +532,19 @@ test('--update refreshes the named source only, and --no-update suppresses auto_
     assert.equal(cachedRule('second', 'two.md'), 'Two.\n');
   });
 });
+
+test('--update reports one invalid namespace exactly once', async () => {
+  await withScratchHomes(async (scratch) => {
+    writeUserConfig(
+      scratch,
+      '[plugins.sources]\n"bad ns" = "https://example.invalid/org/repo.git"\n'
+    );
+
+    const report = await runSync({ update: true });
+    const failures = report.entries.filter((entry) => entry.id === 'bad ns');
+
+    assert.equal(report.exitCode, 2);
+    assert.equal(failures.length, 1, JSON.stringify(report.entries, null, 2));
+    assert.equal(failures[0].outcome, 'failed');
+  });
+});

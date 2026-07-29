@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { parseCliArgs, runExplain, runSync } from '../../src/engine/cli.js';
+import { main, parseCliArgs, runExplain, runSync } from '../../src/engine/cli.js';
 import { ConfigError } from '../../src/engine/config.js';
 import { renderExplain } from '../../src/engine/report.js';
 import { hashContent } from '../../src/engine/shapes.js';
@@ -24,6 +24,42 @@ function seedBareCodexPlugin(asbHome: string): string {
   write(path.join(root, '.codex-plugin', 'plugin.json'), '{"name":"demo","version":"1.0.0"}\n');
   return root;
 }
+
+async function runMain(argv: string[]): Promise<{ code: number; out: string; err: string }> {
+  let out = '';
+  let err = '';
+  const stdout = process.stdout.write.bind(process.stdout);
+  const stderr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = ((chunk: string | Uint8Array) => {
+    out += chunk.toString();
+    return true;
+  }) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    err += chunk.toString();
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return { code: await main(argv), out, err };
+  } finally {
+    process.stdout.write = stdout;
+    process.stderr.write = stderr;
+  }
+}
+
+test('--help and --version succeed on the engine surface', async () => {
+  const version = JSON.parse(
+    fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8')
+  ).version as string;
+  const help = await runMain(['--help']);
+  const reported = await runMain(['--version']);
+
+  assert.equal(help.code, 0, help.err);
+  assert.match(help.out, /Usage: asb/);
+  assert.equal(help.err, '');
+  assert.equal(reported.code, 0, reported.err);
+  assert.equal(reported.out.trim(), version);
+  assert.equal(reported.err, '');
+});
 
 test('status parses its id glob and --all position-independently', () => {
   const after = parseCliArgs(['status', 'build-*', '--all', '--type', 'commands']);
@@ -261,5 +297,30 @@ test('explain masks env values through the kv-array dialect too', async () => {
     assert.equal(JSON.stringify(slices).includes(placeholder), false);
     assert.match(output, /API_TOKEN/);
     assert.match(output, /\*\*\*/);
+  });
+});
+
+test('explain exits 1 for failed slices and no match in text and JSON', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(path.join(homes.asbHome, 'commands', 'healthy.md'), 'Healthy.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = ["healthy", "missing"]\n'
+    );
+
+    for (const json of [false, true]) {
+      const flag = json ? ['--json'] : [];
+      const healthy = await runMain(['explain', 'healthy', ...flag]);
+      const failed = await runMain(['explain', 'missing', ...flag]);
+      const absent = await runMain(['explain', 'not-selected', ...flag]);
+
+      assert.equal(healthy.code, 0, healthy.out || healthy.err);
+      assert.equal(failed.code, 1, failed.out || failed.err);
+      assert.equal(absent.code, 1, absent.out || absent.err);
+      assert.equal(healthy.err, '');
+      assert.equal(failed.err, '');
+      assert.equal(absent.err, '');
+    }
   });
 });
