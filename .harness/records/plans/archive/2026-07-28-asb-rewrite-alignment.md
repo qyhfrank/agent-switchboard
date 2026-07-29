@@ -1,7 +1,7 @@
 ---
-status: aligned
-owner: harness (staged replacement per Q5; stage 1 = engine core + rules)
-evidence: .harness/runtime/rewrite-design/ (blind designs, judge verdicts) and .harness/runtime/rewrite-understand/
+status: delivered
+owner: .harness/runtime/tasks/001-asb-05-rewrite
+evidence: .harness/runtime/tasks/001-asb-05-rewrite/plan.yaml (capsule G1-G15/B1-B5 evidence) with state.jsonl round-32 seal and round-32/{audit-rerun.md,dogfood-final.md,acceptance-map.md}; merged to main at 16ceb7b
 goal: null
 ---
 
