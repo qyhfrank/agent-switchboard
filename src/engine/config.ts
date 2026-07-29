@@ -1149,9 +1149,11 @@ function removeSourceDeclaration(content: string, namespace: string): string {
     const end = sectionEnd(content, tableMatch.index + tableMatch[0].length + 1);
     const body = content.slice(start, end);
     // A trailing run of comment lines documents whatever follows this table,
-    // not the table itself; the removal stops before it. The run may end with
-    // one comment line the file terminates without a newline.
-    const trailing = /(?:[ \t]*(?:#[^\n]*)?\n)*(?:[ \t]*#[^\n]*)?$/.exec(body);
+    // not the table itself; the removal stops before it. The run starts at a
+    // line boundary — an inline comment on the table's own last line belongs
+    // to the table and goes with it — and may end with one comment line the
+    // file terminates without a newline.
+    const trailing = /(?:^|(?<=\n))(?:[ \t]*(?:#[^\n]*)?\n)*(?:[ \t]*#[^\n]*)?$/.exec(body);
     let cut = body.length;
     if (trailing && trailing[0].includes('#')) {
       const firstComment = trailing[0].indexOf('#');

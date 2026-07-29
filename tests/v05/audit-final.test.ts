@@ -13,7 +13,7 @@ import {
   selectedFor,
 } from '../../src/engine/cli.js';
 import { loadConfig } from '../../src/engine/config.js';
-import { acquireRunLock, loadLedger } from '../../src/engine/ledger.js';
+import { acquireRunLock, ledgerPath, loadLedger } from '../../src/engine/ledger.js';
 import { projectManifestPath } from '../../src/engine/peer.js';
 import { type Action, groupKeyActions } from '../../src/engine/plan.js';
 import { renderExplain } from '../../src/engine/report.js';
@@ -707,6 +707,22 @@ test('a project sync records ownership in the manifest only, never the machine l
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.ok(report.entries.some((entry) => entry.outcome === 'written'));
     assert.deepEqual(loadLedger(homes.stateHome).entries, []);
+    assert.equal(
+      fs.existsSync(ledgerPath(homes.stateHome)),
+      false,
+      'a project-only run never creates the machine ledger'
+    );
+
+    const globalReport = await runSync();
+    assert.equal(globalReport.exitCode, 0, JSON.stringify(globalReport.entries, null, 2));
+    const bytes = fs.readFileSync(ledgerPath(homes.stateHome), 'utf-8');
+    const second = await runSync({ project });
+    assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
+    assert.equal(
+      fs.readFileSync(ledgerPath(homes.stateHome), 'utf-8'),
+      bytes,
+      'a project run neither rewrites the global store nor replaces its last-run fact'
+    );
   });
 });
 

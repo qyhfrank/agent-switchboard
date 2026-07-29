@@ -133,15 +133,13 @@ test('custom keyed-array project MCP keeps @array grammar out of every ownership
 
     const report = await runSync({ project });
     const manifestText = fs.readFileSync(loadProjectManifest(homes.asbHome, project).path, 'utf-8');
-    const ledgerText = fs.readFileSync(path.join(homes.stateHome, 'ledger.json'), 'utf-8');
-
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     // The portable manifest records the machine-independent serverKey; the
-    // machine ledger holds no project rows at all — project planning proves
-    // ownership from the manifest, and a project row under an app root would
-    // otherwise become a global stale-removal candidate.
-    assert.equal(ledgerText.includes('@array:'), false, ledgerText);
-    assert.equal(JSON.parse(ledgerText).entries.length, 0, ledgerText);
+    // machine ledger is global-only and a project run never writes it —
+    // project planning proves ownership from the manifest, and a project row
+    // under an app root would otherwise become a global stale-removal
+    // candidate.
+    assert.equal(fs.existsSync(path.join(homes.stateHome, 'ledger.json')), false);
     assert.equal(manifestText.includes('@array:'), false);
     assert.match(manifestText, /"serverKey": "alpha"/);
   });

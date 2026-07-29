@@ -252,6 +252,31 @@ test('FD7 removing a source keeps an EOF comment that has no trailing newline', 
   });
 });
 
+test('FD11 removing a source takes its own inline comments with it', async () => {
+  await withScratchHomes(async (homes) => {
+    const configPath = path.join(homes.asbHome, 'config.toml');
+    fs.mkdirSync(homes.asbHome, { recursive: true });
+    for (const ending of ['', '\n']) {
+      fs.writeFileSync(
+        configPath,
+        [
+          '[rules]',
+          'enabled = []',
+          '',
+          '[plugins.sources.doomed]',
+          'url = "https://example.invalid/doomed.git"',
+          `type = "clone" # belongs-to-doomed${ending}`,
+        ].join('\n')
+      );
+      editSourceDeclaration({ namespace: 'doomed' });
+      const after = fs.readFileSync(configPath, 'utf-8');
+      assert.equal(after.includes('belongs-to-doomed'), false, JSON.stringify({ ending, after }));
+      assert.equal(after.includes('doomed'), false, JSON.stringify({ ending, after }));
+      assert.ok(after.includes('[rules]'), after);
+    }
+  });
+});
+
 test('FD8 --source scoping shows a gap row under its own namespace', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
@@ -322,5 +347,54 @@ test('FD9 a pending-clone namespace suppresses gap rows for its own refs in dry-
     // Pending work is not an attention state: the exit vocabulary reserves 1
     // for failing outcomes, and the pending row itself names the next step.
     assert.equal(dry.exitCode, 0, JSON.stringify(dry.entries, null, 2));
+  });
+});
+
+test('FD10 a real first sync surfaces a plugin its just-cloned source does not provide', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const repo = path.join(homes.root, 'src-repo');
+    fs.mkdirSync(repo, { recursive: true });
+    git(['init', '-q', '-b', 'main', '.'], repo);
+    marketplaceSource(repo, 'src', 'pack');
+    // The helper's hi.toml command targets codex; pack needs a component that
+    // lands on the enabled app for the freshness control to observe a write.
+    fs.writeFileSync(path.join(repo, 'pack', 'commands', 'hi.md'), 'Say hi.\n');
+    git(['add', '-A'], repo);
+    git(['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], repo);
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[plugins]',
+        'enabled = ["pack@src", "ghost@src"]',
+        '',
+        '[plugins.sources.src]',
+        `url = ${JSON.stringify(`file://${repo}`)}`,
+        'type = "clone"',
+        '',
+      ].join('\n')
+    );
+
+    // The clone runs inside this very sync, so the catalog already proves
+    // what the source provides: pack lands now, and ghost is this run's
+    // failing outcome, not the second run's surprise.
+    const first = await runSync();
+    assert.ok(
+      first.entries.some(
+        (entry) =>
+          (entry.outcome === 'written' || entry.outcome === 'adopted') &&
+          entry.id !== null &&
+          entry.id.includes('pack')
+      ),
+      JSON.stringify(first.entries, null, 2)
+    );
+    assert.ok(
+      first.entries.some((entry) => entry.id === 'ghost@src' && entry.outcome === 'missing'),
+      JSON.stringify(first.entries, null, 2)
+    );
+    assert.equal(first.exitCode, 1, JSON.stringify(first.entries, null, 2));
   });
 });

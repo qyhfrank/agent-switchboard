@@ -1360,10 +1360,15 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       ...planSelectedPluginGaps(
         resolved,
         catalog,
+        // Readiness materializes before planning, so a real run's catalog
+        // already proves what a cloned source provides; only a dry run still
+        // has namespaces whose content is unknowable.
         new Set(
-          sources.readiness
-            .filter((row) => row.action && row.status !== 'error')
-            .map((row) => row.namespace)
+          dryRun
+            ? sources.readiness
+                .filter((row) => row.action && row.status !== 'error')
+                .map((row) => row.namespace)
+            : []
         )
       )
     );
@@ -1417,35 +1422,39 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
 
     const entries = reconcile(actions, (action) => executeAction(action, ledger, !config.project));
 
-    // Every real run stamps the last-run fact; `status` (dry) reports it.
+    // Every real global run stamps the last-run fact; `status` (dry) reports
+    // it. A project run's proof is its manifest: the machine ledger — entries
+    // and last-run fact alike — is global-only and stays untouched.
     const previousLastRun = ledger.lastRun;
-    const counts = new Map<string, number>();
-    for (const entry of entries) {
-      counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
-    }
-    ledger.lastRun = {
-      at: planInput.now,
-      summary:
-        [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(', ') ||
-        'nothing to do',
-    };
+    if (!config.project) {
+      const counts = new Map<string, number>();
+      for (const entry of entries) {
+        counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
+      }
+      ledger.lastRun = {
+        at: planInput.now,
+        summary:
+          [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(', ') ||
+          'nothing to do',
+      };
 
-    try {
-      saveLedger(config.homes.stateHome, ledger);
-    } catch (error) {
-      // Files changed but the proof did not persist: that is a failure of
-      // this run, reported as such — identity adoption re-proves ownership
-      // on the next run.
-      const message = error instanceof Error ? error.message : String(error);
-      entries.push({
-        app: null,
-        type: null,
-        id: null,
-        path: ledgerPath(config.homes.stateHome),
-        outcome: 'failed',
-        detail: 'write-error',
-        reason: `ownership ledger could not be saved (${message})`,
-      });
+      try {
+        saveLedger(config.homes.stateHome, ledger);
+      } catch (error) {
+        // Files changed but the proof did not persist: that is a failure of
+        // this run, reported as such — identity adoption re-proves ownership
+        // on the next run.
+        const message = error instanceof Error ? error.message : String(error);
+        entries.push({
+          app: null,
+          type: null,
+          id: null,
+          path: ledgerPath(config.homes.stateHome),
+          outcome: 'failed',
+          detail: 'write-error',
+          reason: `ownership ledger could not be saved (${message})`,
+        });
+      }
     }
 
     if (

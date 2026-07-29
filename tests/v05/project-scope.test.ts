@@ -490,17 +490,12 @@ test('project mode none creates no output, manifest ownership, or project ledger
     projectConfig(project, 'none');
 
     const report = await runSync({ project });
-    const ledger = JSON.parse(
-      fs.readFileSync(path.join(homes.stateHome, 'ledger.json'), 'utf-8')
-    ) as { entries: Array<{ path: string }> };
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(fs.existsSync(path.join(project, '.cursor', 'commands', 'build.md')), false);
     assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
-    assert.equal(
-      ledger.entries.some((entry) => entry.path.startsWith(project)),
-      false
-    );
+    // A project-scope run never touches the machine ledger at all.
+    assert.equal(fs.existsSync(path.join(homes.stateHome, 'ledger.json')), false);
   });
 });
 
