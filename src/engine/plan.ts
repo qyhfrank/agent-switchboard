@@ -13,11 +13,12 @@ import {
   effectiveSelection,
   isPlainObject,
   type ResolvedConfig,
+  SELECTION_TYPES,
 } from './config.js';
 import { preferHomeVar, sanitizeMcpName } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, HookEventMap, LibraryInventory } from './library.js';
-import type { NativeWork } from './native.js';
+import { type NativePlanInput, type NativeWork, planNative } from './native.js';
 import { type HookTarget, type PeerState, peerStateHasContent } from './peer.js';
 import type { Outcome } from './report.js';
 import {
@@ -198,6 +199,69 @@ export interface PlanInput {
   capture: SyncCapture;
   table: readonly AppRow[];
   now: string;
+}
+
+const STATUS_TYPES = [...SELECTION_TYPES, 'native_plugins'] as const;
+type StatusType = (typeof STATUS_TYPES)[number];
+
+function appSupports(row: AppRow, type: StatusType): boolean {
+  return type === 'native_plugins' ? row.native !== undefined : row[type] !== undefined;
+}
+
+/** Extra inventory/probe rows requested by `status --all`. */
+export function planStatusAll(input: PlanInput): Action[] {
+  const { config, inventory, capture, table } = input;
+  const actions: Action[] = [];
+  const selected = new Set<string>();
+  for (const app of config.apps.enabled) {
+    for (const type of SELECTION_TYPES) {
+      for (const id of effectiveSelection(config, app, type)) selected.add(`${type}\0${id}`);
+    }
+  }
+
+  for (const component of inventory.components) {
+    if (selected.has(`${component.type}\0${component.id}`)) continue;
+    actions.push({
+      app: null,
+      type: component.type,
+      id: component.id,
+      path: component.path,
+      op: 'none',
+      outcome: 'skipped',
+      detail: 'not-selected',
+      reason: 'library component is not selected by any enabled app',
+    });
+  }
+
+  const assumed = new Set(config.apps.assumeInstalled);
+  for (const row of table) {
+    for (const type of STATUS_TYPES) {
+      if (!appSupports(row, type)) {
+        actions.push({
+          app: row.id,
+          type,
+          id: null,
+          path: null,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'app-lacks-type',
+          reason: `${row.id} has no ${type} target`,
+        });
+      } else if (capture.installed[row.id] !== true && !assumed.has(row.id)) {
+        actions.push({
+          app: row.id,
+          type,
+          id: null,
+          path: null,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'app-not-installed',
+          reason: `${row.detectDir(config.homes)} not found; add "${row.id}" to [applications].assume_installed to sync anyway`,
+        });
+      }
+    }
+  }
+  return actions;
 }
 
 interface ResolvedRuleSet {
@@ -2907,7 +2971,7 @@ export interface ExplainSlice {
   detail?: string;
   reason?: string;
   /** Recorded ownership proof, or null when no ledger record exists. */
-  provenance: Provenance | null;
+  provenance: Provenance | 'native-manager' | null;
   recordedHash: string | null;
   currentHash: string | null;
   desiredHash: string | null;
@@ -2950,6 +3014,124 @@ export function explainSources(input: SourcePlanInput, target: string): ExplainS
   return planSources(input)
     .filter((action) => action.id === target || action.path === target)
     .map(librarySlice);
+}
+
+function explainEntries(input: PlanInput, target: string, type: EntryType): ExplainSlice[] {
+  const { config, inventory, ledger, capture, table } = input;
+  const byId = new Map(
+    inventory.components
+      .filter((component) => component.type === type)
+      .map((component) => [component.id, component])
+  );
+  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
+  const slices: ExplainSlice[] = [];
+
+  for (const action of planEntries(input, type)) {
+    if (action.app === null) {
+      if (action.id === target || action.path === target) slices.push(librarySlice(action));
+      continue;
+    }
+    const pathMatch =
+      action.path !== null &&
+      (action.path === target || action.path.endsWith(`${path.sep}${target}`));
+    if (action.id !== target && action.app !== target && !pathMatch) continue;
+
+    const component = action.id === null ? undefined : byId.get(action.id);
+    const row = table.find((candidate) => candidate.id === action.app)?.[type];
+    const recorded =
+      action.path === null
+        ? null
+        : (ledgerByKey.get(
+            ledgerKey({ app: action.app, type, id: action.id, path: action.path })
+          ) ?? null);
+    let currentHash: string | null = null;
+    let desiredHash: string | null = null;
+    let desired: string | null = null;
+
+    if (component && row && action.path !== null) {
+      const ownPath = path.join(row.dir(config.homes), row.filename(component.id));
+      if (action.path === ownPath) {
+        const current = capture.targets[action.path]?.content;
+        currentHash = current === null || current === undefined ? null : hashContent(current);
+        try {
+          desired = row.render(component);
+        } catch {
+          desired = null;
+        }
+        desiredHash = desired === null ? null : hashContent(desired);
+      } else if (type === 'agents' && row.config?.path(config.homes) === action.path) {
+        const candidate = row.config.component(component, row.filename(component.id));
+        const current = valueAtKeyPath(capture.mcp[action.app]?.root ?? null, candidate.keyPath);
+        currentHash = current === undefined ? null : sliceHash(current);
+        desiredHash = sliceHash(candidate.value);
+        desired = candidate.text;
+      }
+    } else if (action.path !== null) {
+      const current = capture.targets[action.path]?.content;
+      currentHash = current === null || current === undefined ? null : hashContent(current);
+      desired = action.content ?? null;
+      desiredHash = desired === null ? null : hashContent(desired);
+    }
+
+    const slice: ExplainSlice = {
+      app: action.app,
+      path: action.path,
+      outcome: action.outcome,
+      provenance: recorded?.provenance ?? null,
+      recordedHash: recorded?.hash ?? null,
+      currentHash,
+      desiredHash,
+      desired,
+      components: component ? [{ id: component.id, path: component.path }] : [],
+      sources: component ? componentSources([component]) : [],
+    };
+    if (action.detail !== undefined) slice.detail = action.detail;
+    if (action.reason !== undefined) slice.reason = action.reason;
+    slices.push(slice);
+  }
+  return slices;
+}
+
+export function explainCommands(input: PlanInput, target: string): ExplainSlice[] {
+  return explainEntries(input, target, 'commands');
+}
+
+export function explainAgents(input: PlanInput, target: string): ExplainSlice[] {
+  return explainEntries(input, target, 'agents');
+}
+
+export function explainNative(input: NativePlanInput, target: string): ExplainSlice[] {
+  const slices: ExplainSlice[] = [];
+  for (const action of planNative(input)) {
+    const pathMatch =
+      action.path !== null &&
+      (action.path === target || action.path.endsWith(`${path.sep}${target}`));
+    if (action.id !== target && action.app !== target && !pathMatch) continue;
+    const plugin = input.catalog.plugins.find(
+      (candidate) =>
+        candidate.id === action.id ||
+        candidate.native?.install?.ref === action.id ||
+        action.id?.endsWith(`@${candidate.id}`)
+    );
+    const sourcePath = plugin?.root ?? plugin?.native?.manifestPath;
+    const slice: ExplainSlice = {
+      app: action.app,
+      path: action.path,
+      outcome: action.outcome,
+      provenance: 'native-manager',
+      recordedHash: null,
+      currentHash: null,
+      desiredHash: null,
+      desired: null,
+      components: [],
+      sources:
+        plugin && sourcePath ? [{ id: plugin.id, source: plugin.source, path: sourcePath }] : [],
+    };
+    if (action.detail !== undefined) slice.detail = action.detail;
+    if (action.reason !== undefined) slice.reason = action.reason;
+    slices.push(slice);
+  }
+  return slices;
 }
 
 /**

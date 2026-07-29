@@ -4,6 +4,7 @@ import { checkbox, confirm, input } from '@inquirer/prompts';
 import { Command } from 'commander';
 import { AGENTS_SKILLS_UNION, APP_ROWS, type AppRow, appRows } from './apps.js';
 import {
+  type ComponentType,
   ConfigError,
   editSelection,
   effectivePlugins,
@@ -11,6 +12,7 @@ import {
   loadConfig,
   type ResolvedConfig,
   resolveHomes,
+  SELECTION_TYPES,
   withPluginExpansion,
 } from './config.js';
 import { expandHome, type RemoteSource } from './git.js';
@@ -32,8 +34,11 @@ import {
   type CapturedHookApp,
   type CapturedMcpHost,
   type ExplainSlice,
+  explainAgents,
+  explainCommands,
   explainHooks,
   explainMcp,
+  explainNative,
   explainRules,
   explainSkills,
   explainSources,
@@ -46,6 +51,7 @@ import {
   planRules,
   planSkills,
   planSources,
+  planStatusAll,
   type SyncCapture,
 } from './plan.js';
 import {
@@ -104,6 +110,10 @@ export interface SyncOptions {
   update?: boolean;
   /** Explicit suppression, including of `[plugins].auto_update`. */
   noUpdate?: boolean;
+  /** Status-only: include inactive inventory and app/type probe rows. */
+  all?: boolean;
+  /** Status-only component id glob (`*` and `?`). */
+  idGlob?: string;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -111,7 +121,8 @@ function captureFor(
   config: ReturnType<typeof loadConfig>,
   ledger: Ledger,
   table: readonly AppRow[],
-  inventory: LibraryInventory
+  inventory: LibraryInventory,
+  allApps = false
 ): SyncCapture {
   const capture: SyncCapture = {
     installed: {},
@@ -137,10 +148,13 @@ function captureFor(
       capture.targets[targetPath] = { exists: fs.existsSync(targetPath), content: null, escapes };
     }
   };
+  if (allApps) {
+    for (const row of table) capture.installed[row.id] = fs.existsSync(row.detectDir(config.homes));
+  }
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId);
     if (!row) continue;
-    capture.installed[appId] = fs.existsSync(row.detectDir(config.homes));
+    capture.installed[appId] ??= fs.existsSync(row.detectDir(config.homes));
     if (!row.rules) continue;
     const targetPath = row.rules.path(config.homes);
     capture.rulePaths[appId] = targetPath;
@@ -703,6 +717,34 @@ function sourceAttribution(catalog: SourceCatalog): (action: Action) => string |
   };
 }
 
+function matchesIdGlob(id: string, glob: string): boolean {
+  // ponytail: ID globs support `*` and `?`; add a dedicated matcher if the CLI
+  // contract grows character classes or brace expansion.
+  const source = [...glob]
+    .map((char) =>
+      char === '*' ? '.*' : char === '?' ? '.' : char.replace(/[\\^$.*+?()[\]{}|]/g, '\\$&')
+    )
+    .join('');
+  return new RegExp(`^${source}$`).test(id);
+}
+
+function isComponentType(value: string | null): value is ComponentType {
+  return value !== null && (SELECTION_TYPES as readonly string[]).includes(value);
+}
+
+function statusActionMatchesId(action: Action, glob: string, config: ResolvedConfig): boolean {
+  if (action.id !== null) return matchesIdGlob(action.id, glob);
+  if (
+    action.app === null ||
+    !isComponentType(action.type) ||
+    action.detail === 'app-lacks-type' ||
+    action.detail === 'app-not-installed'
+  ) {
+    return false;
+  }
+  return effectiveSelection(config, action.app, action.type).some((id) => matchesIdGlob(id, glob));
+}
+
 /**
  * The sources phase: materialize configured clones, then refresh them when the
  * run asked for it. It runs before the scan and produces no components of its
@@ -793,7 +835,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
     }
 
-    const capture = captureFor(resolved, ledger, table, inventory);
+    const capture = captureFor(resolved, ledger, table, inventory, opts.all === true);
     const nativeState = captureNative(resolved, catalog, table, env, capture.installed, dryRun);
 
     const planInput = {
@@ -826,6 +868,29 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       }),
     ];
 
+    if (opts.all === true) {
+      // The typed probe rows replace the rules planner's one generic app
+      // absence row and make `--type` filtering unambiguous.
+      actions = actions.filter(
+        (action) =>
+          !(action.app !== null && action.type === null && action.detail === 'app-not-installed')
+      );
+      const represented = new Set(
+        actions.flatMap((action) =>
+          action.id === null || action.type === null ? [] : [`${action.type}\0${action.id}`]
+        )
+      );
+      actions.push(
+        ...planStatusAll(planInput).filter(
+          (action) =>
+            action.detail !== 'not-selected' ||
+            action.id === null ||
+            action.type === null ||
+            !represented.has(`${action.type}\0${action.id}`)
+        )
+      );
+    }
+
     // Filters select which actions execute, never which inputs the planner saw.
     if (opts.apps && opts.apps.length > 0) {
       const wanted = new Set(opts.apps);
@@ -842,6 +907,11 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         const source = owner(action);
         return source === null || wanted.has(source);
       });
+    }
+    if (opts.idGlob) {
+      actions = actions.filter((action) =>
+        statusActionMatchesId(action, opts.idGlob as string, resolved)
+      );
     }
     actions = groupKeyActions(actions);
 
@@ -902,6 +972,7 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
   const inventory = scanLibrary({ env, plugins: catalog.plugins });
   const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
   const capture = captureFor(resolved, ledger, table, inventory);
+  const nativeState = captureNative(resolved, catalog, table, env, capture.installed, true);
 
   const planInput = {
     config: resolved,
@@ -911,6 +982,8 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     table,
     now: new Date().toISOString(),
   };
+  const wantedTypes = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
+  const wants = (type: string): boolean => wantedTypes === null || wantedTypes.has(type);
   // Explain never clones or fetches: it reads what a preview would report.
   let slices = [
     ...explainSources(
@@ -925,10 +998,26 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
       },
       target
     ),
-    ...explainRules(planInput, target),
-    ...explainSkills(planInput, target),
-    ...explainHooks(planInput, target),
-    ...explainMcp(planInput, target),
+    ...(wants('rules') ? explainRules(planInput, target) : []),
+    ...(wants('commands') ? explainCommands(planInput, target) : []),
+    ...(wants('agents') ? explainAgents(planInput, target) : []),
+    ...(wants('skills') ? explainSkills(planInput, target) : []),
+    ...(wants('hooks') ? explainHooks(planInput, target) : []),
+    ...(wants('mcp') ? explainMcp(planInput, target) : []),
+    ...(wants('native_plugins')
+      ? explainNative(
+          {
+            config: resolved,
+            catalog,
+            capture: nativeState,
+            table,
+            env,
+            installed: capture.installed,
+            dryRun: true,
+          },
+          target
+        )
+      : []),
   ];
   if (opts.apps && opts.apps.length > 0) {
     const wanted = new Set(opts.apps);
@@ -1129,6 +1218,7 @@ export type CliOptions = SyncOptions & {
   json: boolean;
   update: boolean;
   noUpdate: boolean;
+  all: boolean;
   sources: string[];
 };
 
@@ -1177,6 +1267,7 @@ function registerScopeFlags(target: Command): Command {
     .option('--source <name>', 'filter the plan to entries from named sources', collect, [])
     .option('--app <app>', 'narrow the plan to named apps', collect, [])
     .option('--type <type>', 'narrow the plan to named types', collect, [])
+    .option('--all', 'include inactive inventory and app/type probe rows (status only)')
     .option('-p, --profile <name>', 'per-machine selection set')
     .option('-P, --project <dir>', 'apply that repo project config at project scope')
     .option('--json', 'machine-readable output');
@@ -1206,6 +1297,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
       sources: [...(global.source ?? []), ...(local.source ?? [])],
       apps: [...(global.app ?? []), ...(local.app ?? [])],
       types: [...(global.type ?? []), ...(local.type ?? [])],
+      all: local.all === true || global.all === true,
       profile: (local.profile ?? global.profile) as string | undefined,
       project: (local.project ?? global.project) as string | undefined,
       json: local.json === true || global.json === true,
@@ -1219,9 +1311,15 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   });
 
   registerScopeFlags(
-    program.command('status').description('inventory × selection × per-app reality')
-  ).action((_args: unknown, cmd: Command) => {
-    parsed = { command: 'status', options: scopeOptions(cmd) };
+    program
+      .command('status')
+      .description('inventory × selection × per-app reality')
+      .argument('[idGlob]', 'component id glob')
+  ).action((idGlob: string | undefined, _args: unknown, cmd: Command) => {
+    parsed = {
+      command: 'status',
+      options: { ...scopeOptions(cmd), ...(idGlob === undefined ? {} : { idGlob }) },
+    };
   });
 
   for (const command of ['enable', 'disable'] as const) {
@@ -1328,7 +1426,15 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   if (!parsed) {
     throw new ConfigErrorLike('No command given.');
   }
-  return parsed;
+  const invocation = parsed as CliInvocation;
+  if (
+    invocation.command !== 'status' &&
+    'all' in invocation.options &&
+    invocation.options.all === true
+  ) {
+    throw new ConfigErrorLike('--all is only available on status.');
+  }
+  return invocation;
 }
 
 class ConfigErrorLike extends Error {
