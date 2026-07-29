@@ -852,7 +852,7 @@ export function removeSource(
     pluginIds?: readonly string[];
     env?: NodeJS.ProcessEnv;
   } = {}
-): { retired: { type: ComponentType | 'plugins'; id: string }[] } {
+): { retired: { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[] } {
   const { cacheOwnerPath, rollback } = removeSourceContent(config, namespace);
   try {
     editSourceDeclaration({ namespace, env: opts.env });
@@ -862,7 +862,13 @@ export function removeSource(
   }
   finishRemoveSource(config.homes, namespace, cacheOwnerPath);
   return {
-    retired: retireSelection(config, opts.componentIds ?? [], opts.pluginIds ?? [], opts.env),
+    retired: retireSelection(
+      config,
+      namespace,
+      opts.componentIds ?? [],
+      opts.pluginIds ?? [],
+      opts.env
+    ),
   };
 }
 
@@ -875,17 +881,23 @@ export function removeSource(
  */
 function retireSelection(
   config: ResolvedConfig,
+  namespace: string,
   componentIds: readonly string[],
   pluginIds: readonly string[],
   env: NodeJS.ProcessEnv | undefined
-): { type: ComponentType | 'plugins'; id: string }[] {
+): { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[] {
   const expansion = config.plugins.expansion;
-  const retired: { type: ComponentType | 'plugins'; id: string }[] = [];
+  const retired: { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[] = [];
+  // An id spelled `name@<namespace>` names this source even when the source
+  // never resolved, so no catalog row could enumerate it.
+  const spelledPlugin = (ref: string): boolean => ref.endsWith(`@${namespace}`);
+  const spelledComponent = (ref: string): boolean => ref.includes(`@${namespace}:`);
 
   const wantedComponents = new Set(componentIds);
   for (const type of SELECTION_TYPES) {
-    const hits = config.selection[type].filter((ref) =>
-      wantedComponents.has(expansion?.componentAliases[ref] ?? ref)
+    const hits = config.selection[type].filter(
+      (ref) =>
+        wantedComponents.has(expansion?.componentAliases[ref] ?? ref) || spelledComponent(ref)
     );
     if (hits.length === 0) continue;
     editSelection({ type, disable: hits, env });
@@ -893,12 +905,22 @@ function retireSelection(
   }
 
   const wantedPlugins = new Set(pluginIds);
-  const pluginHits = config.selection.plugins.filter((ref) =>
-    wantedPlugins.has(expansion?.pluginAliases[ref] ?? ref)
-  );
+  const pluginMatch = (ref: string): boolean =>
+    wantedPlugins.has(expansion?.pluginAliases[ref] ?? ref) || spelledPlugin(ref);
+  const pluginHits = config.selection.plugins.filter(pluginMatch);
   if (pluginHits.length > 0) {
     editSelection({ type: 'plugins', disable: pluginHits, env });
     for (const id of pluginHits) retired.push({ type: 'plugins', id });
+  }
+
+  const userApps = config.layers.find((layer) => layer.kind === 'user')?.values.applications ?? {};
+  for (const [app, override] of Object.entries(userApps)) {
+    if (Array.isArray(override) || typeof override !== 'object' || override === null) continue;
+    const native = (override as { native_plugins?: { enabled?: string[] } }).native_plugins;
+    const hits = (native?.enabled ?? []).filter(pluginMatch);
+    if (hits.length === 0) continue;
+    editSelection({ type: 'native_plugins', app, disable: hits, env });
+    for (const id of hits) retired.push({ type: 'native_plugins', id });
   }
 
   return retired;

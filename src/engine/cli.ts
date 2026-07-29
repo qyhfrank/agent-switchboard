@@ -70,6 +70,7 @@ import {
   planLegacyOpencode,
   planMcp,
   planRules,
+  planSelectedPluginGaps,
   planSkills,
   planSources,
   planStatusAll,
@@ -1341,6 +1342,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     if (opts.all === true || opts.types?.includes('plugins') === true) {
       actions.push(...planCatalogStatus(resolved, catalog, inventory));
     }
+    actions.push(...planSelectedPluginGaps(resolved, catalog));
 
     // Filters select which actions execute, never which inputs the planner saw.
     if (opts.apps && opts.apps.length > 0) {

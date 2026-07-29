@@ -1138,7 +1138,16 @@ function removeSourceDeclaration(content: string, namespace: string): string {
   if (tableMatch) {
     const start = tableMatch.index;
     const end = sectionEnd(content, tableMatch.index + tableMatch[0].length + 1);
-    return content.slice(0, start) + content.slice(end);
+    const body = content.slice(start, end);
+    // A trailing run of comment lines documents whatever follows this table,
+    // not the table itself; the removal stops before it.
+    const trailing = /(?:[ \t]*(?:#[^\n]*)?\n)*$/.exec(body);
+    let cut = body.length;
+    if (trailing && trailing[0].includes('#')) {
+      const firstComment = trailing[0].indexOf('#');
+      cut = trailing.index + trailing[0].lastIndexOf('\n', firstComment) + 1;
+    }
+    return content.slice(0, start) + content.slice(start + cut);
   }
 
   const section = findSection(content, 'plugins.sources');
@@ -1194,7 +1203,7 @@ export function editSourceDeclaration(options: EditSourceOptions): void {
 }
 
 export interface EditSelectionOptions {
-  type: ComponentType | 'plugins';
+  type: ComponentType | 'plugins' | 'native_plugins';
   enable?: readonly string[];
   disable?: readonly string[];
   replace?: readonly string[];
@@ -1306,12 +1315,13 @@ export function editSelection(options: EditSelectionOptions): void {
         content = `${content.slice(0, element.start)}${JSON.stringify(value)}${content.slice(element.end)}`;
       }
     }
-  } else if (options.app) {
+  } else if (options.app && options.type !== 'native_plugins') {
     mutate('remove', [], new Set(additionsInput));
     mutate('add', additionsInput, removals);
     mutate('add', [], removals);
     mutate('remove', [...removals], new Set());
   } else {
+    // Native plugin overrides carry a plain `enabled` array in every scope.
     mutate('enabled', additionsInput, removals);
   }
 

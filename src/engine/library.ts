@@ -430,7 +430,14 @@ function scanHooksDirectory(directory: string, owner: Owner, inventory: LibraryI
         content: '',
         metadata: { tags: [], requires: [] },
         hooks: parsed.hooks,
-        ...(isBundle ? { files: listBundleFiles(entryPath) } : {}),
+        // A plugin's flat hook references sibling scripts through the
+        // plugin-root placeholder, so the whole hooks directory distributes
+        // as its bundle — the 0.4.35 layout.
+        ...(isBundle
+          ? { files: listBundleFiles(entryPath) }
+          : owner.source !== LIBRARY.source
+            ? { files: listBundleFiles(directory) }
+            : {}),
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

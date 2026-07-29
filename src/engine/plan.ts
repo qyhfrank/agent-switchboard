@@ -344,6 +344,29 @@ export function planCatalogStatus(
   ];
 }
 
+/** Selected plugin refs nothing resolves or declares: visible in every run. */
+export function planSelectedPluginGaps(config: ResolvedConfig, catalog: SourceCatalog): Action[] {
+  const aliases = config.plugins.expansion?.pluginAliases ?? {};
+  const known = new Set([
+    ...catalog.plugins.flatMap((plugin) => [plugin.id, plugin.name]),
+    ...catalog.absent.map((plugin) => plugin.id),
+  ]);
+  return config.selection.plugins
+    .filter((ref) => aliases[ref] === undefined && !known.has(ref))
+    .map(
+      (ref): Action => ({
+        app: null,
+        type: 'plugins',
+        id: ref,
+        path: null,
+        op: 'none',
+        outcome: 'missing',
+        detail: 'unavailable',
+        reason: 'selected, but no source provides it; disable it or add its source',
+      })
+    );
+}
+
 interface ResolvedRuleSet {
   present: Component[];
   missing: string[];
