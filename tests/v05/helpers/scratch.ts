@@ -41,7 +41,11 @@ function setEnv(key: string, value: string | undefined): void {
 }
 
 export async function withScratchHomes<T>(fn: (homes: ScratchHomes) => T | Promise<T>): Promise<T> {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'asb05-'));
+  // os.tmpdir() is a symlink on macOS (/var -> /private/var). The engine
+  // canonicalizes a project root before it derives peer-state and manifest
+  // names, so a scratch tree reached through the link would be written under
+  // one spelling and looked up under the other.
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'asb05-')));
   const homes: ScratchHomes = {
     root,
     asbHome: path.join(root, 'asb-home'),
@@ -147,6 +151,16 @@ function vendorDataDir(agentsHome: string, appName: string): string {
     default:
       return path.join(agentsHome, '.config', appName);
   }
+}
+
+/**
+ * coco's config root (frozen 0.4.35 probe). macOS keeps it with the other
+ * vendor data; every other platform reads it out of the XDG config home.
+ */
+export function cocoConfigDir(agentsHome: string): string {
+  return os.platform() === 'darwin'
+    ? vendorDataDir(agentsHome, 'coco')
+    : path.join(agentsHome, '.config', 'coco');
 }
 
 type DetectableAppId = RuleAppId | 'claude-desktop';

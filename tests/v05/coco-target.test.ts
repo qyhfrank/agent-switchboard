@@ -7,6 +7,7 @@ import { APP_ROWS } from '../../src/engine/apps.js';
 import { runSync } from '../../src/engine/cli.js';
 import type { Component } from '../../src/engine/library.js';
 import {
+  cocoConfigDir,
   installApps,
   mcpHostPath,
   readMcpHost,
@@ -31,8 +32,8 @@ test('coco is one builtin data row with the snapshot paths and dialects', async 
   await withScratchHomes(async (homes) => {
     const row = APP_ROWS.find((candidate) => candidate.id === 'coco');
     assert.ok(row);
-    assert.equal(row.detectDir(homes), path.join(homes.agentsHome, '.config', 'coco'));
-    assert.equal(row.mcp?.path(homes), path.join(homes.agentsHome, '.config', 'coco', 'coco.yaml'));
+    assert.equal(row.detectDir(homes), cocoConfigDir(homes.agentsHome));
+    assert.equal(row.mcp?.path(homes), path.join(cocoConfigDir(homes.agentsHome), 'coco.yaml'));
     assert.equal(row.mcp?.structure, 'keyed-array');
     assert.equal(row.mcp?.keyField, 'name');
     assert.equal(row.commands?.dir(homes), path.join(homes.agentsHome, '.coco', 'commands'));
@@ -75,7 +76,7 @@ test('coco rules resolves one capture-time target and renders for that path', as
 
 test('coco rules retires the previously recorded fallback when capture moves to cursor', async () => {
   await withScratchHomes(async (homes) => {
-    fs.mkdirSync(path.join(homes.agentsHome, '.config', 'coco'), { recursive: true });
+    fs.mkdirSync(cocoConfigDir(homes.agentsHome), { recursive: true });
     seedRule(homes, 'base.md', 'Be kind.\n');
     writeUserConfig(homes, '[applications]\nenabled = ["coco"]\n\n[rules]\nenabled = ["base"]\n');
     await runSync({});
@@ -112,7 +113,7 @@ test('coco rules retires the previously recorded fallback when capture moves to 
 
 test('coco YAML keyed arrays preserve foreign members and record identity paths', async () => {
   await withScratchHomes(async (homes) => {
-    const cocoDir = path.join(homes.agentsHome, '.config', 'coco');
+    const cocoDir = cocoConfigDir(homes.agentsHome);
     fs.mkdirSync(cocoDir, { recursive: true });
     const host = path.join(cocoDir, 'coco.yaml');
     fs.writeFileSync(
@@ -151,7 +152,7 @@ test('coco YAML keyed arrays preserve foreign members and record identity paths'
 test('coco MCP bootstraps absent and empty YAML hosts', async () => {
   for (const initial of [null, '', '\n', '# keep\ntheme: dark\n'] as const) {
     await withScratchHomes(async (homes) => {
-      const cocoDir = path.join(homes.agentsHome, '.config', 'coco');
+      const cocoDir = cocoConfigDir(homes.agentsHome);
       fs.mkdirSync(cocoDir, { recursive: true });
       const host = path.join(cocoDir, 'coco.yaml');
       if (initial !== null) fs.writeFileSync(host, initial, 'utf-8');
@@ -174,7 +175,7 @@ test('coco MCP bootstraps absent and empty YAML hosts', async () => {
 test('a defective coco identity array fails that host while another app proceeds', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
-    const cocoDir = path.join(homes.agentsHome, '.config', 'coco');
+    const cocoDir = cocoConfigDir(homes.agentsHome);
     fs.mkdirSync(cocoDir, { recursive: true });
     const host = path.join(cocoDir, 'coco.yaml');
     const poisoned =

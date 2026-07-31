@@ -7,6 +7,7 @@ import { ConfigError } from '../../src/engine/config.js';
 import { renderExplain } from '../../src/engine/report.js';
 import { hashContent } from '../../src/engine/shapes.js';
 import {
+  cocoConfigDir,
   installApps,
   seedMcpLibrary,
   withScratchHomes,
@@ -282,7 +283,7 @@ test('explain keeps MCP credential map keys and masks every value', async () => 
 
 test('explain masks env values through the kv-array dialect too', async () => {
   await withScratchHomes(async (homes) => {
-    fs.mkdirSync(path.join(homes.agentsHome, '.config', 'coco'), { recursive: true });
+    fs.mkdirSync(cocoConfigDir(homes.agentsHome), { recursive: true });
     const placeholder = 'INVENTED-PLACEHOLDER-9f3a';
     seedMcpLibrary(homes, {
       alpha: { command: 'run', env: { API_TOKEN: placeholder } },
