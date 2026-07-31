@@ -493,3 +493,55 @@ test('a missing library entry and a malformed hook file contain to their own row
     assert.notEqual(report.exitCode, 0, 'neither failure is silent');
   });
 });
+
+test('a codex hooks write reports the trust review Codex still requires', async () => {
+  const LIBRARY = {
+    UserPromptSubmit: [{ matcher: '*', hooks: [{ type: 'command', command: 'echo t' }] }],
+  };
+
+  // Codex records trust against each hook's current hash and skips new or
+  // changed non-managed hooks until they are reviewed, so a written hooks.json
+  // is not yet a running hook. Distribution cannot establish that trust, so it
+  // has to name the step instead of letting `written` imply it.
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex', 'claude-code');
+    seedHook(homes, 'trust', LIBRARY);
+    writeUserConfig(homes, configFor(['codex', 'claude-code'], ['trust']));
+
+    const first = await runSync();
+
+    const codex = hooksRows(first).find((entry) => entry.app === 'codex' && entry.id === null);
+    assert.equal(codex?.outcome, 'written');
+    assert.match(String(codex?.reason), /\/hooks in Codex/);
+    assert.match(String(codex?.reason), /codex exec/);
+
+    // The notice is Codex's gate, not a property of distributing hooks.
+    const claude = hooksRows(first).find(
+      (entry) => entry.app === 'claude-code' && entry.id === null
+    );
+    assert.equal(claude?.outcome, 'written');
+    assert.equal(claude?.reason, undefined);
+
+    // An unchanged config is not a new review: only a write carries it.
+    const second = await runSync();
+    const quiet = hooksRows(second).find((entry) => entry.app === 'codex' && entry.id === null);
+    assert.equal(quiet?.outcome, 'unchanged');
+    assert.equal(quiet?.reason, undefined);
+  });
+
+  // Deselecting everything empties the hook map; a foreign top-level key keeps
+  // the file, and an emptied map leaves nothing to review.
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'trust', LIBRARY);
+    writeJson(configPath(homes, 'codex'), { preferredNotifChannel: 'desktop' });
+    writeUserConfig(homes, configFor(['codex'], ['trust']));
+    await runSync();
+
+    writeUserConfig(homes, configFor(['codex'], []));
+    const cleared = hooksRows(await runSync()).find((entry) => entry.id === null);
+
+    assert.equal(cleared?.detail, 'cleared');
+    assert.equal(cleared?.reason, undefined);
+  });
+});

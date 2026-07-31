@@ -2802,6 +2802,9 @@ export function planHooks(input: PlanInput): Action[] {
         op: 'write',
         outcome: 'written',
         detail: emptied ? 'cleared' : 'merged',
+        // Hooks that just landed are not yet hooks that run when the app gates
+        // them behind review; a cleared config has nothing left to review.
+        ...(row.reviewNotice !== undefined && !emptied ? { reason: row.reviewNotice } : {}),
         content,
         root,
         expectedHash: currentHash,

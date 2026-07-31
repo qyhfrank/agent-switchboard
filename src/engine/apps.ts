@@ -137,6 +137,12 @@ export interface HooksTargetRow {
   stateTarget: 'claude-code' | 'codex';
   /** Import the user hook map from this row's host document. */
   importable?: boolean;
+  /**
+   * Reported alongside a write when the app gates newly written hooks behind
+   * its own review step, so a distribution that lands is not mistaken for one
+   * that runs.
+   */
+  reviewNotice?: string;
 }
 
 /**
@@ -371,6 +377,11 @@ export const APP_ROWS: readonly AppRow[] = [
       deleteWhenEmpty: true,
       filter: filterCodexHooks,
       stateTarget: 'codex',
+      // Codex records trust against each hook's current hash and skips new or
+      // changed non-managed hooks until they are reviewed. Interactive Codex
+      // warns at startup; `codex exec` just runs without them.
+      reviewNotice:
+        'Codex skips new or changed hooks until they are trusted: run /hooks in Codex to review them, or headless codex exec runs without them',
     },
     mcp: {
       root: (homes) => path.join(homes.agentsHome, '.codex'),
