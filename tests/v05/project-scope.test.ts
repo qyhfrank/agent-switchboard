@@ -52,15 +52,16 @@ test('project root canonicalizes once and merged selection remains the planner i
   });
 });
 
-test('project registry exposes only ratified destinations and keeps Coco global-only', async () => {
+test('project registry exposes only ratified destinations and keeps global-only cells out', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
+    const projectReal = fs.realpathSync(project);
     writeUserConfig(
       homes,
       [
         '[applications]',
-        'enabled = ["claude-code", "codex", "gemini", "opencode", "cursor", "coco", "trae", "trae-cn", "custom"]',
+        'enabled = ["claude-code", "codex", "gemini", "opencode", "cursor", "trae", "trae-cn", "custom"]',
         '',
         '[targets.custom.commands]',
         'target_dir = "~/global-commands"',
@@ -78,26 +79,33 @@ test('project registry exposes only ratified destinations and keeps Coco global-
 
     assert.equal(
       row('claude-code')?.rules?.path(config.homes),
-      path.join(project, '.claude', 'CLAUDE.md')
+      path.join(projectReal, '.claude', 'CLAUDE.md')
     );
-    assert.equal(row('claude-code')?.mcp?.path(config.homes), path.join(project, '.mcp.json'));
-    assert.equal(row('codex')?.rules?.path(config.homes), path.join(project, 'AGENTS.md'));
+    assert.equal(row('claude-code')?.mcp?.path(config.homes), path.join(projectReal, '.mcp.json'));
+    assert.equal(row('codex')?.rules?.path(config.homes), path.join(projectReal, 'AGENTS.md'));
     assert.equal(row('codex')?.commands, undefined);
-    assert.equal(row('codex')?.skills?.dir(config.homes), path.join(project, '.agents', 'skills'));
+    assert.equal(
+      row('codex')?.skills?.dir(config.homes),
+      path.join(projectReal, '.agents', 'skills')
+    );
     assert.equal(row('gemini')?.agents, undefined);
     assert.equal(
       row('opencode')?.mcp?.path(config.homes),
-      path.join(project, '.opencode', 'opencode.json')
+      path.join(projectReal, '.opencode', 'opencode.json')
     );
-    assert.equal(row('cursor')?.mcp?.path(config.homes), path.join(project, '.cursor', 'mcp.json'));
-    assert.equal(row('trae')?.skills?.dir(config.homes), path.join(project, '.trae', 'skills'));
-    assert.equal(row('trae-cn')?.mcp?.path(config.homes), path.join(project, '.trae', 'mcp.json'));
-    assert.equal(row('coco')?.rules, undefined);
-    assert.equal(row('coco')?.commands, undefined);
-    assert.equal(row('coco')?.mcp, undefined);
+    assert.equal(
+      row('cursor')?.mcp?.path(config.homes),
+      path.join(projectReal, '.cursor', 'mcp.json')
+    );
+    assert.equal(row('trae')?.skills?.dir(config.homes), path.join(projectReal, '.trae', 'skills'));
+    assert.equal(
+      row('trae-cn')?.mcp?.path(config.homes),
+      path.join(projectReal, '.trae', 'mcp.json')
+    );
+    assert.equal(row('custom')?.rules, undefined);
     assert.equal(
       row('custom')?.commands?.dir(config.homes),
-      path.join(project, '.custom', 'commands')
+      path.join(projectReal, '.custom', 'commands')
     );
     assert.equal(row('custom')?.skills, undefined, 'missing project_parent_dir is global-only');
   });

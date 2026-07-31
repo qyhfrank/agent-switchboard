@@ -7,7 +7,6 @@ import { ConfigError } from '../../src/engine/config.js';
 import { renderExplain } from '../../src/engine/report.js';
 import { hashContent } from '../../src/engine/shapes.js';
 import {
-  cocoConfigDir,
   installApps,
   seedMcpLibrary,
   withScratchHomes,
@@ -283,12 +282,30 @@ test('explain keeps MCP credential map keys and masks every value', async () => 
 
 test('explain masks env values through the kv-array dialect too', async () => {
   await withScratchHomes(async (homes) => {
-    fs.mkdirSync(cocoConfigDir(homes.agentsHome), { recursive: true });
+    fs.mkdirSync(path.join(homes.agentsHome, '.config', 'custom'), { recursive: true });
     const placeholder = 'INVENTED-PLACEHOLDER-9f3a';
     seedMcpLibrary(homes, {
       alpha: { command: 'run', env: { API_TOKEN: placeholder } },
     });
-    writeUserConfig(homes, '[applications]\nenabled = ["coco"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["custom"]',
+        '',
+        '[mcp]',
+        'enabled = ["alpha"]',
+        '',
+        '[targets.custom.mcp]',
+        'format = "yaml"',
+        'config_path = "~/.config/custom/custom.yaml"',
+        'root_key = "mcp_servers"',
+        'structure = "keyed-array"',
+        'key_field = "name"',
+        'env_transform = { key_name = "key", value_name = "value" }',
+        '',
+      ].join('\n')
+    );
     await runSync();
 
     const slices = await runExplain('alpha');

@@ -531,7 +531,7 @@ test('every TOML row in the table brings the renderer its writer needs', () => {
 
 test('the table names one host per app and never two apps per host', () => {
   const rows = APP_ROWS.filter((row) => row.mcp !== undefined);
-  assert.equal(rows.length, 9, 'all nine apps take MCP');
+  assert.equal(rows.length, 8, 'all eight apps take MCP');
   const homes = {
     asbHome: '/tmp/asb',
     agentsHome: '/tmp/home',

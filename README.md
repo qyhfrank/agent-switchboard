@@ -81,7 +81,7 @@ The user configuration is always loaded. `-p work` adds `work.toml`, and
 
 ```toml
 [applications]
-enabled = ["claude-code", "codex", "coco"]
+enabled = ["claude-code", "codex"]
 assume_installed = []
 
 [rules]
@@ -134,7 +134,6 @@ tolerance during the shared-library peer window.
 | Gemini | yes | yes |  | yes |  | yes |
 | OpenCode | yes | yes | yes | yes |  | yes |
 | Cursor | yes | yes | yes | yes |  | yes |
-| Coco | yes | yes | yes | yes |  | yes |
 | Trae | yes |  |  | yes |  | yes |
 | Trae CN | yes |  |  | yes |  | yes |
 

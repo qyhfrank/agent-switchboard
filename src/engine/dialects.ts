@@ -351,28 +351,6 @@ export function renderCustomEntry(
   return wrapFrontmatter(spec ? transformFrontmatter(base, spec) : base, component.content);
 }
 
-export function renderCocoCommand(component: Component): string {
-  return wrapFrontmatter(
-    transformFrontmatter(platformFrontmatter(component, 'coco'), {
-      join: { allowed_tools: ',' },
-      rename: { allowed_tools: 'allowed-tools', argument_hint: 'argument-hint' },
-    }),
-    component.content
-  );
-}
-
-export function renderCocoAgent(component: Component): string {
-  const base = platformFrontmatter(component, 'coco');
-  if (typeof base.name !== 'string' || base.name.trim().length === 0) base.name = component.id;
-  return wrapFrontmatter(
-    transformFrontmatter(base, {
-      join: { allowed_tools: ',' },
-      rename: { allowed_tools: 'tools' },
-    }),
-    component.content
-  );
-}
-
 /**
  * Frozen 0.4.35 `preferHomeVar`: a distributed command path under the home
  * directory is recorded as `$HOME/...`, so machines sharing one dotfile tree

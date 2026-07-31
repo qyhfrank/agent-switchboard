@@ -153,16 +153,6 @@ function vendorDataDir(agentsHome: string, appName: string): string {
   }
 }
 
-/**
- * coco's config root (frozen 0.4.35 probe). macOS keeps it with the other
- * vendor data; every other platform reads it out of the XDG config home.
- */
-export function cocoConfigDir(agentsHome: string): string {
-  return os.platform() === 'darwin'
-    ? vendorDataDir(agentsHome, 'coco')
-    : path.join(agentsHome, '.config', 'coco');
-}
-
 type DetectableAppId = RuleAppId | 'claude-desktop';
 
 /** The directory whose existence marks an app as installed (frozen 0.4.35 probes). */

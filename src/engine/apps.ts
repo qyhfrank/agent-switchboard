@@ -18,8 +18,6 @@ import {
   rawBody,
   renderClaudeAgent,
   renderClaudeCommand,
-  renderCocoAgent,
-  renderCocoCommand,
   renderCodexAgent,
   renderCodexAgentConfigTable,
   renderCodexCommand,
@@ -60,16 +58,6 @@ function vendorDataDir(agentsHome: string, appName: string): string {
     default:
       return path.join(agentsHome, '.config', appName);
   }
-}
-
-function cocoConfigDir(homes: Homes): string {
-  return os.platform() === 'darwin'
-    ? path.join(homes.agentsHome, 'Library', 'Application Support', 'coco')
-    : path.join(homes.configHome ?? path.join(homes.agentsHome, '.config'), 'coco');
-}
-
-function cocoDataDir(homes: Homes): string {
-  return path.join(homes.agentsHome, '.coco');
 }
 
 export interface RulesTargetRow {
@@ -530,57 +518,6 @@ export const APP_ROWS: readonly AppRow[] = [
       path: (homes) => path.join(homes.agentsHome, '.cursor', 'mcp.json'),
       projectPath: (root) => path.join(root, '.cursor', 'mcp.json'),
       sanitize: true,
-    },
-  },
-  {
-    id: 'coco',
-    detectDir: cocoConfigDir,
-    rules: {
-      root: (homes, targetPath) =>
-        targetPath?.includes(`${path.sep}.cursor${path.sep}`)
-          ? path.join(homes.agentsHome, '.cursor')
-          : cocoDataDir(homes),
-      path: (homes) => {
-        const cursor = path.join(homes.agentsHome, '.cursor', 'rules', 'asb-rules.mdc');
-        return fs.existsSync(cursor) ? cursor : path.join(cocoDataDir(homes), 'AGENTS.md');
-      },
-      render: (body, targetPath) =>
-        targetPath?.endsWith(`${path.sep}asb-rules.mdc`) ? wrapMdcFrontmatter(body) : body,
-      dedicated: false,
-    },
-    commands: {
-      root: cocoDataDir,
-      dir: (homes) => path.join(cocoDataDir(homes), 'commands'),
-      filename: (id) => `${encodeComponentId(id)}.md`,
-      render: renderCocoCommand,
-    },
-    agents: {
-      root: cocoDataDir,
-      dir: (homes) => path.join(cocoDataDir(homes), 'agents'),
-      filename: (id) => `${encodeComponentId(id)}.md`,
-      render: renderCocoAgent,
-    },
-    skills: {
-      root: cocoDataDir,
-      dir: (homes) => path.join(cocoDataDir(homes), 'skills'),
-      reserved: [],
-    },
-    mcp: {
-      root: cocoConfigDir,
-      path: (homes) => path.join(cocoConfigDir(homes), 'coco.yaml'),
-      format: 'yaml',
-      rootKey: 'mcp_servers',
-      structure: 'keyed-array',
-      keyField: 'name',
-      sanitize: false,
-      dialect: (server) =>
-        transformMcpServer(server, {
-          envTransform: { keyName: 'key', valueName: 'value' },
-          defaults: { type: 'stdio' },
-        }),
-      credentialKeys: MCP_CREDENTIAL_KEYS,
-      envKeyName: 'key',
-      create: true,
     },
   },
   {
