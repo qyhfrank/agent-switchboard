@@ -897,11 +897,18 @@ export function executeAction(
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      // The config already landed, so a review the run asked for still stands;
+      // the failure must not swallow it, or the user loses the step the write
+      // made necessary.
+      const reason =
+        action.reason !== undefined
+          ? `${action.reason}; hook ownership state could not be saved (${message})`
+          : `hook ownership state could not be saved (${message})`;
       return {
         ...toEntry(action),
         outcome: 'failed',
         detail: 'write-error',
-        reason: `hook ownership state could not be saved (${message})`,
+        reason,
       };
     }
   }

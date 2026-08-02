@@ -544,4 +544,59 @@ test('a codex hooks write reports the trust review Codex still requires', async 
     assert.equal(cleared?.detail, 'cleared');
     assert.equal(cleared?.reason, undefined);
   });
+
+  // A write that only removes asks for no review, even beside a foreign hook
+  // that keeps the file non-empty.
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'trust', LIBRARY);
+    writeJson(configPath(homes, 'codex'), {
+      hooks: {
+        SessionStart: [
+          {
+            matcher: 'startup',
+            hooks: [{ type: 'command', command: "echo 'foreign'" }],
+          },
+        ],
+      },
+    });
+    writeUserConfig(homes, configFor(['codex'], ['trust']));
+    await runSync();
+
+    writeUserConfig(homes, configFor(['codex'], []));
+    const removal = hooksRows(await runSync()).find((entry) => entry.id === null);
+
+    assert.equal(removal?.outcome, 'written');
+    assert.equal(removal?.detail, 'merged', 'the foreign hook keeps the file');
+    assert.equal(removal?.reason, undefined, 'nothing new needs a review');
+  });
+
+  // The config lands before the record, so a failed save cannot swallow the
+  // review the write made necessary: the reason keeps the trust step.
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'trust', LIBRARY);
+    writeUserConfig(homes, configFor(['codex'], ['trust']));
+    const stateDir = path.join(homes.asbHome, 'state', 'hooks');
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.chmodSync(stateDir, 0o555);
+
+    let failed: ReportEntry | undefined;
+    try {
+      failed = hooksRows(await runSync()).find(
+        (entry) => entry.app === 'codex' && entry.id === null
+      );
+    } finally {
+      fs.chmodSync(stateDir, 0o755);
+    }
+
+    assert.equal(failed?.outcome, 'failed');
+    assert.equal(failed?.detail, 'write-error');
+    assert.match(
+      String(failed?.reason),
+      /\/hooks in Codex/,
+      'the trust step survives the save failure'
+    );
+    assert.match(String(failed?.reason), /hook ownership state could not be saved/);
+  });
 });

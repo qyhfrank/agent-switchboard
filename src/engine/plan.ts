@@ -2802,9 +2802,8 @@ export function planHooks(input: PlanInput): Action[] {
         op: 'write',
         outcome: 'written',
         detail: emptied ? 'cleared' : 'merged',
-        // Hooks that just landed are not yet hooks that run when the app gates
-        // them behind review; a cleared config has nothing left to review.
-        ...(row.reviewNotice !== undefined && !emptied ? { reason: row.reviewNotice } : {}),
+        // A trust review is attached only where the hooks that need it are
+        // known to be in place; that lives with the push below.
         content,
         root,
         expectedHash: currentHash,
@@ -2821,6 +2820,28 @@ export function planHooks(input: PlanInput): Action[] {
     // back before it goes out.
     const gate = owned.length > 0 ? { requires: [...owned] } : {};
     const gatedRemovals = removals.map((removal) => ({ ...removal, ...gate }));
+    // The trust notice follows the hooks that need reviewing, not the write
+    // that happened to carry them: none are in place, there is nothing to
+    // review; bundles that fail to land leave the config pointing at payload
+    // this run never distributed, so the run's skip is named over the notice.
+    if (configAction.op === 'write' && configAction.outcome === 'written') {
+      // A review is only ever owed for hooks this run put into the config: a
+      // write that only removes (the survivors were already in place) asks for
+      // none, and a bundle that failed to land leaves the config pointing at
+      // payload the run never distributed, so the run's skip is named instead.
+      const appended = Object.keys(toAppend).length;
+      const failed = writes.filter((w) => w.outcome === 'conflict').length;
+      let reviewReason: string | undefined;
+      if (appended === 0) {
+        reviewReason = undefined;
+      } else if (failed > 0) {
+        reviewReason = `${failed} hook bundle(s) could not land; the config still points at them: fix and run asb sync again`;
+      } else {
+        reviewReason = row.reviewNotice;
+      }
+      configAction =
+        reviewReason === undefined ? configAction : { ...configAction, reason: reviewReason };
+    }
     if (deferralAction && configAction.op === 'none' && configAction.outcome === 'unchanged') {
       actions.push(...writes, ...gatedRemovals, { ...deferralAction, peer, ...gate });
     } else {
