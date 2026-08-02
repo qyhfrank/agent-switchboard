@@ -28,6 +28,7 @@ import {
   renderGeminiCommand,
   renderOpencodeAgent,
   renderOpencodeCommand,
+  renderTraecliCommand,
   traeServer,
   transformMcpServer,
   verbatimServer,
@@ -215,12 +216,13 @@ const JSON_MCP_ROW = {
 } as const;
 
 /**
- * With `distribution.use_agents_dir`, codex/gemini/opencode read skills from
- * the shared open-agent standard directory instead of their own rows; the
- * union row distributes the union of the active members' effective selections.
+ * With `distribution.use_agents_dir`, codex/gemini/opencode/traecli read
+ * skills from the shared open-agent standard directory instead of their own
+ * rows; the union row distributes the union of the active members' effective
+ * selections.
  */
 export const AGENTS_SKILLS_UNION = {
-  members: ['codex', 'gemini', 'opencode'] as readonly string[],
+  members: ['codex', 'gemini', 'opencode', 'traecli'] as readonly string[],
   root: (homes: Homes, projectRoot?: string): string =>
     path.join(projectRoot ?? homes.agentsHome, '.agents'),
   dir: (homes: Homes, projectRoot?: string): string =>
@@ -570,6 +572,44 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, '.trae', 'mcp.json'),
       sanitize: true,
       dialect: traeServer,
+    },
+  },
+  {
+    // TRAE CLI 2.0: a codex fork sharing ~/.trae with the Trae IDE rows.
+    // ~/.trae/skills stays owned by the trae row, so no skills cell here.
+    id: 'traecli',
+    detectDir: (homes) => path.join(homes.agentsHome, '.trae', 'cli'),
+    rules: {
+      root: (homes) => path.join(homes.agentsHome, '.trae'),
+      path: (homes) => path.join(homes.agentsHome, '.trae', 'AGENTS.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
+      render: rawBody,
+      dedicated: false,
+    },
+    commands: {
+      root: (homes) => path.join(homes.agentsHome, '.trae'),
+      dir: (homes) => path.join(homes.agentsHome, '.trae', 'commands'),
+      filename: (id) => `${encodeComponentId(id)}.md`,
+      render: renderTraecliCommand,
+    },
+    agents: {
+      root: (homes) => path.join(homes.agentsHome, '.trae'),
+      dir: (homes) => path.join(homes.agentsHome, '.trae', 'agents'),
+      filename: (id) => `${encodeComponentId(id)}.md`,
+      // traecli's own migration imports ~/.claude/agents verbatim, so the
+      // agent document shape is Claude's.
+      render: renderClaudeAgent,
+    },
+    mcp: {
+      root: (homes) => path.join(homes.agentsHome, '.trae'),
+      path: (homes) => path.join(homes.agentsHome, '.trae', 'traecli.toml'),
+      format: 'toml',
+      rootKey: 'mcp_servers',
+      sanitize: true,
+      dialect: codexServer,
+      credentialKeys: MCP_CREDENTIAL_KEYS,
+      render: renderCodexTable,
+      create: true,
     },
   },
 ];

@@ -297,9 +297,9 @@ test('the app table declares the frozen skills parent directories', async () => 
   });
 });
 
-test('the agents union row unions codex, gemini, and opencode at ~/.agents/skills', async () => {
+test('the agents union row unions codex, gemini, opencode, and traecli at ~/.agents/skills', async () => {
   await withScratchHomes(async (homes) => {
-    assert.deepEqual([...AGENTS_SKILLS_UNION.members], ['codex', 'gemini', 'opencode']);
+    assert.deepEqual([...AGENTS_SKILLS_UNION.members], ['codex', 'gemini', 'opencode', 'traecli']);
     assert.equal(AGENTS_SKILLS_UNION.dir(homes), skillsParentDir(homes, 'agents'));
     assert.equal(AGENTS_SKILLS_UNION.root(homes), path.join(homes.agentsHome, '.agents'));
     assert.deepEqual([...AGENTS_SKILLS_UNION.reserved], ['.system']);

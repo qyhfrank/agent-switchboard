@@ -61,7 +61,7 @@ test('project registry exposes only ratified destinations and keeps global-only 
       homes,
       [
         '[applications]',
-        'enabled = ["claude-code", "codex", "gemini", "opencode", "cursor", "trae", "trae-cn", "custom"]',
+        'enabled = ["claude-code", "codex", "gemini", "opencode", "cursor", "trae", "trae-cn", "traecli", "custom"]',
         '',
         '[targets.custom.commands]',
         'target_dir = "~/global-commands"',
@@ -102,6 +102,9 @@ test('project registry exposes only ratified destinations and keeps global-only 
       row('trae-cn')?.mcp?.path(config.homes),
       path.join(projectReal, '.trae', 'mcp.json')
     );
+    assert.equal(row('traecli')?.rules?.path(config.homes), path.join(projectReal, 'AGENTS.md'));
+    assert.equal(row('traecli')?.commands, undefined);
+    assert.equal(row('traecli')?.mcp, undefined);
     assert.equal(row('custom')?.rules, undefined);
     assert.equal(
       row('custom')?.commands?.dir(config.homes),

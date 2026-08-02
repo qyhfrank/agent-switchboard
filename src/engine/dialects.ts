@@ -351,6 +351,16 @@ export function renderCustomEntry(
   return wrapFrontmatter(spec ? transformFrontmatter(base, spec) : base, component.content);
 }
 
+export function renderTraecliCommand(component: Component): string {
+  return wrapFrontmatter(
+    transformFrontmatter(platformFrontmatter(component, 'traecli'), {
+      join: { allowed_tools: ',' },
+      rename: { allowed_tools: 'allowed-tools', argument_hint: 'argument-hint' },
+    }),
+    component.content
+  );
+}
+
 /**
  * Frozen 0.4.35 `preferHomeVar`: a distributed command path under the home
  * directory is recorded as `$HOME/...`, so machines sharing one dotfile tree
