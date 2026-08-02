@@ -115,12 +115,20 @@ export function renderClaudeCommand(component: Component): string {
   return wrapFrontmatter(platformFrontmatter(component, 'claude-code'), component.content);
 }
 
-export function renderClaudeAgent(component: Component): string {
-  const frontmatter = platformFrontmatter(component, 'claude-code', ['model']);
+function renderClaudeShapeAgent(component: Component, platform: string): string {
+  const frontmatter = platformFrontmatter(component, platform, ['model']);
   if (typeof frontmatter.name !== 'string' || frontmatter.name.trim().length === 0) {
     frontmatter.name = component.id;
   }
   return wrapFrontmatter(frontmatter, component.content);
+}
+
+export function renderClaudeAgent(component: Component): string {
+  return renderClaudeShapeAgent(component, 'claude-code');
+}
+
+export function renderTraecliAgent(component: Component): string {
+  return renderClaudeShapeAgent(component, 'traecli');
 }
 
 export function renderCursorCommand(component: Component): string {

@@ -28,6 +28,7 @@ import {
   renderGeminiCommand,
   renderOpencodeAgent,
   renderOpencodeCommand,
+  renderTraecliAgent,
   renderTraecliCommand,
   traeServer,
   transformMcpServer,
@@ -228,10 +229,10 @@ export const AGENTS_SKILLS_UNION = {
   dir: (homes: Homes, projectRoot?: string): string =>
     path.join(projectRoot ?? homes.agentsHome, '.agents', 'skills'),
   reserved: ['.system'] as readonly string[],
-  // Capture and planner must agree on this predicate: a row the planner
-  // builds over an uncaptured directory reads as absent and mis-reports
-  // removal. With every member disabled the union is dormant — records and
-  // files stay untouched until a member returns.
+  // Capture scans on this predicate (an enabled-member superset); the
+  // planner additionally requires detection, so an enabled but uninstalled
+  // member leaves union state untouched. With no member enabled the union
+  // is dormant: records and files stay untouched until a member returns.
   participates: (enabled: readonly string[]): boolean =>
     AGENTS_SKILLS_UNION.members.some((member) => enabled.includes(member)),
 };
@@ -597,8 +598,8 @@ export const APP_ROWS: readonly AppRow[] = [
       dir: (homes) => path.join(homes.agentsHome, '.trae', 'agents'),
       filename: (id) => `${encodeComponentId(id)}.md`,
       // traecli's own migration imports ~/.claude/agents verbatim, so the
-      // agent document shape is Claude's.
-      render: renderClaudeAgent,
+      // agent document shape is Claude's; the extras namespace is its own.
+      render: renderTraecliAgent,
     },
     mcp: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),

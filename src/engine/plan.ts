@@ -1097,9 +1097,12 @@ export function planSkills(input: PlanInput): Action[] {
 
   const rows: SkillRowPlan[] = [];
   const useAgentsDir = config.distribution.useAgentsDir;
-  const trio = new Set(AGENTS_SKILLS_UNION.members);
+  const unionMembers = new Set(AGENTS_SKILLS_UNION.members);
+  const activeMembers = AGENTS_SKILLS_UNION.members.filter(
+    (member) => config.apps.enabled.includes(member) && detected(member)
+  );
 
-  const trioEffective = new Map<string, Set<string>>();
+  const memberEffective = new Map<string, Set<string>>();
   const memberDirs = new Map<string, string>();
 
   for (const appId of config.apps.enabled) {
@@ -1109,8 +1112,8 @@ export function planSkills(input: PlanInput): Action[] {
     for (const id of effective) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
-    if (trio.has(appId)) {
-      trioEffective.set(appId, new Set(effective));
+    if (unionMembers.has(appId)) {
+      memberEffective.set(appId, new Set(effective));
       memberDirs.set(appId, row.skills.dir(config.homes));
     }
     rows.push({
@@ -1119,10 +1122,24 @@ export function planSkills(input: PlanInput): Action[] {
       dir: row.skills.dir(config.homes),
       root: row.skills.root(config.homes),
       reserved: row.skills.reserved,
-      // In agents mode the trio's own rows deselect everything: their copies
-      // are stale by design and leave through the proof-gated removal path.
-      selected: useAgentsDir && trio.has(appId) ? [] : effective,
+      // In agents mode the union members' own rows deselect everything:
+      // their copies are stale by design and leave through the proof-gated
+      // removal path.
+      selected: useAgentsDir && unionMembers.has(appId) ? [] : effective,
     });
+  }
+
+  // A union member without a skills cell (traecli) drives union writes only
+  // in agents-dir mode, so only then do its missing selections reach the
+  // library-level report; with the mode off it has no skills destination at
+  // all, and reporting would false-fail an otherwise complete run.
+  if (useAgentsDir) {
+    for (const member of activeMembers) {
+      if (table.find((candidate) => candidate.id === member)?.skills) continue;
+      for (const id of effectiveSelection(config, member, 'skills')) {
+        if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
+      }
+    }
   }
 
   // A copy that only moved (agents-dir toggle) is removed strictly after its
@@ -1145,9 +1162,6 @@ export function planSkills(input: PlanInput): Action[] {
     });
   };
 
-  const activeMembers = AGENTS_SKILLS_UNION.members.filter(
-    (member) => config.apps.enabled.includes(member) && detected(member)
-  );
   const unionSelected =
     useAgentsDir && activeMembers.length > 0
       ? [
@@ -1157,8 +1171,10 @@ export function planSkills(input: PlanInput): Action[] {
         ]
       : [];
   const unionDir = AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined);
+  // Dormant unless a member is enabled AND detected: an enabled but
+  // uninstalled member must not wake cleanup of union-written state.
   const unionRowActive =
-    AGENTS_SKILLS_UNION.participates(config.apps.enabled) &&
+    activeMembers.length > 0 &&
     (ledger.entries.some((entry) => entry.app === 'agents' && entry.type === 'skills') ||
       unionSelected.length > 0);
   if (unionRowActive) {
@@ -1336,13 +1352,13 @@ export function planSkills(input: PlanInput): Action[] {
           // Deselected here, but still wanted at the counterpart location of
           // an agents-dir toggle: defer until that copy is proven on disk.
           const waitingOn: string[] = [];
-          if (useAgentsDir && trio.has(row.app) && trioEffective.get(row.app)?.has(id)) {
+          if (useAgentsDir && unionMembers.has(row.app) && memberEffective.get(row.app)?.has(id)) {
             const unionPath = path.join(unionDir, id);
             if (!bundleCleanAt(unionPath, component)) waitingOn.push(unionPath);
           }
           if (row.app === 'agents') {
             for (const [member, dir] of memberDirs) {
-              if (!trioEffective.get(member)?.has(id)) continue;
+              if (!memberEffective.get(member)?.has(id)) continue;
               const memberPath = path.join(dir, id);
               if (!bundleCleanAt(memberPath, component)) waitingOn.push(memberPath);
             }

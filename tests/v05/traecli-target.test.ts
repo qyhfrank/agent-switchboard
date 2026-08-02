@@ -7,7 +7,14 @@ import { APP_ROWS } from '../../src/engine/apps.js';
 import { runSync } from '../../src/engine/cli.js';
 import { loadLedger } from '../../src/engine/ledger.js';
 import type { Component } from '../../src/engine/library.js';
-import { seedMcpLibrary, seedRule, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+import { loadProjectManifest } from '../../src/engine/peer.js';
+import {
+  installApps,
+  seedMcpLibrary,
+  seedRule,
+  withScratchHomes,
+  writeUserConfig,
+} from './helpers/scratch.js';
 
 function entry(type: 'commands' | 'agents', metadata: Record<string, unknown>): Component {
   return {
@@ -47,7 +54,7 @@ test('traecli is one builtin data row with the snapshot paths and dialects', asy
       /allowed-tools: read,write[\s\S]*argument-hint: <path>/
     );
     const agent = row.agents?.render(
-      entry('agents', { extras: { 'claude-code': { allowed_tools: ['read', 'write'] } } })
+      entry('agents', { extras: { traecli: { allowed_tools: ['read', 'write'] } } })
     );
     assert.match(agent ?? '', /name: reviewer/);
     assert.match(agent ?? '', /allowed_tools/);
@@ -113,5 +120,46 @@ test('without ~/.trae/cli the traecli row is inert even when ~/.trae exists', as
 
     assert.equal(fs.existsSync(path.join(homes.agentsHome, '.trae', 'AGENTS.md')), false);
     assert.equal(fs.existsSync(path.join(homes.agentsHome, '.trae', 'traecli.toml')), false);
+  });
+});
+
+test('project AGENTS.md keeps one marker writer with codex, gemini, opencode, and traecli', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    const projectReal = fs.realpathSync(project);
+    installApps(homes, 'codex', 'gemini', 'opencode');
+    fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
+    seedRule(homes, 'project.md', '# Shared rule\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex", "gemini", "opencode", "traecli"]\n\n[rules]\nenabled = ["project"]\n'
+    );
+    fs.writeFileSync(
+      path.join(projectReal, '.asb.toml'),
+      '[distribution.project]\nmode = "managed"\ncollision = "warn-skip"\n'
+    );
+    const agents = path.join(projectReal, 'AGENTS.md');
+    fs.writeFileSync(agents, '# User instructions\n');
+
+    const report = await runSync({ project: projectReal });
+    const content = fs.readFileSync(agents, 'utf-8');
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(content.match(/<!-- asb:rules:start -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- asb:rules:end -->/g)?.length, 1);
+    assert.match(content, /# Shared rule/);
+    assert.match(content, /# User instructions/);
+    assert.equal(
+      report.entries.filter((entry) => entry.type === 'rules' && entry.path === agents).length,
+      1
+    );
+    const loaded = loadProjectManifest(homes.asbHome, projectReal);
+    assert.deepEqual(loaded.manifest.sections.rules['AGENTS.md']?.targetIds, [
+      'codex',
+      'gemini',
+      'opencode',
+      'traecli',
+    ]);
   });
 });

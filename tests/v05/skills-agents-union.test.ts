@@ -14,7 +14,7 @@ import {
 } from './helpers/scratch.js';
 
 /**
- * use_agents_dir: codex/gemini/opencode read skills from the shared
+ * use_agents_dir: codex/gemini/opencode/traecli read skills from the shared
  * ~/.agents/skills directory. The union row distributes the union of the
  * ACTIVE members' effective selections; the members' own rows deselect,
  * so their stale copies leave through the proof-gated removal path (0.4
@@ -290,5 +290,58 @@ test('disabling every union member leaves the agents copies and records dormant'
     const cleanup = await runSync();
     assert.equal(entryFor(cleanup, 'agents', 'alpha')?.outcome, 'removed');
     assert.equal(fs.existsSync(agentsBundle(homes, 'alpha')), false, 'removed with proof');
+  });
+});
+
+test('a cell-less union member (traecli) still reports library-missing skills', async () => {
+  await withScratchHomes(async (homes) => {
+    fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
+    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['ghost'], agentsDir: true }));
+
+    const report = await runSync();
+
+    assert.equal(report.exitCode, 1);
+    const missing = report.entries.find(
+      (entry) => entry.type === 'skills' && entry.id === 'ghost' && entry.outcome === 'missing'
+    );
+    assert.ok(missing, 'expected a missing row for the absent skill');
+  });
+});
+
+test('a cell-less member with agents-dir off stays silent about missing skills', async () => {
+  await withScratchHomes(async (homes) => {
+    fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
+    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['ghost'], agentsDir: false }));
+
+    const report = await runSync();
+
+    assert.equal(report.exitCode, 0);
+    assert.equal(
+      report.entries.some((entry) => entry.type === 'skills' && entry.id === 'ghost'),
+      false,
+      'a selection with no destination must not false-fail the run'
+    );
+  });
+});
+
+test('an enabled but undetected union member leaves union state dormant', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedSkill(homes, 'alpha');
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    const first = await runSync();
+    assert.equal(first.exitCode, 0);
+    assert.equal(fs.existsSync(path.join(agentsBundle(homes, 'alpha'), 'SKILL.md')), true);
+
+    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['alpha'], agentsDir: true }));
+    const second = await runSync();
+
+    assert.equal(second.exitCode, 0);
+    assert.equal(
+      fs.existsSync(path.join(agentsBundle(homes, 'alpha'), 'SKILL.md')),
+      true,
+      'undetected member woke union cleanup'
+    );
+    assert.equal(entryFor(second, 'agents', 'alpha'), undefined, 'union row ran while dormant');
   });
 });

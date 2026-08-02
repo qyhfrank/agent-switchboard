@@ -34,7 +34,6 @@ export interface Homes {
   agentsHome: string;
   cacheHome: string;
   stateHome: string;
-  configHome?: string;
 }
 
 export class ConfigError extends Error {
@@ -55,11 +54,6 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
   }
 
   const agentsHome = env.ASB_AGENTS_HOME?.trim() || home;
-  const xdgConfig = env.XDG_CONFIG_HOME?.trim();
-  const configHome =
-    xdgConfig && !env.ASB_AGENTS_HOME?.trim()
-      ? path.resolve(xdgConfig)
-      : path.join(path.resolve(agentsHome), '.config');
 
   const cacheOverride = env.ASB_CACHE_HOME?.trim();
   const xdgCache = env.XDG_CACHE_HOME?.trim();
@@ -85,7 +79,6 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
     agentsHome: path.resolve(agentsHome),
     cacheHome: path.resolve(cacheHome),
     stateHome: path.resolve(stateHome),
-    configHome,
   };
 }
 
