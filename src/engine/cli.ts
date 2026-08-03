@@ -31,8 +31,6 @@ import {
 import { buildPluginExpansion, type LibraryInventory, scanLibrary } from './library.js';
 import { applyNative, captureNative, planNative } from './native.js';
 import {
-  consumeLegacyManagedState,
-  loadPeerState,
   loadProjectManifest,
   type ProjectLibrarySection,
   type ProjectManifest,
@@ -43,7 +41,6 @@ import {
   removeManagedMcpEntry,
   removeProjectLibraryEntry,
   removeProjectRulesEntry,
-  savePeerState,
   saveProjectManifest,
   uniqueProjectManifestPaths,
 } from './peer.js';
@@ -475,8 +472,8 @@ function captureFor(
     }
   }
 
-  // Hooks: the app config it merges into, the peer record that says which
-  // groups are asb's, and every bundle directory that record can reclaim.
+  // Hooks: the app config the groups merge into, and every bundle directory
+  // a library hook could be sitting in.
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId)?.hooks;
     if (!row) continue;
@@ -488,12 +485,6 @@ function captureFor(
       content: null,
       config: {},
       escapes: targetEscapesRoot(root, configPath),
-      state: loadPeerState(config.homes.asbHome, row.stateTarget, config.project ?? undefined),
-      legacyGroups: consumeLegacyManagedState(
-        config.homes.asbHome,
-        row.stateTarget,
-        config.project ?? undefined
-      ),
     };
     if (captured.exists) {
       try {
@@ -510,9 +501,14 @@ function captureFor(
     }
     capture.hooks[appId] = captured;
 
+    // Every hook the library defines could have a bundle sitting there, so
+    // each one is measured whether it is selected or not: that is what tells
+    // a tree asb wrote from one it did not.
     const claimable = new Set([
       ...effectiveSelection(config, appId, 'hooks'),
-      ...captured.state.bundles,
+      ...inventory.components
+        .filter((component) => component.type === 'hooks' && component.files !== undefined)
+        .map((component) => component.id),
     ]);
     for (const id of claimable) {
       const bundlePath = path.join(row.bundleDir(config.homes), id);
@@ -788,9 +784,9 @@ export function executeAction(
         } else if (action.bundle.exclusive) {
           fs.rmSync(action.path, { recursive: true });
         } else {
-          // A deletion that did not happen is never reported as one: the
-          // claim stays with the ledger or the peer record, so the payload
-          // remains reclaimable instead of orphaned by a false success.
+          // A deletion that did not happen is never reported as one, or the
+          // payload is orphaned by a false success: what is still on disk is
+          // named instead, and the next run measures it again.
           const leftBehind = removeBundleSlice(action.path, action.bundle.stale);
           if (leftBehind.length > 0) {
             return failure(
@@ -880,34 +876,6 @@ export function executeAction(
   if (recordInLedger) applyLedgerMutation(ledger, action);
   applyProjectManifestMutation(action);
 
-  // The peer record is published only once its own slice landed: a config
-  // holding groups no record claims is a leak, and a record claiming groups
-  // no config holds authorizes deleting the user's.
-  if (action.peer) {
-    try {
-      savePeerState(
-        action.peer.asbHome,
-        action.peer.target,
-        action.peer.state,
-        action.peer.projectRoot
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // The config already landed, so a review the run asked for still stands;
-      // the failure must not swallow it, or the user loses the step the write
-      // made necessary.
-      const reason =
-        action.reason !== undefined
-          ? `${action.reason}; hook ownership state could not be saved (${message})`
-          : `hook ownership state could not be saved (${message})`;
-      return {
-        ...toEntry(action),
-        outcome: 'failed',
-        detail: 'write-error',
-        reason,
-      };
-    }
-  }
   return toEntry(action);
 }
 
@@ -915,12 +883,9 @@ const NO_FAILURES: ReadonlySet<string> = new Set();
 
 /**
  * One gated pass over the plan. An action whose required bundles did not land
- * is skipped instead of executed — an app config may not point at payload
- * this run failed to distribute, and the record that authorizes deleting it
- * may not claim it. The record also goes out still claiming anything whose
- * removal failed, so shared state never says less than what remains on disk.
- * Preview walks the same gate, so a dry run cannot promise a write the real
- * run refuses.
+ * is skipped instead of executed: an app config may not point at payload this
+ * run failed to distribute. Preview walks the same gate, so a dry run cannot
+ * promise a write the real run refuses.
  */
 function reconcile(
   actions: readonly Action[],
@@ -949,23 +914,7 @@ function reconcile(
       continue;
     }
 
-    // A failed write blocks its own config through `requires` above, so an id
-    // that reaches a peer publish failed to be REMOVED: it is still
-    // distributed, and the record must keep saying so.
-    const entry = run(
-      action.peer && slot.size > 0
-        ? {
-            ...action,
-            peer: {
-              ...action.peer,
-              state: {
-                ...action.peer.state,
-                bundles: [...new Set([...action.peer.state.bundles, ...slot])],
-              },
-            },
-          }
-        : action
-    );
+    const entry = run(action);
     entries.push(entry);
 
     if (entry.id !== null && FAILING_OUTCOMES.has(entry.outcome)) {

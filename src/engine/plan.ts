@@ -20,15 +20,7 @@ import { preferHomeVar, sanitizeMcpName } from './dialects.js';
 import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
 import type { Component, HookEventMap, LibraryInventory } from './library.js';
 import { type NativePlanInput, type NativeWork, planNative } from './native.js';
-import {
-  filterRecognizedDesiredGroups,
-  type HookTarget,
-  type PeerState,
-  type ProjectManifest,
-  peerStateHasContent,
-  removeOwnedHookGroups,
-  stripLegacyMarkerLines,
-} from './peer.js';
+import { hookGroupOwner, type ProjectManifest, stripLegacyMarkerLines } from './peer.js';
 import type { Outcome } from './report.js';
 import {
   applyKeysEdits,
@@ -91,10 +83,6 @@ export interface CapturedHookApp {
   error?: string;
   /** Parent chain of the config path resolves outside the app root. */
   escapes?: boolean;
-  /** Peer ownership record: the shared file merged with any device copies. */
-  state: PeerState;
-  /** v0.4.28 state files, captured read-only as predecessor recognition evidence. */
-  legacyGroups: Record<string, unknown[]>[];
 }
 
 export interface CapturedMcpHost {
@@ -139,7 +127,7 @@ export interface SyncCapture {
   bundles: Record<string, CapturedBundle>;
   /** Non-dot child directory names per managed skills parent. */
   bundleDirs: Record<string, string[]>;
-  /** Hook config and peer ownership state per app id. */
+  /** Hook config per app id. */
   hooks: Record<string, CapturedHookApp>;
   /** MCP host document per app id. */
   mcp: Record<string, CapturedMcpHost>;
@@ -169,15 +157,14 @@ export interface Action {
   content?: string;
   /**
    * Component ids in this app whose own actions must land before this one may
-   * run. A config may not point at payload the run failed to distribute, and
-   * the record that authorizes deleting it may not claim it either.
+   * run: a config may not point at payload the run failed to distribute.
    */
   requires?: string[];
   /** Target-path dependencies used when retiring a dynamically moved row. */
   requiresPaths?: string[];
   /**
-   * Own-dir payload: files to reconcile and the recorded rels no longer
-   * desired. Present ⇒ the executor treats path as a bundle directory. For
+   * Own-dir payload: files to reconcile and the rels on disk the render no
+   * longer names. Present ⇒ the executor treats path as a bundle directory. For
    * `put` mutations the executor stamps the measured post-write fingerprint
    * into the ledger entry hash.
    */
@@ -195,12 +182,6 @@ export interface Action {
    * together or not at all, because one write is what put them there.
    */
   ledger?: LedgerMutation | LedgerMutation[];
-  /**
-   * Peer ownership record to publish once the action's own write succeeds.
-   * Hook groups live in a file every peer reads, so their ownership travels
-   * with this record instead of a ledger entry.
-   */
-  peer?: { asbHome: string; target: HookTarget; state: PeerState; projectRoot?: string };
   /** Project manifest mutated only after this action succeeds. */
   projectManifest?: { manifest: ProjectManifest; projectRoot: string };
   /**
@@ -1959,8 +1940,8 @@ const HOOK_DIR_PLACEHOLDERS = [
 /**
  * Render one library entry into the groups an app config carries: the bundle
  * placeholders resolve to the distributed directory, commands become
- * `$HOME`-portable, and `_asb*` metadata is stripped — an app config holds no
- * ASB marker of any kind, which is why ownership needs the peer record.
+ * `$HOME`-portable, and `_asb*` metadata is stripped: an app config holds no
+ * ASB marker of any kind, so ownership is read from the render instead.
  */
 export function renderHookGroups(
   hooks: HookEventMap,
@@ -2002,31 +1983,19 @@ export function renderHookGroups(
   return rendered;
 }
 
+/** A group's matcher, for naming one in a report line. */
+function matcherOf(group: unknown): unknown {
+  return isPlainObject(group) ? group.matcher : undefined;
+}
+
 /**
- * Count-bounded removal of recorded groups: each recorded instance takes out
- * the first deep-equal group and no more, so a user's own duplicate of a
- * managed group and a hand-edited copy both survive. Emptied events go.
+ * Groups an event map holds for one event. Event names come from the app's
+ * vocabulary, so `__proto__` is a name a user can write and `JSON.parse` hands
+ * it back as an own key: a plain lookup would return the prototype instead.
  */
-function spliceRecordedGroups(
-  existing: Record<string, unknown[]>,
-  recorded: Record<string, unknown[]>
-): { hooks: Record<string, unknown[]>; removed: boolean; taken: Record<string, unknown[]> } {
-  const hooks: Record<string, unknown[]> = Object.create(null);
-  const taken: Record<string, unknown[]> = Object.create(null);
-  let removed = false;
-  for (const [event, groups] of Object.entries(existing)) {
-    const remaining = [...groups];
-    for (const group of recorded[event] ?? []) {
-      const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, group));
-      if (index >= 0) {
-        taken[event] = [...(taken[event] ?? []), remaining[index]];
-        remaining.splice(index, 1);
-        removed = true;
-      }
-    }
-    if (remaining.length > 0) hooks[event] = remaining;
-  }
-  return { hooks, removed, taken };
+function groupsFor(byEvent: Record<string, unknown[]>, event: string): unknown[] {
+  const groups = byEvent[event];
+  return Array.isArray(groups) ? groups : [];
 }
 
 /** The shape asb can merge into, or the reason it cannot. */
@@ -2043,15 +2012,17 @@ function invalidHooksShape(config: Record<string, unknown>): string | null {
 }
 
 /**
- * Hooks planner. The slice is a set of matcher groups inside a config file
- * the app and the user also own, so nothing is positional: current output is
- * recorded by the peer, while predecessor output is recognized by evidence.
+ * Hooks planner. The slice is a set of matcher groups inside a config file the
+ * app and the user also own, so a group is asb's only while it is what the
+ * library renders, or while its commands run a file under the app's managed
+ * hook directory named after a hook the library defines. Predecessor markers
+ * and v0.4.28 managed paths say asb without saying which hook, which is enough
+ * to take a group out and never enough to hand one back.
  *
- * Proofs for this slice: (4) the peer record, plus predecessor markers,
- * managed paths backed by known bundle ids, and read-only v0.4.28 state.
- * Byte-identity alone never claims a group the user wrote by hand. Shape
- * validation runs before any write, so an unusable config never gets a
- * partial distribution.
+ * Each recognized group is rewritten where it already sits: Codex records its
+ * trust against a group's array position, so moving one it did not ask about
+ * costs the user an approval. Shape validation runs before any write, so an
+ * unusable config never gets a partial distribution.
  */
 export function planHooks(input: PlanInput): Action[] {
   const { config, inventory, capture, table } = input;
@@ -2131,37 +2102,52 @@ export function planHooks(input: PlanInput): Action[] {
       continue;
     }
 
-    const state = captured.state;
-    const recorded = spliceRecordedGroups(
-      (captured.config.hooks ?? {}) as Record<string, unknown[]>,
-      state.events
-    );
+    const existingHooks = (captured.config.hooks ?? {}) as Record<string, unknown[]>;
     const managedParent = row.bundleDir(config.homes);
     const legacyParent = path.join(path.dirname(managedParent), 'asb');
-    const knownManagedIds = new Set([
-      ...inventory.components
-        .filter((component) => component.type === 'hooks' && component.files !== undefined)
-        .map((component) => component.id),
-      ...state.bundles,
-    ]);
-    const recognized = removeOwnedHookGroups(recorded.hooks, {
+    const ownership = {
       legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
       managedRoots: [managedParent, preferHomeVar(managedParent)],
-      knownManagedIds,
-      stateGroups: [],
-    });
-    const remainder = recognized.hooks;
-    const removed = recorded.removed || recognized.removed;
+      knownManagedIds: new Set(
+        inventory.components
+          .filter((component) => component.type === 'hooks' && component.files !== undefined)
+          .map((component) => component.id)
+      ),
+    };
     const hadLegacyManagedKey = Object.hasOwn(captured.config, '_asb_managed_hooks');
 
+    // Every hook the library still defines, rendered for this app whether it
+    // is selected or not: a group equal to one of these is asb's even when
+    // its command names no managed path, which is how a hook with no bundle
+    // is recognized at all.
+    const renders = new Map<string, Record<string, unknown[]>>();
+    for (const component of byId.values()) {
+      if (!component.hooks) continue;
+      const source = row.filter ? row.filter(component.hooks) : component.hooks;
+      if (Object.keys(source).length === 0) continue;
+      const bundlePath = component.files
+        ? path.join(row.bundleDir(config.homes), component.id)
+        : undefined;
+      renders.set(component.id, renderHookGroups(source, bundlePath));
+    }
+    const renderOwnerOf = (group: unknown, event: string): string | null => {
+      for (const [id, byEvent] of renders) {
+        if (groupsFor(byEvent, event).some((candidate) => isDeepStrictEqual(candidate, group))) {
+          return id;
+        }
+      }
+      return null;
+    };
+
     // A selected id the library cannot resolve — absent file, parse failure —
-    // reports its cause at library level. Peer-owned groups and bundles get
-    // one app-level deferral because only deselection authorizes removal.
+    // reports its cause at library level, and its groups and bundle stay put
+    // until the library is whole again.
     const unresolved = selected.filter((id) => byId.get(id)?.hooks === undefined);
 
     // Bundle files land before the config that points at them.
     const writes: Action[] = [];
-    const desired: Record<string, unknown[]> = {};
+    const desired: Record<string, unknown[]> = Object.create(null);
+    const desiredById = new Map<string, Record<string, unknown[]>>();
     const owned: string[] = [];
     let distributed = 0;
     for (const id of selected) {
@@ -2184,7 +2170,9 @@ export function planHooks(input: PlanInput): Action[] {
       distributed++;
 
       const bundlePath = component.files ? path.join(row.bundleDir(config.homes), id) : undefined;
-      for (const [event, groups] of Object.entries(renderHookGroups(source, bundlePath))) {
+      const rendered = renders.get(id) ?? renderHookGroups(source, bundlePath);
+      desiredById.set(id, rendered);
+      for (const [event, groups] of Object.entries(rendered)) {
         if (!desired[event]) desired[event] = [];
         desired[event].push(...groups);
       }
@@ -2207,8 +2195,7 @@ export function planHooks(input: PlanInput): Action[] {
             targetModeMatchesSourceExecutableBits(file.mode, target.mode)
           );
         });
-      const projectRecord = input.project ? state.bundles.includes(id) : false;
-      const projectCollision = input.project && live.exists && !projectRecord && !clean;
+      const projectCollision = input.project && live.exists && !clean;
       if (projectCollision && input.project?.collision !== 'takeover') {
         writes.push({
           app,
@@ -2235,17 +2222,12 @@ export function planHooks(input: PlanInput): Action[] {
               detail: live.exists ? 'updated' : 'created',
               bundle: {
                 files,
-                // Deleting needs proof asb put the directory there, and the
-                // loaded record is the only carrier. A name-colliding
-                // directory asb has never distributed is adopted for update
-                // only: its other files stay, the id enters the record with
-                // this write, and later syncs reconcile the tree normally.
-                stale:
-                  state.bundles.includes(id) || input.project?.collision === 'takeover'
-                    ? (live.files ?? [])
-                        .map((file) => file.rel)
-                        .filter((rel) => !desiredRels.has(rel))
-                    : [],
+                // A distributed bundle mirrors its library directory, so files
+                // the render does not name are cleared. That is what keeps the
+                // tree provably asb's for a later deselection.
+                stale: (live.files ?? [])
+                  .map((file) => file.rel)
+                  .filter((rel) => !desiredRels.has(rel)),
               },
               root,
               expectedHash: live.fingerprint,
@@ -2253,45 +2235,18 @@ export function planHooks(input: PlanInput): Action[] {
       );
     }
 
-    // Recorded groups no resolvable entry re-renders belong to the unresolved
-    // ones: they go straight back into the config and stay in the record.
-    // Sourced from what the splice actually took out of THIS config, never
-    // from state.events directly — device-copy merges over-count there.
-    let stranded = 0;
-    if (unresolved.length > 0) {
-      for (const [event, groups] of Object.entries(
-        spliceRecordedGroups(recorded.taken, desired).hooks
-      )) {
-        desired[event] = [...(desired[event] ?? []), ...groups];
-        stranded += groups.length;
-      }
-    }
-
-    // Nothing selected, nothing of ours in the config, no record: the run has
-    // no business rewriting a config or a state file it does not own.
-    if (distributed === 0 && !removed && !hadLegacyManagedKey && !peerStateHasContent(state)) {
-      continue;
-    }
-
-    // Deselected bundle directories: the peer record is the only thing that
-    // says asb put them there, so it is the only thing that may remove them.
+    // Deselected bundle directories, on the same proof as a skill bundle: a
+    // tree that is byte-for-byte the render is asb's and comes out, and an id
+    // the library no longer defines has nothing to compare against, so it
+    // stays. A selected id the library cannot resolve keeps its tree too.
     const removals: Action[] = [];
-    const retained: string[] = [];
-    for (const id of state.bundles) {
-      if (owned.includes(id)) continue;
+    for (const component of byId.values()) {
+      const id = component.id;
+      if (owned.includes(id) || !component.files || unresolved.includes(id)) continue;
       const bundlePath = path.join(row.bundleDir(config.homes), id);
       const live = capture.bundles[bundlePath];
       if (!live?.exists) continue;
-      // With an unresolved selection this run cannot tell a deselected bundle
-      // from one whose library entry merely went missing, so it removes
-      // neither and reclaims both once the library is whole again. One
-      // config-level deferral is emitted after every retained id is known.
-      if (unresolved.length > 0) {
-        retained.push(id);
-        continue;
-      }
       if (live.files === null || live.fingerprint === null) {
-        retained.push(id);
         removals.push({
           app,
           type: 'hooks',
@@ -2305,6 +2260,30 @@ export function planHooks(input: PlanInput): Action[] {
         });
         continue;
       }
+      const liveByRel = new Map(live.files.map((file) => [file.rel, file]));
+      const proven =
+        live.files.length === component.files.length &&
+        component.files.every((file) => {
+          const target = liveByRel.get(file.rel);
+          return (
+            target !== undefined &&
+            target.hash === hashContent(file.bytes) &&
+            targetModeMatchesSourceExecutableBits(file.mode, target.mode)
+          );
+        });
+      if (!proven && input.project) {
+        removals.push({
+          app,
+          type: 'hooks',
+          id,
+          path: bundlePath,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason: 'project hook bundle is not the current render; preserved',
+        });
+        continue;
+      }
       removals.push({
         app,
         type: 'hooks',
@@ -2312,18 +2291,78 @@ export function planHooks(input: PlanInput): Action[] {
         path: bundlePath,
         op: 'remove',
         outcome: 'removed',
+        ...(proven ? {} : { detail: 'stale-copy' }),
         bundle: { files: [], stale: live.files.map((file) => file.rel) },
         root,
         expectedHash: live.fingerprint,
       });
     }
 
-    const toAppend = filterRecognizedDesiredGroups(remainder, desired, captured.legacyGroups);
+    // The merge, in place. Each group asb can prove is its own is rewritten
+    // where it already sits, so Codex — which records its trust against a
+    // group's position — is asked to review only what actually changed. A
+    // group asb cannot prove keeps its place and its content, and hooks with
+    // nowhere to sit yet go on the end.
     const merged: Record<string, unknown[]> = Object.create(null);
-    for (const [event, groups] of Object.entries(remainder)) merged[event] = [...groups];
-    for (const [event, groups] of Object.entries(toAppend)) {
-      if (!merged[event]) merged[event] = [];
-      merged[event].push(...groups);
+    let appended = 0;
+    let removedGroups = 0;
+    const unproven: { event: string; matcher: unknown }[] = [];
+    const protectedIds = new Set(unresolved);
+    for (const event of new Set([...Object.keys(existingHooks), ...Object.keys(desired)])) {
+      const queue = new Map<string, unknown[]>();
+      for (const [id, byEvent] of desiredById) {
+        const groups = groupsFor(byEvent, event);
+        if (groups.length > 0) queue.set(id, [...groups]);
+      }
+      const out: unknown[] = [];
+      for (const group of existingHooks[event] ?? []) {
+        const owner = hookGroupOwner(group, ownership);
+        const id = owner?.kind === 'managed' ? owner.id : renderOwnerOf(group, event);
+        if (owner === null && id === null) {
+          out.push(group);
+          if (groupsFor(desired, event).some((c) => matcherOf(c) === matcherOf(group))) {
+            unproven.push({ event, matcher: matcherOf(group) });
+          }
+          continue;
+        }
+        if (id !== null && protectedIds.has(id)) {
+          out.push(group);
+          continue;
+        }
+        const pending = id === null ? undefined : queue.get(id);
+        if (pending && pending.length > 0) {
+          const next = pending.shift();
+          out.push(next);
+          if (!isDeepStrictEqual(next, group)) appended++;
+          continue;
+        }
+        removedGroups++;
+      }
+      for (const groups of queue.values()) {
+        out.push(...groups);
+        appended += groups.length;
+      }
+      if (out.length > 0) merged[event] = out;
+    }
+    const removed = removedGroups > 0;
+
+    // Nothing selected and nothing of asb's in the config: the run has no
+    // business rewriting a file it does not own.
+    if (distributed === 0 && !removed && !hadLegacyManagedKey) continue;
+
+    for (const { event, matcher } of unproven) {
+      actions.push({
+        app,
+        type: 'hooks',
+        id: null,
+        path: configPath,
+        op: 'none',
+        outcome: 'left-behind',
+        detail: 'unproven',
+        reason: `a ${event} group${
+          typeof matcher === 'string' ? ` matching ${matcher}` : ''
+        } in ${configPath} is not one asb can prove it wrote — usually an older render of a hook it now writes elsewhere in the file; delete it yourself`,
+      });
     }
     const next = { ...captured.config };
     delete next._asb_managed_hooks;
@@ -2339,35 +2378,6 @@ export function planHooks(input: PlanInput): Action[] {
       configEdits.push({ keyPath: ['hooks'], value: merged });
     }
 
-    const stateAfter: PeerState = {
-      version: 1,
-      events: desired,
-      bundles: [...owned, ...retained],
-      legacyBundles: [],
-    };
-    const peer: Action['peer'] = {
-      asbHome: config.homes.asbHome,
-      target: row.stateTarget,
-      state: stateAfter,
-      ...(input.project ? { projectRoot: input.project.root } : {}),
-    };
-    const deferred = unresolved.length > 0 && (stranded > 0 || retained.length > 0);
-    const deferralAction: Action | undefined = deferred
-      ? {
-          app,
-          type: 'hooks',
-          id: unresolved.length === 1 ? unresolved[0] : null,
-          path: configPath,
-          op: 'none',
-          outcome: 'skipped',
-          detail: 'not-selected',
-          reason: `${stranded} recorded group(s) and ${retained.length} bundle(s) kept because ${
-            unresolved.length === 1
-              ? `entry ${unresolved[0]} is unresolved`
-              : `entries ${unresolved.join(', ')} are unresolved`
-          }; fix or deselect, then run asb sync again`,
-        }
-      : undefined;
     const currentHash = captured.content !== null ? hashContent(captured.content) : null;
     const baseContent = captured.content ?? '';
     let content: string;
@@ -2400,15 +2410,14 @@ export function planHooks(input: PlanInput): Action[] {
             detail: 'cleared',
             // A symlinked config keeps its link and receives the empty
             // document instead, or the managed groups stay behind in the
-            // dotfiles store with no record on any machine to reclaim them.
+            // dotfiles store with nothing pointing at them.
             content: `${JSON.stringify(next, null, 2)}\n`,
             root,
             expectedHash: currentHash,
-            peer,
           }
-        : { ...base, op: 'none', outcome: 'unchanged', peer };
+        : { ...base, op: 'none', outcome: 'unchanged' };
     } else if (captured.content === content) {
-      configAction = { ...base, op: 'none', outcome: 'unchanged', peer };
+      configAction = { ...base, op: 'none', outcome: 'unchanged' };
     } else {
       configAction = {
         ...base,
@@ -2420,17 +2429,13 @@ export function planHooks(input: PlanInput): Action[] {
         content,
         root,
         expectedHash: currentHash,
-        peer,
         keyEdits: { format: 'json', edits: configEdits, baseContent },
       };
     }
 
     // Bundles land first, then the removals they authorize, and only then the
-    // config and the record that point at both: a config naming payload this
-    // run failed to write is a broken hook, and a record claiming it hands
-    // every peer authority to delete a directory asb never wrote. The record
-    // is published last so a removal that could not delete can put its id
-    // back before it goes out.
+    // config that points at both: a config naming payload this run failed to
+    // write is a broken hook.
     const gate = owned.length > 0 ? { requires: [...owned] } : {};
     const gatedRemovals = removals.map((removal) => ({ ...removal, ...gate }));
     // The trust notice follows the hooks that need reviewing, not the write
@@ -2442,7 +2447,6 @@ export function planHooks(input: PlanInput): Action[] {
       // write that only removes (the survivors were already in place) asks for
       // none, and a bundle that failed to land leaves the config pointing at
       // payload the run never distributed, so the run's skip is named instead.
-      const appended = Object.keys(toAppend).length;
       const failed = writes.filter((w) => w.outcome === 'conflict').length;
       let reviewReason: string | undefined;
       if (appended === 0) {
@@ -2455,13 +2459,7 @@ export function planHooks(input: PlanInput): Action[] {
       configAction =
         reviewReason === undefined ? configAction : { ...configAction, reason: reviewReason };
     }
-    if (deferralAction && configAction.op === 'none' && configAction.outcome === 'unchanged') {
-      actions.push(...writes, ...gatedRemovals, { ...deferralAction, peer, ...gate });
-    } else {
-      actions.push(...writes, ...gatedRemovals);
-      if (deferralAction) actions.push(deferralAction);
-      actions.push({ ...configAction, ...gate });
-    }
+    actions.push(...writes, ...gatedRemovals, { ...configAction, ...gate });
   }
 
   return actions.map((action) => {
@@ -2953,8 +2951,7 @@ export function planMcp(input: PlanInput): Action[] {
     const retired: string[] = [];
     for (const slice of slices) {
       if (!slice.edit) {
-        // Adoptions and relinquished claims are their own rows: each carries
-        // the record it changes, and none of them touch the host.
+        // A slice with no edit changes nothing in the host document.
         if (slice.outcome === 'unchanged') {
           actions.push({
             app,
@@ -3151,9 +3148,6 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
     reason,
     ledger: undefined,
     keyEdits: undefined,
-    // A canceled write publishes no ownership: a peer record claiming groups
-    // the config never received authorizes deleting the user's own groups.
-    peer: undefined,
   });
   const pathsOverlap = (left: readonly string[], right: readonly string[]): boolean => {
     const length = Math.min(left.length, right.length);
@@ -3215,7 +3209,6 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
         reason,
         ledger: undefined,
         keyEdits: undefined,
-        peer: undefined,
       };
       continue;
     }
@@ -3276,7 +3269,6 @@ export function preflightProjectActions(
       root: undefined,
       expectedHash: undefined,
       ledger: undefined,
-      peer: undefined,
       projectManifest: undefined,
       keyEdits: undefined,
       native: undefined,
@@ -3796,10 +3788,10 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
 }
 
 /**
- * Hooks view over the same planner. Hook groups carry no ledger entry, so the
- * owner is the peer record: a bundle it lists, or an app config it holds
- * groups for, is owned by proof (4) and nothing else. A definition entry owns
- * no directory, so its slice is the app config it merged into.
+ * Hooks view over the same planner. A hook bundle is asb's while it holds what
+ * the library renders, and a group is asb's while it equals a rendered group
+ * or names a managed path. A definition entry owns no directory, so its slice
+ * is the app config it merged into.
  */
 export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
   const { config, inventory, capture } = input;
@@ -3828,16 +3820,19 @@ export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
 
     const captured = capture.hooks[action.app];
     const component = byId.get(action.id ?? target);
-    const claimed =
-      action.id === null
-        ? Object.keys(captured?.state.events ?? {}).length > 0
-        : (captured?.state.bundles.includes(action.id) ?? false);
+    // A bundle the planner found equal to the render is asb's; one it is about
+    // to overwrite is not yet, and the app config is shared with whatever the
+    // user wrote there no matter which groups inside it derive.
+    const proven =
+      action.id !== null &&
+      (action.outcome === 'unchanged' ||
+        (action.outcome === 'removed' && action.detail !== 'stale-copy'));
 
     const slice: ExplainSlice = {
       app: action.app,
       path: action.path,
       outcome: action.outcome,
-      provenance: claimed ? 'peer-record' : null,
+      provenance: proven ? 'identity' : null,
       recordedHash: null,
       currentHash:
         action.id === null

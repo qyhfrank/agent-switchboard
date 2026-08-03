@@ -42,9 +42,7 @@ test('the built 0.5 binary re-syncs hook state without duplicates or removals', 
     const report = await runSync();
     assert.equal(report.exitCode, 0, 'the 0.5 sync succeeds');
     const settingsPath = path.join(homes.agentsHome, '.claude', 'settings.json');
-    const statePath = path.join(homes.asbHome, 'state', 'hooks', 'claude-code.json');
     const settingsBefore = fs.readFileSync(settingsPath, 'utf-8');
-    const stateBefore = fs.readFileSync(statePath, 'utf-8');
     const groupsBefore = JSON.parse(settingsBefore).hooks.UserPromptSubmit.length;
 
     const env = {
@@ -70,12 +68,10 @@ test('the built 0.5 binary re-syncs hook state without duplicates or removals', 
       groupsBefore,
       'the group is neither duplicated nor removed'
     );
-    const stateAfter = JSON.parse(fs.readFileSync(statePath, 'utf-8'));
-    assert.equal(stateAfter.version, 1);
     assert.equal(
-      stateAfter.events.UserPromptSubmit.length,
-      JSON.parse(stateBefore).events.UserPromptSubmit.length,
-      'the shared record still carries exactly the groups 0.5 appended'
+      fs.existsSync(path.join(homes.asbHome, 'state', 'hooks')),
+      false,
+      'and it re-derives every run instead of recording anything'
     );
   });
 });

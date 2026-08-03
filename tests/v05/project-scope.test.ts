@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { appRows, projectAppRows } from '../../src/engine/apps.js';
 import { runExplain, runSync } from '../../src/engine/cli.js';
 import { effectiveSelection, loadConfig } from '../../src/engine/config.js';
-import { peerStatePath, projectManifestPath } from '../../src/engine/peer.js';
+import { projectManifestPath } from '../../src/engine/peer.js';
 import { mergeProjectRegion, projectRegion } from '../../src/engine/shapes.js';
 import {
   installApps,
@@ -286,7 +286,7 @@ test('project marker parser accepts one pair in either spelling and rejects part
   );
 });
 
-test('project hooks keep ownership in the scoped hooks v1 state, never the manifest', async () => {
+test('project hooks land in the project config and leave it on deselection', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -308,30 +308,32 @@ test('project hooks keep ownership in the scoped hooks v1 state, never the manif
     projectConfig(project);
 
     const first = await runSync({ project });
-    const globalPeer = path.join(homes.asbHome, 'state', 'hooks', 'claude-code.json');
-    const projectPeer = peerStatePath(homes.asbHome, 'claude-code', project);
-    const state = JSON.parse(fs.readFileSync(projectPeer, 'utf-8')) as {
-      events: Record<string, unknown[]>;
+    const projectSettings = path.join(project, '.claude', 'settings.local.json');
+    const landed = JSON.parse(fs.readFileSync(projectSettings, 'utf-8')) as {
+      hooks: Record<string, unknown[]>;
     };
 
     assert.equal(first.exitCode, 0, JSON.stringify(first.entries, null, 2));
-    assert.equal(fs.existsSync(globalPeer), false);
-    assert.equal(state.events.UserPromptSubmit.length, 1);
+    assert.equal(landed.hooks.UserPromptSubmit.length, 1);
+    // A project run touches the repository and nothing else: no global config,
+    // and no record of its own beside the library.
+    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.claude', 'settings.json')), false);
+    assert.equal(fs.existsSync(path.join(homes.asbHome, 'state', 'hooks')), false);
     assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
 
     fs.writeFileSync(path.join(project, '.asb.toml'), '[hooks]\nenabled = []\n');
     const second = await runSync({ project });
-    const settings = JSON.parse(
-      fs.readFileSync(path.join(project, '.claude', 'settings.local.json'), 'utf-8')
-    ) as Record<string, unknown>;
+    const settings = JSON.parse(fs.readFileSync(projectSettings, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
 
     assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
     assert.equal(Object.hasOwn(settings, 'hooks'), false);
-    assert.equal(fs.existsSync(projectPeer), false);
   });
 });
 
-test('project hook bundle cleanup follows the scoped 0.4 ownership list', async () => {
+test('an edited project hook bundle is preserved and reported, never swept', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -362,9 +364,18 @@ test('project hook bundle cleanup follows the scoped 0.4 ownership list', async 
 
     const report = await runSync({ project });
 
+    // The group in the config names the managed path, so it is asb's and goes;
+    // the tree no longer matches the render, so in a repository it stays and is
+    // named instead.
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(fs.existsSync(path.dirname(target)), false);
-    assert.equal(fs.existsSync(peerStatePath(homes.asbHome, 'claude-code', project)), false);
+    assert.equal(fs.readFileSync(target, 'utf-8'), '#!/bin/sh\necho edited\n');
+    const row = report.entries.find((entry) => entry.type === 'hooks' && entry.id === 'tool');
+    assert.equal(row?.outcome, 'left-behind');
+    assert.equal(row?.detail, 'unproven');
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(project, '.claude', 'settings.local.json'), 'utf-8')
+    ) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(settings, 'hooks'), false);
   });
 });
 

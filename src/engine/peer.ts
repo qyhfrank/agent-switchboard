@@ -2,15 +2,16 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 
 /**
- * Hook ownership state: a peer contract, not private engine state. A 0.4.35
- * asb on another machine reads and writes the same
- * `<ASB_HOME>/state/hooks/<target>.json`, so every byte, key order and file
- * lifecycle here is frozen 0.4.35 behavior — the file lives beside the
- * library, not in the machine-local state home the ledger uses. Hook groups
- * carry no ledger entry: this record is their only ownership evidence.
+ * Who wrote a hook group in an app config, read from the group itself. A
+ * command running a file under the app's managed hook directory names the
+ * library hook it came from; a predecessor's marker line says asb without
+ * saying which hook. Everything else in the config is the user's.
+ *
+ * The 0.4.35 `<ASB_HOME>/state/hooks/<target>.json` record below is read-only
+ * migration input: `asb import` reads what a 0.4 install left, and nothing
+ * writes it.
  */
 
 export type HookTarget = 'claude-code' | 'codex';
@@ -30,20 +31,20 @@ const LEGACY_ASB_ID_ANY_HOME_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/asb\/([^/\s"'`;|&<>]+)/g;
 const COMMAND_PATH_BOUNDARY = /[\s"'`=(:;&|<>]/;
 const COMMAND_FIELDS = ['command', 'commandWindows', 'command_windows'] as const;
-const LEGACY_STATE_FILE_RE = /^(claude-code|codex)-[0-9a-f]{64}\.json$/;
 
 export interface OwnershipContext {
   legacyAsbRoots: readonly string[];
   managedRoots: readonly string[];
   knownManagedIds: ReadonlySet<string>;
-  stateGroups: ReadonlyArray<Record<string, unknown[]>>;
 }
 
-export interface OwnershipRemoval {
-  hooks: Record<string, unknown[]>;
-  removed: boolean;
-  taken: Record<string, unknown[]>;
-}
+/**
+ * Which library hook a group in an app config belongs to. `managed` carries
+ * the id a managed path inside the group's commands names; `legacy` is a
+ * predecessor's own marker, which proves the group is asb's without saying
+ * which hook it came from.
+ */
+export type HookGroupOwner = { kind: 'managed'; id: string } | { kind: 'legacy' } | null;
 
 function findPathTokenIndexes(command: string, pathPrefix: string): number[] {
   const needle = `${pathPrefix}/`;
@@ -160,106 +161,40 @@ function isManagedPathOwnedGroup(
   );
 }
 
-export function removeOwnedHookGroups(
-  existingHooks: Record<string, unknown[]>,
-  ctx: OwnershipContext
-): OwnershipRemoval {
-  const legacyAsbRoots = ctx.legacyAsbRoots.map(normalizeRoot);
+/** The managed id a group's commands name, when every command names one. */
+function managedIdOf(
+  group: unknown,
+  managedRoots: readonly string[],
+  knownManagedIds: ReadonlySet<string>
+): string | null {
+  for (const command of groupCommands(group)) {
+    for (const root of managedRoots) {
+      for (const segment of extractPathTokenSegments(command, root)) {
+        if (knownManagedIds.has(segment)) return segment;
+      }
+    }
+    for (const id of extractIdsByPattern(command, MANAGED_ID_ANY_HOME_RE)) {
+      if (knownManagedIds.has(id)) return id;
+    }
+  }
+  return null;
+}
+
+/**
+ * A group's owner, from the group alone. A command running a file under the
+ * app's managed hook directory, named after a hook the library defines, is
+ * asb's doing however it got there; nothing else in the config is.
+ */
+export function hookGroupOwner(group: unknown, ctx: OwnershipContext): HookGroupOwner {
   const managedRoots = ctx.managedRoots.map(normalizeRoot);
-  const hooks: Record<string, unknown[]> = Object.create(null);
-  const taken: Record<string, unknown[]> = Object.create(null);
-  const removedGroups: unknown[] = [];
-  for (const [event, groups] of Object.entries(existingHooks)) {
-    if (!Array.isArray(groups)) continue;
-    let remaining = [...groups];
-
-    for (const stateEvents of ctx.stateGroups) {
-      const stateGroupsForEvent = stateEvents[event];
-      if (!Array.isArray(stateGroupsForEvent)) continue;
-      for (const stateGroup of stateGroupsForEvent) {
-        const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, stateGroup));
-        if (index >= 0) {
-          const removed = remaining.splice(index, 1);
-          removedGroups.push(...removed);
-          taken[event] = [...(taken[event] ?? []), ...removed];
-        }
-      }
-    }
-
-    remaining = remaining.filter((group) => {
-      const owned =
-        isLegacyOwnedGroup(group, legacyAsbRoots, ctx.knownManagedIds) ||
-        isManagedPathOwnedGroup(group, managedRoots, ctx.knownManagedIds);
-      if (owned) {
-        removedGroups.push(group);
-        taken[event] = [...(taken[event] ?? []), group];
-      }
-      return !owned;
-    });
-    if (remaining.length > 0) hooks[event] = remaining;
+  if (isManagedPathOwnedGroup(group, managedRoots, ctx.knownManagedIds)) {
+    const id = managedIdOf(group, managedRoots, ctx.knownManagedIds);
+    if (id !== null) return { kind: 'managed', id };
   }
-
-  return { hooks, removed: removedGroups.length > 0, taken };
-}
-
-export function filterRecognizedDesiredGroups(
-  existing: Record<string, unknown[]>,
-  desired: Record<string, unknown[]>,
-  evidence: ReadonlyArray<Record<string, unknown[]>>
-): Record<string, unknown[]> {
-  const result: Record<string, unknown[]> = Object.create(null);
-  for (const [event, groups] of Object.entries(desired)) {
-    const remaining = [...(existing[event] ?? [])];
-    const proofs = evidence.flatMap((events) => events[event] ?? []);
-    for (const group of groups) {
-      const existingIndex = remaining.findIndex((value) => isDeepStrictEqual(value, group));
-      const proofIndex = proofs.findIndex((value) => isDeepStrictEqual(value, group));
-      if (existingIndex >= 0 && proofIndex >= 0) {
-        remaining.splice(existingIndex, 1);
-        proofs.splice(proofIndex, 1);
-      } else {
-        if (!result[event]) result[event] = [];
-        result[event].push(group);
-      }
-    }
+  if (isLegacyOwnedGroup(group, ctx.legacyAsbRoots.map(normalizeRoot), ctx.knownManagedIds)) {
+    return { kind: 'legacy' };
   }
-  return result;
-}
-
-/** Read v0.4.28 groups as scope-local recognition evidence. */
-export function consumeLegacyManagedState(
-  asbHome: string,
-  target: HookTarget,
-  projectRoot?: string
-): Record<string, unknown[]>[] {
-  const project = projectRoot?.trim();
-  const dir = project
-    ? path.join(path.resolve(project), '.asb', 'state', 'hooks')
-    : path.join(asbHome, 'state', 'hooks');
-  const groups: Record<string, unknown[]>[] = [];
-  let entries: fs.Dirent[] = [];
-  try {
-    const stat = fs.lstatSync(dir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return groups;
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return groups;
-  }
-  for (const entry of entries) {
-    const match = entry.name.match(LEGACY_STATE_FILE_RE);
-    if (match?.[1] !== target || !entry.isFile()) continue;
-    try {
-      const parsed = JSON.parse(fs.readFileSync(path.join(dir, entry.name), 'utf-8')) as {
-        hooks?: Record<string, unknown[]>;
-      };
-      if (parsed.hooks && typeof parsed.hooks === 'object' && !Array.isArray(parsed.hooks)) {
-        groups.push(parsed.hooks);
-      }
-    } catch {
-      // Unreadable legacy state carries no recognition evidence.
-    }
-  }
-  return groups;
+  return null;
 }
 
 export interface PeerState {

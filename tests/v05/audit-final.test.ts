@@ -726,12 +726,7 @@ test('a project sync records ownership in the manifest only, never the machine l
   });
 });
 
-test('a canceled structured write never publishes peer ownership', () => {
-  const peer = {
-    asbHome: '/tmp/none',
-    target: { app: 'claude-code' },
-    state: { version: 1, groups: {}, bundles: [], updatedAt: '' },
-  } as unknown as NonNullable<Action['peer']>;
+test('a canceled structured write carries none of its edits', () => {
   const base: Action = {
     app: 'claude-code',
     type: 'hooks',
@@ -742,7 +737,6 @@ test('a canceled structured write never publishes peer ownership', () => {
     root: '/tmp/none',
     expectedHash: null,
     content: '{}',
-    peer,
     keyEdits: {
       format: 'json',
       edits: [{ keyPath: ['hooks'], value: { a: 1 } }],
@@ -752,7 +746,6 @@ test('a canceled structured write never publishes peer ownership', () => {
   const other: Action = {
     ...base,
     type: 'mcp',
-    peer: undefined,
     keyEdits: {
       format: 'json',
       edits: [{ keyPath: ['hooks', 'x'], value: 2 }],
@@ -763,7 +756,8 @@ test('a canceled structured write never publishes peer ownership', () => {
   assert.equal(grouped.length, 2);
   for (const action of grouped) {
     assert.equal(action.outcome, 'conflict', JSON.stringify(action));
-    assert.equal(action.peer, undefined, 'a canceled action must carry no peer publication');
+    assert.equal(action.keyEdits, undefined, 'a canceled action carries no edit to apply');
+    assert.equal(action.ledger, undefined, 'and records nothing about a write that never ran');
   }
 });
 
