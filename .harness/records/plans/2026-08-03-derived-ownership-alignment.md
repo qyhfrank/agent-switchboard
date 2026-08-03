@@ -1,7 +1,7 @@
 ---
-status: executing
+status: delivered
 owner: .harness/runtime/tasks/001-derived-ownership
-evidence: null
+evidence: d39ede1
 goal: null
 ---
 
