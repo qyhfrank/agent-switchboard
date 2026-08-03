@@ -641,9 +641,11 @@ export function planRules(input: PlanInput): Action[] {
 
     // The filename an earlier version gave this same slice. It holds no
     // library id, so location plus the retired prefix is the whole claim, and
-    // it is swept whether or not rules are still selected. The name sweep
-    // stays out of a project tree, which the repository shares.
-    const legacyPath = row.rules.dedicated ? legacyDedicatedRulesPath(targetPath) : null;
+    // it is swept whether or not rules are still selected. Only a path this
+    // table names had that predecessor spelling; at a path configuration
+    // chose, an `asb-` sibling is a file someone else wrote. The name sweep
+    // also stays out of a project tree, which the repository shares.
+    const legacyPath = row.rules.ownsName ? legacyDedicatedRulesPath(targetPath) : null;
     const legacy = legacyPath ? capture.targets[legacyPath] : undefined;
     if (legacyPath && legacy?.exists && legacy.content !== null && !input.project) {
       staleActions.push({
@@ -695,17 +697,20 @@ export function planRules(input: PlanInput): Action[] {
         });
         continue;
       }
-      // A version that wrote the whole file left no markers. Recognizing that
-      // composition is what lets the region replace it instead of being
-      // prepended above it, which would leave the rules in the file twice.
       const composed = current.content ?? '';
-      const host =
-        projectRegion(composed) === null && composedFromRuleBlocks(composed, ruleBlocksFor(appId))
-          ? ''
-          : composed;
-
       let desiredHost: string;
+      // Every read of the existing markers happens here: a malformed pair is
+      // one app's conflict row, not an exception that takes the whole run
+      // down with it.
       try {
+        // A version that wrote the whole file left no markers. Recognizing
+        // that composition is what lets the region replace it instead of
+        // being prepended above it, which would leave the rules in the file
+        // twice.
+        const host =
+          projectRegion(composed) === null && composedFromRuleBlocks(composed, ruleBlocksFor(appId))
+            ? ''
+            : composed;
         desiredHost = mergeProjectRegion(host, desired);
       } catch (error) {
         actions.push({
@@ -739,8 +744,8 @@ export function planRules(input: PlanInput): Action[] {
     // falls through and writes the empty composition instead.
     if (present.length === 0) {
       // Nothing selected renders to no bytes, so comparison proves nothing
-      // here and the filename is the only claim left. A dedicated target
-      // carries the name asb chose for this slice, so location is the proof.
+      // here and the filename is the only claim left. A path this table names
+      // carries the name asb chose for the slice, so location is the proof.
       // The name sweep stays out of a project tree the repository shares.
       if (!current.exists || input.project) continue;
       if (currentHash === null) {
@@ -750,6 +755,19 @@ export function planRules(input: PlanInput): Action[] {
           outcome: 'left-behind',
           detail: 'unproven',
           reason: 'occupied but unreadable; asb cannot prove it is safe to remove',
+        });
+        continue;
+      }
+      // A path configuration chose is the user's, so nothing here proves the
+      // bytes are asb's: the file is named and kept, never deleted for
+      // sitting where a custom target points.
+      if (!row.rules.ownsName) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason: `nothing is selected for ${appId} and this target's path comes from configuration, so asb cannot prove it wrote the file; delete it yourself or enable rules`,
         });
         continue;
       }
@@ -1971,6 +1989,20 @@ export function planHooks(input: PlanInput): Action[] {
       }
       return null;
     };
+    // A group asb cannot prove is kin to a library hook when it shares that
+    // hook's event and matcher, which is what an older render of it looks
+    // like. Kinship reads every hook the library defines rather than the
+    // selected ones, so deselecting a hook does not silence the report on the
+    // predecessor group it left behind.
+    const kinToLibrary = (group: unknown, event: string): boolean => {
+      for (const byEvent of renders.values()) {
+        if (
+          groupsFor(byEvent, event).some((candidate) => matcherOf(candidate) === matcherOf(group))
+        )
+          return true;
+      }
+      return false;
+    };
 
     // A selected id the library cannot resolve — absent file, parse failure —
     // reports its cause at library level, and its groups and bundle stay put
@@ -2153,16 +2185,20 @@ export function planHooks(input: PlanInput): Action[] {
         const id = owner?.kind === 'managed' ? owner.id : renderOwnerOf(group, event);
         if (owner === null && id === null) {
           out.push(group);
-          if (groupsFor(desired, event).some((c) => matcherOf(c) === matcherOf(group))) {
-            unproven.push({ event, matcher: matcherOf(group) });
-          }
+          if (kinToLibrary(group, event)) unproven.push({ event, matcher: matcherOf(group) });
           continue;
         }
         if (id !== null && protectedIds.has(id)) {
           out.push(group);
           continue;
         }
-        const pending = id === null ? undefined : queue.get(id);
+        // Reaching here with no id means a predecessor's marker proved the
+        // group asb's without saying which hook wrote it. When exactly one
+        // hook still has a group waiting for this event, that is the hook,
+        // and rewriting it where it sits leaves every group below at the
+        // index Codex recorded its trust against.
+        const waiting = [...queue.values()].filter((groups) => groups.length > 0);
+        const pending = id !== null ? queue.get(id) : waiting.length === 1 ? waiting[0] : undefined;
         if (pending && pending.length > 0) {
           const next = pending.shift();
           out.push(next);
@@ -2179,10 +2215,9 @@ export function planHooks(input: PlanInput): Action[] {
     }
     const removed = removedGroups > 0;
 
-    // Nothing selected and nothing of asb's in the config: the run has no
-    // business rewriting a file it does not own.
-    if (distributed === 0 && !removed && !hadLegacyManagedKey) continue;
-
+    // Naming a group costs the file nothing, so the report comes before the
+    // decision to leave the file alone: a predecessor group is reported once
+    // per run whether or not this run has anything to write.
     for (const { event, matcher } of unproven) {
       actions.push({
         app,
@@ -2197,6 +2232,10 @@ export function planHooks(input: PlanInput): Action[] {
         } in ${configPath} is not one asb can prove it wrote — usually an older render of a hook it now writes elsewhere in the file; delete it yourself`,
       });
     }
+
+    // Nothing selected and nothing of asb's in the config: the run has no
+    // business rewriting a file it does not own.
+    if (distributed === 0 && !removed && !hadLegacyManagedKey) continue;
     const next = { ...captured.config };
     delete next._asb_managed_hooks;
     if (Object.keys(merged).length === 0) delete next.hooks;
@@ -3340,10 +3379,11 @@ export function planSources(input: SourcePlanInput): Action[] {
 /**
  * How a slice proves it is asb's when someone asks. `identity` is the target
  * holding what the library renders; `marker` is a region asb delimits inside a
- * file it shares; `managed-path` is a command running a file asb distributed;
- * `native-manager` is work the app's own plugin manager owns.
+ * file it shares; `native-manager` is work the app's own plugin manager owns.
+ * A hook group's managed path proves the group rather than the file it sits
+ * in, and explain speaks in whole slices, so it has no spelling here.
  */
-export type Ownership = 'identity' | 'marker' | 'managed-path' | 'native-manager';
+export type Ownership = 'identity' | 'marker' | 'native-manager';
 
 export interface ExplainSlice {
   /** Owning app, or null for library-level rows (missing, parse failures). */

@@ -1337,6 +1337,9 @@ export function editSelection(options: EditSelectionOptions): void {
     mutate('add', additionsInput, removals);
     mutate('add', [], removals);
     mutate('remove', [...removals], new Set());
+    // An override spelled `enabled` replaces the base and ignores `remove`,
+    // so a disable that only wrote `remove` would leave the id selected.
+    mutate('enabled', [], removals);
   } else {
     // Native plugin overrides carry a plain `enabled` array in every scope.
     mutate('enabled', additionsInput, removals);

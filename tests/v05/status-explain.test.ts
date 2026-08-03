@@ -340,3 +340,31 @@ test('explain exits 1 for failed slices and no match in text and JSON', async ()
     }
   });
 });
+
+test('explain exits 1 for a slice asb declined to touch', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(path.join(homes.asbHome, 'commands', 'review.md'), 'Review it.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = ["review"]\n'
+    );
+    await runMain(['sync']);
+
+    // Edited, then deselected: asb will not delete bytes it cannot prove are
+    // its own, so the file stays. A run treats that as working as intended,
+    // but `explain review` is a question about this one target, and the
+    // answer is that it is not resolved.
+    const target = path.join(homes.agentsHome, '.claude', 'commands', 'review.md');
+    fs.appendFileSync(target, 'A line the user added.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = []\n'
+    );
+
+    const left = await runMain(['explain', 'review']);
+    assert.match(left.out, /left-behind \(unproven\)/, left.out || left.err);
+    assert.equal(left.code, 1, left.out || left.err);
+    assert.equal((await runMain(['explain', 'review', '--json'])).code, 1);
+  });
+});

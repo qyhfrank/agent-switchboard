@@ -69,8 +69,15 @@ export interface RulesTargetRow {
   /** Project destination; absent means this cell is global-only. */
   projectPath?(projectRoot: string): string;
   render(body: string, targetPath?: string): string;
-  /** Dedicated asb-named file (full ownership by name) vs shared host. */
+  /** Whole-file target vs a host asb shares with the user. */
   dedicated: boolean;
+  /**
+   * The filename is this table's, so location alone proves the slice and
+   * authorizes both the sweep on deselection and the sweep of the name an
+   * earlier version used. A target whose path comes from configuration is the
+   * user's choice and carries no such claim.
+   */
+  ownsName?: boolean;
 }
 
 export interface SkillsTargetRow {
@@ -481,6 +488,7 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, '.cursor', 'rules', 'rules.mdc'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+      ownsName: true,
     },
     commands: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
@@ -528,6 +536,7 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, '.trae', 'rules', 'rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+      ownsName: true,
     },
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
@@ -555,6 +564,7 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, '.trae', 'rules', 'rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+      ownsName: true,
     },
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),

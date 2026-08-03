@@ -213,3 +213,31 @@ test('a hand-written file at a shared rules path is untouched while rules are of
     assert.equal(report.exitCode, 0);
   });
 });
+
+test('one malformed marker pair conflicts on its own row and the run continues', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code', 'codex');
+    seedRule(homes, 'base.md', COMPOSED);
+    writeUserConfig(homes, configFor(['claude-code', 'codex'], ['base']));
+
+    // Half a region: a truncated file, or a hand edit that took the closing
+    // delimiter with it. Reading it is what raises, and the raise belongs to
+    // this host, not to the run.
+    const broken = ruleFilePath(homes, 'claude-code');
+    const kept = '# Notes\n\n<!-- rules:start -->\nHalf a region.\n';
+    fs.mkdirSync(path.dirname(broken), { recursive: true });
+    fs.writeFileSync(broken, kept, 'utf-8');
+
+    const report = await runSync();
+
+    const row = rulesEntry(report, 'claude-code');
+    assert.equal(row?.outcome, 'conflict', JSON.stringify(report.entries, null, 2));
+    assert.equal(row?.detail, 'malformed-marker');
+    assert.equal(fs.readFileSync(broken, 'utf-8'), kept, 'the host is left exactly as it was');
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'codex'), 'utf-8'),
+      renderedRules('codex', COMPOSED),
+      'and the app beside it still gets its rules'
+    );
+  });
+});

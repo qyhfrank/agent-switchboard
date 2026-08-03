@@ -806,3 +806,79 @@ test('known foreign-home bundle ids are reclaimed while unknown ids stay user-ow
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// A predecessor's group keeps its place and stays named
+// ---------------------------------------------------------------------------
+
+test('a predecessor group is named even after its hook leaves the selection', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedHook(homes, 'alpha', {
+      UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo v2' }] }],
+    });
+    const settings = configPath(homes, 'claude-code');
+    // What an earlier render of `alpha` left: same event and matcher, older
+    // command. Nothing on disk says which hook wrote it, and the library's
+    // current render no longer matches it.
+    writeJson(settings, {
+      hooks: {
+        UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo v1' }] }],
+      },
+    });
+
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    const selected = await runSync();
+    assert.ok(
+      hooksRows(selected).some((row) => row.outcome === 'left-behind' && row.detail === 'unproven'),
+      JSON.stringify(selected.entries, null, 2)
+    );
+
+    // Deselecting takes the render away. The predecessor group is still not
+    // asb's to remove and still kin to a hook the library defines, so the run
+    // still says where it is.
+    writeUserConfig(homes, configFor(['claude-code'], []));
+    const deselected = await runSync();
+
+    assert.deepEqual(commandsOf(eventGroups(settings, 'UserPromptSubmit')), ['echo v1']);
+    assert.ok(
+      hooksRows(deselected).some(
+        (row) => row.outcome === 'left-behind' && row.detail === 'unproven'
+      ),
+      `the group is still there, so the run still names it: ${JSON.stringify(deselected.entries, null, 2)}`
+    );
+  });
+});
+
+test('a marked group an earlier version wrote is rewritten where it sits', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'alpha', {
+      UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo alpha' }] }],
+    });
+    writeUserConfig(homes, configFor(['codex'], ['alpha']));
+
+    // Codex keys its trust by array position, so the group below the marked
+    // one must not move when the marked one is rewritten.
+    const settings = configPath(homes, 'codex');
+    writeJson(settings, {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            matcher: 'go',
+            hooks: [{ type: 'command', command: 'echo alpha\n# asb-managed-by=agent-switchboard' }],
+          },
+          { matcher: 'user', hooks: [{ type: 'command', command: 'echo mine' }] },
+        ],
+      },
+    });
+
+    assert.equal((await runSync()).exitCode, 0);
+
+    assert.deepEqual(
+      commandsOf(eventGroups(settings, 'UserPromptSubmit')),
+      ['echo alpha', 'echo mine'],
+      'the marked group loses its marker in place, and the user group keeps index 1'
+    );
+  });
+});

@@ -151,6 +151,11 @@ config_path = "~/.my-agent/mcp.json"
 root_key = "mcpServers"
 ```
 
+A path you write into `[targets.<id>]` is your choice, not a name ASB claims,
+so nothing at it is ever removed for sitting there. A `rules.file_path` whose
+component selection is empty is reported and left, and no sibling of it is
+touched.
+
 Executable `.mjs` and `.js` target extensions are not loaded by 0.5. When
 files remain directly under `ASB_HOME/extensions`, every reconciliation emits
 one non-failing warning pointing to `[targets.<id>]`. ASB leaves those files
@@ -169,12 +174,14 @@ External marketplace entries are materialized only when selected content needs
 them. The predecessor marketplace cache is read only to retire entries whose
 identity is verified; 0.5 never writes that cache.
 
-`asb remove <source>` retires the plugin-expanded enabled ids that came from
-the source, takes the slices they distributed, and only then drops the
-declaration and any managed checkout. The order is load-bearing: a component
-the library can no longer render proves nothing, so removing the content first
-would leave every file it distributed behind. A local directory you pointed at
-is never deleted.
+`asb remove <source>` retires every id that came from the source, in the
+global lists, the plugin list, and any per-application override, takes the
+slices they distributed, and only then drops the declaration and any managed
+checkout. The order is load-bearing: a component the library can no longer
+render proves nothing, so removing the content first would leave every file it
+distributed behind. If a slice cannot be taken, the source is kept along with
+the named rows, because while it is still declared a later run can still prove
+what it distributed. A local directory you pointed at is never deleted.
 
 ## Ownership
 
@@ -189,15 +196,19 @@ key's name; and a region between ASB's delimiters inside a file it shares is
 proven by the delimiters themselves, so bytes outside them survive every sync.
 
 Deselecting a component removes its slice while that slice still holds the
-render. One that says something else is a target ASB cannot attribute: under
-your home directory it is swept as a stale copy of something ASB distributed
-under a name it owns, and inside a repository it is preserved and named,
-because the repository is shared.
+render. One that says something else is a target ASB cannot attribute, and
+what happens next depends on how strong the remaining claim is. A bundle
+directory carries a library id under a parent the application table declares,
+which is claim enough: under your home directory it is swept as a stale copy,
+and inside a repository it is preserved and named, because the repository is
+shared. A single file carries no such id in its contents, so a drifted command
+or agent is preserved and named in either scope; it is yours to delete or to
+re-enable. A key inside a shared document is never removed at all.
 
 `asb explain <target>` names what proves a slice right now: `identity` for a
-target holding the render, `marker` for a delimited region, `managed-path` for
-a command running a distributed file, `native-manager` for work an
-application's own plugin manager owns, and `unproven` when nothing does.
+target holding the render, `marker` for a delimited region, `native-manager`
+for work an application's own plugin manager owns, and `unproven` when nothing
+does.
 
 The state directory (`XDG_STATE_HOME/asb`, else `~/.local/state/asb`) holds
 `run.lock` while a run is in flight and `last-run.json` afterwards. Neither
@@ -210,10 +221,12 @@ credential values in `explain` and report output while preserving environment
 variable names.
 
 A server is ASB's while the value at its key equals the render, so a
-hand-written server sharing a library id is never read, written, or removed.
-ASB does not create empty MCP host files, and an existing empty container is
-evidence of nothing. An owned value is replaced whole rather than merged, so a
-drifted one conflicts instead of absorbing unknown foreign subkeys.
+hand-written server sharing a library id you have not selected is never read,
+written, or removed. Selecting that id is the instruction to put the library's
+definition at that key, and the value there is replaced. ASB does not create
+empty MCP host files, and an existing empty container is evidence of nothing.
+An owned value is replaced whole rather than merged, so a drifted one
+conflicts instead of absorbing unknown foreign subkeys.
 
 Writers preserve unrelated bytes in shared JSON, JSONC, YAML, and TOML hosts.
 They cannot restore comments or formatting already removed by an earlier

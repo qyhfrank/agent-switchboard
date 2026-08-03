@@ -159,6 +159,96 @@ test('removing a source takes what it distributed in the same run', async () => 
   });
 });
 
+test('removing a source reaches what the plugin list and a per-app override selected', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    seedSource(homes, 'solo', { 'skills/audit/SKILL.md': skillDoc('audit') });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        // Neither id is in a global [skills] list: one arrives through the
+        // plugin the source ships, the other through an override that names
+        // one app. Both are what `asb enable` writes for those shapes.
+        '[plugins]',
+        'enabled = ["team"]',
+        '',
+        '[applications.claude-code.skills]',
+        'add = ["solo:audit"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        `solo = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'solo'))}`,
+        '',
+      ].join('\n')
+    );
+
+    await runSync();
+    const deploy = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    const audit = path.join(skillsParentDir(homes, 'claude-code'), 'solo:audit');
+    assert.ok(fs.existsSync(deploy), 'the plugin distributed its skill');
+    assert.ok(fs.existsSync(audit), 'and so did the per-app override');
+
+    assert.equal((await runRemoveSource('team')).exitCode, 0);
+    assert.equal(
+      fs.existsSync(deploy),
+      false,
+      'a component the plugin list selected is swept while its library entry can still render it'
+    );
+
+    assert.equal((await runRemoveSource('solo')).exitCode, 0);
+    assert.equal(
+      fs.existsSync(audit),
+      false,
+      'and so is one a per-app override selected, which no global list mentions'
+    );
+  });
+});
+
+test('a source outlives a sweep that could not take everything it distributed', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        '',
+      ].join('\n')
+    );
+    await runSync();
+
+    // The tree is still exactly the render, so the sweep plans to take it.
+    // What stops the deletion is containment: the skills parent now leaves
+    // the app root, and asb refuses to delete through it.
+    const parent = skillsParentDir(homes, 'claude-code');
+    const outside = path.join(homes.root, 'elsewhere');
+    fs.renameSync(parent, outside);
+    fs.symlinkSync(outside, parent);
+    const bundle = path.join(outside, 'team:deploy');
+
+    const report = await runRemoveSource('team');
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.ok(fs.existsSync(bundle), 'the tree the sweep could not take is still there');
+    assert.match(
+      fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'),
+      /\bteam\b/,
+      'and so is the source, which is the only thing that can still render it'
+    );
+  });
+});
+
 test('explain names what proves ownership now, not what a record once said', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');

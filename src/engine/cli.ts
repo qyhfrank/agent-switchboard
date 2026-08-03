@@ -61,7 +61,6 @@ import {
   renderCompactStatus,
   renderExplain,
   renderReport,
-  runFailed,
 } from './report.js';
 import {
   acquireRunLock,
@@ -95,6 +94,7 @@ import {
   readSourceCatalog,
   refreshableSources,
   removeSource,
+  retireSourceSelection,
   type SourceCatalog,
   type UpdateRow,
   updateSources,
@@ -1208,6 +1208,22 @@ export async function runAddSource(location: string, opts: AddSourceOptions = {}
   ]);
 }
 
+/** One row per id this command disabled: a config edit is never silent. */
+function retiredEntries(
+  retired: readonly { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[],
+  namespace: string
+): ReportEntry[] {
+  return retired.map((row) => ({
+    app: null,
+    type: row.type,
+    id: row.id,
+    path: null,
+    outcome: 'removed' as const,
+    detail: 'retired',
+    reason: `disabled in [${row.type}] because source "${namespace}" provided it`,
+  }));
+}
+
 /**
  * Retire a source: its managed content, its declaration, its derived caches,
  * and every enabled entry it put there. The retired ids are reported one per
@@ -1236,18 +1252,16 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
   );
 
   // Retirement compares canonical ids, so it needs the same expansion the
-  // selection was written against. An id spelled `name@<namespace>:type` names
-  // this source even when no catalog row could enumerate it.
-  const wanted = new Set(componentIds);
-  const retired: { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[] = [];
-  for (const type of SELECTION_TYPES) {
-    const hits = config.selection[type].filter(
-      (ref) => wanted.has(expansion.componentAliases[ref] ?? ref) || ref.includes(`@${namespace}:`)
-    );
-    if (hits.length === 0) continue;
-    editSelection({ type, disable: hits, env });
-    for (const id of hits) retired.push({ type, id });
-  }
+  // selection was written against. Every channel goes at once: a component
+  // still selected through the plugin list or a per-app override would
+  // survive the sweep below and outlive the library entry that proves it.
+  const retired = retireSourceSelection(
+    withPluginExpansion(config, expansion),
+    namespace,
+    componentIds,
+    pluginIds,
+    env
+  );
   // Unfiltered on purpose: a `--source`, `--app`, or `--type` narrowing meant
   // for the report would otherwise leave part of what this source distributed
   // behind, and nothing could prove it later.
@@ -1257,6 +1271,34 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
     noUpdate: true,
     env,
   });
+
+  // A slice this source distributed that the sweep could not take is the one
+  // state the source has to outlive: while it is still declared the library
+  // can render that slice, so fixing the cause and re-running finishes the
+  // job. `left-behind` and `missing` are not that state — neither resolves on
+  // a later run, and holding the source hostage to them would make a
+  // hand-edited copy enough to pin a source in the config forever.
+  const distributed = new Set(componentIds);
+  const stranded = swept.entries.filter(
+    (entry) =>
+      entry.id !== null &&
+      distributed.has(entry.id) &&
+      (entry.outcome === 'failed' || entry.outcome === 'blocked' || entry.outcome === 'conflict')
+  );
+  if (stranded.length > 0) {
+    return buildReport(scope, [
+      {
+        app: null,
+        type: null,
+        id: namespace,
+        path: source?.path ?? null,
+        outcome: 'blocked',
+        reason: `kept: ${stranded.length} slice(s) it distributed could not be taken, and removing it now would leave them with nothing able to prove them; resolve the rows below and re-run asb remove ${namespace}`,
+      },
+      ...retiredEntries(retired, namespace),
+      ...swept.entries,
+    ]);
+  }
 
   const remaining = loadConfig({ profile: opts.profile, env });
   retired.push(
@@ -1276,18 +1318,8 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
       outcome: 'removed',
       reason: 'source removed with everything it distributed',
     },
+    ...retiredEntries(retired, namespace),
   ];
-  for (const row of retired) {
-    entries.push({
-      app: null,
-      type: row.type,
-      id: row.id,
-      path: null,
-      outcome: 'removed',
-      detail: 'retired',
-      reason: `disabled in [${row.type}] because source "${namespace}" provided it`,
-    });
-  }
   return buildReport(scope, [...entries, ...swept.entries]);
 }
 
@@ -1982,8 +2014,12 @@ export async function main(argv: readonly string[]): Promise<number> {
 
     if (invocation.command === 'explain') {
       const slices = await runExplain(invocation.target, invocation.options);
+      // `explain` answers a question about one target, so it reports on the
+      // wider set: a slice asb declined to touch is a run working as intended
+      // but an answer of "not resolved", and a script asking about it wants
+      // to hear so.
       const exitCode =
-        slices.length > 0 && !runFailed(slices.map((slice) => slice.outcome)) ? 0 : 1;
+        slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome)) ? 0 : 1;
       process.stdout.write(
         invocation.options.json
           ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), slices, exitCode), null, 2)}\n`

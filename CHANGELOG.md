@@ -52,16 +52,23 @@ run consults a record to decide.
   file.
 - **Nothing ASB writes into your configuration carries its name.** The Cursor
   and Trae rules files are `rules.mdc` and `rules.md`, replacing `asb-rules.*`,
-  which are swept on the next run. The rules region delimiters are
+  which are swept on the next run. Only those built-in paths carry the old
+  spelling, so a `[targets.<id>].rules` path you chose is left alone along with
+  anything beside it. The rules region delimiters are
   `<!-- rules:start -->` and `<!-- rules:end -->`; the previous spelling is
   still recognized when locating an existing region, so a file written by an
   earlier version is rewritten once rather than gaining a second region. A rule
   id of `rules` is rejected, since it would collide with the new filename.
 - **`asb remove <source>` takes what the source distributed.** It retires the
-  ids, distributes once while the library can still render them, and only then
-  drops the declaration and any managed checkout. Previously it removed the
+  ids — in the global lists, the plugin list, and any per-application override
+  — distributes once while the library can still render them, and only then
+  drops the declaration and any managed checkout. A slice it could not take
+  keeps the source in place for a later attempt. Previously it removed the
   source and told you to sync afterwards, which now would leave every
   distributed file behind with nothing able to attribute it.
+- **Disabling an id reaches a per-application `enabled` list.** That spelling
+  replaces the global selection for its app and ignores `remove`, so a disable
+  that only wrote `remove` used to leave the id selected there.
 - **A project region in `AGENTS.md` is proven by its delimiters.** An edit
   inside the region is overwritten on the next project sync, exactly as it is
   in a shared file under your home directory. Bytes outside the region are
