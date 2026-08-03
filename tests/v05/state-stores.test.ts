@@ -250,37 +250,62 @@ test('a source outlives a sweep that could not take everything it distributed', 
   });
 });
 
-test('removing a source reaches a plugin only a per-app override selected', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'claude-code');
-    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
-    writeUserConfig(
-      homes,
-      [
-        '[applications]',
-        'enabled = ["claude-code"]',
-        '',
-        '[applications.claude-code.plugins]',
-        'add = ["team"]',
-        '',
-        '[plugins.sources]',
-        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
-        '',
-      ].join('\n')
-    );
+/**
+ * Every channel a source's content can be selected through, one case each.
+ * Retirement enumerates these channels and `effectiveSelection` reads them:
+ * two enumerations of one set, and each time they drifted apart a source was
+ * deleted while its files stayed installed. The table is the check that keeps
+ * them together, so a channel added later fails here rather than in the field.
+ */
+const SELECTION_CHANNELS: readonly (readonly [string, readonly string[]])[] = [
+  ['the global component list', ['[skills]', 'enabled = ["team:deploy"]']],
+  ['the global plugin list', ['[plugins]', 'enabled = ["team"]']],
+  ['a per-app component add', ['[applications.claude-code.skills]', 'add = ["team:deploy"]']],
+  [
+    'a per-app component enabled',
+    ['[applications.claude-code.skills]', 'enabled = ["team:deploy"]'],
+  ],
+  ['a per-app plugin add', ['[applications.claude-code.plugins]', 'add = ["team"]']],
+  ['a per-app plugin enabled', ['[applications.claude-code.plugins]', 'enabled = ["team"]']],
+];
 
-    await runSync();
-    const deploy = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
-    assert.ok(fs.existsSync(deploy), 'the per-app plugin override distributed the skill');
+for (const [label, channel] of SELECTION_CHANNELS) {
+  test(`removing a source takes what ${label} selected`, async () => {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'claude-code');
+      seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+      writeUserConfig(
+        homes,
+        [
+          '[applications]',
+          'enabled = ["claude-code"]',
+          '',
+          ...channel,
+          '',
+          '[plugins.sources]',
+          `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+          '',
+        ].join('\n')
+      );
 
-    assert.equal((await runRemoveSource('team')).exitCode, 0);
-    assert.equal(
-      fs.existsSync(deploy),
-      false,
-      'a plugin no global list mentions still expands to components, so retiring the source has to reach the override that named it'
-    );
+      await runSync();
+      const deploy = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+      assert.ok(fs.existsSync(deploy), 'the channel distributed the skill');
+
+      assert.equal((await runRemoveSource('team')).exitCode, 0);
+      assert.equal(fs.existsSync(deploy), false, 'the skill leaves with the source');
+
+      // Nothing left selected: an id still in any list outlives the library
+      // entry that could render it, and the next run is where that shows.
+      const after = await runSync();
+      assert.deepEqual(
+        after.entries.filter((entry) => (entry.id ?? '').includes('team')),
+        [],
+        JSON.stringify(after.entries, null, 2)
+      );
+    });
   });
-});
+}
 
 test('a source outlives a deletion the file system refused', async () => {
   await withScratchHomes(async (homes) => {
