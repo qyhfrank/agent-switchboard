@@ -1275,16 +1275,29 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
   // A slice this source distributed that the sweep could not take is the one
   // state the source has to outlive: while it is still declared the library
   // can render that slice, so fixing the cause and re-running finishes the
-  // job. `left-behind` and `missing` are not that state — neither resolves on
-  // a later run, and holding the source hostage to them would make a
-  // hand-edited copy enough to pin a source in the config forever.
+  // job. `missing` and a hand-edited copy are not that state — neither
+  // resolves on a later run, and holding the source hostage to them would
+  // pin it in the config forever.
   const distributed = new Set(componentIds);
-  const stranded = swept.entries.filter(
-    (entry) =>
-      entry.id !== null &&
-      distributed.has(entry.id) &&
-      (entry.outcome === 'failed' || entry.outcome === 'blocked' || entry.outcome === 'conflict')
+  // A rules host, a hooks config, an MCP host: these fail as a whole and name
+  // no component, so what attributes them is the type they cover.
+  const distributedTypes = new Set(
+    pluginIds.flatMap((id) => Object.keys(expansion.byPlugin[id] ?? {}))
   );
+  const stranded = swept.entries.filter((entry) => {
+    const mine =
+      entry.id !== null
+        ? distributed.has(entry.id)
+        : entry.type !== null && distributedTypes.has(entry.type);
+    if (!mine) return false;
+    if (entry.outcome === 'failed' || entry.outcome === 'blocked' || entry.outcome === 'conflict') {
+      return true;
+    }
+    // A deletion the file system refused is the retryable shape of
+    // `left-behind`: the bytes are still the ones the library renders, so
+    // the next run takes them once the cause is fixed.
+    return entry.outcome === 'left-behind' && entry.detail === 'remove-failed';
+  });
   if (stranded.length > 0) {
     return buildReport(scope, [
       {

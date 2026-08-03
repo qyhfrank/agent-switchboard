@@ -923,6 +923,14 @@ export function retireSourceSelection(
       editSelection({ type: 'native_plugins', app, disable: hits, env });
       for (const id of hits) retired.push({ type: 'native_plugins', id });
     }
+    // The per-app plugin cell feeds the same expansion the global list does,
+    // so a plugin enabled only here still expands to components.
+    const perApp = (override as { plugins?: { enabled?: string[]; add?: string[] } }).plugins;
+    const perAppPlugins = [...(perApp?.enabled ?? []), ...(perApp?.add ?? [])].filter(pluginMatch);
+    if (perAppPlugins.length > 0) {
+      editSelection({ type: 'plugins', app, disable: perAppPlugins, env });
+      for (const id of perAppPlugins) retired.push({ type: 'plugins', id });
+    }
     // A per-app override selects for that app alone, in any of its three
     // spellings, and an id left in one of them is still distributed.
     for (const type of SELECTION_TYPES) {

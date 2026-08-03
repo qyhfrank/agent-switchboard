@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { runExplain, runRemoveSource, runSync } from '../../src/engine/cli.js';
 import {
   installApps,
+  ruleFilePath,
   type ScratchHomes,
   seedRule,
   seedSkill,
@@ -245,6 +246,118 @@ test('a source outlives a sweep that could not take everything it distributed', 
       fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'),
       /\bteam\b/,
       'and so is the source, which is the only thing that can still render it'
+    );
+  });
+});
+
+test('removing a source reaches a plugin only a per-app override selected', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[applications.claude-code.plugins]',
+        'add = ["team"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        '',
+      ].join('\n')
+    );
+
+    await runSync();
+    const deploy = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    assert.ok(fs.existsSync(deploy), 'the per-app plugin override distributed the skill');
+
+    assert.equal((await runRemoveSource('team')).exitCode, 0);
+    assert.equal(
+      fs.existsSync(deploy),
+      false,
+      'a plugin no global list mentions still expands to components, so retiring the source has to reach the override that named it'
+    );
+  });
+});
+
+test('a source outlives a deletion the file system refused', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        '',
+      ].join('\n')
+    );
+    await runSync();
+
+    // The tree is still exactly the render, so the sweep plans to take it and
+    // the unlink is what fails. Fixing the mode and re-running is the whole
+    // repair, which is why the source has to still be there afterwards.
+    const bundle = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    fs.chmodSync(bundle, 0o500);
+    try {
+      const report = await runRemoveSource('team');
+
+      assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+      assert.ok(fs.existsSync(path.join(bundle, 'SKILL.md')), 'the file is still installed');
+      assert.match(
+        fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'),
+        /\bteam\b/,
+        'and so is the source, which is the only thing that can still render it'
+      );
+    } finally {
+      fs.chmodSync(bundle, 0o700);
+    }
+  });
+});
+
+test('a source outlives a host failure on a type it distributed', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'rules/base.md': 'Team rule body.\n' });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[rules]',
+        'enabled = ["team:base"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        '',
+      ].join('\n')
+    );
+    await runSync();
+
+    // A shared host fails as a whole and names no component, so nothing in
+    // the row says the rule inside it came from this source. What says so is
+    // the type: the source distributes rules, and the rules host is stuck.
+    const host = ruleFilePath(homes, 'claude-code');
+    const broken = '# Notes\n\n<!-- rules:start -->\nHalf a region.\n';
+    fs.writeFileSync(host, broken, 'utf-8');
+
+    const report = await runRemoveSource('team');
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.readFileSync(host, 'utf-8'), broken, 'the host is left exactly as it was');
+    assert.match(
+      fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'),
+      /\bteam\b/,
+      'and the source stays until the host can be swept'
     );
   });
 });
