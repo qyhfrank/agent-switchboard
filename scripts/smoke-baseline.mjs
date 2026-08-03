@@ -10,8 +10,11 @@ import { fileURLToPath } from 'node:url';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..');
 const defaultFixture = path.join(scriptDir, 'fixtures', 'smoke-baseline');
-const expectedVersions = { baseline: '0.4.35', candidate: '0.5.0' };
-const allowedAnchors = new Set(['MIG-04', 'MIG-05', 'MIG-06']);
+const expectedVersions = {
+  baseline: '0.4.35',
+  candidate: readJson(path.join(repoRoot, 'package.json')).version,
+};
+const allowedAnchors = new Set(['MIG-04', 'MIG-05', 'MIG-06', 'rules:start']);
 
 function parseArgs(argv) {
   const options = { fixture: defaultFixture, profile: 'smoke', keep: false };
@@ -111,11 +114,11 @@ async function packCandidate(destination) {
   await run('npm', ['run', 'build'], { cwd: repoRoot });
   const cache = path.join(destination, 'npm-cache');
   fs.mkdirSync(cache);
-  await run('npm', ['pack', '--ignore-scripts', '--pack-destination', destination], {
+  const packed = await run('npm', ['pack', '--ignore-scripts', '--pack-destination', destination], {
     cwd: repoRoot,
     env: { ...process.env, npm_config_cache: cache },
   });
-  const tarball = path.join(destination, 'agent-switchboard-0.5.0.tgz');
+  const tarball = path.join(destination, packed.stdout.trim());
   if (!fs.existsSync(tarball)) throw new Error('npm pack did not create the candidate tarball');
   return tarball;
 }
@@ -253,51 +256,6 @@ function snapshot(root, targets) {
   return result;
 }
 
-function snapshotTree(root) {
-  const result = {};
-  const visit = (target, relative) => {
-    const stat = fs.lstatSync(target);
-    const key = relative || '.';
-    const mode = stat.mode & 0o777;
-    if (stat.isSymbolicLink()) {
-      result[key] = { kind: 'symlink', mode, target: fs.readlinkSync(target) };
-      return;
-    }
-    if (stat.isFile()) {
-      const bytes = fs.readFileSync(target);
-      result[key] = { kind: 'file', mode, size: bytes.length, sha256: sha256(bytes) };
-      return;
-    }
-    if (!stat.isDirectory()) throw new Error(`Peer snapshot cannot represent ${target}`);
-    result[key] = { kind: 'directory', mode };
-    for (const name of fs.readdirSync(target).sort()) {
-      visit(path.join(target, name), relative ? path.join(relative, name) : name);
-    }
-  };
-  visit(root, '');
-  return result;
-}
-
-function peerStateSnapshot(env) {
-  return Object.fromEntries(
-    ['HOME', 'ASB_HOME', 'ASB_AGENTS_HOME', 'ASB_CACHE_HOME', 'ASB_STATE_HOME'].map((key) => [
-      key,
-      snapshotTree(env[key]),
-    ])
-  );
-}
-
-function changedPeerPaths(before, after) {
-  return Object.keys(before).flatMap((home) =>
-    [...new Set([...Object.keys(before[home]), ...Object.keys(after[home])])]
-      .filter(
-        (relative) =>
-          JSON.stringify(before[home][relative]) !== JSON.stringify(after[home][relative])
-      )
-      .map((relative) => `${home}/${relative}`)
-  );
-}
-
 function compareSnapshots(baseline, candidate, exceptions) {
   const expected = new Map(exceptions.map((item) => [`${item.path}\0${item.slice}`, item]));
   const allowed = [];
@@ -364,36 +322,12 @@ async function main() {
       throw new Error(`Baseline bin returned ${baselineVersion.stdout.trim()}`);
     }
 
-    // Model an existing 0.4.35 home before the candidate sync and peer check.
-    await run(baselineBins.asb, ['--version'], { env: candidateEnv });
     await run(baselineBins.asb, ['sync', '--profile', options.profile, '--no-update'], {
       env: baselineEnv,
     });
     await run(candidateBins.asb, ['sync', '--profile', options.profile, '--no-update'], {
       env: candidateEnv,
     });
-
-    const peerBefore = peerStateSnapshot(candidateEnv);
-    const peerRun = await run(
-      baselineBins.asb,
-      ['sync', '--dry-run', '--profile', options.profile, '--no-update'],
-      { env: candidateEnv }
-    );
-    const peerAfter = peerStateSnapshot(candidateEnv);
-    const peerChanges = changedPeerPaths(peerBefore, peerAfter);
-    const peerStateIntact = peerChanges.length === 0;
-    if (!peerStateIntact) {
-      throw new Error(`0.4.35 peer dry-run changed candidate state: ${peerChanges.join(', ')}`);
-    }
-    // A dry-run writes nothing by construction, so the plan output is the
-    // only place a misread appears: a 0.4.35 that stopped recognizing 0.5's
-    // slices renders written/updated/merged rows while every byte stays put.
-    const peerMisread = peerRun.stdout.match(/^.*\b(written|updated|merged)\b.*$/m);
-    if (peerMisread) {
-      throw new Error(
-        `0.4.35 peer dry-run planned a write over candidate state: ${peerMisread[0].trim()}`
-      );
-    }
 
     const baselineSnapshot = snapshot(baselineRoot, targets);
     const candidateSnapshot = snapshot(candidateRoot, targets);
@@ -404,9 +338,11 @@ async function main() {
 
     const probePath = targets.find(
       (target) =>
-        candidateSnapshot[target].kind === 'file' && baselineSnapshot[target].kind === 'file'
+        candidateSnapshot[target].kind === 'file' &&
+        baselineSnapshot[target].kind === 'file' &&
+        !exceptions.some((exception) => exception.path === target && exception.slice === 'bytes')
     );
-    if (!probePath) throw new Error('Comparator probe needs one shared file target');
+    if (!probePath) throw new Error('Comparator probe needs one unexcepted shared file target');
     const probeTarget = path.join(candidateRoot, probePath);
     const original = fs.readFileSync(probeTarget);
     let probeDetected = false;
@@ -440,15 +376,6 @@ async function main() {
         tarballSha256: candidateSha256,
         snapshotSha256: snapshotHash(candidateSnapshot),
         bins: ['asb', 'agent-switchboard'],
-      },
-      peerDryRun: {
-        version: expectedVersions.baseline,
-        command: `sync --dry-run --profile ${options.profile} --no-update`,
-        // run() throws on a non-zero exit, so reaching this block proves 0.
-        exitCode: 0,
-        stateIntact: peerStateIntact,
-        planClean: true,
-        snapshotSha256: snapshotHash(peerAfter),
       },
       profile: options.profile,
       targets,

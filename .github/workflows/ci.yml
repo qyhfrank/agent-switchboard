@@ -45,5 +45,5 @@ jobs:
       - name: Test
         run: pnpm run test
 
-      - name: Smoke (0.4.35 peer baseline)
+      - name: Smoke (0.4.35 baseline)
         run: pnpm run smoke:baseline

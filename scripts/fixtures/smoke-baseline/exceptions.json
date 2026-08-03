@@ -4,5 +4,11 @@
     "slice": "file-presence",
     "reason": "0.5 omits empty MCP host files",
     "anchor": "CHANGELOG.md:MIG-04"
+  },
+  {
+    "path": "agents-home/.claude/CLAUDE.md",
+    "slice": "bytes",
+    "reason": "0.5.1 wraps shared rules in the ownership region",
+    "anchor": "CHANGELOG.md:rules:start"
   }
 ]
