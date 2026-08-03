@@ -218,7 +218,7 @@ test('a failing union destination leaves the per-app copy in place', async () =>
   });
 });
 
-test('a user-modified union bundle survives the toggle-off as left-behind', async () => {
+test('a union bundle is held through the toggle-off until its counterpart lands', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedSkill(homes, 'alpha');
@@ -230,14 +230,22 @@ test('a user-modified union bundle survives the toggle-off as left-behind', asyn
     writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: false }));
     const report = await runSync();
 
-    const entry = entryFor(report, 'agents', 'alpha');
-    assert.equal(entry?.outcome, 'left-behind');
-    assert.equal(entry?.detail, 'modified');
+    // The codex copy is written by this same run, so the union copy is not
+    // touched until a later capture has seen it land.
+    const held = entryFor(report, 'agents', 'alpha');
+    assert.equal(held?.outcome, 'skipped');
+    assert.equal(held?.detail, 'not-selected');
     assert.equal(
       fs.readFileSync(path.join(agentsBundle(homes, 'alpha'), 'SKILL.md'), 'utf-8'),
       'hand-edited\n'
     );
-    assert.equal(report.exitCode, 1);
+
+    const second = await runSync();
+    const entry = entryFor(second, 'agents', 'alpha');
+    assert.equal(entry?.outcome, 'removed');
+    assert.equal(entry?.detail, 'stale-copy');
+    assert.equal(fs.existsSync(agentsBundle(homes, 'alpha')), false);
+    assert.equal(second.exitCode, 0);
   });
 });
 

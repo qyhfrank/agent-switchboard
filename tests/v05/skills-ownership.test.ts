@@ -16,11 +16,11 @@ import {
 } from './helpers/scratch.js';
 
 /**
- * Ownership, adoption, and removal for the own-dir shape. 0.4 deleted any
- * child of the managed skills parent whose name matched a library skill; 0.5
- * deletes only what it can prove it wrote, adopts what it can prove is
- * identical, updates what convention grants, and leaves everything else
- * exactly as the user left it.
+ * Ownership and removal for the own-dir shape. Ownership is derived from the
+ * library rather than recorded: a selected skill is written until the bundle
+ * mirrors its render, and a deselected one is removed either on that byte
+ * proof or, failing it, on the weaker claim that a library id under a managed
+ * skills parent is asb's layout.
  */
 
 const LIBRARY_BODY = 'Walk the diff.\n';
@@ -104,10 +104,10 @@ function read(...segments: string[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Adoption: identity and convention
+// Ownership derived from the library render
 // ---------------------------------------------------------------------------
 
-test('a byte-identical unrecorded bundle is adopted by identity and never rewritten', async () => {
+test('a byte-identical bundle asb never recorded is left exactly as it is', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     const source = seedLibrarySkill(homes);
@@ -128,14 +128,13 @@ test('a byte-identical unrecorded bundle is adopted by identity and never rewrit
     const report = await runSync();
 
     const entry = skillEntry(report, 'claude-code', 'review-pr');
-    assert.equal(entry?.outcome, 'adopted');
-    assert.equal(entry?.detail, 'identity');
+    assert.equal(entry?.outcome, 'unchanged');
     assert.equal(entry?.path, target);
     assert.equal(report.exitCode, 0);
-    assert.equal(bundleFingerprint(target), fingerprint, 'the adopted tree is unchanged');
+    assert.equal(bundleFingerprint(target), fingerprint, 'the tree is unchanged');
     assert.deepEqual(mtimesOf(target), mtimes, 'no file was rewritten');
 
-    // Adoption records the target's own tree, so the next run agrees with it.
+    // Identity is recomputed, not remembered, so the next run agrees too.
     const second = await runSync();
     assert.equal(skillEntry(second, 'claude-code', 'review-pr')?.outcome, 'unchanged');
     assert.deepEqual(mtimesOf(target), mtimes);
@@ -143,7 +142,7 @@ test('a byte-identical unrecorded bundle is adopted by identity and never rewrit
   });
 });
 
-test('an unrecorded plain bundle adopts by convention, then updates keeping foreign files', async () => {
+test('a diverged bundle is brought to the render in one sync, mirroring the library', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedLibrarySkill(homes);
@@ -159,13 +158,6 @@ test('an unrecorded plain bundle adopts by convention, then updates keeping fore
     fs.writeFileSync(path.join(target, 'my-notes.md'), 'hand-written, not asb\n');
     fs.writeFileSync(path.join(target, 'references', 'mine.md'), 'also mine\n');
 
-    const adoption = await runSync();
-    const adopted = skillEntry(adoption, 'claude-code', 'review-pr');
-    assert.equal(adopted?.outcome, 'adopted');
-    assert.equal(adopted?.detail, 'convention');
-    assert.match(read(target, 'SKILL.md'), /Old body\./, 'adoption writes nothing');
-    assert.equal(adoption.exitCode, 0);
-
     const report = await runSync();
 
     const entry = skillEntry(report, 'claude-code', 'review-pr');
@@ -176,8 +168,11 @@ test('an unrecorded plain bundle adopts by convention, then updates keeping fore
     assert.match(read(target, 'SKILL.md'), /Walk the diff\./);
     assert.equal(read(target, 'references', 'checklist.md'), CHECKLIST);
     assert.equal(read(target, 'bin', 'run.sh'), SCRIPT);
-    assert.equal(read(target, 'my-notes.md'), 'hand-written, not asb\n', 'foreign file preserved');
-    assert.equal(read(target, 'references', 'mine.md'), 'also mine\n', 'nested foreign preserved');
+    // A distributed bundle is a copy of its library directory, so files the
+    // render does not name are cleared. That is what keeps the tree provably
+    // asb's for a later deselection.
+    assert.equal(fs.existsSync(path.join(target, 'my-notes.md')), false);
+    assert.equal(fs.existsSync(path.join(target, 'references', 'mine.md')), false);
 
     const third = await runSync();
     assert.equal(skillEntry(third, 'claude-code', 'review-pr')?.outcome, 'unchanged');
@@ -185,7 +180,7 @@ test('an unrecorded plain bundle adopts by convention, then updates keeping fore
   });
 });
 
-test('deselecting between adoption and the first rewrite preserves the bundle', async () => {
+test('a bundle written over the user’s own tree still removes cleanly on deselect', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedLibrarySkill(homes);
@@ -195,18 +190,16 @@ test('deselecting between adoption and the first rewrite preserves the bundle', 
     fs.mkdirSync(target, { recursive: true });
     fs.writeFileSync(path.join(target, 'SKILL.md'), 'their own take on this skill\n');
 
-    await runSync();
+    const first = await runSync();
+    assert.equal(skillEntry(first, 'claude-code', 'review-pr')?.outcome, 'written');
+    assert.match(read(target, 'SKILL.md'), /Walk the diff\./, 'the library wins');
+
     writeUserConfig(homes, configFor(['claude-code'], []));
     const report = await runSync();
 
-    const entry = skillEntry(report, 'claude-code', 'review-pr');
-    assert.equal(entry?.outcome, 'left-behind');
-    assert.equal(entry?.detail, 'unproven');
-    assert.equal(
-      read(target, 'SKILL.md'),
-      'their own take on this skill\n',
-      'a convention claim never deletes'
-    );
+    assert.equal(skillEntry(report, 'claude-code', 'review-pr')?.outcome, 'removed');
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(report.exitCode, 0);
   });
 });
 
@@ -245,10 +238,10 @@ test('a name-matching bundle holding a symlink is left behind unproven and untou
 });
 
 // ---------------------------------------------------------------------------
-// Owned bundles the user edited
+// Distributed bundles the user edited
 // ---------------------------------------------------------------------------
 
-test('a user edit inside an owned bundle conflicts while the skill stays selected', async () => {
+test('a user edit inside a selected bundle is overwritten by the library', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedLibrarySkill(homes);
@@ -264,15 +257,15 @@ test('a user edit inside an owned bundle conflicts while the skill stays selecte
     const report = await runSync();
 
     const entry = skillEntry(report, 'claude-code', 'review-pr');
-    assert.equal(entry?.outcome, 'conflict');
+    assert.equal(entry?.outcome, 'written');
+    assert.equal(entry?.detail, 'updated');
     assert.equal(entry?.path, target);
-    assert.equal(report.exitCode, 1);
-    assert.equal(read(target, 'references', 'checklist.md'), 'be exacting\n', 'the edit survives');
-    assert.match(read(target, 'SKILL.md'), /Walk the diff\./, 'no partial rewrite of the bundle');
+    assert.equal(report.exitCode, 0);
+    assert.equal(read(target, 'references', 'checklist.md'), CHECKLIST, 'the library wins');
   });
 });
 
-test('deselecting a user-modified bundle leaves it behind and drops the ownership record', async () => {
+test('deselecting a user-modified bundle sweeps it as a stale copy', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedLibrarySkill(homes);
@@ -286,39 +279,18 @@ test('deselecting a user-modified bundle leaves it behind and drops the ownershi
     const report = await runSync();
 
     const entry = skillEntry(report, 'claude-code', 'review-pr');
-    assert.equal(entry?.outcome, 'left-behind');
-    assert.equal(entry?.detail, 'modified');
-    assert.equal(report.exitCode, 1);
-    assert.equal(read(target, 'SKILL.md'), 'hand-edited since asb wrote it\n');
+    assert.equal(entry?.outcome, 'removed');
+    assert.equal(entry?.detail, 'stale-copy');
+    assert.equal(report.exitCode, 0);
+    assert.equal(fs.existsSync(target), false);
 
-    // The record goes with the report: a later run makes no claim on the dir.
+    // Nothing is left to report, so the run after it is silent about the id.
     const third = await runSync();
-    assert.equal(
-      third.entries.some(
-        (candidate) => candidate.path === target && candidate.outcome === 'removed'
-      ),
-      false,
-      'a dropped record never authorizes a later deletion'
-    );
-    assert.equal(fs.existsSync(target), true);
-
-    // Re-selecting meets a foreign dir: convention adoption first (writing
-    // nothing), then the update — not a resurrected ledger claim reporting
-    // `unchanged` over the user's bytes.
-    writeUserConfig(homes, configFor(['claude-code'], ['review-pr']));
-    const fourth = await runSync();
-    assert.equal(skillEntry(fourth, 'claude-code', 'review-pr')?.outcome, 'adopted');
-    assert.equal(skillEntry(fourth, 'claude-code', 'review-pr')?.detail, 'convention');
-    assert.equal(read(target, 'SKILL.md'), 'hand-edited since asb wrote it\n');
-
-    const fifth = await runSync();
-    assert.equal(skillEntry(fifth, 'claude-code', 'review-pr')?.outcome, 'written');
-    assert.equal(skillEntry(fifth, 'claude-code', 'review-pr')?.detail, 'updated');
-    assert.match(read(target, 'SKILL.md'), /Walk the diff\./);
+    assert.equal(skillEntry(third, 'claude-code', 'review-pr'), undefined);
   });
 });
 
-test('a foreign file dropped into an owned bundle stops deletion at deselection', async () => {
+test('a foreign file dropped into a selected bundle is cleared on the next sync', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedLibrarySkill(homes);
@@ -327,16 +299,15 @@ test('a foreign file dropped into an owned bundle stops deletion at deselection'
     await runSync();
     const target = bundlePath(homes, 'claude-code', 'review-pr');
     fs.writeFileSync(path.join(target, 'notes.txt'), 'my own notes\n');
-    writeUserConfig(homes, configFor(['claude-code'], []));
 
     const report = await runSync();
 
     const entry = skillEntry(report, 'claude-code', 'review-pr');
-    assert.equal(entry?.outcome, 'left-behind');
-    assert.equal(entry?.detail, 'modified');
-    assert.equal(report.exitCode, 1);
-    assert.equal(read(target, 'notes.txt'), 'my own notes\n', 'the added file survives');
-    assert.match(read(target, 'SKILL.md'), /Walk the diff\./, 'nothing is partially pruned');
+    assert.equal(entry?.outcome, 'written');
+    assert.equal(entry?.detail, 'updated');
+    assert.equal(report.exitCode, 0);
+    assert.equal(fs.existsSync(path.join(target, 'notes.txt')), false, 'the bundle mirrors');
+    assert.match(read(target, 'SKILL.md'), /Walk the diff\./);
     assert.equal(read(target, 'references', 'checklist.md'), CHECKLIST);
   });
 });
@@ -501,35 +472,33 @@ test('the codex .system directory is never reported, claimed, or touched', async
   });
 });
 
-test('a convention claim whose tree became the desired render removes for real', async () => {
+test('a copy of an older render is swept rather than stranded at deselection', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedSkill(homes, 'keeper', { body: 'Library original.' });
-    const handDoc = [
-      '---',
-      'name: keeper',
-      'description: hand-rolled keeper',
-      '---',
-      '',
-      'The user wrote this by hand.',
-      '',
-    ].join('\n');
-    const hand = bundlePath(homes, 'codex', 'keeper');
-    fs.mkdirSync(hand, { recursive: true });
-    fs.writeFileSync(path.join(hand, 'SKILL.md'), handDoc);
     writeUserConfig(homes, configFor(['codex'], ['keeper']));
 
-    const adopted = await runSync();
-    assert.equal(skillEntry(adopted, 'codex', 'keeper')?.detail, 'convention');
+    const target = bundlePath(homes, 'codex', 'keeper');
+    await runSync();
+    assert.match(read(target, 'SKILL.md'), /Library original\./);
 
-    // The user promotes the hand copy into the library before the rewrite:
-    // desired now IS the adopted tree (proof 3), so deselection may delete it.
-    fs.writeFileSync(path.join(homes.asbHome, 'skills', 'keeper', 'SKILL.md'), handDoc);
+    // The library moves on while the distributed copy stays where it was, so
+    // the copy is no longer byte-identical to anything asb can render. This is
+    // the shape every pre-derivation distribution has, and leaving it behind
+    // is what made a clean sync impossible.
+    fs.writeFileSync(
+      path.join(homes.asbHome, 'skills', 'keeper', 'SKILL.md'),
+      ['---', 'name: keeper', 'description: keeper', '---', '', 'Rewritten upstream.', ''].join(
+        '\n'
+      )
+    );
     writeUserConfig(homes, configFor(['codex'], []));
     const removal = await runSync();
 
     const entry = skillEntry(removal, 'codex', 'keeper');
     assert.equal(entry?.outcome, 'removed');
-    assert.equal(fs.existsSync(hand), false, 'the identity-proven tree is actually deleted');
+    assert.equal(entry?.detail, 'stale-copy');
+    assert.equal(removal.exitCode, 0);
+    assert.equal(fs.existsSync(target), false);
   });
 });

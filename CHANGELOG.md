@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Skills ownership is derived, not recorded
+
+Skill bundles are no longer planned from the ownership ledger. A bundle is
+compared against its library render, and that comparison decides everything:
+
+- A selected skill whose bundle differs is written in one pass. The two-step
+  `adopted (convention)` then `written (updated)` sequence is gone, as is the
+  `conflict` a hand-edited bundle used to raise. The library is the source of
+  truth for a distributed copy; edit the library entry, not the copy.
+- A distributed bundle mirrors its library directory. Files the render does
+  not name are cleared, which is what keeps a synced bundle byte-identical to
+  its render and therefore removable later without a stored record.
+- A deselected bundle is removed on that byte proof. Failing it, a bundle whose
+  id matches a library skill under a skills parent the app table declares is
+  swept as `removed (stale-copy)`. This clears copies distributed before
+  ownership was derived, which no record can attribute and which otherwise
+  report as `left-behind (unproven)` on every run.
+
+A directory you wrote by hand under a library skill's id is destroyed by that
+sweep. Bundles holding symlinks or special files are still never removed.
+
+Ledger entries are still written for skills so that a project run proves
+ownership to its peer manifest, which 0.4 peers read. Global planning no longer
+consults them.
+
 ## 0.5.0
 
 ### Migration notes

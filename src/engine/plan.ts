@@ -1068,15 +1068,14 @@ interface SkillRowPlan {
  * skip rows and library-level parse failures are planRules' single voice
  * (both planners always run together through runSync).
  *
- * Proofs for own-dir slices: (1) ledger entry whose tree fingerprint matches
- * the captured directory, with the recorded per-file list bounding deletion
- * authority; (3) byte-identity of the whole tree with the current desired
- * bundle; (5) convention — a name-matched child of a table-declared managed
- * parent grants update authority over desired rels only, never deletion of
- * anything else. Removal only by deselection, only with proof (1).
+ * Ownership of an own-dir slice is derived from the library, not recorded.
+ * A selected skill is brought to its render in one pass, leaving files the
+ * render does not name untouched. Deletion needs the stronger claim that the
+ * whole tree is byte-for-byte that render, so an edited or stale bundle is
+ * reported and preserved rather than removed.
  */
 export function planSkills(input: PlanInput): Action[] {
-  const { config, inventory, ledger, capture, table, now } = input;
+  const { config, inventory, capture, table, now } = input;
   const actions: Action[] = [];
 
   const byId = new Map(
@@ -1175,8 +1174,7 @@ export function planSkills(input: PlanInput): Action[] {
   // uninstalled member must not wake cleanup of union-written state.
   const unionRowActive =
     activeMembers.length > 0 &&
-    (ledger.entries.some((entry) => entry.app === 'agents' && entry.type === 'skills') ||
-      unionSelected.length > 0);
+    ((capture.bundleDirs[unionDir]?.length ?? 0) > 0 || unionSelected.length > 0);
   if (unionRowActive) {
     rows.push({
       app: 'agents',
@@ -1216,20 +1214,9 @@ export function planSkills(input: PlanInput): Action[] {
 
   for (const row of physicalRows) {
     const present = capture.bundleDirs[row.dir] ?? [];
-    const recordedIds = ledger.entries
-      .filter(
-        (entry) =>
-          (entry.app === row.app || row.members.includes(entry.app)) &&
-          entry.type === 'skills' &&
-          entry.id !== null &&
-          entry.shape === 'own-dir' &&
-          path.dirname(entry.path) === row.dir
-      )
-      .map((entry) => entry.id as string);
     const candidates = [
       ...new Set([
         ...row.selected,
-        ...recordedIds,
         ...present.filter((name) => input.project?.mode === 'exclusive' || byId.has(name)),
       ]),
     ].filter((id) => !row.reserved.includes(id) && !id.startsWith('.'));
@@ -1241,14 +1228,6 @@ export function planSkills(input: PlanInput): Action[] {
         files: null,
         fingerprint: null,
       };
-      const recorded = ledger.entries.find(
-        (entry) =>
-          (entry.app === row.app || row.members.includes(entry.app)) &&
-          entry.type === 'skills' &&
-          entry.id === id &&
-          entry.path === bundlePath &&
-          entry.shape === 'own-dir'
-      );
       const isSelected = row.selected.includes(id);
       const component = byId.get(id);
 
@@ -1271,9 +1250,6 @@ export function planSkills(input: PlanInput): Action[] {
           if (live.hash !== hashContent(file.bytes)) return false;
           if (!targetModeMatchesSourceExecutableBits(file.mode, live.mode)) return false;
         }
-        for (const rel of recorded?.files ?? []) {
-          if (!desiredByRel.has(rel) && capturedByRel.has(rel)) return false;
-        }
         return true;
       };
       const identicalToDesired = (): boolean => {
@@ -1282,7 +1258,21 @@ export function planSkills(input: PlanInput): Action[] {
         return sliceClean();
       };
 
-      const putEntry = (provenance: Provenance, hash: string): Action['ledger'] => ({
+      /**
+       * Ownership is decided from the library, not from a record:
+       * `identicalToDesired` asks whether this tree is the current render,
+       * which both means there is nothing to write and is the only claim that
+       * authorizes deleting it. Anything else is the user's: overwritten
+       * while the skill is selected, left alone once it is not.
+       *
+       * Writes still emit a record, because a project run proves ownership to
+       * its peer manifest and 0.4 peers read that file. Global planning no
+       * longer consults it.
+       */
+      // No file list: the render is the file list, and deletion authority now
+      // comes from comparing against it. Recording one cost a megabyte per
+      // large bundle and proved nothing the library does not already say.
+      const record = (hash: string): Action['ledger'] => ({
         op: 'put',
         entry: {
           app: row.app,
@@ -1291,8 +1281,7 @@ export function planSkills(input: PlanInput): Action[] {
           path: bundlePath,
           shape: 'own-dir',
           hash,
-          files: desired.map((file) => file.rel),
-          provenance,
+          provenance: 'written',
           updatedAt: now,
         },
       });
@@ -1315,175 +1304,7 @@ export function planSkills(input: PlanInput): Action[] {
             root: row.root,
             expectedHash: null,
             // Hash is measured post-write by the executor.
-            ledger: putEntry('written', ''),
-          });
-        } else if (recorded) {
-          actions.push({
-            ...base,
-            op: 'none',
-            outcome: 'removed',
-            detail: 'already-absent',
-            ledger: { op: 'delete' as const, key: ledgerKey(recorded) },
-          });
-        }
-        continue;
-      }
-
-      if (recorded && captured.fingerprint !== null && captured.fingerprint === recorded.hash) {
-        if (isSelected) {
-          if (sliceClean()) {
-            actions.push({ ...base, op: 'none', outcome: 'unchanged' });
-          } else {
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'updated',
-              bundle: {
-                files: desired,
-                stale: (recorded.files ?? []).filter((rel) => !desiredByRel.has(rel)),
-              },
-              root: row.root,
-              expectedHash: recorded.hash,
-              ledger: putEntry('written', ''),
-            });
-          }
-        } else {
-          // Deselected here, but still wanted at the counterpart location of
-          // an agents-dir toggle: defer until that copy is proven on disk.
-          const waitingOn: string[] = [];
-          if (useAgentsDir && unionMembers.has(row.app) && memberEffective.get(row.app)?.has(id)) {
-            const unionPath = path.join(unionDir, id);
-            if (!bundleCleanAt(unionPath, component)) waitingOn.push(unionPath);
-          }
-          if (row.app === 'agents') {
-            for (const [member, dir] of memberDirs) {
-              if (!memberEffective.get(member)?.has(id)) continue;
-              const memberPath = path.join(dir, id);
-              if (!bundleCleanAt(memberPath, component)) waitingOn.push(memberPath);
-            }
-          }
-          if (waitingOn.length > 0) {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'skipped',
-              detail: 'not-selected',
-              reason: `kept until ${waitingOn.join(', ')} carries this skill; run asb sync again`,
-            });
-          } else if (recorded.provenance === 'convention' && !identicalToDesired()) {
-            // Adopted by convention and never rewritten: the tree is the
-            // user's; deselection relinquishes the claim without deleting.
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'left-behind',
-              detail: 'unproven',
-              reason:
-                'adopted by convention and never rewritten by asb; preserved — delete it yourself',
-              ledger: { op: 'delete', key: ledgerKey(recorded) },
-            });
-          } else {
-            actions.push({
-              ...base,
-              op: 'remove',
-              outcome: 'removed',
-              bundle: {
-                files: [],
-                // A convention entry records no files; it reaches removal
-                // only through identicalToDesired (proof 3), so the desired
-                // rels are exactly the live tree.
-                stale:
-                  recorded.provenance === 'convention'
-                    ? desired.map((file) => file.rel)
-                    : (recorded.files ?? []),
-              },
-              root: row.root,
-              expectedHash: recorded.hash,
-              ledger: { op: 'delete', key: ledgerKey(recorded) },
-            });
-          }
-        }
-        continue;
-      }
-
-      if (recorded) {
-        // Recorded but the live tree no longer matches: user-modified — with
-        // one exception. When every desired file is still byte-identical and
-        // no stale recorded file lingers, the divergence is permission bits
-        // or added foreign files: the bytes prove the content ours (proof 3),
-        // so the run repairs modes and re-records rather than conflicting
-        // (0.4's exec-bit repair behavior). Byte edits stay conflicts, and
-        // removal authority still demands the exact recorded tree.
-        const bytesClean = (): boolean => {
-          if (capturedByRel === null) return false;
-          for (const file of desired) {
-            const liveFile = capturedByRel.get(file.rel);
-            if (!liveFile || liveFile.hash !== hashContent(file.bytes)) return false;
-          }
-          for (const rel of recorded.files ?? []) {
-            if (!desiredByRel.has(rel) && capturedByRel.has(rel)) return false;
-          }
-          return true;
-        };
-        if (isSelected) {
-          if (input.project?.collision === 'takeover' && captured.fingerprint !== null) {
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              bundle: {
-                files: desired,
-                stale: (captured.files ?? [])
-                  .map((file) => file.rel)
-                  .filter((rel) => !desiredByRel.has(rel)),
-              },
-              root: row.root,
-              expectedHash: captured.fingerprint,
-              ledger: putEntry('written', ''),
-            });
-            continue;
-          }
-          if (input.project) {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'conflict',
-              detail: 'modified',
-              reason: `project bundle changed since the peer manifest was written (recorded ${recorded.hash.slice(0, 17)}, current ${captured.fingerprint?.slice(0, 17) ?? 'unprovable'}); preserved`,
-            });
-            continue;
-          }
-          if (captured.fingerprint !== null && bytesClean()) {
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'updated',
-              bundle: { files: desired, stale: [] },
-              root: row.root,
-              expectedHash: captured.fingerprint,
-              ledger: putEntry('written', ''),
-            });
-            continue;
-          }
-          actions.push({
-            ...base,
-            op: 'none',
-            outcome: 'conflict',
-            reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 17)}, current ${captured.fingerprint?.slice(0, 17) ?? 'unprovable'}); resolve by hand, or disable this skill`,
-          });
-        } else {
-          actions.push({
-            ...base,
-            op: 'none',
-            outcome: 'left-behind',
-            detail: 'modified',
-            reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 17)}, current ${captured.fingerprint?.slice(0, 17) ?? 'unprovable'}); delete it yourself or re-enable the skill`,
-            ...(input.project
-              ? {}
-              : { ledger: { op: 'delete' as const, key: ledgerKey(recorded) } }),
+            ledger: record(''),
           });
         }
         continue;
@@ -1517,15 +1338,7 @@ export function planSkills(input: PlanInput): Action[] {
       }
 
       if (isSelected) {
-        if (identicalToDesired() && captured.fingerprint !== null) {
-          actions.push({
-            ...base,
-            op: 'adopt',
-            outcome: 'adopted',
-            detail: 'identity',
-            ledger: putEntry('identity', captured.fingerprint),
-          });
-        } else if (captured.files === null || captured.fingerprint === null) {
+        if (captured.files === null || captured.fingerprint === null) {
           actions.push({
             ...base,
             op: 'none',
@@ -1534,72 +1347,118 @@ export function planSkills(input: PlanInput): Action[] {
             reason:
               'directory matches this skill by name but contains symlinks or special files asb cannot prove ownership of; move it away or delete it yourself',
           });
-        } else if (input.project) {
-          if (input.project.collision === 'takeover') {
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              bundle: {
-                files: desired,
-                stale: (captured.files ?? [])
-                  .map((file) => file.rel)
-                  .filter((rel) => !desiredByRel.has(rel)),
-              },
-              root: row.root,
-              expectedHash: captured.fingerprint,
-              ledger: putEntry('written', ''),
-            });
-          } else {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'conflict',
-              detail: 'foreign',
-              reason: 'project bundle is occupied and the peer manifest does not own it; preserved',
-            });
-          }
-        } else {
-          // Convention: name-matched child of the managed parent adopts for
-          // update only — nothing is written this run. The entry records the
-          // user's current tree with an empty file list (so the first update
-          // deletes nothing), the next sync writes the desired files, and a
-          // deselect before that first rewrite preserves the tree.
+        } else if (identicalToDesired()) {
+          actions.push({ ...base, op: 'none', outcome: 'unchanged' });
+        } else if (input.project && input.project.collision !== 'takeover') {
           actions.push({
             ...base,
-            op: 'adopt',
-            outcome: 'adopted',
-            detail: 'convention',
-            reason: 'existing directory adopted for update; the next sync writes the skill files',
-            ledger: {
-              op: 'put',
-              entry: {
-                app: row.app,
-                type: 'skills',
-                id,
-                path: bundlePath,
-                shape: 'own-dir',
-                hash: captured.fingerprint,
-                files: [],
-                provenance: 'convention',
-                updatedAt: now,
-              },
+            op: 'none',
+            outcome: 'conflict',
+            detail: 'foreign',
+            reason: 'project bundle is occupied and the peer manifest does not own it; preserved',
+          });
+        } else {
+          // A distributed bundle mirrors its library directory: the render is
+          // written and anything the render does not name is cleared. That is
+          // what makes a synced bundle byte-identical to its render, which is
+          // in turn what lets deselection remove it later without a stored
+          // record. Editing a distributed copy is not supported; edit the
+          // library entry instead.
+          actions.push({
+            ...base,
+            op: 'write',
+            outcome: 'written',
+            detail: input.project ? 'takeover' : 'updated',
+            bundle: {
+              files: desired,
+              stale: captured.files.map((file) => file.rel).filter((rel) => !desiredByRel.has(rel)),
             },
+            root: row.root,
+            expectedHash: captured.fingerprint,
+            ledger: record(''),
           });
         }
         continue;
       }
 
-      // Deselected, present, never recorded, name matches a library skill:
-      // visible but untouchable without proof.
+      // Deselected. A tree that is byte-for-byte the render is provably asb's
+      // and comes out on that proof alone. A tree that is not carries either
+      // edits or an older render, and is swept on the weaker claim that an id
+      // matching a library skill, sitting under a skills parent the app table
+      // declares, is asb's layout rather than something the user put there.
+      //
+      // ponytail: a name is weaker evidence than bytes, so a directory you
+      // wrote by hand under a library skill's id is destroyed here. Removing
+      // only on byte proof is the safer rule, and it is what stranded every
+      // copy distributed before ownership was derived. To go back to it,
+      // report this branch as `left-behind (unproven)` instead of removing.
+      if (captured.files === null || captured.fingerprint === null) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'directory matches a library skill by name but contains symlinks or special files asb cannot prove safe to remove; delete it yourself',
+        });
+        continue;
+      }
+
+      const proven = identicalToDesired();
+      // A project tree is shared with the repository, so the name sweep stays
+      // out of it: at project scope only a proven copy is removed.
+      if (!proven && input.project) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'project bundle is not the current render and the peer manifest does not own it; preserved',
+        });
+        continue;
+      }
+
+      // Held back while an agents-dir toggle still needs this copy at its
+      // counterpart location.
+      const waitingOn: string[] = [];
+      if (useAgentsDir && unionMembers.has(row.app) && memberEffective.get(row.app)?.has(id)) {
+        const unionPath = path.join(unionDir, id);
+        if (!bundleCleanAt(unionPath, component)) waitingOn.push(unionPath);
+      }
+      if (row.app === 'agents') {
+        for (const [member, dir] of memberDirs) {
+          if (!memberEffective.get(member)?.has(id)) continue;
+          const memberPath = path.join(dir, id);
+          if (!bundleCleanAt(memberPath, component)) waitingOn.push(memberPath);
+        }
+      }
+      if (waitingOn.length > 0) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'not-selected',
+          reason: `kept until ${waitingOn.join(', ')} carries this skill; run asb sync again`,
+        });
+        continue;
+      }
+
       actions.push({
         ...base,
-        op: 'none',
-        outcome: 'left-behind',
-        detail: 'unproven',
-        reason:
-          'directory matches a library skill by name but has no ownership record; delete it yourself or enable the skill to adopt it',
+        op: 'remove',
+        outcome: 'removed',
+        ...(proven ? {} : { detail: 'stale-copy' }),
+        bundle: {
+          files: [],
+          stale: proven ? desired.map((file) => file.rel) : captured.files.map((file) => file.rel),
+        },
+        root: row.root,
+        expectedHash: captured.fingerprint,
+        ledger: {
+          op: 'delete',
+          key: ledgerKey({ app: row.app, type: 'skills', id, path: bundlePath }),
+        },
       });
     }
   }

@@ -24,7 +24,7 @@ function baseConfig(skills: readonly string[]): string {
   return `[applications]\nenabled = ["claude-code"]\n\n[skills]\nenabled = [${list}]\n`;
 }
 
-test('status names a seeded stale skill without touching it', async () => {
+test('status names a drifted skill as a pending rewrite without touching it', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedSkill(homes, 'review-pr', { files: { 'references/checklist.md': 'be kind\n' } });
@@ -40,14 +40,15 @@ test('status names a seeded stale skill without touching it', async () => {
     const entry = status.entries.find(
       (candidate) => candidate.type === 'skills' && candidate.id === 'review-pr'
     );
-    assert.equal(entry?.outcome, 'conflict', 'status names the drift');
+    assert.equal(entry?.outcome, 'written', 'status names the drift');
+    assert.equal(entry?.detail, 'updated');
     assert.equal(entry?.path, target);
-    assert.equal(status.exitCode, 1);
+    assert.equal(status.exitCode, 0, 'a rewrite the library will do is not a failure');
     assert.equal(fs.readFileSync(stale, 'utf-8'), 'drifted by hand\n', 'status writes nothing');
 
     const rendered = renderReport(status);
     assert.match(rendered, /review-pr/);
-    assert.match(rendered, /conflict/);
+    assert.match(rendered, /written \(updated\)/);
   });
 });
 
@@ -96,7 +97,7 @@ test('explain matches a skill by target path basename and by app id', async () =
   });
 });
 
-test('explain shows a user-modified bundle as conflict with diverging hashes', async () => {
+test('explain shows a user-modified bundle as a pending rewrite with diverging hashes', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedSkill(homes, 'review-pr');
@@ -104,15 +105,14 @@ test('explain shows a user-modified bundle as conflict with diverging hashes', a
     await runSync();
 
     const target = path.join(skillsParentDir(homes, 'claude-code'), 'review-pr');
-    const recordedBefore = bundleFingerprint(target);
+    const distributed = bundleFingerprint(target);
     fs.writeFileSync(path.join(target, 'SKILL.md'), 'edited\n');
 
     const slices = await runExplain('review-pr');
 
-    assert.equal(slices[0]?.outcome, 'conflict');
-    assert.equal(slices[0]?.recordedHash, recordedBefore);
+    assert.equal(slices[0]?.outcome, 'written');
     assert.equal(slices[0]?.currentHash, bundleFingerprint(target));
-    assert.notEqual(slices[0]?.currentHash, slices[0]?.recordedHash);
+    assert.notEqual(slices[0]?.currentHash, distributed, 'the edit moved the live tree');
   });
 });
 
