@@ -42,9 +42,8 @@ function setEnv(key: string, value: string | undefined): void {
 
 export async function withScratchHomes<T>(fn: (homes: ScratchHomes) => T | Promise<T>): Promise<T> {
   // os.tmpdir() is a symlink on macOS (/var -> /private/var). The engine
-  // canonicalizes a project root before it derives peer-state and manifest
-  // names, so a scratch tree reached through the link would be written under
-  // one spelling and looked up under the other.
+  // canonicalizes a project root, so a scratch tree reached through the link
+  // would be configured under one spelling and resolved under the other.
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'asb05-')));
   const homes: ScratchHomes = {
     root,

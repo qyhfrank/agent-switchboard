@@ -4,10 +4,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { parse as parseToml } from '@iarna/toml';
 import { APP_ROWS } from '../../src/engine/apps.js';
-import { runSync } from '../../src/engine/cli.js';
-import { loadLedger } from '../../src/engine/ledger.js';
+import { runExplain, runSync } from '../../src/engine/cli.js';
 import type { Component } from '../../src/engine/library.js';
-import { loadProjectManifest } from '../../src/engine/peer.js';
 import {
   installApps,
   seedMcpLibrary,
@@ -77,7 +75,7 @@ test('traecli rules sync writes the shared ~/.trae/AGENTS.md without frontmatter
   });
 });
 
-test('traecli MCP keeps foreign TOML content and records identity keys', async () => {
+test('traecli MCP keeps foreign TOML content and owns its own key by identity', async () => {
   await withScratchHomes(async (homes) => {
     const traeDir = path.join(homes.agentsHome, '.trae');
     fs.mkdirSync(path.join(traeDir, 'cli'), { recursive: true });
@@ -99,11 +97,10 @@ test('traecli MCP keeps foreign TOML content and records identity keys', async (
     assert.equal(parsed.model, 'gpt-5.1');
     assert.equal(parsed.mcp_servers?.foreign?.command, 'theirs');
     assert.equal(parsed.mcp_servers?.alpha?.command, 'run');
-    const ledger = loadLedger(homes.stateHome);
-    assert.deepEqual(ledger.entries.find((record) => record.app === 'traecli')?.keys, [
-      'mcp_servers',
-      'alpha',
-    ]);
+    const [slice] = await runExplain('alpha');
+    assert.equal(slice?.app, 'traecli');
+    assert.equal(slice?.provenance, 'identity', 'the value under the key is the whole proof');
+    assert.equal(slice?.outcome, 'unchanged');
   });
 });
 
@@ -150,16 +147,10 @@ test('project AGENTS.md keeps one marker writer with codex, gemini, opencode, an
     assert.equal(content.match(/<!-- rules:end -->/g)?.length, 1);
     assert.match(content, /# Shared rule/);
     assert.match(content, /# User instructions/);
-    assert.equal(
-      report.entries.filter((entry) => entry.type === 'rules' && entry.path === agents).length,
-      1
+    assert.deepEqual(
+      report.entries.filter((entry) => entry.type === 'rules').map((entry) => entry.path),
+      [agents],
+      'all four contributors fold into the one region rather than writing beside it'
     );
-    const loaded = loadProjectManifest(homes.asbHome, projectReal);
-    assert.deepEqual(loaded.manifest.sections.rules['AGENTS.md']?.targetIds, [
-      'codex',
-      'gemini',
-      'opencode',
-      'traecli',
-    ]);
   });
 });

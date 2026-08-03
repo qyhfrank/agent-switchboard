@@ -422,17 +422,16 @@ export function applyBundleFiles(
 }
 
 /**
- * Remove an owned bundle's recorded files, prune emptied directories, and
- * drop the bundle directory itself only when nothing foreign remains.
- * Returns the recorded rels still on disk afterwards: a deletion that could
- * not happen must never be reported as one, and the caller keeps its claim so
- * the payload stays reclaimable. An empty result means asb's whole slice is
- * gone, whether or not foreign files kept the directory alive.
+ * Remove the files the render names inside a bundle, prune emptied
+ * directories, and drop the bundle directory itself only when nothing foreign
+ * remains. Returns the named rels still on disk afterwards: a deletion that
+ * could not happen must never be reported as one. An empty result means asb's
+ * whole slice is gone, whether or not foreign files kept the directory alive.
  */
-export function removeBundleSlice(bundleRoot: string, recorded: readonly string[]): string[] {
+export function removeBundleSlice(bundleRoot: string, slice: readonly string[]): string[] {
   const root = path.resolve(bundleRoot);
   const leftBehind: string[] = [];
-  for (const rel of recorded) {
+  for (const rel of slice) {
     const filePath = path.join(root, rel);
     try {
       fs.unlinkSync(filePath);
@@ -444,7 +443,7 @@ export function removeBundleSlice(bundleRoot: string, recorded: readonly string[
   try {
     if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
   } catch {
-    // Gone already, or holding files this record never covered.
+    // Gone already, or holding files the render never named.
   }
   return leftBehind;
 }

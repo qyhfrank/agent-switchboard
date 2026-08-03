@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runSync } from '../../src/engine/cli.js';
-import { loadProjectManifest } from '../../src/engine/peer.js';
 import {
   installApps,
   seedMcpLibrary,
@@ -18,7 +17,7 @@ function projectConfig(project: string, mcp: string[]): void {
   );
 }
 
-test('managed project MCP preserves foreign servers and records sanitized peer keys', async () => {
+test('managed project MCP preserves foreign servers and sanitizes the managed key', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -37,14 +36,12 @@ test('managed project MCP preserves foreign servers and records sanitized peer k
 
     const report = await runSync({ project });
     const parsed = JSON.parse(fs.readFileSync(host, 'utf-8')) as {
-      mcpServers: Record<string, unknown>;
+      mcpServers: Record<string, { env?: Record<string, string> }>;
     };
-    const manifest = loadProjectManifest(homes.asbHome, project).manifest;
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.deepEqual(Object.keys(parsed.mcpServers).sort(), ['foreign', 'managed-server']);
-    assert.equal(manifest?.sections.mcp?.['managed.server::cursor']?.serverKey, 'managed-server');
-    assert.equal(JSON.stringify(manifest).includes('@array:'), false);
+    assert.equal(parsed.mcpServers['managed-server']?.env?.TOKEN_NAME, 'INVENTED-PLACEHOLDER-9f3a');
   });
 });
 
@@ -72,11 +69,10 @@ test('managed project MCP removes a clean disabled key and preserves foreign sib
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.deepEqual(Object.keys(after.mcpServers), ['foreign']);
-    assert.deepEqual(loadProjectManifest(homes.asbHome, project).manifest?.sections.mcp, {});
   });
 });
 
-test('managed project MCP drifted removal is left behind with peer proof retained', async () => {
+test('a deselected project key running a different command is kept and not spoken of', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -101,13 +97,17 @@ test('managed project MCP drifted removal is left behind with peer proof retaine
         .mcpServers.alpha.command,
       'user-edited'
     );
-    assert.ok(
-      loadProjectManifest(homes.asbHome, project).manifest?.sections.mcp?.['alpha::cursor']
+    // The value is the whole proof, and `user-edited` is a different server
+    // wearing a library name: asb keeps it and says nothing about it.
+    assert.deepEqual(
+      report.entries.filter((entry) => entry.type === 'mcp'),
+      [],
+      JSON.stringify(report.entries, null, 2)
     );
   });
 });
 
-test('custom keyed-array project MCP keeps @array grammar out of every ownership record', async () => {
+test('custom keyed-array project MCP keeps @array grammar out of the host document', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -132,16 +132,17 @@ test('custom keyed-array project MCP keeps @array grammar out of every ownership
     projectConfig(project, ['alpha']);
 
     const report = await runSync({ project });
-    const manifestText = fs.readFileSync(loadProjectManifest(homes.asbHome, project).path, 'utf-8');
+    const hostText = fs.readFileSync(path.join(project, '.custom', 'mcp.yaml'), 'utf-8');
+
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    // The portable manifest records the machine-independent serverKey; the
-    // machine ledger is global-only and a project run never writes it —
-    // project planning proves ownership from the manifest, and a project row
-    // under an app root would otherwise become a global stale-removal
-    // candidate.
+    // `@array:name[...]` is the key path planning addresses an array element
+    // with; the document keeps the plain keyed-array shape the app reads.
+    assert.equal(hostText.includes('@array:'), false);
+    assert.match(hostText, /name: alpha/);
+    // A project run derives what it owns from the render, so it writes no
+    // machine state at all.
     assert.equal(fs.existsSync(path.join(homes.stateHome, 'ledger.json')), false);
-    assert.equal(manifestText.includes('@array:'), false);
-    assert.match(manifestText, /"serverKey": "alpha"/);
+    assert.equal(fs.existsSync(path.join(homes.stateHome, 'last-run.json')), false);
   });
 });
 
@@ -301,6 +302,5 @@ test('a key two Trae apps share outlives the first of them and goes with the las
     const root = JSON.parse(fs.readFileSync(host, 'utf-8')) as { mcpServers: unknown };
     assert.equal(third.exitCode, 0, JSON.stringify(third.entries, null, 2));
     assert.deepEqual(root.mcpServers, {});
-    assert.deepEqual(loadProjectManifest(homes.asbHome, project).manifest?.sections.mcp, {});
   });
 });

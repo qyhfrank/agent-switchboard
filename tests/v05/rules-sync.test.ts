@@ -291,25 +291,6 @@ test('an app without a rules target contributes no rules actions', async () => {
   });
 });
 
-test('a corrupt ledger aborts the run before any write', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'claude-code');
-    seedTwoRules(homes);
-    writeUserConfig(homes, configFor(['claude-code'], ['alpha', 'beta']));
-
-    await runSync();
-    const ledgerPath = path.join(homes.stateHome, 'ledger.json');
-    assert.ok(fs.existsSync(ledgerPath), 'expected the ledger in the state dir');
-
-    seedRule(homes, 'alpha.md', '---\ntitle: Alpha\n---\nSecond version\n');
-    fs.writeFileSync(ledgerPath, '{corrupt', 'utf-8');
-
-    const bytesBefore = fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8');
-    await assert.rejects(() => runSync(), /ledger/i);
-    assert.equal(fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'), bytesBefore);
-  });
-});
-
 test('an enabled rule missing from the library blocks the aggregate and touches nothing', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');

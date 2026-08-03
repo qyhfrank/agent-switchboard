@@ -72,8 +72,8 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
       : path.join(home, '.local', 'state', 'asb');
 
   // Resolved once against the invocation cwd: a relative override (e.g.
-  // ASB_AGENTS_HOME=agents) must not let the same ledger key point at a
-  // different physical file per working directory.
+  // ASB_AGENTS_HOME=agents) must not let the same target point at a different
+  // physical file per working directory.
   return {
     asbHome: path.resolve(asbHome),
     agentsHome: path.resolve(agentsHome),

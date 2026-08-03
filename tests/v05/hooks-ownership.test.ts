@@ -635,14 +635,14 @@ test('a byte-identical hand-written definition group is adopted, not duplicated'
   });
 });
 
-test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', async () => {
+test('legacy markers, tags, and paths are recognition evidence', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
-    const legacyStateGroup = {
-      matcher: 'legacy-state',
-      hooks: [{ type: 'command', command: 'echo from-state' }],
+    const renderedGroup = {
+      matcher: 'rendered',
+      hooks: [{ type: 'command', command: 'echo rendered' }],
     };
-    seedHook(homes, 'test-hook', { PreToolUse: [legacyStateGroup] });
+    seedHook(homes, 'test-hook', { PreToolUse: [renderedGroup] });
     writeUserConfig(homes, configFor(['claude-code'], ['test-hook']));
 
     const legacyRoot = path.join(homes.agentsHome, '.claude', 'hooks', 'asb');
@@ -669,7 +669,7 @@ test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', 
             hooks: [{ type: 'command', command: 'echo tagged' }],
             _asb_source: true,
           },
-          legacyStateGroup,
+          renderedGroup,
           {
             matcher: 'legacy-path',
             hooks: [{ type: 'command', command: `${legacyDir}/run.sh` }],
@@ -678,13 +678,6 @@ test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', 
       },
       _asb_managed_hooks: ['x'],
     });
-    const legacyStatePath = path.join(
-      homes.asbHome,
-      'state',
-      'hooks',
-      `claude-code-${HEX64_A}.json`
-    );
-    writeJson(legacyStatePath, { version: 1, hooks: { PreToolUse: [legacyStateGroup] } });
 
     await runSync();
 
@@ -692,11 +685,10 @@ test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', 
     assert.equal(raw.includes('_asb'), false);
     assert.equal(raw.includes('asb-managed'), false);
     assert.deepEqual(commandsOf(eventGroups(settings, 'PreToolUse')).sort(), [
-      'echo from-state',
       'echo mine',
+      'echo rendered',
     ]);
     assert.equal(readJson(settings).theme, 'dark');
-    assert.equal(fs.existsSync(legacyStatePath), true, 'legacy evidence is read-only');
     assert.equal(fs.existsSync(legacyDir), true, 'M8 leaves legacy bundle directories untouched');
   });
 });

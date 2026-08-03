@@ -221,8 +221,7 @@ test('explain completes command and agent slices with source, owner, and all has
       const slices = await runExplain(id);
       assert.equal(slices.length, 1, JSON.stringify(slices, null, 2));
       const [slice] = slices;
-      assert.equal(slice.provenance, 'written');
-      assert.equal(slice.recordedHash, slice.currentHash);
+      assert.equal(slice.provenance, 'identity');
       assert.equal(slice.currentHash, slice.desiredHash);
       assert.equal(slice.desiredHash, hashContent(slice.desired as string));
       assert.deepEqual(slice.sources, [{ id, source: 'library', path: source }]);
@@ -242,7 +241,6 @@ test('explain covers native manager state and attributes its plugin source witho
     assert.equal(slices.length, 1, JSON.stringify(slices, null, 2));
     assert.equal(slices[0].app, 'codex');
     assert.equal(slices[0].provenance, 'native-manager');
-    assert.equal(slices[0].recordedHash, null);
     assert.equal(slices[0].currentHash, null);
     assert.equal(slices[0].desiredHash, null);
     assert.equal(slices[0].desired, null);

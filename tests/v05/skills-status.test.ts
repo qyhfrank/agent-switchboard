@@ -52,7 +52,7 @@ test('status names a drifted skill as a pending rewrite without touching it', as
   });
 });
 
-test('explain by skill id joins the ledger record, live tree, and source bundle', async () => {
+test('explain by skill id joins the live tree and its source bundle', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     const source = seedSkill(homes, 'review-pr');
@@ -67,8 +67,7 @@ test('explain by skill id joins the ledger record, live tree, and source bundle'
     assert.equal(slice.app, 'claude-code');
     assert.equal(slice.path, target);
     assert.equal(slice.outcome, 'unchanged');
-    assert.equal(slice.provenance, 'written');
-    assert.equal(slice.recordedHash, bundleFingerprint(target));
+    assert.equal(slice.provenance, 'identity');
     assert.equal(slice.currentHash, bundleFingerprint(target));
     assert.deepEqual(
       slices[0].components.map((component) => component.id),

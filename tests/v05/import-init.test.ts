@@ -6,7 +6,6 @@ import { parse as parseToml } from '@iarna/toml';
 import { parseCliArgs, runImport, runInit, runSync } from '../../src/engine/cli.js';
 import { renderGeminiCommand } from '../../src/engine/dialects.js';
 import { scanLibrary } from '../../src/engine/library.js';
-import { savePeerState } from '../../src/engine/peer.js';
 import { installApps, withScratchHomes } from './helpers/scratch.js';
 
 function write(filePath: string, content: string): void {
@@ -74,12 +73,16 @@ test('no-type import uses every app reader and existing files skip unless forced
       path.join(claude, 'settings.json'),
       `${JSON.stringify({ hooks: { PreToolUse: [managed, user] } })}\n`
     );
-    savePeerState(homes.asbHome, 'claude-code', {
-      version: 1,
-      events: { PreToolUse: [managed] },
-      bundles: [],
-      legacyBundles: [],
-    });
+    // The selected library hook renders the first group verbatim, which is the
+    // only thing that proves the group is asb's rather than the user's.
+    write(
+      path.join(homes.asbHome, 'hooks', 'managed.json'),
+      `${JSON.stringify({ hooks: { PreToolUse: [managed] } })}\n`
+    );
+    write(
+      path.join(homes.asbHome, 'config.toml'),
+      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["managed"]\n'
+    );
 
     const first = await runImport('claude-code', undefined, { recursive: true, force: true });
     assert.equal(first.exitCode, 0, JSON.stringify(first.entries));
@@ -109,9 +112,9 @@ test('no-type import uses every app reader and existing files skip unless forced
       'plan'
     );
     assert.deepEqual(
-      inventory.components.find((entry) => entry.type === 'hooks')?.hooks,
+      inventory.components.find((entry) => entry.id === 'claude-code-hooks')?.hooks,
       { PreToolUse: [user] },
-      'import excludes groups proven ASB-owned by the peer state'
+      'import excludes the group a selected hook renders'
     );
 
     const second = await runImport('claude-code', undefined, { recursive: true });
@@ -153,7 +156,7 @@ test('forced skill import overlays copied files and preserves library-only files
   });
 });
 
-test('hook import excludes enabled rendered groups when peer state is absent', async () => {
+test('importing straight after a sync brings back nothing asb wrote', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     write(
@@ -169,7 +172,6 @@ test('hook import excludes enabled rendered groups when peer state is absent', a
       '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["guard"]\n'
     );
     await runSync();
-    fs.rmSync(path.join(homes.asbHome, 'state', 'hooks'), { recursive: true, force: true });
 
     const result = await runImport('claude-code', undefined, {
       types: ['hooks'],

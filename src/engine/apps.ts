@@ -123,8 +123,6 @@ export interface HooksTargetRow {
   deleteWhenEmpty: boolean;
   /** The app-native subset of the library shape, when the app supports less than Claude. */
   filter?: (hooks: HookEventMap) => HookEventMap;
-  /** Peer state target name: `<ASB_HOME>/state/hooks/<target>.json`. */
-  stateTarget: 'claude-code' | 'codex';
   /** Import the user hook map from this row's host document. */
   importable?: boolean;
   /**
@@ -284,7 +282,6 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, '.claude', 'settings.local.json'),
       projectBundleDir: (root) => path.join(root, '.claude', 'hooks', 'managed'),
       deleteWhenEmpty: false,
-      stateTarget: 'claude-code',
       importable: true,
     },
     mcp: {
@@ -367,7 +364,6 @@ export const APP_ROWS: readonly AppRow[] = [
       projectBundleDir: (root) => path.join(root, '.codex', 'hooks', 'managed'),
       deleteWhenEmpty: true,
       filter: filterCodexHooks,
-      stateTarget: 'codex',
       // Codex records trust against each hook's current hash and skips new or
       // changed non-managed hooks until they are reviewed. Interactive Codex
       // warns at startup; `codex exec` just runs without them.
