@@ -146,8 +146,8 @@ test('project AGENTS.md keeps one marker writer with codex, gemini, opencode, an
     const content = fs.readFileSync(agents, 'utf-8');
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(content.match(/<!-- asb:rules:start -->/g)?.length, 1);
-    assert.equal(content.match(/<!-- asb:rules:end -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- rules:start -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- rules:end -->/g)?.length, 1);
     assert.match(content, /# Shared rule/);
     assert.match(content, /# User instructions/);
     assert.equal(

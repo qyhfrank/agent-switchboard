@@ -95,8 +95,32 @@ export function composeRules(
 // Region shape (markdown hosts; delimiters double as on-disk ownership proof)
 // ---------------------------------------------------------------------------
 
-const REGION_START = '<!-- asb:rules:start -->';
-const REGION_END = '<!-- asb:rules:end -->';
+const REGION_START = '<!-- rules:start -->';
+const REGION_END = '<!-- rules:end -->';
+
+/**
+ * The pair an earlier version wrote. Locating accepts it so a host it wrapped
+ * is found and rewritten rather than gaining a second region; writing only
+ * ever emits the current pair.
+ */
+const LEGACY_REGION_START = '<!-- asb:rules:start -->';
+const LEGACY_REGION_END = '<!-- asb:rules:end -->';
+
+/** Bounds of the marker pair in either spelling, or null when the host has none. */
+function regionBounds(content: string): { start: number; end: number } | null {
+  const pairs = [
+    [REGION_START, REGION_END],
+    [LEGACY_REGION_START, LEGACY_REGION_END],
+  ] as const;
+  for (const [open, close] of pairs) {
+    const startIdx = content.indexOf(open);
+    const endIdx = content.indexOf(close);
+    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+      return { start: startIdx, end: endIdx + close.length };
+    }
+  }
+  return null;
+}
 
 export type RegionPlacement = 'prepend' | 'append';
 
@@ -110,20 +134,16 @@ export function mergeRegion(
   content: string,
   placement: RegionPlacement = 'prepend'
 ): string {
-  const startIdx = existing.indexOf(REGION_START);
-  const endIdx = existing.indexOf(REGION_END);
+  const bounds = regionBounds(existing);
 
   if (content.length === 0) {
-    if (startIdx !== -1 && endIdx !== -1) return removeRegion(existing);
-    return existing;
+    return bounds === null ? existing : removeRegion(existing);
   }
 
   const block = `${REGION_START}\n${content.trimEnd()}\n${REGION_END}`;
 
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    const before = existing.slice(0, startIdx);
-    const after = existing.slice(endIdx + REGION_END.length);
-    return `${before}${block}${after}`;
+  if (bounds !== null) {
+    return `${existing.slice(0, bounds.start)}${block}${existing.slice(bounds.end)}`;
   }
 
   const trimmed = existing.trimEnd();
@@ -134,23 +154,18 @@ export function mergeRegion(
 
 /** Remove the managed block and its markers, preserving the rest. */
 export function removeRegion(content: string): string {
-  const startIdx = content.indexOf(REGION_START);
-  const endIdx = content.indexOf(REGION_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return content;
+  const bounds = regionBounds(content);
+  if (bounds === null) return content;
 
-  const before = content.slice(0, startIdx);
-  const after = content.slice(endIdx + REGION_END.length);
-
-  const result = (before + after).replace(/\n{3,}/g, '\n\n').trim();
+  const kept = content.slice(0, bounds.start) + content.slice(bounds.end);
+  const result = kept.replace(/\n{3,}/g, '\n\n').trim();
   return result.length > 0 ? `${result}\n` : '';
 }
 
 /** The managed slice of a host, or null when no marker pair exists. */
 export function extractRegion(content: string): string | null {
-  const startIdx = content.indexOf(REGION_START);
-  const endIdx = content.indexOf(REGION_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
-  return content.slice(startIdx, endIdx + REGION_END.length);
+  const bounds = regionBounds(content);
+  return bounds === null ? null : content.slice(bounds.start, bounds.end);
 }
 
 /** True when the host has asb's own region markers (ownership proof 2). */
@@ -175,17 +190,24 @@ function markerOffsets(content: string, marker: string): number[] {
  * duplicated, or reordered marker set is ambiguous ownership and fails closed.
  */
 export function projectRegion(content: string): string | null {
-  const starts = markerOffsets(content, REGION_START);
-  const ends = markerOffsets(content, REGION_END);
+  const currentStarts = markerOffsets(content, REGION_START);
+  const currentEnds = markerOffsets(content, REGION_END);
+  const legacyStarts = markerOffsets(content, LEGACY_REGION_START);
+  const legacyEnds = markerOffsets(content, LEGACY_REGION_END);
+
+  const starts = [...currentStarts, ...legacyStarts];
+  const ends = [...currentEnds, ...legacyEnds];
   if (starts.length === 0 && ends.length === 0) return null;
   if (starts.length > 1 || ends.length > 1) {
-    throw new Error('duplicate ASB project markers');
+    throw new Error('duplicate managed project markers');
   }
-  if (starts.length !== 1 || ends.length !== 1) {
-    throw new Error('incomplete ASB project markers');
+  const current = currentStarts.length === 1 && currentEnds.length === 1;
+  const legacy = legacyStarts.length === 1 && legacyEnds.length === 1;
+  if (!current && !legacy) {
+    throw new Error('incomplete managed project markers');
   }
-  if (starts[0] >= ends[0]) throw new Error('reordered ASB project markers');
-  return content.slice(starts[0], ends[0] + REGION_END.length);
+  if (starts[0] >= ends[0]) throw new Error('reordered managed project markers');
+  return content.slice(starts[0], ends[0] + (current ? REGION_END : LEGACY_REGION_END).length);
 }
 
 export function mergeProjectRegion(

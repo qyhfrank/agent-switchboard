@@ -200,8 +200,9 @@ test('shared project AGENTS.md has one strict 0.4 marker writer', async () => {
     const content = fs.readFileSync(agents, 'utf-8');
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(content.match(/<!-- asb:rules:start -->/g)?.length, 1);
-    assert.equal(content.match(/<!-- asb:rules:end -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- rules:start -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- rules:end -->/g)?.length, 1);
+    assert.ok(!/asb/i.test(content), 'the written project region never names asb');
     assert.match(content, /# Shared rule/);
     assert.match(content, /# User instructions/);
     assert.equal(
@@ -234,14 +235,19 @@ test('malformed shared AGENTS markers fail closed without repair guessing', asyn
   });
 });
 
-test('project marker parser accepts one 0.4 pair and rejects partial or reordered pairs', () => {
+test('project marker parser accepts one pair in either spelling and rejects partial or reordered pairs', () => {
+  assert.equal(
+    projectRegion('before\n<!-- rules:start -->\nmanaged\n<!-- rules:end -->\nafter\n'),
+    '<!-- rules:start -->\nmanaged\n<!-- rules:end -->'
+  );
   assert.equal(
     projectRegion('before\n<!-- asb:rules:start -->\nmanaged\n<!-- asb:rules:end -->\nafter\n'),
     '<!-- asb:rules:start -->\nmanaged\n<!-- asb:rules:end -->'
   );
+  assert.throws(() => projectRegion('<!-- rules:start -->\nmanaged\n'), /incomplete/i);
   assert.throws(() => projectRegion('<!-- asb:rules:start -->\nmanaged\n'), /incomplete/i);
   assert.throws(
-    () => projectRegion('<!-- asb:rules:end -->\nmanaged\n<!-- asb:rules:start -->\n'),
+    () => projectRegion('<!-- rules:end -->\nmanaged\n<!-- rules:start -->\n'),
     /reordered/i
   );
 });
