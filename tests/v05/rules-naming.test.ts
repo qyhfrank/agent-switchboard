@@ -4,6 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { APP_ROWS } from '../../src/engine/apps.js';
 import { runSync } from '../../src/engine/cli.js';
+import { loadConfig } from '../../src/engine/config.js';
 import { seedRule, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
 const DEDICATED = [
@@ -52,6 +53,33 @@ test('the rendered rules body names no product, only the rules themselves', () =
     assert.doesNotMatch(rendered, /asb/i, `${row.id} rendered rules`);
     assert.doesNotMatch(rendered, /agent switchboard/i, `${row.id} rendered rules`);
   }
+});
+
+test('a rule id of `rules` is rejected rather than written as an ambiguous marker', async () => {
+  await withScratchHomes(async (homes) => {
+    for (const toml of [
+      '[rules]\nenabled = ["rules"]\n',
+      '[applications.claude-code.rules]\nenabled = ["rules"]\n',
+      '[applications.claude-code.rules]\nadd = ["rules"]\n',
+    ]) {
+      writeUserConfig(homes, toml);
+      assert.throws(
+        () => loadConfig(),
+        (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          return message.includes('rules') && message.includes('marker');
+        },
+        toml
+      );
+    }
+  });
+});
+
+test('a namespaced id ending in rules stays usable', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[rules]\nenabled = ["team:rules"]\n');
+    assert.deepEqual(loadConfig().selection.rules, ['team:rules']);
+  });
 });
 
 test('a cursor sync writes ~/.cursor/rules/rules.mdc', async () => {

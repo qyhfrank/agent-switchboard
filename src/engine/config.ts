@@ -222,9 +222,21 @@ const selectionSection = z.preprocess(
   z.object({ enabled: idArray.optional() }).strict()
 );
 
+/**
+ * A rule delimits its block with `<!-- <id>:start -->`, and the region around
+ * the whole composition uses the same spelling with the id `rules`. A rule
+ * actually named `rules` would render a block marker identical to the region
+ * boundary, leaving nothing able to tell where asb's slice ends. Namespaced
+ * ids are safe: `team:rules` renders `<!-- team:rules:start -->`.
+ */
+const ruleIdArray = idArray.refine((ids) => !ids.includes('rules'), {
+  message:
+    '"rules" cannot be a rule id: its block marker would be identical to the marker bounding the whole region',
+});
+
 const rulesSection = z.preprocess(
   migrateActive,
-  z.object({ enabled: idArray.optional(), includeDelimiters: z.boolean().optional() }).strict()
+  z.object({ enabled: ruleIdArray.optional(), includeDelimiters: z.boolean().optional() }).strict()
 );
 
 const incrementalSelection = z
@@ -233,8 +245,8 @@ const incrementalSelection = z
 
 const incrementalRules = z
   .object({
-    enabled: idArray.optional(),
-    add: idArray.optional(),
+    enabled: ruleIdArray.optional(),
+    add: ruleIdArray.optional(),
     remove: idArray.optional(),
     includeDelimiters: z.boolean().optional(),
   })
