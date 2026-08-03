@@ -27,6 +27,12 @@ Ledger entries are still written for skills so that a project run proves
 ownership to its peer manifest, which 0.4 peers read. Global planning no longer
 consults them.
 
+### Reports collapse repeated outcomes
+
+Entries sharing an outcome, detail, and reason render as one line naming the
+first four subjects and counting the rest, restoring 0.4's `... (+N more)`
+behavior. A run resolving forty bundles the same way is one line, not forty.
+
 ## 0.5.0
 
 ### Migration notes

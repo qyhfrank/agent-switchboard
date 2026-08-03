@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { runSync } from '../../src/engine/cli.js';
 import { loadConfig } from '../../src/engine/config.js';
-import { redactCredentials, renderReport } from '../../src/engine/report.js';
+import { buildReport, redactCredentials, renderReport } from '../../src/engine/report.js';
 import { installApps, seedRule, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
 test('relative home overrides resolve once against the invocation cwd', async () => {
@@ -39,6 +39,42 @@ test('the credential redactor also masks bare token userinfo', () => {
   assert.equal(redactCredentials('https://user:secret@host/path'), 'https://user:***@host/path');
   assert.equal(redactCredentials('https://secret-token@host/path'), 'https://***@host/path');
   assert.equal(redactCredentials('no credentials here'), 'no credentials here');
+});
+
+test('entries sharing an outcome and reason render as one named-and-counted line', () => {
+  const entries = ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta'].map((id) => ({
+    app: 'codex',
+    type: 'skills',
+    id,
+    path: `/skills/${id}`,
+    outcome: 'removed' as const,
+    detail: 'stale-copy',
+    reason: 'not the current render',
+  }));
+  const rendered = renderReport(
+    buildReport({ profile: null, project: null, dryRun: false }, [
+      ...entries,
+      {
+        app: 'codex',
+        type: 'skills',
+        id: 'solo',
+        path: '/skills/solo',
+        outcome: 'written' as const,
+        detail: 'created',
+      },
+    ])
+  );
+
+  const lines = rendered.split('\n');
+  assert.equal(
+    lines.filter((line) => line.includes('removed (stale-copy)')).length,
+    1,
+    'six identical outcomes collapse to one line'
+  );
+  assert.match(rendered, /removed \(stale-copy\): alpha, beta, gamma, delta, \.\.\. \(\+2 more\)/);
+  assert.match(rendered, /not the current render/);
+  // A lone entry still names itself without a count suffix.
+  assert.match(rendered, /written \(created\): solo\n/);
 });
 
 test('status reports the last completed real run', async () => {
