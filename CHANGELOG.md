@@ -23,9 +23,56 @@ compared against its library render, and that comparison decides everything:
 A directory you wrote by hand under a library skill's id is destroyed by that
 sweep. Bundles holding symlinks or special files are still never removed.
 
-Ledger entries are still written for skills so that a project run proves
-ownership to its peer manifest, which 0.4 peers read. Global planning no longer
-consults them.
+### Ownership is derived for every component type
+
+What was true for skills is now true for rules, commands, agents, hooks, and
+MCP servers: a slice is ASB's while it holds what the library renders, and no
+run consults a record to decide.
+
+- **The ownership stores are deleted.** `<state dir>/ledger.json`, the project
+  manifests under `<ASB_HOME>/state/manifests/`, and the hook peer state under
+  `<ASB_HOME>/state/hooks/` are removed on the first run of this version. The
+  state directory keeps `run.lock` and a new `last-run.json`.
+- **0.4 interoperation ends.** A 0.4 peer sharing one `ASB_HOME` read those
+  stores and 0.5 no longer writes them, so the two versions can no longer share
+  a library. Finish migrating before running this version against a home a 0.4
+  install still uses.
+- **`adopted` is gone from the output.** A target already holding the render is
+  reported `unchanged` and nothing is written; the `adopted (convention)` step
+  that used to precede a write no longer exists.
+- **Predecessor hook groups are reported, not migrated.** A group a 0.4 install
+  wrote whose command names no distributed file cannot be attributed, so it is
+  reported once per run and left for you to delete. A group byte-identical to
+  what the library renders is taken as ASB's rather than duplicated beside
+  itself, which reverses the previous "byte equality is not proof" rule for
+  definition hooks.
+- **A recognized hook group keeps its array index.** Codex records trust
+  against a group's position, so a group that did not change is rewritten where
+  it already sits instead of being appended behind whatever else is in the
+  file.
+- **Nothing ASB writes into your configuration carries its name.** The Cursor
+  and Trae rules files are `rules.mdc` and `rules.md`, replacing `asb-rules.*`,
+  which are swept on the next run. Only those built-in paths carry the old
+  spelling, so a `[targets.<id>].rules` path you chose is left alone along with
+  anything beside it. The rules region delimiters are
+  `<!-- rules:start -->` and `<!-- rules:end -->`; the previous spelling is
+  still recognized when locating an existing region, so a file written by an
+  earlier version is rewritten once rather than gaining a second region. A rule
+  id of `rules` is rejected, since it would collide with the new filename.
+- **`asb remove <source>` takes what the source distributed.** It retires the
+  ids — in the global lists, the plugin list, and any per-application override
+  — distributes once while the library can still render them, and only then
+  drops the declaration and any managed checkout. A slice it could not take
+  keeps the source in place for a later attempt. Previously it removed the
+  source and told you to sync afterwards, which now would leave every
+  distributed file behind with nothing able to attribute it.
+- **Disabling an id reaches a per-application `enabled` list.** That spelling
+  replaces the global selection for its app and ignores `remove`, so a disable
+  that only wrote `remove` used to leave the id selected there.
+- **A project region in `AGENTS.md` is proven by its delimiters.** An edit
+  inside the region is overwritten on the next project sync, exactly as it is
+  in a shared file under your home directory. Bytes outside the region are
+  untouched.
 
 ### Reports collapse repeated outcomes
 
@@ -51,9 +98,9 @@ behavior. A run resolving forty bundles the same way is one line, not forty.
 - **MIG-05, byte preservation:** Shared-document writers preserve unrelated
   bytes. They cannot restore comments or formatting already destroyed by a
   predecessor whole-file rewrite.
-- **MIG-06, managed MCP values:** An owned MCP value is replaced wholly. Bytes
-  modified since the recorded write cause a conflict instead of a deep merge
-  with foreign subkeys.
+- **MIG-06, managed MCP values:** An owned MCP value is replaced wholly. A
+  value that no longer equals the render conflicts instead of deep-merging with
+  foreign subkeys.
 - **MIG-07, Codex project trust:** Trust is add-only. Existing trusted values
   are preserved, untrusted or malformed values are refused, and ASB provides
   no removal path.
@@ -78,11 +125,10 @@ behavior. A run resolving forty bundles the same way is one line, not forty.
 ### Compatibility boundaries
 
 - Executable target extensions are replaced by `[targets.<id>]` data. Leftover
-  `.mjs` and `.js` files remain untouched for a 0.4 peer sharing `ASB_HOME`.
-- Hook bundle groups can recover ownership from recognized managed paths and
-  predecessor evidence after state loss. Definition hooks remain unclaimable
-  without state; byte equality is not ownership proof, so an identical
-  hand-written group is preserved and a definition may be appended again.
+  `.mjs` and `.js` files remain untouched.
+- A hook group is attributed by the managed path in its command or by equality
+  with a rendered group. Predecessor markers are still recognized, and a group
+  neither signal reaches keeps its content and its position.
 - Configuration validation is strict after the explicit compatibility
   migrations for `active`, the agents/subagents split, legacy plugin forms,
   legacy home resolution, and `[extensions]` parser tolerance.

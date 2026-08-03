@@ -4,7 +4,6 @@ import { isDeepStrictEqual } from 'node:util';
 import type { AppRow } from './apps.js';
 import { ConfigError, effectiveSelection, type Homes, type ResolvedConfig } from './config.js';
 import type { LibraryInventory } from './library.js';
-import { loadPeerState } from './peer.js';
 import { renderHookGroups } from './plan.js';
 import { writeFileAtomic } from './shapes.js';
 
@@ -265,26 +264,25 @@ async function importHooks(
     let content = sourceOverride ? document : { hooks: document.hooks };
     if (!content.hooks || typeof content.hooks !== 'object') throw new Error('hook map is absent');
     if (!sourceOverride) {
-      let owned = loadPeerState(homes.asbHome, row.hooks.stateTarget).events;
-      if (Object.keys(owned).length === 0) {
-        const byId = new Map(
-          context.inventory.components
-            .filter((component) => component.type === 'hooks')
-            .map((component) => [component.id, component])
-        );
-        const rendered: Record<string, unknown[]> = {};
-        for (const selected of effectiveSelection(context.config, row.id, 'hooks')) {
-          const component = byId.get(selected);
-          if (!component?.hooks) continue;
-          const filtered = row.hooks.filter ? row.hooks.filter(component.hooks) : component.hooks;
-          const bundleDir = component.files
-            ? path.join(row.hooks.bundleDir(homes), selected)
-            : undefined;
-          for (const [event, groups] of Object.entries(renderHookGroups(filtered, bundleDir))) {
-            rendered[event] = [...(rendered[event] ?? []), ...groups];
-          }
+      // What asb already put in this config is what the library renders for
+      // the ids currently selected: importing the rest is what makes this an
+      // import of the user's own hooks rather than a round trip.
+      const byId = new Map(
+        context.inventory.components
+          .filter((component) => component.type === 'hooks')
+          .map((component) => [component.id, component])
+      );
+      const owned: Record<string, unknown[]> = {};
+      for (const selected of effectiveSelection(context.config, row.id, 'hooks')) {
+        const component = byId.get(selected);
+        if (!component?.hooks) continue;
+        const filtered = row.hooks.filter ? row.hooks.filter(component.hooks) : component.hooks;
+        const bundleDir = component.files
+          ? path.join(row.hooks.bundleDir(homes), selected)
+          : undefined;
+        for (const [event, groups] of Object.entries(renderHookGroups(filtered, bundleDir))) {
+          owned[event] = [...(owned[event] ?? []), ...groups];
         }
-        owned = rendered;
       }
       const userHooks: Record<string, unknown[]> = {};
       for (const [event, groups] of Object.entries(content.hooks as Record<string, unknown[]>)) {

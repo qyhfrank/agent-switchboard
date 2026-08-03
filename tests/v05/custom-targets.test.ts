@@ -207,3 +207,48 @@ test('the carried transforms keep pipeline order and inverse validation', () => 
     /duplicate identity/
   );
 });
+
+test('a rules path configuration chose is never swept by name', async () => {
+  await withScratchHomes(async (homes) => {
+    const targetDir = path.join(homes.agentsHome, '.mine');
+    fs.mkdirSync(targetDir, { recursive: true });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["mine"]',
+        '',
+        '[rules]',
+        'enabled = []',
+        '',
+        '[targets.mine]',
+        'detect = "~/.mine"',
+        '',
+        '[targets.mine.rules]',
+        'file_path = "~/.mine/rules.md"',
+        '',
+      ].join('\n')
+    );
+
+    // The path is the user's answer to "where do rules go", not a name asb
+    // chose, so neither it nor a sibling wearing the retired prefix is
+    // evidence of anything. Both are the user's bytes.
+    const chosen = path.join(targetDir, 'rules.md');
+    const sibling = path.join(targetDir, 'asb-rules.md');
+    fs.writeFileSync(chosen, 'House rules, written by hand.\n', 'utf-8');
+    fs.writeFileSync(sibling, 'Notes about asb, written by hand.\n', 'utf-8');
+
+    const report = await runSync();
+
+    assert.equal(fs.readFileSync(chosen, 'utf-8'), 'House rules, written by hand.\n');
+    assert.equal(fs.readFileSync(sibling, 'utf-8'), 'Notes about asb, written by hand.\n');
+    const row = report.entries.find((entry) => entry.path === chosen);
+    assert.equal(row?.outcome, 'left-behind', JSON.stringify(report.entries, null, 2));
+    assert.equal(row?.detail, 'unproven');
+    assert.equal(
+      report.entries.some((entry) => entry.path === sibling),
+      false,
+      'a file asb has no claim on is not its business to name'
+    );
+  });
+});

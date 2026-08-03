@@ -221,8 +221,7 @@ test('explain completes command and agent slices with source, owner, and all has
       const slices = await runExplain(id);
       assert.equal(slices.length, 1, JSON.stringify(slices, null, 2));
       const [slice] = slices;
-      assert.equal(slice.provenance, 'written');
-      assert.equal(slice.recordedHash, slice.currentHash);
+      assert.equal(slice.provenance, 'identity');
       assert.equal(slice.currentHash, slice.desiredHash);
       assert.equal(slice.desiredHash, hashContent(slice.desired as string));
       assert.deepEqual(slice.sources, [{ id, source: 'library', path: source }]);
@@ -242,7 +241,6 @@ test('explain covers native manager state and attributes its plugin source witho
     assert.equal(slices.length, 1, JSON.stringify(slices, null, 2));
     assert.equal(slices[0].app, 'codex');
     assert.equal(slices[0].provenance, 'native-manager');
-    assert.equal(slices[0].recordedHash, null);
     assert.equal(slices[0].currentHash, null);
     assert.equal(slices[0].desiredHash, null);
     assert.equal(slices[0].desired, null);
@@ -340,5 +338,33 @@ test('explain exits 1 for failed slices and no match in text and JSON', async ()
       assert.equal(failed.err, '');
       assert.equal(absent.err, '');
     }
+  });
+});
+
+test('explain exits 1 for a slice asb declined to touch', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(path.join(homes.asbHome, 'commands', 'review.md'), 'Review it.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = ["review"]\n'
+    );
+    await runMain(['sync']);
+
+    // Edited, then deselected: asb will not delete bytes it cannot prove are
+    // its own, so the file stays. A run treats that as working as intended,
+    // but `explain review` is a question about this one target, and the
+    // answer is that it is not resolved.
+    const target = path.join(homes.agentsHome, '.claude', 'commands', 'review.md');
+    fs.appendFileSync(target, 'A line the user added.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = []\n'
+    );
+
+    const left = await runMain(['explain', 'review']);
+    assert.match(left.out, /left-behind \(unproven\)/, left.out || left.err);
+    assert.equal(left.code, 1, left.out || left.err);
+    assert.equal((await runMain(['explain', 'review', '--json'])).code, 1);
   });
 });

@@ -69,8 +69,15 @@ export interface RulesTargetRow {
   /** Project destination; absent means this cell is global-only. */
   projectPath?(projectRoot: string): string;
   render(body: string, targetPath?: string): string;
-  /** Dedicated asb-named file (full ownership by name) vs shared host. */
+  /** Whole-file target vs a host asb shares with the user. */
   dedicated: boolean;
+  /**
+   * The filename is this table's, so location alone proves the slice and
+   * authorizes both the sweep on deselection and the sweep of the name an
+   * earlier version used. A target whose path comes from configuration is the
+   * user's choice and carries no such claim.
+   */
+  ownsName?: boolean;
 }
 
 export interface SkillsTargetRow {
@@ -123,8 +130,6 @@ export interface HooksTargetRow {
   deleteWhenEmpty: boolean;
   /** The app-native subset of the library shape, when the app supports less than Claude. */
   filter?: (hooks: HookEventMap) => HookEventMap;
-  /** Peer state target name: `<ASB_HOME>/state/hooks/<target>.json`. */
-  stateTarget: 'claude-code' | 'codex';
   /** Import the user hook map from this row's host document. */
   importable?: boolean;
   /**
@@ -284,7 +289,6 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, '.claude', 'settings.local.json'),
       projectBundleDir: (root) => path.join(root, '.claude', 'hooks', 'managed'),
       deleteWhenEmpty: false,
-      stateTarget: 'claude-code',
       importable: true,
     },
     mcp: {
@@ -367,7 +371,6 @@ export const APP_ROWS: readonly AppRow[] = [
       projectBundleDir: (root) => path.join(root, '.codex', 'hooks', 'managed'),
       deleteWhenEmpty: true,
       filter: filterCodexHooks,
-      stateTarget: 'codex',
       // Codex records trust against each hook's current hash and skips new or
       // changed non-managed hooks until they are reviewed. Interactive Codex
       // warns at startup; `codex exec` just runs without them.
@@ -481,10 +484,11 @@ export const APP_ROWS: readonly AppRow[] = [
     detectDir: (homes) => path.join(homes.agentsHome, '.cursor'),
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
-      path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'asb-rules.mdc'),
-      projectPath: (root) => path.join(root, '.cursor', 'rules', 'asb-rules.mdc'),
+      path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'rules.mdc'),
+      projectPath: (root) => path.join(root, '.cursor', 'rules', 'rules.mdc'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+      ownsName: true,
     },
     commands: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
@@ -528,10 +532,11 @@ export const APP_ROWS: readonly AppRow[] = [
     detectDir: (homes) => vendorDataDir(homes.agentsHome, 'Trae'),
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
-      path: (homes) => path.join(homes.agentsHome, '.trae', 'user_rules', 'asb-rules.md'),
-      projectPath: (root) => path.join(root, '.trae', 'rules', 'asb-rules.md'),
+      path: (homes) => path.join(homes.agentsHome, '.trae', 'user_rules', 'rules.md'),
+      projectPath: (root) => path.join(root, '.trae', 'rules', 'rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+      ownsName: true,
     },
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
@@ -555,10 +560,11 @@ export const APP_ROWS: readonly AppRow[] = [
     detectDir: (homes) => vendorDataDir(homes.agentsHome, 'Trae CN'),
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),
-      path: (homes) => path.join(homes.agentsHome, '.trae-cn', 'user_rules', 'asb-rules.md'),
-      projectPath: (root) => path.join(root, '.trae', 'rules', 'asb-rules.md'),
+      path: (homes) => path.join(homes.agentsHome, '.trae-cn', 'user_rules', 'rules.md'),
+      projectPath: (root) => path.join(root, '.trae', 'rules', 'rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
+      ownsName: true,
     },
     skills: {
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),

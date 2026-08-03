@@ -91,71 +91,54 @@ export function composeRules(
   return { content, hash: hashContent(content), sections };
 }
 
+/**
+ * Whether `content` is a composition of the given rule blocks and nothing
+ * else. A version that wrote the whole host file left no marker to find, so
+ * this is how such a file is still recognized as a render rather than as
+ * something the user wrote: it reassembles from library blocks, joined the
+ * way `composeRules` joins them.
+ */
+export function composedFromRuleBlocks(content: string, blocks: readonly string[]): boolean {
+  if (content.length === 0 || blocks.length === 0) return false;
+  let position = 0;
+  while (position < content.length) {
+    let matched = 0;
+    for (const block of blocks) {
+      if (block.length > matched && content.startsWith(block, position)) matched = block.length;
+    }
+    if (matched === 0) return false;
+    position += matched;
+    if (position === content.length) return true;
+    if (content[position] !== '\n') return false;
+    position += 1;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Region shape (markdown hosts; delimiters double as on-disk ownership proof)
 // ---------------------------------------------------------------------------
 
-const REGION_START = '<!-- asb:rules:start -->';
-const REGION_END = '<!-- asb:rules:end -->';
+const REGION_START = '<!-- rules:start -->';
+const REGION_END = '<!-- rules:end -->';
+
+/**
+ * The pair an earlier version wrote. Locating accepts it so a host it wrapped
+ * is found and rewritten rather than gaining a second region; writing only
+ * ever emits the current pair.
+ */
+const LEGACY_REGION_START = '<!-- asb:rules:start -->';
+const LEGACY_REGION_END = '<!-- asb:rules:end -->';
 
 export type RegionPlacement = 'prepend' | 'append';
 
 /**
- * Merge managed content into a shared host, preserving everything outside the
- * markers. Existing marker pair → replace between them; no markers → insert
- * per placement; empty content → remove the block entirely.
+ * The name an earlier version gave a dedicated rules file at this same path.
+ * Sweeping it is what carries a machine across the rename; it goes once no
+ * supported upgrade path still starts from a file carrying the old prefix.
  */
-export function mergeRegion(
-  existing: string,
-  content: string,
-  placement: RegionPlacement = 'prepend'
-): string {
-  const startIdx = existing.indexOf(REGION_START);
-  const endIdx = existing.indexOf(REGION_END);
-
-  if (content.length === 0) {
-    if (startIdx !== -1 && endIdx !== -1) return removeRegion(existing);
-    return existing;
-  }
-
-  const block = `${REGION_START}\n${content.trimEnd()}\n${REGION_END}`;
-
-  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-    const before = existing.slice(0, startIdx);
-    const after = existing.slice(endIdx + REGION_END.length);
-    return `${before}${block}${after}`;
-  }
-
-  const trimmed = existing.trimEnd();
-  if (trimmed.length === 0) return `${block}\n`;
-  if (placement === 'prepend') return `${block}\n\n${trimmed}\n`;
-  return `${trimmed}\n\n${block}\n`;
-}
-
-/** Remove the managed block and its markers, preserving the rest. */
-export function removeRegion(content: string): string {
-  const startIdx = content.indexOf(REGION_START);
-  const endIdx = content.indexOf(REGION_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return content;
-
-  const before = content.slice(0, startIdx);
-  const after = content.slice(endIdx + REGION_END.length);
-
-  const result = (before + after).replace(/\n{3,}/g, '\n\n').trim();
-  return result.length > 0 ? `${result}\n` : '';
-}
-
-/** The managed slice of a host, or null when no marker pair exists. */
-export function extractRegion(content: string): string | null {
-  const startIdx = content.indexOf(REGION_START);
-  const endIdx = content.indexOf(REGION_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return null;
-  return content.slice(startIdx, endIdx + REGION_END.length);
-}
-
-/** True when the host has asb's own region markers (ownership proof 2). */
-export function hasRegionMarkers(content: string): boolean {
-  return extractRegion(content) !== null;
+export function legacyDedicatedRulesPath(targetPath: string): string {
+  return path.join(path.dirname(targetPath), `asb-${path.basename(targetPath)}`);
 }
 
 function markerOffsets(content: string, marker: string): number[] {
@@ -175,17 +158,24 @@ function markerOffsets(content: string, marker: string): number[] {
  * duplicated, or reordered marker set is ambiguous ownership and fails closed.
  */
 export function projectRegion(content: string): string | null {
-  const starts = markerOffsets(content, REGION_START);
-  const ends = markerOffsets(content, REGION_END);
+  const currentStarts = markerOffsets(content, REGION_START);
+  const currentEnds = markerOffsets(content, REGION_END);
+  const legacyStarts = markerOffsets(content, LEGACY_REGION_START);
+  const legacyEnds = markerOffsets(content, LEGACY_REGION_END);
+
+  const starts = [...currentStarts, ...legacyStarts];
+  const ends = [...currentEnds, ...legacyEnds];
   if (starts.length === 0 && ends.length === 0) return null;
   if (starts.length > 1 || ends.length > 1) {
-    throw new Error('duplicate ASB project markers');
+    throw new Error('duplicate managed project markers');
   }
-  if (starts.length !== 1 || ends.length !== 1) {
-    throw new Error('incomplete ASB project markers');
+  const current = currentStarts.length === 1 && currentEnds.length === 1;
+  const legacy = legacyStarts.length === 1 && legacyEnds.length === 1;
+  if (!current && !legacy) {
+    throw new Error('incomplete managed project markers');
   }
-  if (starts[0] >= ends[0]) throw new Error('reordered ASB project markers');
-  return content.slice(starts[0], ends[0] + REGION_END.length);
+  if (starts[0] >= ends[0]) throw new Error('reordered managed project markers');
+  return content.slice(starts[0], ends[0] + (current ? REGION_END : LEGACY_REGION_END).length);
 }
 
 export function mergeProjectRegion(
@@ -215,15 +205,6 @@ export function mergeProjectRegion(
   const trimmed = existing.trimEnd();
   if (trimmed.length === 0) return `${block}\n`;
   return placement === 'prepend' ? `${block}\n\n${trimmed}\n` : `${trimmed}\n\n${block}\n`;
-}
-
-/**
- * A dedicated asb file (asb-rules prefix) is safe for full replace; a shared
- * file needs region merge in managed contexts.
- */
-export function isDedicatedFile(filePath: string): boolean {
-  const basename = path.basename(filePath).split('\\').pop() ?? '';
-  return basename.startsWith('asb-rules');
 }
 
 // ---------------------------------------------------------------------------
@@ -441,17 +422,16 @@ export function applyBundleFiles(
 }
 
 /**
- * Remove an owned bundle's recorded files, prune emptied directories, and
- * drop the bundle directory itself only when nothing foreign remains.
- * Returns the recorded rels still on disk afterwards: a deletion that could
- * not happen must never be reported as one, and the caller keeps its claim so
- * the payload stays reclaimable. An empty result means asb's whole slice is
- * gone, whether or not foreign files kept the directory alive.
+ * Remove the files the render names inside a bundle, prune emptied
+ * directories, and drop the bundle directory itself only when nothing foreign
+ * remains. Returns the named rels still on disk afterwards: a deletion that
+ * could not happen must never be reported as one. An empty result means asb's
+ * whole slice is gone, whether or not foreign files kept the directory alive.
  */
-export function removeBundleSlice(bundleRoot: string, recorded: readonly string[]): string[] {
+export function removeBundleSlice(bundleRoot: string, slice: readonly string[]): string[] {
   const root = path.resolve(bundleRoot);
   const leftBehind: string[] = [];
-  for (const rel of recorded) {
+  for (const rel of slice) {
     const filePath = path.join(root, rel);
     try {
       fs.unlinkSync(filePath);
@@ -463,7 +443,7 @@ export function removeBundleSlice(bundleRoot: string, recorded: readonly string[
   try {
     if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
   } catch {
-    // Gone already, or holding files this record never covered.
+    // Gone already, or holding files the render never named.
   }
   return leftBehind;
 }
@@ -1134,7 +1114,7 @@ export function writeFileAtomic(targetPath: string, content: string | Buffer): v
   const mode = existing ? existing.mode & 0o777 : null;
   const temp = path.join(
     directory,
-    `.${path.basename(resolved)}.asb-tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    `.${path.basename(resolved)}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   );
   try {
     if (typeof content === 'string') {

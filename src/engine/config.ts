@@ -72,8 +72,8 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
       : path.join(home, '.local', 'state', 'asb');
 
   // Resolved once against the invocation cwd: a relative override (e.g.
-  // ASB_AGENTS_HOME=agents) must not let the same ledger key point at a
-  // different physical file per working directory.
+  // ASB_AGENTS_HOME=agents) must not let the same target point at a different
+  // physical file per working directory.
   return {
     asbHome: path.resolve(asbHome),
     agentsHome: path.resolve(agentsHome),
@@ -222,9 +222,21 @@ const selectionSection = z.preprocess(
   z.object({ enabled: idArray.optional() }).strict()
 );
 
+/**
+ * A rule delimits its block with `<!-- <id>:start -->`, and the region around
+ * the whole composition uses the same spelling with the id `rules`. A rule
+ * actually named `rules` would render a block marker identical to the region
+ * boundary, leaving nothing able to tell where asb's slice ends. Namespaced
+ * ids are safe: `team:rules` renders `<!-- team:rules:start -->`.
+ */
+const ruleIdArray = idArray.refine((ids) => !ids.includes('rules'), {
+  message:
+    '"rules" cannot be a rule id: its block marker would be identical to the marker bounding the whole region',
+});
+
 const rulesSection = z.preprocess(
   migrateActive,
-  z.object({ enabled: idArray.optional(), includeDelimiters: z.boolean().optional() }).strict()
+  z.object({ enabled: ruleIdArray.optional(), includeDelimiters: z.boolean().optional() }).strict()
 );
 
 const incrementalSelection = z
@@ -233,8 +245,8 @@ const incrementalSelection = z
 
 const incrementalRules = z
   .object({
-    enabled: idArray.optional(),
-    add: idArray.optional(),
+    enabled: ruleIdArray.optional(),
+    add: ruleIdArray.optional(),
     remove: idArray.optional(),
     includeDelimiters: z.boolean().optional(),
   })
@@ -1325,6 +1337,9 @@ export function editSelection(options: EditSelectionOptions): void {
     mutate('add', additionsInput, removals);
     mutate('add', [], removals);
     mutate('remove', [...removals], new Set());
+    // An override spelled `enabled` replaces the base and ignores `remove`,
+    // so a disable that only wrote `remove` would leave the id selected.
+    mutate('enabled', [], removals);
   } else {
     // Native plugin overrides carry a plain `enabled` array in every scope.
     mutate('enabled', additionsInput, removals);
@@ -1358,10 +1373,7 @@ function writeConfigFile(filePath: string, content: string, label: string): void
     // new file: no link to follow, default creation mode
   }
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  const temp = path.join(
-    path.dirname(resolved),
-    `.${path.basename(resolved)}.asb-tmp-${process.pid}`
-  );
+  const temp = path.join(path.dirname(resolved), `.${path.basename(resolved)}.tmp-${process.pid}`);
   fs.writeFileSync(temp, content, 'utf-8');
   if (mode !== null) fs.chmodSync(temp, mode);
   fs.renameSync(temp, resolved);

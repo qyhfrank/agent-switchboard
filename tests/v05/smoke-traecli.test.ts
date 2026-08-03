@@ -1,9 +1,10 @@
 // Real-surface smoke for the traecli app row: drives the actual CLI entry
 // (main from src/engine/cli.js) against disposable homes. Covers the three
 // acceptance scenarios: full four-cell sync plus union skills flow,
-// detection gate without ~/.trae/cli, and a legacy ledger carrying entries
-// for an unknown app. Runs inside the node --test per-file process
-// isolation, so the env and stdout overrides below are process-local.
+// detection gate without ~/.trae/cli, and a stale 0.4 ownership ledger
+// sitting beside an unknown app's files. Runs inside the node --test
+// per-file process isolation, so the env and stdout overrides below are
+// process-local.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -179,21 +180,6 @@ test('four-cell sync: rules, MCP, commands, agents land and skills flow through 
       false,
       'nothing may write ~/.trae/skills while the trae row is disabled'
     );
-
-    const ledger = JSON.parse(
-      fs.readFileSync(path.join(homes.stateHome, 'ledger.json'), 'utf-8')
-    ) as {
-      entries: { app: string; type: string }[];
-    };
-    const skillsClaims = ledger.entries.filter(
-      (record) => record.app === 'traecli' && record.type === 'skills'
-    );
-    assert.equal(skillsClaims.length, 0, 'traecli must never claim skills entries');
-    assert.equal(
-      ledger.entries.some((record) => record.app === 'agents' && record.type === 'skills'),
-      true,
-      'union row did not record its skills write'
-    );
   });
 });
 
@@ -239,18 +225,14 @@ test('union proof: a traecli-only selection drives the shared agents skills writ
       true,
       'traecli-only selection did not drive the union writer'
     );
-    const ledger = JSON.parse(
-      fs.readFileSync(path.join(homes.stateHome, 'ledger.json'), 'utf-8')
-    ) as { entries: { app: string; type: string }[] };
-    assert.equal(
-      ledger.entries.some((record) => record.app === 'agents' && record.type === 'skills'),
-      true,
-      'union row did not record its skills write'
-    );
   });
 });
 
-test('legacy ledger: entries for an unknown retired app neither crash nor get touched', async () => {
+// A 0.4 install left an entry ledger in the state dir, and its records can
+// name apps this build has no row for. Nothing derives ownership from it, so
+// a real run sweeps it; the files such a record points at stay untouched,
+// because only the current render authorizes a write.
+test('stale ledger: a real run sweeps it and leaves an unknown app’s file alone', async () => {
   await withSmokeHomes('legacy', async (homes) => {
     fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
     // The retired 1.0 app id, assembled so the tree carries no reference to it.
@@ -272,7 +254,7 @@ test('legacy ledger: entries for an unknown retired app neither crash nor get to
       provenance: 'written',
       updatedAt: '2026-01-01T00:00:00.000Z',
     };
-    write(
+    const ledgerPath = write(
       path.join(homes.stateHome, 'ledger.json'),
       `${JSON.stringify({ version: 1, entries: [legacyEntry] }, null, 2)}\n`
     );
@@ -284,6 +266,8 @@ test('legacy ledger: entries for an unknown retired app neither crash nor get to
 
     const status = await runMain(['status']);
     assert.equal(status.code, 0, `status failed on legacy ledger: ${status.err}`);
+    assert.equal(fs.existsSync(ledgerPath), true, 'a dry run swept the stale ledger');
+
     const sync = await runMain(['sync']);
     assert.equal(sync.code, 0, `sync failed on legacy ledger: ${sync.err}`);
 
@@ -292,15 +276,10 @@ test('legacy ledger: entries for an unknown retired app neither crash nor get to
       'Sentinel bytes.\n',
       'unknown-app target bytes changed'
     );
-    const ledger = JSON.parse(
-      fs.readFileSync(path.join(homes.stateHome, 'ledger.json'), 'utf-8')
-    ) as {
-      entries: { app: string }[];
-    };
-    assert.equal(
-      ledger.entries.some((record) => record.app === legacyApp),
-      true,
-      'unknown-app ledger entry was dropped'
+    assert.deepEqual(
+      fs.readdirSync(homes.stateHome).sort(),
+      ['last-run.json'],
+      'the state dir holds something other than the last-run marker'
     );
   });
 });

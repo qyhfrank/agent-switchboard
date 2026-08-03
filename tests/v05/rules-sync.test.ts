@@ -87,7 +87,7 @@ test('editing a rule updates targets and an unedited resync is unchanged', async
   });
 });
 
-test('byte-identical pre-existing targets adopt without rewriting', async () => {
+test('byte-identical pre-existing targets are unchanged without rewriting', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code', 'cursor');
     seedTwoRules(homes);
@@ -104,8 +104,7 @@ test('byte-identical pre-existing targets adopt without rewriting', async () => 
     const report = await runSync();
     for (const app of ['claude-code', 'cursor'] as const) {
       const entry = rulesEntry(report, app);
-      assert.equal(entry?.outcome, 'adopted');
-      assert.equal(entry?.detail, 'identity');
+      assert.equal(entry?.outcome, 'unchanged');
       assert.equal(fs.statSync(ruleFilePath(homes, app)).mtimeMs, before.get(app));
     }
     assert.equal(report.exitCode, 0);
@@ -117,7 +116,7 @@ test('byte-identical pre-existing targets adopt without rewriting', async () => 
   });
 });
 
-test('a stale shared target adopts by convention, then updates on the next sync', async () => {
+test('a shared target holding an older composition is rewritten in one sync', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedTwoRules(homes);
@@ -125,29 +124,18 @@ test('a stale shared target adopts by convention, then updates on the next sync'
 
     const filePath = ruleFilePath(homes, 'claude-code');
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, 'Old composed output\n', 'utf-8');
-
-    const adoption = await runSync();
-    const adopted = rulesEntry(adoption, 'claude-code');
-    assert.equal(adopted?.outcome, 'adopted');
-    assert.equal(adopted?.detail, 'convention');
-    assert.equal(
-      fs.readFileSync(filePath, 'utf-8'),
-      'Old composed output\n',
-      'adoption writes nothing'
-    );
-    assert.equal(adoption.exitCode, 0);
+    fs.writeFileSync(filePath, renderedRules('claude-code', 'Old composed output\n'), 'utf-8');
 
     const report = await runSync();
     const entry = rulesEntry(report, 'claude-code');
     assert.equal(entry?.outcome, 'written');
     assert.equal(entry?.detail, 'updated');
-    assert.equal(fs.readFileSync(filePath, 'utf-8'), COMPOSED_V1);
+    assert.equal(fs.readFileSync(filePath, 'utf-8'), renderedRules('claude-code', COMPOSED_V1));
     assert.equal(report.exitCode, 0);
   });
 });
 
-test('deselecting between adoption and the first rewrite preserves the file', async () => {
+test('hand-written bytes at a shared target survive both the write and the removal', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedTwoRules(homes);
@@ -158,26 +146,26 @@ test('deselecting between adoption and the first rewrite preserves the file', as
     fs.writeFileSync(filePath, 'Hand-written notes asb never wrote\n', 'utf-8');
 
     await runSync();
+    assert.match(fs.readFileSync(filePath, 'utf-8'), /Hand-written notes asb never wrote/);
+
     writeUserConfig(homes, configFor(['claude-code'], []));
     const report = await runSync();
 
-    const entry = rulesEntry(report, 'claude-code');
-    assert.equal(entry?.outcome, 'left-behind');
-    assert.equal(entry?.detail, 'unproven');
+    assert.equal(rulesEntry(report, 'claude-code')?.outcome, 'removed');
     assert.equal(
       fs.readFileSync(filePath, 'utf-8'),
       'Hand-written notes asb never wrote\n',
-      'a convention claim never deletes'
+      'only the marked region is asb to take'
     );
 
-    // The claim is relinquished: later runs stay silent about the file.
+    // Nothing of asb's is left in the file, so later runs stay silent.
     const later = await runSync();
     assert.equal(rulesEntry(later, 'claude-code'), undefined);
     assert.equal(fs.existsSync(filePath), true);
   });
 });
 
-test('a still-selected rule that composes to empty bytes never deletes the target', async () => {
+test('a still-selected rule that composes to empty bytes leaves no empty region', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedRule(homes, 'solo.md', 'Something worth writing\n');
@@ -190,16 +178,23 @@ test('a still-selected rule that composes to empty bytes never deletes the targe
     const filePath = ruleFilePath(homes, 'claude-code');
     assert.equal(fs.existsSync(filePath), true);
 
-    // The rule file becomes empty while still selected: removal is only for
-    // deselection, so the empty composition is written instead.
+    // The rule file becomes empty while still selected. A region with nothing
+    // in it is noise, so it goes; the file itself goes with it because it held
+    // nothing else. Giving the rule a body back restores both.
     seedRule(homes, 'solo.md', '');
     const report = await runSync();
 
-    const entry = rulesEntry(report, 'claude-code');
-    assert.notEqual(entry?.outcome, 'removed');
-    assert.equal(fs.existsSync(filePath), true, 'the target survives');
-    assert.equal(fs.readFileSync(filePath, 'utf-8'), '');
+    assert.equal(rulesEntry(report, 'claude-code')?.outcome, 'removed');
+    assert.equal(fs.existsSync(filePath), false);
     assert.equal(report.exitCode, 0);
+
+    seedRule(homes, 'solo.md', 'Something worth writing again\n');
+    const restored = await runSync();
+    assert.equal(rulesEntry(restored, 'claude-code')?.outcome, 'written');
+    assert.equal(
+      fs.readFileSync(filePath, 'utf-8'),
+      renderedRules('claude-code', 'Something worth writing again\n')
+    );
   });
 });
 
@@ -274,7 +269,10 @@ test('assume_installed forces distribution to an undetected app', async () => {
     const report = await runSync();
     const entry = rulesEntry(report, 'opencode');
     assert.equal(entry?.outcome, 'written');
-    assert.equal(fs.readFileSync(ruleFilePath(homes, 'opencode'), 'utf-8'), COMPOSED_V1);
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'opencode'), 'utf-8'),
+      renderedRules('opencode', COMPOSED_V1)
+    );
     assert.equal(report.exitCode, 0);
   });
 });
@@ -290,25 +288,6 @@ test('an app without a rules target contributes no rules actions', async () => {
     assert.equal(rulesEntry(report, 'claude-code')?.outcome, 'written');
     assert.equal(rulesEntry(report, 'claude-desktop'), undefined);
     assert.equal(report.exitCode, 0);
-  });
-});
-
-test('a corrupt ledger aborts the run before any write', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'claude-code');
-    seedTwoRules(homes);
-    writeUserConfig(homes, configFor(['claude-code'], ['alpha', 'beta']));
-
-    await runSync();
-    const ledgerPath = path.join(homes.stateHome, 'ledger.json');
-    assert.ok(fs.existsSync(ledgerPath), 'expected the ledger in the state dir');
-
-    seedRule(homes, 'alpha.md', '---\ntitle: Alpha\n---\nSecond version\n');
-    fs.writeFileSync(ledgerPath, '{corrupt', 'utf-8');
-
-    const bytesBefore = fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8');
-    await assert.rejects(() => runSync(), /ledger/i);
-    assert.equal(fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'), bytesBefore);
   });
 });
 
@@ -351,7 +330,10 @@ test('a malformed unselected rule fails alone while selected rules deploy', asyn
     assert.match(failure.reason ?? '', /closing delimiter/);
 
     assert.equal(rulesEntry(report, 'claude-code')?.outcome, 'written');
-    assert.equal(fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'), 'Alpha body\n');
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'),
+      renderedRules('claude-code', 'Alpha body\n')
+    );
     assert.equal(report.exitCode, 1);
   });
 });

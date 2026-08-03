@@ -12,7 +12,7 @@ import { tomlKey } from './shapes.js';
 
 /** Frozen 0.4.35 mdc frontmatter wrap used by cursor/trae/trae-cn rules targets. */
 export function wrapMdcFrontmatter(body: string): string {
-  const lines = ['---', 'description: Agent Switchboard Rules', 'alwaysApply: true', '---', ''];
+  const lines = ['---', 'description: Rules', 'alwaysApply: true', '---', ''];
   if (body.length > 0) lines.push(body);
   return lines.join('\n');
 }
@@ -200,7 +200,7 @@ export function renderCodexAgent(component: Component): string | null {
   }
   const instructions = component.content.trim();
   if (instructions) value.developer_instructions = instructions;
-  return `# managed-by: asb\n${tomlStringify(value as Parameters<typeof tomlStringify>[0])}`;
+  return tomlStringify(value as Parameters<typeof tomlStringify>[0]);
 }
 
 export function codexAgentConfigValue(
@@ -208,7 +208,7 @@ export function codexAgentConfigValue(
   filename: string
 ): Record<string, unknown> {
   return {
-    description: component.metadata.description || `ASB-managed agent role: ${component.id}`,
+    description: component.metadata.description || `${component.id} agent role`,
     config_file: `agents/${filename}`,
   };
 }
@@ -469,8 +469,8 @@ export type McpServerValue = Record<string, unknown>;
 
 /**
  * Frozen 0.4.35 `sanitizeMcpName`: apps that reject anything outside
- * `[a-zA-Z0-9_-]` get the rewritten key, and that key is what the ledger
- * records — it is what is on disk.
+ * `[a-zA-Z0-9_-]` get the rewritten key, and that key is the one compared
+ * against the render — it is what is on disk.
  */
 export function sanitizeMcpName(name: string): string {
   return name.replace(/[^a-zA-Z0-9_-]/g, '-');
@@ -601,7 +601,7 @@ function stringMap(value: unknown): Record<string, string> | undefined {
  * and http only, so an sse server renders as nothing at all.
  *
  * The result is exactly what `renderCodexTable` serializes and what parsing
- * that table back yields, so the recorded slice hash survives a round trip.
+ * that table back yields, so a slice compares equal across a round trip.
  */
 export function codexServer(server: McpServerValue): McpServerValue | null {
   if (server.type === 'sse') return null;

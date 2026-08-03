@@ -42,9 +42,8 @@ function setEnv(key: string, value: string | undefined): void {
 
 export async function withScratchHomes<T>(fn: (homes: ScratchHomes) => T | Promise<T>): Promise<T> {
   // os.tmpdir() is a symlink on macOS (/var -> /private/var). The engine
-  // canonicalizes a project root before it derives peer-state and manifest
-  // names, so a scratch tree reached through the link would be written under
-  // one spelling and looked up under the other.
+  // canonicalizes a project root, so a scratch tree reached through the link
+  // would be configured under one spelling and resolved under the other.
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'asb05-')));
   const homes: ScratchHomes = {
     root,
@@ -198,24 +197,29 @@ export function ruleFilePath(homes: ScratchHomes, app: RuleAppId): string {
     case 'opencode':
       return path.join(opencodeRoot(home), 'AGENTS.md');
     case 'cursor':
-      return path.join(home, '.cursor', 'rules', 'asb-rules.mdc');
+      return path.join(home, '.cursor', 'rules', 'rules.mdc');
     case 'trae':
-      return path.join(home, '.trae', 'user_rules', 'asb-rules.md');
+      return path.join(home, '.trae', 'user_rules', 'rules.md');
     case 'trae-cn':
-      return path.join(home, '.trae-cn', 'user_rules', 'asb-rules.md');
+      return path.join(home, '.trae-cn', 'user_rules', 'rules.md');
   }
 }
 
 /** Frozen mdc frontmatter render used by cursor/trae/trae-cn rules targets. */
 export function mdcWrap(body: string): string {
-  const lines = ['---', 'description: Agent Switchboard Rules', 'alwaysApply: true', '---', ''];
+  const lines = ['---', 'description: Rules', 'alwaysApply: true', '---', ''];
   if (body.length > 0) lines.push(body);
   return lines.join('\n');
 }
 
+/** The marked region a shared host carries around the composed body. */
+export function rulesRegion(composed: string): string {
+  return `<!-- rules:start -->\n${composed.trimEnd()}\n<!-- rules:end -->\n`;
+}
+
 /** Expected on-disk bytes for an app's rules target given the composed body. */
 export function renderedRules(app: RuleAppId, composed: string): string {
-  return FRONTMATTER_APPS.has(app) ? mdcWrap(composed) : composed;
+  return FRONTMATTER_APPS.has(app) ? mdcWrap(composed) : rulesRegion(composed);
 }
 
 export function writeUserConfig(homes: ScratchHomes, toml: string): void {

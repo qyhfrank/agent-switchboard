@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
-import { isDeepStrictEqual } from 'node:util';
 import { runSync } from '../../src/engine/cli.js';
 import type { Report, ReportEntry } from '../../src/engine/report.js';
 import {
@@ -349,11 +348,11 @@ test('an invalid hooks shape aborts that app before any config write', async () 
   }
 });
 
-test('a user-edited recorded group survives deselection and removal stays count-bounded', async () => {
+test('a user-edited group survives deselection while every copy of the render leaves', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
-    // Definition (non-bundle) hooks carry no managed path, so the recorded
-    // group is the only ownership evidence (ownership.ts:172-181).
+    // Definition (non-bundle) hooks carry no managed path, so equality with
+    // the render is the whole of the evidence.
     seedHook(homes, 'alpha', {
       PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: 'echo alpha' }] }],
     });
@@ -369,7 +368,8 @@ test('a user-edited recorded group survives deselection and removal stays count-
     assert.equal(groups.length, 2);
 
     // The user hand-edits beta's command (deep equality broken) and duplicates
-    // alpha's group verbatim: two on disk, still one recorded instance.
+    // alpha's group verbatim: two copies of the render, one group asb cannot
+    // prove anything about.
     const alpha = groups.find((group) => commandsOf([group]).includes('echo alpha'));
     assert.ok(alpha, 'expected the rendered alpha group');
     const edited = { matcher: '*', hooks: [{ type: 'command', command: 'echo beta --user' }] };
@@ -378,16 +378,9 @@ test('a user-edited recorded group survives deselection and removal stays count-
     writeUserConfig(homes, configFor(['claude-code'], []));
     await runSync();
 
-    // 0.4 splices the first deep-equal match, leaving [edited, alpha]; the
-    // behavior is the count and the survival, not the remainder's order.
-    const remaining = eventGroups(settings, 'PreToolUse');
-    assert.equal(remaining.length, 2, 'exactly one recorded instance is spliced');
-    assert.equal(remaining.filter((group) => isDeepStrictEqual(group, alpha)).length, 1);
-    assert.equal(
-      remaining.filter((group) => isDeepStrictEqual(group, edited)).length,
-      1,
-      'a user-modified copy of a recorded group is never claimed'
-    );
+    // Both copies are what the library renders, so both are asb's and both
+    // leave; the edited one matches nothing and is never claimed.
+    assert.deepEqual(eventGroups(settings, 'PreToolUse'), [edited]);
   });
 });
 
@@ -569,34 +562,5 @@ test('a codex hooks write reports the trust review Codex still requires', async 
     assert.equal(removal?.outcome, 'written');
     assert.equal(removal?.detail, 'merged', 'the foreign hook keeps the file');
     assert.equal(removal?.reason, undefined, 'nothing new needs a review');
-  });
-
-  // The config lands before the record, so a failed save cannot swallow the
-  // review the write made necessary: the reason keeps the trust step.
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'codex');
-    seedHook(homes, 'trust', LIBRARY);
-    writeUserConfig(homes, configFor(['codex'], ['trust']));
-    const stateDir = path.join(homes.asbHome, 'state', 'hooks');
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.chmodSync(stateDir, 0o555);
-
-    let failed: ReportEntry | undefined;
-    try {
-      failed = hooksRows(await runSync()).find(
-        (entry) => entry.app === 'codex' && entry.id === null
-      );
-    } finally {
-      fs.chmodSync(stateDir, 0o755);
-    }
-
-    assert.equal(failed?.outcome, 'failed');
-    assert.equal(failed?.detail, 'write-error');
-    assert.match(
-      String(failed?.reason),
-      /\/hooks in Codex/,
-      'the trust step survives the save failure'
-    );
-    assert.match(String(failed?.reason), /hook ownership state could not be saved/);
   });
 });

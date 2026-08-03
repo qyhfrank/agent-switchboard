@@ -17,28 +17,21 @@ import {
   selectedPluginIds,
 } from './config.js';
 import { preferHomeVar, sanitizeMcpName } from './dialects.js';
-import { type Ledger, type LedgerEntry, ledgerKey, type Provenance } from './ledger.js';
+import { hookGroupOwner, stripLegacyMarkerLines } from './hooks.js';
 import type { Component, HookEventMap, LibraryInventory } from './library.js';
 import { type NativePlanInput, type NativeWork, planNative } from './native.js';
-import {
-  filterRecognizedDesiredGroups,
-  type HookTarget,
-  type PeerState,
-  type ProjectManifest,
-  peerStateHasContent,
-  removeOwnedHookGroups,
-  stripLegacyMarkerLines,
-} from './peer.js';
 import type { Outcome } from './report.js';
 import {
   applyKeysEdits,
   type BundleFile,
+  composedFromRuleBlocks,
   composeRules,
   hashContent,
   type KeysEdit,
   type KeysFormat,
   keyedArrayProblem,
   keyedArraySegment,
+  legacyDedicatedRulesPath,
   mergeProjectRegion,
   projectRegion,
   sliceHash,
@@ -50,16 +43,15 @@ import {
 import type { EntryRow, ReadinessRow, SourceCatalog, UpdateRow } from './sources.js';
 
 /**
- * The pure planner: selection × inventory × table × ledger × captured fs
- * state → actions. Nothing here touches the filesystem; the capture is taken
+ * The pure planner: selection × inventory × table × captured fs state →
+ * actions. Nothing here touches the filesystem; the capture is taken
  * once and shared by preview and apply, so they cannot diverge structurally.
  *
- * Ownership proofs for the rules cell, in order and nothing else: (1) ledger
- * entry whose hash matches the captured slice; (3) byte-identity with the
- * current render; (5) convention — a table-declared managed location, update
- * authority only, never deletion. Marker proof (2) belongs to region shapes
- * and peer-record proof (4) to hook state and project manifests; neither has
- * a rules own-file carrier. Removal is authorized only by deselection.
+ * A rules target is asb's while it holds what the library renders for it, so
+ * a selected slice that differs is written in one pass and a target that
+ * already matches is left alone. Deselection removes only what the filename
+ * still claims: a dedicated target asb named, never a shared host carrying
+ * the app's own conventional name.
  */
 
 export interface CapturedTarget {
@@ -90,10 +82,6 @@ export interface CapturedHookApp {
   error?: string;
   /** Parent chain of the config path resolves outside the app root. */
   escapes?: boolean;
-  /** Peer ownership record: the shared file merged with any device copies. */
-  state: PeerState;
-  /** v0.4.28 state files, captured read-only as predecessor recognition evidence. */
-  legacyGroups: Record<string, unknown[]>[];
 }
 
 export interface CapturedMcpHost {
@@ -138,26 +126,22 @@ export interface SyncCapture {
   bundles: Record<string, CapturedBundle>;
   /** Non-dot child directory names per managed skills parent. */
   bundleDirs: Record<string, string[]>;
-  /** Hook config and peer ownership state per app id. */
+  /** Hook config per app id. */
   hooks: Record<string, CapturedHookApp>;
   /** MCP host document per app id. */
   mcp: Record<string, CapturedMcpHost>;
-  /** In-memory project authority shared by capture, apply, and checkpoint. */
-  projectManifest?: ProjectManifest;
   /** Global Codex TOML captured separately from the project MCP host. */
   projectTrust?: CapturedMcpHost;
   /** Recognized OpenCode singular-layout entries and any scan failure. */
   legacy: CapturedLegacyScan[];
 }
 
-export type LedgerMutation = { op: 'put'; entry: LedgerEntry } | { op: 'delete'; key: string };
-
 export interface Action {
   app: string | null;
   type: string | null;
   id: string | null;
   path: string | null;
-  op: 'write' | 'remove' | 'adopt' | 'none';
+  op: 'write' | 'remove' | 'none';
   outcome: Outcome;
   detail?: string;
   reason?: string;
@@ -168,17 +152,14 @@ export interface Action {
   content?: string;
   /**
    * Component ids in this app whose own actions must land before this one may
-   * run. A config may not point at payload the run failed to distribute, and
-   * the record that authorizes deleting it may not claim it either.
+   * run: a config may not point at payload the run failed to distribute.
    */
   requires?: string[];
   /** Target-path dependencies used when retiring a dynamically moved row. */
   requiresPaths?: string[];
   /**
-   * Own-dir payload: files to reconcile and the recorded rels no longer
-   * desired. Present ⇒ the executor treats path as a bundle directory. For
-   * `put` mutations the executor stamps the measured post-write fingerprint
-   * into the ledger entry hash.
+   * Own-dir payload: files to reconcile and the rels on disk the render no
+   * longer names. Present ⇒ the executor treats path as a bundle directory.
    */
   bundle?: { files: BundleFile[]; stale: string[]; exclusive?: boolean };
   /** Containment root for write/remove actions. */
@@ -189,22 +170,8 @@ export interface Action {
    */
   expectedHash?: string | null;
   /**
-   * Ledger mutation carried by this action. A grouped write over several
-   * owned slices of one host carries one mutation per slice: they land
-   * together or not at all, because one write is what put them there.
-   */
-  ledger?: LedgerMutation | LedgerMutation[];
-  /**
-   * Peer ownership record to publish once the action's own write succeeds.
-   * Hook groups live in a file every peer reads, so their ownership travels
-   * with this record instead of a ledger entry.
-   */
-  peer?: { asbHome: string; target: HookTarget; state: PeerState; projectRoot?: string };
-  /** Project manifest mutated only after this action succeeds. */
-  projectManifest?: { manifest: ProjectManifest; projectRoot: string };
-  /**
    * Native-manager work: the app's own plugin manager owns the result, so
-   * there is no path, hash, or ledger entry — the commands are the apply.
+   * there is no path or hash — the commands are the apply.
    */
   native?: NativeWork;
   /** Structured edits retained so cells sharing one host can merge once. */
@@ -224,10 +191,8 @@ export interface ProjectPlanPolicy {
 export interface PlanInput {
   config: ResolvedConfig;
   inventory: LibraryInventory;
-  ledger: Ledger;
   capture: SyncCapture;
   table: readonly AppRow[];
-  now: string;
   project?: ProjectPlanPolicy;
 }
 
@@ -441,12 +406,41 @@ function rulesResolver(
   };
 }
 
+/**
+ * Every library rule rendered as the block a composition would carry it as.
+ * A host file assembled from these is a render, whatever was selected when it
+ * was written.
+ */
+function ruleBlockResolver(
+  config: ResolvedConfig,
+  inventory: LibraryInventory
+): (appId: string) => string[] {
+  const rules = inventory.components.filter((component) => component.type === 'rules');
+  const cache = new Map<boolean, string[]>();
+  return (appId) => {
+    const includeDelimiters = effectiveIncludeDelimiters(config, appId);
+    let blocks = cache.get(includeDelimiters);
+    if (!blocks) {
+      blocks = rules.map((rule) => composeRules([rule], { includeDelimiters }).content);
+      cache.set(includeDelimiters, blocks);
+    }
+    return blocks;
+  };
+}
+
+/**
+ * The rules region inside a repository's AGENTS.md. The file belongs to the
+ * repository and asb owns only what its delimiters enclose, exactly as in a
+ * shared host under a home directory: the markers locate the slice and prove
+ * it, bytes outside them survive every sync, and deselection takes the region
+ * away and nothing else.
+ */
 function planSharedProjectRules(
   input: PlanInput,
   resolveFor: (appId: string) => ResolvedRuleSet
 ): Action[] {
   if (!input.project) return [];
-  const { config, capture, ledger, table, now, project } = input;
+  const { config, capture, table, project } = input;
   const targetPath = path.join(project.root, 'AGENTS.md');
   const assumeInstalled = new Set(config.apps.assumeInstalled);
   const members = config.apps.enabled.filter((appId) => {
@@ -516,10 +510,8 @@ function planSharedProjectRules(
   }
 
   const existing = current.content ?? '';
-  let currentSlice: string | null;
   let desiredHost: string;
   try {
-    currentSlice = projectRegion(existing);
     desiredHost = mergeProjectRegion(
       existing,
       bodies[0] ?? '',
@@ -537,61 +529,9 @@ function planSharedProjectRules(
     ];
   }
   const desiredSlice = projectRegion(desiredHost);
-  const recorded = ledger.entries.find(
-    (entry) => entry.path === targetPath && entry.type === 'rules' && entry.shape === 'region'
-  );
-  const currentSliceHash = currentSlice === null ? null : hashContent(currentSlice);
-  const desiredSliceHash = desiredSlice === null ? null : hashContent(desiredSlice);
-  const put =
-    desiredSliceHash === null
-      ? undefined
-      : ({
-          op: 'put',
-          entry: {
-            app: 'project',
-            type: 'rules',
-            id: null,
-            path: targetPath,
-            shape: 'region',
-            hash: desiredSliceHash,
-            provenance: currentSlice === null ? 'written' : 'marker',
-            updatedAt: now,
-          },
-        } satisfies LedgerMutation);
 
   if (desiredHost === existing) {
-    if (desiredSlice === null && recorded) {
-      return [
-        {
-          ...base,
-          op: 'none',
-          outcome: 'removed',
-          detail: 'already-absent',
-          ledger: { op: 'delete', key: ledgerKey(recorded) },
-        },
-      ];
-    }
-    if (desiredSlice !== null && !recorded && put) {
-      return [{ ...base, op: 'adopt', outcome: 'adopted', detail: 'marker', ledger: put }];
-    }
     return desiredSlice === null ? [] : [{ ...base, op: 'none', outcome: 'unchanged' }];
-  }
-
-  if (
-    recorded &&
-    currentSliceHash !== null &&
-    currentSliceHash !== recorded.hash &&
-    project.collision !== 'takeover'
-  ) {
-    return [
-      {
-        ...base,
-        op: 'none',
-        outcome: desiredSlice === null ? 'left-behind' : 'conflict',
-        detail: 'modified',
-        reason: 'ASB project region changed since the peer manifest was written; preserved',
-      },
-    ];
   }
 
   return [
@@ -603,18 +543,12 @@ function planSharedProjectRules(
       content: desiredHost,
       root: project.root,
       expectedHash: current.content === null ? null : hashContent(current.content),
-      ledger:
-        desiredSlice === null
-          ? recorded
-            ? { op: 'delete', key: ledgerKey(recorded) }
-            : undefined
-          : put,
     },
   ];
 }
 
 export function planRules(input: PlanInput): Action[] {
-  const { config, inventory, ledger, capture, table, now } = input;
+  const { config, inventory, capture, table } = input;
   const actions: Action[] = [];
   const staleActions: Action[] = [];
 
@@ -650,6 +584,7 @@ export function planRules(input: PlanInput): Action[] {
   }
 
   const resolveFor = rulesResolver(config, inventory);
+  const ruleBlocksFor = ruleBlockResolver(config, inventory);
 
   // One library-level row per id any enabled app selects but the library
   // lacks; per-app blocking happens inside the app loop.
@@ -674,7 +609,6 @@ export function planRules(input: PlanInput): Action[] {
     });
   }
 
-  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
   const assumeInstalled = new Set(config.apps.assumeInstalled);
 
   for (const appId of config.apps.enabled) {
@@ -702,59 +636,30 @@ export function planRules(input: PlanInput): Action[] {
     if (input.project && targetPath === path.join(input.project.root, 'AGENTS.md')) continue;
     const root = row.rules.root(config.homes, targetPath);
     const current = capture.targets[targetPath] ?? { exists: false, content: null };
-    const recorded = ledgerByKey.get(
-      ledgerKey({ app: appId, type: 'rules', id: null, path: targetPath })
-    );
 
     const { present, missing, content } = resolveFor(appId);
 
-    for (const stale of ledger.entries) {
-      if (
-        stale.app !== appId ||
-        stale.type !== 'rules' ||
-        stale.id !== null ||
-        stale.path === targetPath
-      ) {
-        continue;
-      }
-      const old = capture.targets[stale.path] ?? { exists: false, content: null };
-      const oldHash = old.content !== null ? hashContent(old.content) : null;
-      const drop: Action['ledger'] = { op: 'delete', key: ledgerKey(stale) };
-      const base = {
+    // The filename an earlier version gave this same slice. It holds no
+    // library id, so location plus the retired prefix is the whole claim, and
+    // it is swept whether or not rules are still selected. Only a path this
+    // table names had that predecessor spelling; at a path configuration
+    // chose, an `asb-` sibling is a file someone else wrote. The name sweep
+    // also stays out of a project tree, which the repository shares.
+    const legacyPath = row.rules.ownsName ? legacyDedicatedRulesPath(targetPath) : null;
+    const legacy = legacyPath ? capture.targets[legacyPath] : undefined;
+    if (legacyPath && legacy?.exists && legacy.content !== null && !input.project) {
+      staleActions.push({
         app: appId,
         type: 'rules',
         id: null,
-        path: stale.path,
-        ledger: drop,
-      };
-      if (!old.exists) {
-        staleActions.push({
-          ...base,
-          op: 'none',
-          outcome: 'removed',
-          detail: 'already-absent',
-        });
-      } else if (oldHash === stale.hash && stale.provenance !== 'convention') {
-        staleActions.push({
-          ...base,
-          op: 'remove',
-          outcome: 'removed',
-          root: row.rules.root(config.homes, stale.path),
-          expectedHash: oldHash,
-          ...(present.length + missing.length > 0 ? { requiresPaths: [targetPath] } : {}),
-        });
-      } else {
-        staleActions.push({
-          ...base,
-          op: 'none',
-          outcome: 'left-behind',
-          detail: stale.provenance === 'convention' ? 'unproven' : 'modified',
-          reason:
-            stale.provenance === 'convention'
-              ? 'previous dynamic target was adopted by convention; preserved'
-              : 'previous dynamic target changed since asb wrote it; preserved',
-        });
-      }
+        path: legacyPath,
+        op: 'remove',
+        outcome: 'removed',
+        detail: 'stale-copy',
+        root: row.rules.root(config.homes, legacyPath),
+        expectedHash: hashContent(legacy.content),
+        ...(present.length + missing.length > 0 ? { requiresPaths: [targetPath] } : {}),
+      });
     }
 
     // A missing member blocks that app's aggregate slice: rendering without
@@ -774,200 +679,130 @@ export function planRules(input: PlanInput): Action[] {
     }
 
     const desired = content.length > 0 ? row.rules.render(content, targetPath) : '';
-    const desiredHash = hashContent(desired);
     const currentHash = current.content !== null ? hashContent(current.content) : null;
+    const base = { app: appId, type: 'rules' as const, id: null, path: targetPath };
 
-    const putEntry = (provenance: LedgerEntry['provenance']): Action['ledger'] => ({
-      op: 'put',
-      entry: {
-        app: appId,
-        type: 'rules',
-        id: null,
-        path: targetPath,
-        shape: 'own-file',
-        hash: desiredHash,
-        provenance,
-        updatedAt: now,
-      },
-    });
+    // A shared host belongs to the user; asb owns only the marked region
+    // inside it. The markers both locate the slice and prove it, so bytes
+    // outside them survive every sync and deselection takes the region away
+    // without touching anything else.
+    if (!row.rules.dedicated) {
+      if (current.exists && current.content === null) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'blocked',
+          detail: 'foreign',
+          reason: 'occupied but unreadable; asb cannot prove what it would be overwriting',
+        });
+        continue;
+      }
+      const composed = current.content ?? '';
+      let desiredHost: string;
+      // Every read of the existing markers happens here: a malformed pair is
+      // one app's conflict row, not an exception that takes the whole run
+      // down with it.
+      try {
+        // A version that wrote the whole file left no markers. Recognizing
+        // that composition is what lets the region replace it instead of
+        // being prepended above it, which would leave the rules in the file
+        // twice.
+        const host =
+          projectRegion(composed) === null && composedFromRuleBlocks(composed, ruleBlocksFor(appId))
+            ? ''
+            : composed;
+        desiredHost = mergeProjectRegion(host, desired);
+      } catch (error) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'malformed-marker',
+          reason: `${error instanceof Error ? error.message : String(error)}; left unchanged`,
+        });
+        continue;
+      }
+      const desiredSlice = projectRegion(desiredHost);
+      if (desiredHost === composed) {
+        if (desiredSlice !== null) actions.push({ ...base, op: 'none', outcome: 'unchanged' });
+        continue;
+      }
+      actions.push({
+        ...base,
+        op: desiredSlice === null && desiredHost.length === 0 ? 'remove' : 'write',
+        outcome: desiredSlice === null ? 'removed' : 'written',
+        detail: current.exists ? 'updated' : 'created',
+        content: desiredHost,
+        root,
+        expectedHash: currentHash,
+      });
+      continue;
+    }
 
     // Removal is authorized only by true deselection. A selected set that
     // happens to compose to empty bytes (delimiters off, empty rule bodies)
     // falls through and writes the empty composition instead.
     if (present.length === 0) {
-      if (!current.exists) {
-        if (recorded) {
-          actions.push({
-            app: appId,
-            type: 'rules',
-            id: null,
-            path: targetPath,
-            op: 'none',
-            outcome: 'removed',
-            detail: 'already-absent',
-            ledger: { op: 'delete' as const, key: ledgerKey(recorded) },
-          });
-        }
-        continue;
-      }
-      if (recorded) {
-        if (currentHash === recorded.hash && recorded.provenance === 'convention') {
-          // Adopted by convention and never rewritten by asb: the bytes are
-          // the user's, so deselection relinquishes the claim without
-          // deleting (design: convention never grants deletion).
-          actions.push({
-            app: appId,
-            type: 'rules',
-            id: null,
-            path: targetPath,
-            op: 'none',
-            outcome: 'left-behind',
-            detail: 'unproven',
-            reason:
-              'adopted by convention and never rewritten by asb; preserved — delete it yourself',
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
-          });
-        } else if (currentHash === recorded.hash) {
-          actions.push({
-            app: appId,
-            type: 'rules',
-            id: null,
-            path: targetPath,
-            op: 'remove',
-            outcome: 'removed',
-            root,
-            expectedHash: currentHash,
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
-          });
-        } else {
-          actions.push({
-            app: appId,
-            type: 'rules',
-            id: null,
-            path: targetPath,
-            op: 'none',
-            outcome: 'left-behind',
-            detail: 'modified',
-            reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash?.slice(0, 12) ?? 'unreadable'}); delete it yourself or re-enable rules`,
-            ledger: { op: 'delete', key: ledgerKey(recorded) },
-          });
-        }
-        continue;
-      }
-      // No record. Dedicated asb-named files surface as unproven leftovers;
-      // shared hosts with nothing selected are foreign and stay silent.
-      if (row.rules.dedicated) {
+      // Nothing selected renders to no bytes, so comparison proves nothing
+      // here and the filename is the only claim left. A path this table names
+      // carries the name asb chose for the slice, so location is the proof.
+      // The name sweep stays out of a project tree the repository shares.
+      if (!current.exists || input.project) continue;
+      if (currentHash === null) {
         actions.push({
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
+          ...base,
           op: 'none',
           outcome: 'left-behind',
           detail: 'unproven',
-          reason:
-            'asb-named file with no ownership record; delete it yourself or `asb import` it into the library',
+          reason: 'occupied but unreadable; asb cannot prove it is safe to remove',
         });
+        continue;
       }
+      // A path configuration chose is the user's, so nothing here proves the
+      // bytes are asb's: the file is named and kept, never deleted for
+      // sitting where a custom target points.
+      if (!row.rules.ownsName) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason: `nothing is selected for ${appId} and this target's path comes from configuration, so asb cannot prove it wrote the file; delete it yourself or enable rules`,
+        });
+        continue;
+      }
+      actions.push({
+        ...base,
+        op: 'remove',
+        outcome: 'removed',
+        detail: 'stale-copy',
+        root,
+        expectedHash: currentHash,
+      });
       continue;
     }
 
     if (!current.exists) {
       actions.push({
-        app: appId,
-        type: 'rules',
-        id: null,
-        path: targetPath,
+        ...base,
         op: 'write',
         outcome: 'written',
         detail: 'created',
         content: desired,
         root,
         expectedHash: null,
-        ledger: putEntry('written'),
       });
       continue;
     }
 
     if (current.content === desired) {
-      if (recorded && recorded.hash === desiredHash) {
-        actions.push({
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
-          op: 'none',
-          outcome: 'unchanged',
-        });
-      } else {
-        actions.push({
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
-          op: 'adopt',
-          outcome: 'adopted',
-          detail: 'identity',
-          ledger: putEntry('identity'),
-        });
-      }
+      actions.push({ ...base, op: 'none', outcome: 'unchanged' });
       continue;
     }
 
-    if (recorded) {
-      if (currentHash === recorded.hash) {
-        actions.push({
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
-          op: 'write',
-          outcome: 'written',
-          detail: 'updated',
-          content: desired,
-          root,
-          expectedHash: currentHash,
-          ledger: putEntry('written'),
-        });
-      } else if (input.project?.collision === 'takeover' && currentHash !== null) {
-        actions.push({
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
-          op: 'write',
-          outcome: 'written',
-          detail: 'takeover',
-          content: desired,
-          root,
-          expectedHash: currentHash,
-          ledger: putEntry('written'),
-        });
-      } else {
-        actions.push({
-          app: appId,
-          type: 'rules',
-          id: null,
-          path: targetPath,
-          op: 'none',
-          outcome: 'conflict',
-          reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash?.slice(0, 12) ?? 'unreadable'}); resolve by hand, or disable rules for this app`,
-        });
-      }
-      continue;
-    }
-
-    // Unrecorded, occupied, different bytes: the table-declared managed
-    // location grants convention adoption for update only. Nothing is
-    // written this run — the entry records the user's current bytes, the
-    // next sync performs the update (and flips the entry to `written`), and
-    // a deselect before that first rewrite preserves the file.
     if (currentHash === null) {
       actions.push({
-        app: appId,
-        type: 'rules',
-        id: null,
-        path: targetPath,
+        ...base,
         op: 'none',
         outcome: 'blocked',
         detail: 'foreign',
@@ -975,58 +810,30 @@ export function planRules(input: PlanInput): Action[] {
       });
       continue;
     }
-    if (input.project) {
-      actions.push(
-        input.project.collision === 'takeover'
-          ? {
-              app: appId,
-              type: 'rules',
-              id: null,
-              path: targetPath,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              content: desired,
-              root,
-              expectedHash: currentHash,
-              ledger: putEntry('written'),
-            }
-          : {
-              app: appId,
-              type: 'rules',
-              id: null,
-              path: targetPath,
-              op: 'none',
-              outcome: 'conflict',
-              detail: 'foreign',
-              reason: 'project target is occupied and the peer manifest does not own it; preserved',
-            }
-      );
-    } else {
+
+    // Occupied with bytes that are not the render. Globally the filename is
+    // asb's own, so the render is written in one pass. A project tree is
+    // shared with the repository, so only an explicit takeover overwrites
+    // what is already there.
+    if (input.project && input.project.collision !== 'takeover') {
       actions.push({
-        app: appId,
-        type: 'rules',
-        id: null,
-        path: targetPath,
-        op: 'adopt',
-        outcome: 'adopted',
-        detail: 'convention',
-        reason: 'existing file adopted for update; the next sync writes the composed rules',
-        ledger: {
-          op: 'put',
-          entry: {
-            app: appId,
-            type: 'rules',
-            id: null,
-            path: targetPath,
-            shape: 'own-file',
-            hash: currentHash,
-            provenance: 'convention',
-            updatedAt: now,
-          },
-        },
+        ...base,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'foreign',
+        reason: 'project target holds content that is not the current render; preserved',
       });
+      continue;
     }
+    actions.push({
+      ...base,
+      op: 'write',
+      outcome: 'written',
+      detail: input.project ? 'takeover' : 'updated',
+      content: desired,
+      root,
+      expectedHash: currentHash,
+    });
   }
 
   // Escaping targets are decided here, from the capture, so dry-run and the
@@ -1075,7 +882,7 @@ interface SkillRowPlan {
  * reported and preserved rather than removed.
  */
 export function planSkills(input: PlanInput): Action[] {
-  const { config, inventory, capture, table, now } = input;
+  const { config, inventory, capture, table } = input;
   const actions: Action[] = [];
 
   const byId = new Map(
@@ -1264,27 +1071,7 @@ export function planSkills(input: PlanInput): Action[] {
        * which both means there is nothing to write and is the only claim that
        * authorizes deleting it. Anything else is the user's: overwritten
        * while the skill is selected, left alone once it is not.
-       *
-       * Writes still emit a record, because a project run proves ownership to
-       * its peer manifest and 0.4 peers read that file. Global planning no
-       * longer consults it.
        */
-      // No file list: the render is the file list, and deletion authority now
-      // comes from comparing against it. Recording one cost a megabyte per
-      // large bundle and proved nothing the library does not already say.
-      const record = (hash: string): Action['ledger'] => ({
-        op: 'put',
-        entry: {
-          app: row.app,
-          type: 'skills',
-          id,
-          path: bundlePath,
-          shape: 'own-dir',
-          hash,
-          provenance: 'written',
-          updatedAt: now,
-        },
-      });
       const base = {
         app: row.app,
         type: 'skills',
@@ -1304,7 +1091,6 @@ export function planSkills(input: PlanInput): Action[] {
             root: row.root,
             expectedHash: null,
             // Hash is measured post-write by the executor.
-            ledger: record(''),
           });
         }
         continue;
@@ -1375,7 +1161,6 @@ export function planSkills(input: PlanInput): Action[] {
             },
             root: row.root,
             expectedHash: captured.fingerprint,
-            ledger: record(''),
           });
         }
         continue;
@@ -1455,10 +1240,6 @@ export function planSkills(input: PlanInput): Action[] {
         },
         root: row.root,
         expectedHash: captured.fingerprint,
-        ledger: {
-          op: 'delete',
-          key: ledgerKey({ app: row.app, type: 'skills', id, path: bundlePath }),
-        },
       });
     }
   }
@@ -1490,59 +1271,6 @@ export function planSkills(input: PlanInput): Action[] {
 
 type EntryType = 'commands' | 'agents';
 
-function removeEntryRecord(
-  app: string,
-  type: EntryType,
-  recorded: LedgerEntry,
-  current: CapturedTarget,
-  root: string,
-  keepProofOnLeftBehind = false
-): Action {
-  const base = { app, type, id: recorded.id, path: recorded.path };
-  const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
-  if (!current.exists) {
-    return { ...base, op: 'none', outcome: 'removed', detail: 'already-absent', ledger: drop };
-  }
-  if (current.escapes === true) {
-    return {
-      ...base,
-      op: 'none',
-      outcome: 'blocked',
-      detail: 'path-escape',
-      reason: `parent directory of ${recorded.path} resolves outside the app root; not touching it`,
-    };
-  }
-  if (recorded.provenance === 'convention') {
-    return {
-      ...base,
-      op: 'none',
-      outcome: 'left-behind',
-      detail: 'unproven',
-      reason: 'file was adopted by convention for update only; preserved',
-      ...(keepProofOnLeftBehind ? {} : { ledger: drop }),
-    };
-  }
-  const currentHash = current.content === null ? null : hashContent(current.content);
-  if (currentHash !== recorded.hash) {
-    return {
-      ...base,
-      op: 'none',
-      outcome: 'left-behind',
-      detail: 'modified',
-      reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash?.slice(0, 12) ?? 'unreadable'}); delete it yourself or re-enable it`,
-      ...(keepProofOnLeftBehind ? {} : { ledger: drop }),
-    };
-  }
-  return {
-    ...base,
-    op: 'remove',
-    outcome: 'removed',
-    root,
-    expectedHash: currentHash,
-    ledger: drop,
-  };
-}
-
 interface ConfigCandidate {
   component: Component;
   filename: string;
@@ -1568,12 +1296,11 @@ function planEntryConfig(
   app: string,
   target: EntryTargetRow,
   candidates: readonly ConfigCandidate[],
-  protectedIds: ReadonlySet<string>,
-  selectedEligible: boolean
+  deselected: readonly ConfigCandidate[]
 ): Action[] {
   const spec = target.config;
   if (!spec) return [];
-  const { config, capture, ledger, now } = input;
+  const { config, capture } = input;
   const captured = capture.mcp[app];
   const base = { app, type: 'agents', id: null, path: spec.path(config.homes) };
   if (!captured || captured.path !== base.path) {
@@ -1612,8 +1339,6 @@ function planEntryConfig(
 
   const actions: Action[] = [];
   const edits: KeysEdit[] = [];
-  const mutations: LedgerMutation[] = [];
-  const desiredKeys = new Set<string>();
   const requiredPaths = new Set<string>();
   const addSlice = (
     id: string | null,
@@ -1622,29 +1347,15 @@ function planEntryConfig(
     text: string | undefined,
     rolePath?: string
   ): void => {
-    const recordKey = ledgerKey({ app, type: 'agents', id, path: captured.path });
-    desiredKeys.add(recordKey);
     if (rolePath) requiredPaths.add(rolePath);
-    const recorded = ledger.entries.find((entry) => ledgerKey(entry) === recordKey) ?? null;
     const current = valueAtKeyPath(captured.root, keyPath);
     const sliceBase = { app, type: 'agents', id, path: captured.path };
-    const put = (provenance: Provenance): LedgerMutation => ({
-      op: 'put',
-      entry: {
-        app,
-        type: 'agents',
-        id,
-        path: captured.path,
-        shape: 'keys',
-        hash: sliceHash(value),
-        keys: keyPath,
-        provenance,
-        updatedAt: now,
-      },
-    });
     if (current === undefined) {
       edits.push({ keyPath, value, ...(text ? { text } : { scalar: true as const }) });
-      mutations.push(put('written'));
+      return;
+    }
+    if (sliceHash(current) === sliceHash(value)) {
+      actions.push({ ...sliceBase, op: 'none', outcome: 'unchanged' });
       return;
     }
     const unspliceable = text ? tableCanSplice(captured, keyPath) : null;
@@ -1652,51 +1363,13 @@ function planEntryConfig(
       actions.push({
         ...sliceBase,
         op: 'none',
-        outcome: recorded ? 'conflict' : 'blocked',
-        detail: recorded ? undefined : 'foreign',
+        outcome: 'blocked',
+        detail: 'foreign',
         reason: `${unspliceable}; move it or remove it by hand`,
       });
       return;
     }
-    const currentHash = sliceHash(current);
-    if (recorded) {
-      if (currentHash !== recorded.hash) {
-        actions.push({
-          ...sliceBase,
-          op: 'none',
-          outcome: 'conflict',
-          reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
-        });
-      } else if (currentHash === sliceHash(value)) {
-        actions.push({ ...sliceBase, op: 'none', outcome: 'unchanged' });
-      } else {
-        edits.push({ keyPath, value, ...(text ? { text } : { scalar: true as const }) });
-        mutations.push(put('written'));
-      }
-      return;
-    }
-    if (currentHash === sliceHash(value)) {
-      if (id === null) {
-        actions.push({ ...sliceBase, op: 'none', outcome: 'unchanged' });
-        return;
-      }
-      actions.push({
-        ...sliceBase,
-        op: 'adopt',
-        outcome: 'adopted',
-        detail: 'identity',
-        ledger: put('identity'),
-        ...(rolePath ? { requiresPaths: [rolePath] } : {}),
-      });
-    } else {
-      actions.push({
-        ...sliceBase,
-        op: 'none',
-        outcome: 'blocked',
-        detail: 'foreign',
-        reason: `${tomlHeaderName(keyPath)} is already in ${captured.path} and asb never wrote it`,
-      });
-    }
+    edits.push({ keyPath, value, ...(text ? { text } : { scalar: true as const }) });
   };
 
   for (const candidate of candidates) {
@@ -1707,50 +1380,40 @@ function planEntryConfig(
     addSlice(null, spec.activation.keyPath, spec.activation.value, undefined);
   }
 
-  for (const recorded of ledger.entries) {
-    if (
-      recorded.app !== app ||
-      recorded.type !== 'agents' ||
-      recorded.path !== captured.path ||
-      recorded.shape !== 'keys' ||
-      desiredKeys.has(ledgerKey(recorded)) ||
-      (recorded.id === null ? selectedEligible : protectedIds.has(recorded.id))
-    )
+  // Role keys nothing selects any more, on the same rule as an MCP server:
+  // the key comes out while it holds the render, and a key holding anything
+  // else is the user's. The activation flag is never removed — `multi_agent =
+  // true` is what a Codex user running their own roles also writes, so there
+  // is nothing in it to tell the two apart.
+  for (const candidate of deselected) {
+    let slice: { keyPath: string[]; value: unknown; text?: string };
+    try {
+      slice = spec.component(candidate.component, candidate.filename);
+    } catch {
       continue;
-    const keyPath = recorded.keys as string[];
-    const current = valueAtKeyPath(captured.root, keyPath);
-    const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
-    if (current === undefined) {
-      actions.push({
-        app,
-        type: 'agents',
-        id: recorded.id,
-        path: captured.path,
-        op: 'none',
-        outcome: 'removed',
-        detail: 'already-absent',
-        ledger: drop,
-      });
-    } else if (sliceHash(current) !== recorded.hash) {
-      actions.push({
-        app,
-        type: 'agents',
-        id: recorded.id,
-        path: captured.path,
-        op: 'none',
-        outcome: 'left-behind',
-        detail: 'modified',
-        reason: 'agent config key changed since asb wrote it; preserved',
-        ledger: drop,
-      });
-    } else {
-      edits.push({
-        keyPath,
-        remove: true,
-        ...(recorded.id === null ? { scalar: true as const } : {}),
-      });
-      mutations.push(drop);
     }
+    const current = valueAtKeyPath(captured.root, slice.keyPath);
+    if (current === undefined) continue;
+    const id = candidate.component.id;
+    const proven = sliceHash(current) === sliceHash(slice.value);
+    const unspliceable = slice.text ? tableCanSplice(captured, slice.keyPath) : null;
+    if (proven && !unspliceable) {
+      edits.push({ keyPath: slice.keyPath, remove: true });
+      continue;
+    }
+    if (!proven && !editedRender(current, slice.value, ['config_file'])) continue;
+    actions.push({
+      app,
+      type: 'agents',
+      id,
+      path: captured.path,
+      op: 'none',
+      outcome: 'left-behind',
+      detail: 'modified',
+      reason: unspliceable
+        ? `${unspliceable}; delete it yourself`
+        : `${tomlHeaderName(slice.keyPath)} in ${captured.path} is no longer the library's definition; delete it yourself or re-enable the role`,
+    });
   }
 
   if (edits.length === 0) return actions;
@@ -1770,7 +1433,6 @@ function planEntryConfig(
     content,
     root: spec.root(config.homes),
     expectedHash: captured.content === null ? null : hashContent(captured.content),
-    ledger: mutations,
     requiresPaths: [...requiredPaths],
     keyEdits: { format: spec.format, edits, baseContent: captured.content ?? '' },
   });
@@ -1778,7 +1440,7 @@ function planEntryConfig(
 }
 
 function planEntries(input: PlanInput, type: EntryType): Action[] {
-  const { config, inventory, ledger, capture, table, now } = input;
+  const { config, inventory, capture, table } = input;
   const actions: Action[] = [];
   const byId = new Map(
     inventory.components
@@ -1837,9 +1499,7 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       }
     }
 
-    const desiredRecords = new Set<string>();
     const configCandidates: ConfigCandidate[] = [];
-    let selectedEligible = false;
     for (const id of selected) {
       const component = byId.get(id);
       if (!component) continue;
@@ -1875,28 +1535,10 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
         });
         continue;
       }
-      selectedEligible = true;
       if (collisions.has(id)) continue;
-      const recordKey = ledgerKey({ app, type, id, path: targetPath });
-      desiredRecords.add(recordKey);
-      const recorded = ledger.entries.find((entry) => ledgerKey(entry) === recordKey) ?? null;
       const current = capture.targets[targetPath] ?? { exists: false, content: null };
       const base = { app, type, id, path: targetPath };
-      const desiredHash = hashContent(desired);
       let roleReady = false;
-      const put = (provenance: Provenance): LedgerMutation => ({
-        op: 'put',
-        entry: {
-          app,
-          type,
-          id,
-          path: targetPath,
-          shape: 'own-file',
-          hash: desiredHash,
-          provenance,
-          updatedAt: now,
-        },
-      });
       if (current.escapes === true) {
         actions.push({
           ...base,
@@ -1918,178 +1560,106 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
           content: desired,
           root: target.root(config.homes),
           expectedHash: null,
-          ledger: put('written'),
         });
       } else if (current.content === null) {
         actions.push({
           ...base,
           op: 'none',
-          outcome: recorded ? 'conflict' : 'blocked',
-          detail: recorded ? undefined : 'foreign',
+          outcome: 'blocked',
+          detail: 'foreign',
           reason: 'target exists but cannot be read; not touching it',
         });
         protectedIds.add(id);
         continue;
+      } else if (current.content === desired) {
+        roleReady = true;
+        actions.push({ ...base, op: 'none', outcome: 'unchanged' });
+      } else if (input.project && input.project.collision !== 'takeover') {
+        // A project tree is shared with the repository, so an occupied target
+        // that is not the render stays the repository's until takeover.
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'foreign',
+          reason: 'project target holds content that is not the current render; preserved',
+        });
       } else {
-        const currentHash = hashContent(current.content);
-        if (recorded && currentHash !== recorded.hash) {
-          if (input.project?.collision === 'takeover') {
-            roleReady = true;
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              content: desired,
-              root: target.root(config.homes),
-              expectedHash: currentHash,
-              ledger: put('written'),
-            });
-          } else {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'conflict',
-              reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
-            });
-            protectedIds.add(id);
-          }
-          if (roleReady) configCandidates.push({ component, filename, rolePath: targetPath });
-          continue;
-        }
-        if (currentHash === desiredHash) {
-          roleReady = true;
-          actions.push(
-            recorded
-              ? { ...base, op: 'none', outcome: 'unchanged' }
-              : {
-                  ...base,
-                  op: 'adopt',
-                  outcome: 'adopted',
-                  detail: 'identity',
-                  ledger: put('identity'),
-                }
-          );
-        } else if (recorded) {
-          roleReady = true;
-          actions.push({
-            ...base,
-            op: 'write',
-            outcome: 'written',
-            detail: 'updated',
-            content: desired,
-            root: target.root(config.homes),
-            expectedHash: currentHash,
-            ledger: put('written'),
-          });
-        } else if (input.project) {
-          if (input.project.collision === 'takeover') {
-            roleReady = true;
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              content: desired,
-              root: target.root(config.homes),
-              expectedHash: currentHash,
-              ledger: put('written'),
-            });
-          } else {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'conflict',
-              detail: 'foreign',
-              reason: 'project target is occupied and the peer manifest does not own it; preserved',
-            });
-          }
-        } else {
-          actions.push({
-            ...base,
-            op: 'adopt',
-            outcome: 'adopted',
-            detail: 'convention',
-            reason: 'existing filename adopted for update; the next sync writes desired content',
-            ledger: {
-              op: 'put',
-              entry: {
-                app,
-                type,
-                id,
-                path: targetPath,
-                shape: 'own-file',
-                hash: currentHash,
-                provenance: 'convention',
-                updatedAt: now,
-              },
-            },
-          });
-        }
+        // The app table declares this directory and the library owns this
+        // filename, so a selected component writes its render in one pass.
+        // Editing a distributed copy is not supported; edit the library entry.
+        roleReady = true;
+        actions.push({
+          ...base,
+          op: 'write',
+          outcome: 'written',
+          detail: input.project ? 'takeover' : 'updated',
+          content: desired,
+          root: target.root(config.homes),
+          expectedHash: hashContent(current.content),
+        });
       }
       if (roleReady) configCandidates.push({ component, filename, rolePath: targetPath });
     }
 
-    for (const recorded of ledger.entries) {
-      if (recorded.app !== app || recorded.type !== type || recorded.shape !== 'own-file') continue;
-      if (
-        desiredRecords.has(ledgerKey(recorded)) ||
-        (recorded.id !== null && protectedIds.has(recorded.id))
-      )
-        continue;
-      const current = capture.targets[recorded.path] ?? { exists: false, content: null };
-      actions.push(
-        removeEntryRecord(
-          app,
-          type,
-          recorded,
-          current,
-          target.root(config.homes),
-          input.project !== undefined
-        )
-      );
-    }
-
+    // Deselected. A file that is byte-for-byte the render is provably asb's
+    // and comes out on that proof alone. A selected component is rewritten
+    // whenever it drifts, so a distributed copy only fails that test once the
+    // user has edited it, and their edit is reported rather than deleted.
+    // Exclusive project mode is the one place that still clears the directory,
+    // because the user asked for exactly that.
     const selectedSet = new Set(selected);
+    const configDeselected: ConfigCandidate[] = [];
     for (const component of byId.values()) {
-      if (selectedSet.has(component.id)) continue;
+      if (selectedSet.has(component.id) || protectedIds.has(component.id)) continue;
       const targetPath = path.join(target.dir(config.homes), target.filename(component.id));
+      configDeselected.push({
+        component,
+        filename: target.filename(component.id),
+        rolePath: targetPath,
+      });
       const current = capture.targets[targetPath];
       if (!current?.exists) continue;
-      const recorded = ledger.entries.some(
-        (entry) => ledgerKey(entry) === ledgerKey({ app, type, id: component.id, path: targetPath })
-      );
-      if (!recorded) {
-        actions.push(
-          input.project?.mode === 'exclusive' && current.content !== null
-            ? {
-                app,
-                type,
-                id: component.id,
-                path: targetPath,
-                op: 'remove',
-                outcome: 'removed',
-                detail: 'exclusive-cleanup',
-                root: target.root(config.homes),
-                expectedHash: hashContent(current.content),
-              }
-            : {
-                app,
-                type,
-                id: component.id,
-                path: targetPath,
-                op: 'none',
-                outcome: 'left-behind',
-                detail: 'unproven',
-                reason:
-                  'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
-              }
-        );
+      const base = { app, type, id: component.id, path: targetPath };
+      if (current.content === null) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'target matches a library component by name but cannot be read; delete it yourself',
+        });
+        continue;
       }
+      let rendered: string | null = null;
+      try {
+        rendered = target.render(component);
+      } catch {
+        rendered = null;
+      }
+      const proven = rendered !== null && current.content === rendered;
+      const exclusive = input.project?.mode === 'exclusive';
+      if (!proven && !exclusive) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason: 'edited since asb last wrote it; delete it yourself or re-enable it',
+        });
+        continue;
+      }
+      actions.push({
+        ...base,
+        op: 'remove',
+        outcome: 'removed',
+        ...(proven ? {} : { detail: 'exclusive-cleanup' }),
+        root: target.root(config.homes),
+        expectedHash: hashContent(current.content),
+      });
     }
-    actions.push(
-      ...planEntryConfig(input, app, target, configCandidates, protectedIds, selectedEligible)
-    );
+    actions.push(...planEntryConfig(input, app, target, configCandidates, configDeselected));
   }
   return actions;
 }
@@ -2136,7 +1706,7 @@ export function planLegacyOpencode(input: PlanInput): Action[] {
           outcome: 'left-behind',
           detail: 'unproven',
           reason:
-            'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
+            'filename matches a library component but the file is not what the library renders; delete it yourself or enable it to have it written',
         });
       };
       if (entry.bundle) {
@@ -2221,8 +1791,8 @@ const HOOK_DIR_PLACEHOLDERS = [
 /**
  * Render one library entry into the groups an app config carries: the bundle
  * placeholders resolve to the distributed directory, commands become
- * `$HOME`-portable, and `_asb*` metadata is stripped — an app config holds no
- * ASB marker of any kind, which is why ownership needs the peer record.
+ * `$HOME`-portable, and `_asb*` metadata is stripped: an app config holds no
+ * ASB marker of any kind, so ownership is read from the render instead.
  */
 export function renderHookGroups(
   hooks: HookEventMap,
@@ -2264,31 +1834,19 @@ export function renderHookGroups(
   return rendered;
 }
 
+/** A group's matcher, for naming one in a report line. */
+function matcherOf(group: unknown): unknown {
+  return isPlainObject(group) ? group.matcher : undefined;
+}
+
 /**
- * Count-bounded removal of recorded groups: each recorded instance takes out
- * the first deep-equal group and no more, so a user's own duplicate of a
- * managed group and a hand-edited copy both survive. Emptied events go.
+ * Groups an event map holds for one event. Event names come from the app's
+ * vocabulary, so `__proto__` is a name a user can write and `JSON.parse` hands
+ * it back as an own key: a plain lookup would return the prototype instead.
  */
-function spliceRecordedGroups(
-  existing: Record<string, unknown[]>,
-  recorded: Record<string, unknown[]>
-): { hooks: Record<string, unknown[]>; removed: boolean; taken: Record<string, unknown[]> } {
-  const hooks: Record<string, unknown[]> = Object.create(null);
-  const taken: Record<string, unknown[]> = Object.create(null);
-  let removed = false;
-  for (const [event, groups] of Object.entries(existing)) {
-    const remaining = [...groups];
-    for (const group of recorded[event] ?? []) {
-      const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, group));
-      if (index >= 0) {
-        taken[event] = [...(taken[event] ?? []), remaining[index]];
-        remaining.splice(index, 1);
-        removed = true;
-      }
-    }
-    if (remaining.length > 0) hooks[event] = remaining;
-  }
-  return { hooks, removed, taken };
+function groupsFor(byEvent: Record<string, unknown[]>, event: string): unknown[] {
+  const groups = byEvent[event];
+  return Array.isArray(groups) ? groups : [];
 }
 
 /** The shape asb can merge into, or the reason it cannot. */
@@ -2305,15 +1863,17 @@ function invalidHooksShape(config: Record<string, unknown>): string | null {
 }
 
 /**
- * Hooks planner. The slice is a set of matcher groups inside a config file
- * the app and the user also own, so nothing is positional: current output is
- * recorded by the peer, while predecessor output is recognized by evidence.
+ * Hooks planner. The slice is a set of matcher groups inside a config file the
+ * app and the user also own, so a group is asb's only while it is what the
+ * library renders, or while its commands run a file under the app's managed
+ * hook directory named after a hook the library defines. Predecessor markers
+ * and v0.4.28 managed paths say asb without saying which hook, which is enough
+ * to take a group out and never enough to hand one back.
  *
- * Proofs for this slice: (4) the peer record, plus predecessor markers,
- * managed paths backed by known bundle ids, and read-only v0.4.28 state.
- * Byte-identity alone never claims a group the user wrote by hand. Shape
- * validation runs before any write, so an unusable config never gets a
- * partial distribution.
+ * Each recognized group is rewritten where it already sits: Codex records its
+ * trust against a group's array position, so moving one it did not ask about
+ * costs the user an approval. Shape validation runs before any write, so an
+ * unusable config never gets a partial distribution.
  */
 export function planHooks(input: PlanInput): Action[] {
   const { config, inventory, capture, table } = input;
@@ -2393,37 +1953,66 @@ export function planHooks(input: PlanInput): Action[] {
       continue;
     }
 
-    const state = captured.state;
-    const recorded = spliceRecordedGroups(
-      (captured.config.hooks ?? {}) as Record<string, unknown[]>,
-      state.events
-    );
+    const existingHooks = (captured.config.hooks ?? {}) as Record<string, unknown[]>;
     const managedParent = row.bundleDir(config.homes);
     const legacyParent = path.join(path.dirname(managedParent), 'asb');
-    const knownManagedIds = new Set([
-      ...inventory.components
-        .filter((component) => component.type === 'hooks' && component.files !== undefined)
-        .map((component) => component.id),
-      ...state.bundles,
-    ]);
-    const recognized = removeOwnedHookGroups(recorded.hooks, {
+    const ownership = {
       legacyAsbRoots: [legacyParent, preferHomeVar(legacyParent)],
       managedRoots: [managedParent, preferHomeVar(managedParent)],
-      knownManagedIds,
-      stateGroups: [],
-    });
-    const remainder = recognized.hooks;
-    const removed = recorded.removed || recognized.removed;
+      knownManagedIds: new Set(
+        inventory.components
+          .filter((component) => component.type === 'hooks' && component.files !== undefined)
+          .map((component) => component.id)
+      ),
+    };
     const hadLegacyManagedKey = Object.hasOwn(captured.config, '_asb_managed_hooks');
 
+    // Every hook the library still defines, rendered for this app whether it
+    // is selected or not: a group equal to one of these is asb's even when
+    // its command names no managed path, which is how a hook with no bundle
+    // is recognized at all.
+    const renders = new Map<string, Record<string, unknown[]>>();
+    for (const component of byId.values()) {
+      if (!component.hooks) continue;
+      const source = row.filter ? row.filter(component.hooks) : component.hooks;
+      if (Object.keys(source).length === 0) continue;
+      const bundlePath = component.files
+        ? path.join(row.bundleDir(config.homes), component.id)
+        : undefined;
+      renders.set(component.id, renderHookGroups(source, bundlePath));
+    }
+    const renderOwnerOf = (group: unknown, event: string): string | null => {
+      for (const [id, byEvent] of renders) {
+        if (groupsFor(byEvent, event).some((candidate) => isDeepStrictEqual(candidate, group))) {
+          return id;
+        }
+      }
+      return null;
+    };
+    // A group asb cannot prove is kin to a library hook when it shares that
+    // hook's event and matcher, which is what an older render of it looks
+    // like. Kinship reads every hook the library defines rather than the
+    // selected ones, so deselecting a hook does not silence the report on the
+    // predecessor group it left behind.
+    const kinToLibrary = (group: unknown, event: string): boolean => {
+      for (const byEvent of renders.values()) {
+        if (
+          groupsFor(byEvent, event).some((candidate) => matcherOf(candidate) === matcherOf(group))
+        )
+          return true;
+      }
+      return false;
+    };
+
     // A selected id the library cannot resolve — absent file, parse failure —
-    // reports its cause at library level. Peer-owned groups and bundles get
-    // one app-level deferral because only deselection authorizes removal.
+    // reports its cause at library level, and its groups and bundle stay put
+    // until the library is whole again.
     const unresolved = selected.filter((id) => byId.get(id)?.hooks === undefined);
 
     // Bundle files land before the config that points at them.
     const writes: Action[] = [];
-    const desired: Record<string, unknown[]> = {};
+    const desired: Record<string, unknown[]> = Object.create(null);
+    const desiredById = new Map<string, Record<string, unknown[]>>();
     const owned: string[] = [];
     let distributed = 0;
     for (const id of selected) {
@@ -2446,7 +2035,9 @@ export function planHooks(input: PlanInput): Action[] {
       distributed++;
 
       const bundlePath = component.files ? path.join(row.bundleDir(config.homes), id) : undefined;
-      for (const [event, groups] of Object.entries(renderHookGroups(source, bundlePath))) {
+      const rendered = renders.get(id) ?? renderHookGroups(source, bundlePath);
+      desiredById.set(id, rendered);
+      for (const [event, groups] of Object.entries(rendered)) {
         if (!desired[event]) desired[event] = [];
         desired[event].push(...groups);
       }
@@ -2469,8 +2060,7 @@ export function planHooks(input: PlanInput): Action[] {
             targetModeMatchesSourceExecutableBits(file.mode, target.mode)
           );
         });
-      const projectRecord = input.project ? state.bundles.includes(id) : false;
-      const projectCollision = input.project && live.exists && !projectRecord && !clean;
+      const projectCollision = input.project && live.exists && !clean;
       if (projectCollision && input.project?.collision !== 'takeover') {
         writes.push({
           app,
@@ -2497,17 +2087,12 @@ export function planHooks(input: PlanInput): Action[] {
               detail: live.exists ? 'updated' : 'created',
               bundle: {
                 files,
-                // Deleting needs proof asb put the directory there, and the
-                // loaded record is the only carrier. A name-colliding
-                // directory asb has never distributed is adopted for update
-                // only: its other files stay, the id enters the record with
-                // this write, and later syncs reconcile the tree normally.
-                stale:
-                  state.bundles.includes(id) || input.project?.collision === 'takeover'
-                    ? (live.files ?? [])
-                        .map((file) => file.rel)
-                        .filter((rel) => !desiredRels.has(rel))
-                    : [],
+                // A distributed bundle mirrors its library directory, so files
+                // the render does not name are cleared. That is what keeps the
+                // tree provably asb's for a later deselection.
+                stale: (live.files ?? [])
+                  .map((file) => file.rel)
+                  .filter((rel) => !desiredRels.has(rel)),
               },
               root,
               expectedHash: live.fingerprint,
@@ -2515,45 +2100,18 @@ export function planHooks(input: PlanInput): Action[] {
       );
     }
 
-    // Recorded groups no resolvable entry re-renders belong to the unresolved
-    // ones: they go straight back into the config and stay in the record.
-    // Sourced from what the splice actually took out of THIS config, never
-    // from state.events directly — device-copy merges over-count there.
-    let stranded = 0;
-    if (unresolved.length > 0) {
-      for (const [event, groups] of Object.entries(
-        spliceRecordedGroups(recorded.taken, desired).hooks
-      )) {
-        desired[event] = [...(desired[event] ?? []), ...groups];
-        stranded += groups.length;
-      }
-    }
-
-    // Nothing selected, nothing of ours in the config, no record: the run has
-    // no business rewriting a config or a state file it does not own.
-    if (distributed === 0 && !removed && !hadLegacyManagedKey && !peerStateHasContent(state)) {
-      continue;
-    }
-
-    // Deselected bundle directories: the peer record is the only thing that
-    // says asb put them there, so it is the only thing that may remove them.
+    // Deselected bundle directories, on the same proof as a skill bundle: a
+    // tree that is byte-for-byte the render is asb's and comes out, and an id
+    // the library no longer defines has nothing to compare against, so it
+    // stays. A selected id the library cannot resolve keeps its tree too.
     const removals: Action[] = [];
-    const retained: string[] = [];
-    for (const id of state.bundles) {
-      if (owned.includes(id)) continue;
+    for (const component of byId.values()) {
+      const id = component.id;
+      if (owned.includes(id) || !component.files || unresolved.includes(id)) continue;
       const bundlePath = path.join(row.bundleDir(config.homes), id);
       const live = capture.bundles[bundlePath];
       if (!live?.exists) continue;
-      // With an unresolved selection this run cannot tell a deselected bundle
-      // from one whose library entry merely went missing, so it removes
-      // neither and reclaims both once the library is whole again. One
-      // config-level deferral is emitted after every retained id is known.
-      if (unresolved.length > 0) {
-        retained.push(id);
-        continue;
-      }
       if (live.files === null || live.fingerprint === null) {
-        retained.push(id);
         removals.push({
           app,
           type: 'hooks',
@@ -2567,6 +2125,30 @@ export function planHooks(input: PlanInput): Action[] {
         });
         continue;
       }
+      const liveByRel = new Map(live.files.map((file) => [file.rel, file]));
+      const proven =
+        live.files.length === component.files.length &&
+        component.files.every((file) => {
+          const target = liveByRel.get(file.rel);
+          return (
+            target !== undefined &&
+            target.hash === hashContent(file.bytes) &&
+            targetModeMatchesSourceExecutableBits(file.mode, target.mode)
+          );
+        });
+      if (!proven && input.project) {
+        removals.push({
+          app,
+          type: 'hooks',
+          id,
+          path: bundlePath,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason: 'project hook bundle is not the current render; preserved',
+        });
+        continue;
+      }
       removals.push({
         app,
         type: 'hooks',
@@ -2574,19 +2156,86 @@ export function planHooks(input: PlanInput): Action[] {
         path: bundlePath,
         op: 'remove',
         outcome: 'removed',
+        ...(proven ? {} : { detail: 'stale-copy' }),
         bundle: { files: [], stale: live.files.map((file) => file.rel) },
         root,
         expectedHash: live.fingerprint,
       });
     }
 
-    const toAppend = filterRecognizedDesiredGroups(remainder, desired, captured.legacyGroups);
+    // The merge, in place. Each group asb can prove is its own is rewritten
+    // where it already sits, so Codex — which records its trust against a
+    // group's position — is asked to review only what actually changed. A
+    // group asb cannot prove keeps its place and its content, and hooks with
+    // nowhere to sit yet go on the end.
     const merged: Record<string, unknown[]> = Object.create(null);
-    for (const [event, groups] of Object.entries(remainder)) merged[event] = [...groups];
-    for (const [event, groups] of Object.entries(toAppend)) {
-      if (!merged[event]) merged[event] = [];
-      merged[event].push(...groups);
+    let appended = 0;
+    let removedGroups = 0;
+    const unproven: { event: string; matcher: unknown }[] = [];
+    const protectedIds = new Set(unresolved);
+    for (const event of new Set([...Object.keys(existingHooks), ...Object.keys(desired)])) {
+      const queue = new Map<string, unknown[]>();
+      for (const [id, byEvent] of desiredById) {
+        const groups = groupsFor(byEvent, event);
+        if (groups.length > 0) queue.set(id, [...groups]);
+      }
+      const out: unknown[] = [];
+      for (const group of existingHooks[event] ?? []) {
+        const owner = hookGroupOwner(group, ownership);
+        const id = owner?.kind === 'managed' ? owner.id : renderOwnerOf(group, event);
+        if (owner === null && id === null) {
+          out.push(group);
+          if (kinToLibrary(group, event)) unproven.push({ event, matcher: matcherOf(group) });
+          continue;
+        }
+        if (id !== null && protectedIds.has(id)) {
+          out.push(group);
+          continue;
+        }
+        // Reaching here with no id means a predecessor's marker proved the
+        // group asb's without saying which hook wrote it. When exactly one
+        // hook still has a group waiting for this event, that is the hook,
+        // and rewriting it where it sits leaves every group below at the
+        // index Codex recorded its trust against.
+        const waiting = [...queue.values()].filter((groups) => groups.length > 0);
+        const pending = id !== null ? queue.get(id) : waiting.length === 1 ? waiting[0] : undefined;
+        if (pending && pending.length > 0) {
+          const next = pending.shift();
+          out.push(next);
+          if (!isDeepStrictEqual(next, group)) appended++;
+          continue;
+        }
+        removedGroups++;
+      }
+      for (const groups of queue.values()) {
+        out.push(...groups);
+        appended += groups.length;
+      }
+      if (out.length > 0) merged[event] = out;
     }
+    const removed = removedGroups > 0;
+
+    // Naming a group costs the file nothing, so the report comes before the
+    // decision to leave the file alone: a predecessor group is reported once
+    // per run whether or not this run has anything to write.
+    for (const { event, matcher } of unproven) {
+      actions.push({
+        app,
+        type: 'hooks',
+        id: null,
+        path: configPath,
+        op: 'none',
+        outcome: 'left-behind',
+        detail: 'unproven',
+        reason: `a ${event} group${
+          typeof matcher === 'string' ? ` matching ${matcher}` : ''
+        } in ${configPath} is not one asb can prove it wrote — usually an older render of a hook it now writes elsewhere in the file; delete it yourself`,
+      });
+    }
+
+    // Nothing selected and nothing of asb's in the config: the run has no
+    // business rewriting a file it does not own.
+    if (distributed === 0 && !removed && !hadLegacyManagedKey) continue;
     const next = { ...captured.config };
     delete next._asb_managed_hooks;
     if (Object.keys(merged).length === 0) delete next.hooks;
@@ -2601,35 +2250,6 @@ export function planHooks(input: PlanInput): Action[] {
       configEdits.push({ keyPath: ['hooks'], value: merged });
     }
 
-    const stateAfter: PeerState = {
-      version: 1,
-      events: desired,
-      bundles: [...owned, ...retained],
-      legacyBundles: [],
-    };
-    const peer: Action['peer'] = {
-      asbHome: config.homes.asbHome,
-      target: row.stateTarget,
-      state: stateAfter,
-      ...(input.project ? { projectRoot: input.project.root } : {}),
-    };
-    const deferred = unresolved.length > 0 && (stranded > 0 || retained.length > 0);
-    const deferralAction: Action | undefined = deferred
-      ? {
-          app,
-          type: 'hooks',
-          id: unresolved.length === 1 ? unresolved[0] : null,
-          path: configPath,
-          op: 'none',
-          outcome: 'skipped',
-          detail: 'not-selected',
-          reason: `${stranded} recorded group(s) and ${retained.length} bundle(s) kept because ${
-            unresolved.length === 1
-              ? `entry ${unresolved[0]} is unresolved`
-              : `entries ${unresolved.join(', ')} are unresolved`
-          }; fix or deselect, then run asb sync again`,
-        }
-      : undefined;
     const currentHash = captured.content !== null ? hashContent(captured.content) : null;
     const baseContent = captured.content ?? '';
     let content: string;
@@ -2662,15 +2282,14 @@ export function planHooks(input: PlanInput): Action[] {
             detail: 'cleared',
             // A symlinked config keeps its link and receives the empty
             // document instead, or the managed groups stay behind in the
-            // dotfiles store with no record on any machine to reclaim them.
+            // dotfiles store with nothing pointing at them.
             content: `${JSON.stringify(next, null, 2)}\n`,
             root,
             expectedHash: currentHash,
-            peer,
           }
-        : { ...base, op: 'none', outcome: 'unchanged', peer };
+        : { ...base, op: 'none', outcome: 'unchanged' };
     } else if (captured.content === content) {
-      configAction = { ...base, op: 'none', outcome: 'unchanged', peer };
+      configAction = { ...base, op: 'none', outcome: 'unchanged' };
     } else {
       configAction = {
         ...base,
@@ -2682,17 +2301,13 @@ export function planHooks(input: PlanInput): Action[] {
         content,
         root,
         expectedHash: currentHash,
-        peer,
         keyEdits: { format: 'json', edits: configEdits, baseContent },
       };
     }
 
     // Bundles land first, then the removals they authorize, and only then the
-    // config and the record that point at both: a config naming payload this
-    // run failed to write is a broken hook, and a record claiming it hands
-    // every peer authority to delete a directory asb never wrote. The record
-    // is published last so a removal that could not delete can put its id
-    // back before it goes out.
+    // config that points at both: a config naming payload this run failed to
+    // write is a broken hook.
     const gate = owned.length > 0 ? { requires: [...owned] } : {};
     const gatedRemovals = removals.map((removal) => ({ ...removal, ...gate }));
     // The trust notice follows the hooks that need reviewing, not the write
@@ -2704,7 +2319,6 @@ export function planHooks(input: PlanInput): Action[] {
       // write that only removes (the survivors were already in place) asks for
       // none, and a bundle that failed to land leaves the config pointing at
       // payload the run never distributed, so the run's skip is named instead.
-      const appended = Object.keys(toAppend).length;
       const failed = writes.filter((w) => w.outcome === 'conflict').length;
       let reviewReason: string | undefined;
       if (appended === 0) {
@@ -2717,13 +2331,7 @@ export function planHooks(input: PlanInput): Action[] {
       configAction =
         reviewReason === undefined ? configAction : { ...configAction, reason: reviewReason };
     }
-    if (deferralAction && configAction.op === 'none' && configAction.outcome === 'unchanged') {
-      actions.push(...writes, ...gatedRemovals, { ...deferralAction, peer, ...gate });
-    } else {
-      actions.push(...writes, ...gatedRemovals);
-      if (deferralAction) actions.push(deferralAction);
-      actions.push({ ...configAction, ...gate });
-    }
+    actions.push(...writes, ...gatedRemovals, { ...configAction, ...gate });
   }
 
   return actions.map((action) => {
@@ -2751,63 +2359,6 @@ export function planHooks(input: PlanInput): Action[] {
 // MCP: named slices inside a structured document the user also owns
 // ---------------------------------------------------------------------------
 
-/**
- * Project MCP peer proof carries placement but no hash. The expected hash is
- * recomputed from the current library render; drift therefore preserves the
- * key, while an unchanged deselected key is removable.
- */
-export function projectMcpPeerLedgerEntries(
-  config: ResolvedConfig,
-  inventory: LibraryInventory,
-  capture: SyncCapture,
-  table: readonly AppRow[],
-  manifest: ProjectManifest,
-  now: string
-): LedgerEntry[] {
-  const components = inventory.components.filter(
-    (component): component is Component & { server: NonNullable<Component['server']> } =>
-      component.type === 'mcp' && component.server !== undefined
-  );
-  const entries: LedgerEntry[] = [];
-  for (const peer of Object.values(manifest.sections.mcp ?? {})) {
-    const row = table.find((candidate) => candidate.id === peer.targetId)?.mcp;
-    const captured = capture.mcp[peer.targetId];
-    if (!row || !captured) continue;
-    const expectedPath = path.resolve(config.project as string, peer.relativePath);
-    if (expectedPath !== captured.path) continue;
-    const candidates = components.filter(
-      (component) =>
-        (row.sanitize ? sanitizeMcpName(component.id) : component.id) === peer.serverKey
-    );
-    const component = candidates.length === 1 ? candidates[0] : undefined;
-    const identityField = row.keyField ?? 'name';
-    const keyPath =
-      row.structure === 'keyed-array'
-        ? [keyedArraySegment(row.rootKey, identityField, peer.serverKey)]
-        : [row.rootKey, peer.serverKey];
-    const dialect = component ? row.dialect(component.server) : null;
-    const desired =
-      dialect === null
-        ? null
-        : row.structure === 'keyed-array'
-          ? { ...dialect, [identityField]: peer.serverKey }
-          : dialect;
-    entries.push({
-      app: peer.targetId,
-      type: 'mcp',
-      id: component?.id ?? peer.serverKey,
-      path: captured.path,
-      shape: 'keys',
-      hash: desired === null ? 'peer-placement-only' : sliceHash(desired),
-      keys: keyPath,
-      serverKey: peer.serverKey,
-      provenance: 'peer-record',
-      updatedAt: now,
-    });
-  }
-  return entries;
-}
-
 interface McpSlice {
   /** Library component id: the key as authored. */
   id: string;
@@ -2819,16 +2370,31 @@ interface McpSlice {
   /** Rendered value, for explain. */
   desired: unknown;
   current: unknown;
-  recorded: LedgerEntry | null;
+  /** The value on disk is the render, which is the whole proof of ownership. */
+  proven?: boolean;
   /** Present when this slice contributes to the host's grouped write. */
   edit?: KeysEdit;
-  ledger?: LedgerMutation;
 }
 
 interface McpHostPlan {
   slices: McpSlice[];
   /** Set when nothing about this host can be planned. */
   failure?: { outcome: Outcome; detail: string; reason: string };
+}
+
+/**
+ * Whether a key holds an edited copy of what the library renders, rather than
+ * a different server that happens to share its name: the same invocation with
+ * different options. Enough to say the server is still there, never enough to
+ * remove it — that takes the render itself.
+ */
+function editedRender(current: unknown, desired: unknown, fields: readonly string[]): boolean {
+  if (!isPlainObject(current) || !isPlainObject(desired)) return false;
+  const identifying = fields.filter((field) => desired[field] !== undefined);
+  return (
+    identifying.length > 0 &&
+    identifying.every((field) => isDeepStrictEqual(current[field], desired[field]))
+  );
 }
 
 /** What a host holds where asb expects a table, for a reason line. */
@@ -2839,12 +2405,11 @@ function describeValue(value: unknown): string {
 }
 
 /**
- * One app's MCP host, slice by slice. Proofs available here: (1) the ledger
- * entry whose hash matches the value now at that key path, and (3)
- * byte-identity with the value asb would write. Convention grants nothing —
- * a key inside a document asb does not own is the user's server until one of
- * those two proofs holds, so an unrecorded occupied key blocks rather than
- * being overwritten the way 0.4 did.
+ * One app's MCP host, slice by slice. A key is asb's while it holds what the
+ * library renders for that server, so a selected server is written whenever it
+ * differs and a deselected one comes out only on that proof. The name of the
+ * key is not evidence: `memory` or `fetch` is what anyone would call a server
+ * they wrote themselves, so a key holding something else is left alone.
  */
 function planMcpHost(
   app: string,
@@ -2852,8 +2417,7 @@ function planMcpHost(
   captured: CapturedMcpHost,
   selected: readonly string[],
   byId: ReadonlyMap<string, Component>,
-  ledger: Ledger,
-  now: string,
+  wanted: ReadonlySet<string>,
   project?: ProjectPlanPolicy
 ): McpHostPlan {
   const slices: McpSlice[] = [];
@@ -2931,29 +2495,12 @@ function planMcpHost(
     if (exact) return null;
     return `${name} is not written as a table in ${captured.path}`;
   };
-  const recordFor = (id: string, keyPath: string[]): LedgerEntry => ({
-    app,
-    type: 'mcp',
-    id,
-    path: captured.path,
-    shape: 'keys',
-    hash: '',
-    keys: keyPath,
-    ...(project ? { serverKey: diskIdFor(id) } : {}),
-    provenance: 'written',
-    updatedAt: now,
-  });
-
   const selectedIds = new Set(selected);
   const desiredServerKeys = new Set<string>();
   for (const id of selected) {
     const component = byId.get(id);
     if (!component?.server) continue;
     const keyPath = keyPathFor(id);
-    const recorded =
-      ledger.entries.find(
-        (entry) => ledgerKey(entry) === ledgerKey({ app, type: 'mcp', id, path: captured.path })
-      ) ?? null;
     const dialectValue = row.dialect(component.server);
     if (dialectValue === null) {
       slices.push({
@@ -2964,7 +2511,6 @@ function planMcpHost(
         reason: `${app} does not support this server's transport`,
         desired: null,
         current: valueAtKeyPath(captured.root, keyPath),
-        recorded,
       });
       continue;
     }
@@ -2975,15 +2521,10 @@ function planMcpHost(
         : dialectValue;
 
     const current = valueAtKeyPath(captured.root, keyPath);
-    const base = { id, keyPath, desired: value, current, recorded };
+    const base = { id, keyPath, desired: value, current };
     const edit: KeysEdit = row.render
       ? { keyPath, value, text: row.render(keyPath, value) }
       : { keyPath, value };
-    const put = (provenance: Provenance): LedgerMutation => ({
-      op: 'put',
-      entry: { ...recordFor(id, keyPath), hash: sliceHash(value), provenance },
-    });
-
     if (current === undefined) {
       if (!captured.exists && !row.create) {
         slices.push({
@@ -2999,8 +2540,12 @@ function planMcpHost(
         outcome: 'written',
         detail: captured.exists ? 'updated' : 'created',
         edit,
-        ledger: put('written'),
       });
+      continue;
+    }
+
+    if (sliceHash(current) === sliceHash(value)) {
+      slices.push({ ...base, outcome: 'unchanged', proven: true });
       continue;
     }
 
@@ -3008,105 +2553,70 @@ function planMcpHost(
     if (unaddressable !== null) {
       slices.push({
         ...base,
-        outcome: recorded ? 'conflict' : 'blocked',
-        detail: recorded ? undefined : 'foreign',
+        outcome: 'blocked',
+        detail: 'foreign',
         reason: `${unaddressable}; asb edits whole tables only — move it or remove it by hand`,
       });
       continue;
     }
 
-    const currentHash = sliceHash(current);
-    if (recorded) {
-      if (currentHash !== recorded.hash) {
-        slices.push(
-          project?.collision === 'takeover'
-            ? {
-                ...base,
-                outcome: 'written',
-                detail: 'takeover',
-                edit,
-                ledger: put('written'),
-              }
-            : {
-                ...base,
-                outcome: 'conflict',
-                reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand, or disable this server for ${app}`,
-              }
-        );
-        continue;
-      }
-      if (currentHash === sliceHash(value)) {
-        slices.push({ ...base, outcome: 'unchanged' });
-        continue;
-      }
-      slices.push({ ...base, outcome: 'written', detail: 'updated', edit, ledger: put('written') });
-      continue;
-    }
-
-    if (currentHash === sliceHash(value)) {
-      slices.push({ ...base, outcome: 'adopted', detail: 'identity', ledger: put('identity') });
-      continue;
-    }
+    // Selecting a server asks for the library's definition at that key, so the
+    // render lands in one pass however the key got there. A project run
+    // without takeover keeps the repository's own value instead.
     slices.push(
-      project?.collision === 'takeover'
+      project && project.collision !== 'takeover'
         ? {
             ...base,
-            outcome: 'written',
-            detail: 'takeover',
-            edit,
-            ledger: put('written'),
+            outcome: 'conflict',
+            detail: 'foreign',
+            reason: `${diskIdFor(id)} in ${captured.path} is not the current render; preserved`,
           }
         : {
             ...base,
-            outcome: 'blocked',
-            detail: 'foreign',
-            reason: `${diskIdFor(id)} is already in ${captured.path} and asb never wrote it; rename yours, or delete that entry to let asb own the key`,
+            outcome: 'written',
+            detail: project ? 'takeover' : 'updated',
+            edit,
           }
     );
   }
 
-  // Recorded keys nothing selects any more. Removal needs the recorded hash
-  // to still match: an edited value is the user's now, so the claim goes and
-  // the value stays.
-  for (const recorded of ledger.entries) {
-    if (recorded.app !== app || recorded.type !== 'mcp' || recorded.path !== captured.path)
-      continue;
-    const id = recorded.id;
-    if (id === null || selectedIds.has(id)) continue;
-    const keyPath = recorded.keys ?? keyPathFor(id);
+  // Library servers nothing selects here any more. A key holding the render is
+  // provably asb's and comes out on that proof; anything else stays. A value
+  // that still runs the same server with different options is that server,
+  // edited, so it is named once — a key that merely shares the name is a
+  // stranger and is not spoken of at all.
+  for (const component of byId.values()) {
+    if (selectedIds.has(component.id) || !component.server) continue;
+    if (wanted.has(`${captured.path}::${diskIdFor(component.id)}`)) continue;
+    const dialectValue = row.dialect(component.server);
+    if (dialectValue === null) continue;
+    const keyPath = keyPathFor(component.id);
     const current = valueAtKeyPath(captured.root, keyPath);
-    const base = { id, keyPath: [...keyPath], desired: null, current, recorded };
-    const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
-    if (current === undefined) {
-      slices.push({ ...base, outcome: 'removed', detail: 'already-absent', ledger: drop });
-      continue;
-    }
+    if (current === undefined) continue;
+    const value =
+      row.structure === 'keyed-array'
+        ? { ...dialectValue, [identityField]: diskIdFor(component.id) }
+        : dialectValue;
+    const base = { id: component.id, keyPath, desired: null, current };
+    const proven = sliceHash(current) === sliceHash(value);
     const unaddressable = unspliceable(keyPath);
-    if (unaddressable !== null) {
+    if (proven && unaddressable === null) {
       slices.push({
         ...base,
-        outcome: 'left-behind',
-        detail: 'modified',
-        reason: `${unaddressable}; delete it yourself`,
-        ledger: drop,
+        proven: true,
+        outcome: 'removed',
+        edit: { keyPath, remove: true },
       });
       continue;
     }
-    if (sliceHash(current) !== recorded.hash) {
-      slices.push({
-        ...base,
-        outcome: 'left-behind',
-        detail: 'modified',
-        reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${sliceHash(current).slice(0, 12)}); delete it yourself or re-enable the server`,
-        ...(project ? {} : { ledger: drop }),
-      });
-      continue;
-    }
+    if (!proven && !editedRender(current, value, ['command', 'args', 'url'])) continue;
     slices.push({
       ...base,
-      outcome: 'removed',
-      edit: { keyPath: [...keyPath], remove: true },
-      ledger: drop,
+      outcome: 'left-behind',
+      detail: 'modified',
+      reason: unaddressable
+        ? `${unaddressable}; delete it yourself`
+        : `${diskIdFor(component.id)} in ${captured.path} is no longer the library's definition; delete it yourself or re-enable the server`,
     });
   }
 
@@ -3141,7 +2651,6 @@ function planMcpHost(
               reason: `${problem}; delete it yourself`,
               desired: null,
               current,
-              recorded: null,
             }
           : {
               id: serverKey,
@@ -3149,7 +2658,6 @@ function planMcpHost(
               outcome: 'removed',
               desired: null,
               current,
-              recorded: null,
               edit: { keyPath, remove: true },
             }
       );
@@ -3169,7 +2677,7 @@ function planMcpHost(
  * creates a host, which is where 0.4 wrote an empty server map instead.
  */
 export function planMcp(input: PlanInput): Action[] {
-  const { config, inventory, ledger, capture, table, now } = input;
+  const { config, inventory, capture, table } = input;
   const actions: Action[] = [];
 
   const byId = new Map(
@@ -3182,55 +2690,52 @@ export function planMcp(input: PlanInput): Action[] {
   );
   const assumeInstalled = new Set(config.apps.assumeInstalled);
 
-  const enabledApps = new Set(config.apps.enabled);
-  const rows: { app: string; row: McpTargetRow; selected: string[]; enabled: boolean }[] = [];
+  const rows: { app: string; row: McpTargetRow; selected: string[] }[] = [];
   const missingUnion = new Set<string>();
-  const appIds = new Set([
-    ...config.apps.enabled,
-    ...(input.project?.mode === 'managed'
-      ? ledger.entries.filter((entry) => entry.type === 'mcp').map((entry) => entry.app)
-      : []),
-  ]);
+  const enabledApps = new Set(config.apps.enabled);
+  // A project run visits every app that has a host in the tree, so the keys it
+  // wrote for an app the user has since dropped come out of that app's file.
+  const appIds = config.project
+    ? new Set([
+        ...config.apps.enabled,
+        ...table.filter((candidate) => candidate.mcp).map((candidate) => candidate.id),
+      ])
+    : enabledApps;
   for (const appId of appIds) {
     const row = table.find((candidate) => candidate.id === appId)?.mcp;
     if (!row) continue;
     const enabled = enabledApps.has(appId);
     if (enabled && capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
+    if (!enabled && capture.mcp[appId]?.exists !== true) continue;
     const selected = enabled ? effectiveSelection(config, appId, 'mcp') : [];
     for (const id of selected) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
-    // Nothing to write, nothing claimed there and nothing to adopt: a
-    // document asb has no business in is not read for problems either.
-    const claimedHere = ledger.entries.some(
-      (entry) =>
-        entry.app === appId && entry.type === 'mcp' && entry.path === capture.mcp[appId]?.path
-    );
+    // Nothing to write and no library server that could be sitting at one of
+    // these keys: a document asb has no business in is not read for problems
+    // either.
     if (
       selected.length === 0 &&
-      !claimedHere &&
       byId.size === 0 &&
       !(input.project?.mode === 'exclusive' && capture.mcp[appId]?.exists)
     )
       continue;
-    rows.push({ app: appId, row, selected, enabled });
+    rows.push({ app: appId, row, selected });
   }
 
-  const activePlacements = rows.flatMap(({ row, selected, enabled, app }) => {
-    if (!enabled) return [];
-    const captured = capture.mcp[app];
-    if (!captured) return [];
-    return selected.flatMap((id) => {
-      const component = byId.get(id);
-      if (!component?.server || row.dialect(component.server) === null) return [];
-      const serverKey = row.sanitize ? sanitizeMcpName(id) : id;
-      const keys =
-        row.structure === 'keyed-array'
-          ? [keyedArraySegment(row.rootKey, row.keyField ?? 'name', serverKey)]
-          : [row.rootKey, serverKey];
-      return [{ path: captured.path, keys }];
-    });
-  });
+  // Two apps can share one host — trae and trae-cn in a project tree — so a
+  // key another app still wants is never cleaned up behind its back.
+  const wanted = new Set(
+    rows.flatMap(({ app, row, selected }) => {
+      const captured = capture.mcp[app];
+      if (!captured) return [];
+      return selected.flatMap((id) => {
+        const component = byId.get(id);
+        if (!component?.server || row.dialect(component.server) === null) return [];
+        return [`${captured.path}::${row.sanitize ? sanitizeMcpName(id) : id}`];
+      });
+    })
+  );
 
   for (const id of missingUnion) {
     actions.push({
@@ -3244,7 +2749,7 @@ export function planMcp(input: PlanInput): Action[] {
     });
   }
 
-  for (const { app, row, selected, enabled } of rows) {
+  for (const { app, row, selected } of rows) {
     const captured = capture.mcp[app];
     if (!captured) continue;
     const base = { app, type: 'mcp', id: null, path: captured.path };
@@ -3270,55 +2775,13 @@ export function planMcp(input: PlanInput): Action[] {
       continue;
     }
 
-    const inactiveDrops = new Set<string>();
-    if (!enabled) {
-      const records = ledger.entries.filter(
-        (entry) => entry.app === app && entry.type === 'mcp' && entry.path === captured.path
-      );
-      for (const record of records) {
-        const owners = ledger.entries.filter(
-          (candidate) =>
-            candidate.type === 'mcp' &&
-            candidate.path === record.path &&
-            isDeepStrictEqual(candidate.keys, record.keys)
-        );
-        const cleanupOwner = owners
-          .filter((owner) => !enabledApps.has(owner.app))
-          .sort((left, right) => ledgerKey(left).localeCompare(ledgerKey(right)))[0];
-        const active = activePlacements.some(
-          (placement) =>
-            placement.path === record.path && isDeepStrictEqual(placement.keys, record.keys)
-        );
-        if (!active && cleanupOwner && ledgerKey(cleanupOwner) === ledgerKey(record)) continue;
-        const key = ledgerKey(record);
-        inactiveDrops.add(key);
-        actions.push({
-          app,
-          type: 'mcp',
-          id: record.id,
-          path: captured.path,
-          op: 'none',
-          outcome: 'removed',
-          detail: 'inactive-owner',
-          ledger: { op: 'delete', key },
-        });
-      }
-    }
-    const hostLedger =
-      inactiveDrops.size === 0
-        ? ledger
-        : {
-            ...ledger,
-            entries: ledger.entries.filter((entry) => !inactiveDrops.has(ledgerKey(entry))),
-          };
     const { slices, failure } = planMcpHost(
       app,
       row,
       captured,
       selected,
       byId,
-      hostLedger,
-      now,
+      wanted,
       input.project
     );
     if (failure) {
@@ -3327,13 +2790,11 @@ export function planMcp(input: PlanInput): Action[] {
     }
 
     const edits: KeysEdit[] = [];
-    const mutations: LedgerMutation[] = [];
     const wrote: string[] = [];
     const retired: string[] = [];
     for (const slice of slices) {
       if (!slice.edit) {
-        // Adoptions and relinquished claims are their own rows: each carries
-        // the record it changes, and none of them touch the host.
+        // A slice with no edit changes nothing in the host document.
         if (slice.outcome === 'unchanged') {
           actions.push({
             app,
@@ -3350,17 +2811,15 @@ export function planMcp(input: PlanInput): Action[] {
           type: 'mcp',
           id: slice.id,
           path: captured.path,
-          op: slice.outcome === 'adopted' ? 'adopt' : 'none',
+          op: 'none',
           outcome: slice.outcome,
         };
         if (slice.detail !== undefined) action.detail = slice.detail;
         if (slice.reason !== undefined) action.reason = slice.reason;
-        if (slice.ledger) action.ledger = slice.ledger;
         actions.push(action);
         continue;
       }
       edits.push(slice.edit);
-      if (slice.ledger) mutations.push(slice.ledger);
       if (slice.outcome === 'removed') retired.push(slice.id);
       else wrote.push(slice.id);
     }
@@ -3389,7 +2848,7 @@ export function planMcp(input: PlanInput): Action[] {
       .join('; ');
 
     if (content === captured.content) {
-      actions.push({ ...base, op: 'none', outcome: 'unchanged', ledger: mutations });
+      actions.push({ ...base, op: 'none', outcome: 'unchanged' });
       continue;
     }
     actions.push({
@@ -3401,7 +2860,6 @@ export function planMcp(input: PlanInput): Action[] {
       content,
       root: row.root(config.homes),
       expectedHash: captured.content !== null ? hashContent(captured.content) : null,
-      ledger: mutations,
       keyEdits: { format: row.format, edits, baseContent: captured.content ?? '' },
     });
   }
@@ -3417,7 +2875,7 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
       action.app === 'codex' &&
       action.type === 'mcp' &&
       ((action.op === 'write' && action.reason?.includes('wrote ') === true) ||
-        (action.id !== null && (action.outcome === 'unchanged' || action.outcome === 'adopted')))
+        (action.id !== null && action.outcome === 'unchanged'))
   );
   if (!planned) return [];
 
@@ -3528,11 +2986,7 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
     outcome,
     detail,
     reason,
-    ledger: undefined,
     keyEdits: undefined,
-    // A canceled write publishes no ownership: a peer record claiming groups
-    // the config never received authorizes deleting the user's own groups.
-    peer: undefined,
   });
   const pathsOverlap = (left: readonly string[], right: readonly string[]): boolean => {
     const length = Math.min(left.length, right.length);
@@ -3592,23 +3046,16 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
         outcome: reason.includes('unmanaged YAML') ? 'conflict' : 'failed',
         detail: 'parse-error',
         reason,
-        ledger: undefined,
         keyEdits: undefined,
-        peer: undefined,
       };
       continue;
     }
-    const mutations = [
-      ...(first.ledger ? (Array.isArray(first.ledger) ? first.ledger : [first.ledger]) : []),
-      ...(action.ledger ? (Array.isArray(action.ledger) ? action.ledger : [action.ledger]) : []),
-    ];
     grouped[index] = {
       ...first,
       type: first.type === action.type ? first.type : null,
       id: null,
       reason: [first.reason, action.reason].filter(Boolean).join('; ') || undefined,
       content,
-      ledger: mutations,
       requiresPaths: [
         ...new Set([...(first.requiresPaths ?? []), ...(action.requiresPaths ?? [])]),
       ],
@@ -3643,7 +3090,7 @@ export function preflightProjectActions(
   if (!collision) return [...actions];
   const reason = `project collision preflight failed at ${collision.path ?? collision.id ?? 'unknown target'}; no project write was applied`;
   return actions.map((action) => {
-    if (!belongs(action) || (action.op === 'none' && action.ledger === undefined)) return action;
+    if (!belongs(action) || action.op === 'none') return action;
     return {
       ...action,
       op: 'none',
@@ -3654,9 +3101,6 @@ export function preflightProjectActions(
       bundle: undefined,
       root: undefined,
       expectedHash: undefined,
-      ledger: undefined,
-      peer: undefined,
-      projectManifest: undefined,
       keyEdits: undefined,
       native: undefined,
     };
@@ -3669,7 +3113,7 @@ export function preflightProjectActions(
  * slice reports the value asb would write beside the one on disk.
  */
 export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
-  const { config, inventory, ledger, capture, table, now } = input;
+  const { config, inventory, capture, table } = input;
   const byId = new Map(
     inventory.components
       .filter((component) => component.type === 'mcp')
@@ -3695,8 +3139,7 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
       captured,
       effectiveSelection(config, appId, 'mcp'),
       byId,
-      ledger,
-      now,
+      new Set<string>(),
       input.project
     );
     for (const slice of hostSlices) {
@@ -3707,8 +3150,7 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
         app: appId,
         path: captured.path,
         outcome: slice.outcome,
-        provenance: slice.recorded?.provenance ?? null,
-        recordedHash: slice.recorded?.hash ?? null,
+        provenance: slice.proven ? 'identity' : null,
         currentHash: slice.current === undefined ? null : sliceHash(slice.current),
         desiredHash: slice.desired === null ? null : sliceHash(slice.desired),
         desired:
@@ -3934,6 +3376,15 @@ export function planSources(input: SourcePlanInput): Action[] {
   return actions;
 }
 
+/**
+ * How a slice proves it is asb's when someone asks. `identity` is the target
+ * holding what the library renders; `marker` is a region asb delimits inside a
+ * file it shares; `native-manager` is work the app's own plugin manager owns.
+ * A hook group's managed path proves the group rather than the file it sits
+ * in, and explain speaks in whole slices, so it has no spelling here.
+ */
+export type Ownership = 'identity' | 'marker' | 'native-manager';
+
 export interface ExplainSlice {
   /** Owning app, or null for library-level rows (missing, parse failures). */
   app: string | null;
@@ -3941,9 +3392,8 @@ export interface ExplainSlice {
   outcome: Outcome;
   detail?: string;
   reason?: string;
-  /** Recorded ownership proof, or null when no ledger record exists. */
-  provenance: Provenance | 'native-manager' | null;
-  recordedHash: string | null;
+  /** What proves the slice is asb's right now; null when nothing does. */
+  provenance: Ownership | null;
   currentHash: string | null;
   desiredHash: string | null;
   /** Rendered desired bytes; null when nothing is selected or the aggregate is blocked. */
@@ -3969,7 +3419,6 @@ function librarySlice(action: Action): ExplainSlice {
     path: action.path,
     outcome: action.outcome,
     provenance: null,
-    recordedHash: null,
     currentHash: null,
     desiredHash: null,
     desired: null,
@@ -4004,13 +3453,12 @@ export function explainSources(
 }
 
 function explainEntries(input: PlanInput, target: string, type: EntryType): ExplainSlice[] {
-  const { config, inventory, ledger, capture, table } = input;
+  const { config, inventory, capture, table } = input;
   const byId = new Map(
     inventory.components
       .filter((component) => component.type === type)
       .map((component) => [component.id, component])
   );
-  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
   const slices: ExplainSlice[] = [];
 
   for (const action of planEntries(input, type)) {
@@ -4025,12 +3473,6 @@ function explainEntries(input: PlanInput, target: string, type: EntryType): Expl
 
     const component = action.id === null ? undefined : byId.get(action.id);
     const row = table.find((candidate) => candidate.id === action.app)?.[type];
-    const recorded =
-      action.path === null
-        ? null
-        : (ledgerByKey.get(
-            ledgerKey({ app: action.app, type, id: action.id, path: action.path })
-          ) ?? null);
     let currentHash: string | null = null;
     let desiredHash: string | null = null;
     let desired: string | null = null;
@@ -4064,8 +3506,8 @@ function explainEntries(input: PlanInput, target: string, type: EntryType): Expl
       app: action.app,
       path: action.path,
       outcome: action.outcome,
-      provenance: recorded?.provenance ?? null,
-      recordedHash: recorded?.hash ?? null,
+      // The target holding what the library renders is the whole proof.
+      provenance: currentHash !== null && currentHash === desiredHash ? 'identity' : null,
       currentHash,
       desiredHash,
       desired,
@@ -4106,7 +3548,6 @@ export function explainNative(input: NativePlanInput, target: string): ExplainSl
       path: action.path,
       outcome: action.outcome,
       provenance: 'native-manager',
-      recordedHash: null,
       currentHash: null,
       desiredHash: null,
       desired: null,
@@ -4122,20 +3563,18 @@ export function explainNative(input: NativePlanInput, target: string): ExplainSl
 }
 
 /**
- * Skills view over the same planner: match a skill id, app id, or bundle
- * path and join each matched slice with its ledger record and captured tree
- * fingerprints. Own-dir slices have no single rendered body, so `desired`
- * stays null and the source bundle appears under `components`.
+ * Skills view over the same planner: match a skill id, app id, or bundle path
+ * and join each matched slice with the captured tree fingerprint. Own-dir
+ * slices have no single rendered body, so `desired` stays null and the source
+ * bundle appears under `components`.
  */
 export function explainSkills(input: PlanInput, target: string): ExplainSlice[] {
-  const { inventory, ledger, capture } = input;
+  const { inventory, capture } = input;
   const byId = new Map(
     inventory.components
       .filter((component) => component.type === 'skills')
       .map((component) => [component.id, component])
   );
-  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
-
   const slices: ExplainSlice[] = [];
   for (const action of planSkills(input)) {
     if (action.app === null) {
@@ -4150,18 +3589,19 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
     const pathMatch = action.path === target || action.path.endsWith(`${path.sep}${target}`);
     if (action.id !== target && action.app !== target && !pathMatch) continue;
 
-    const recorded =
-      ledgerByKey.get(
-        ledgerKey({ app: action.app, type: 'skills', id: action.id, path: action.path })
-      ) ?? null;
     const component = byId.get(action.id);
 
     const slice: ExplainSlice = {
       app: action.app,
       path: action.path,
       outcome: action.outcome,
-      provenance: recorded?.provenance ?? null,
-      recordedHash: recorded?.hash ?? null,
+      // A tree the planner found equal to the render is asb's; one it is
+      // about to overwrite or leave behind is not.
+      provenance:
+        action.outcome === 'unchanged' ||
+        (action.outcome === 'removed' && action.detail !== 'stale-copy')
+          ? 'identity'
+          : null,
       currentHash: capture.bundles[action.path]?.fingerprint ?? null,
       desiredHash: null,
       desired: null,
@@ -4175,10 +3615,10 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
 }
 
 /**
- * Hooks view over the same planner. Hook groups carry no ledger entry, so the
- * owner is the peer record: a bundle it lists, or an app config it holds
- * groups for, is owned by proof (4) and nothing else. A definition entry owns
- * no directory, so its slice is the app config it merged into.
+ * Hooks view over the same planner. A hook bundle is asb's while it holds what
+ * the library renders, and a group is asb's while it equals a rendered group
+ * or names a managed path. A definition entry owns no directory, so its slice
+ * is the app config it merged into.
  */
 export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
   const { config, inventory, capture } = input;
@@ -4207,17 +3647,19 @@ export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
 
     const captured = capture.hooks[action.app];
     const component = byId.get(action.id ?? target);
-    const claimed =
-      action.id === null
-        ? Object.keys(captured?.state.events ?? {}).length > 0
-        : (captured?.state.bundles.includes(action.id) ?? false);
+    // A bundle the planner found equal to the render is asb's; one it is about
+    // to overwrite is not yet, and the app config is shared with whatever the
+    // user wrote there no matter which groups inside it derive.
+    const proven =
+      action.id !== null &&
+      (action.outcome === 'unchanged' ||
+        (action.outcome === 'removed' && action.detail !== 'stale-copy'));
 
     const slice: ExplainSlice = {
       app: action.app,
       path: action.path,
       outcome: action.outcome,
-      provenance: claimed ? 'peer-record' : null,
-      recordedHash: null,
+      provenance: proven ? 'identity' : null,
       currentHash:
         action.id === null
           ? captured?.content != null
@@ -4238,13 +3680,12 @@ export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
 
 /**
  * One-target view over the same planner: match a component id, app id, or
- * target path (exact or basename) and join each matched slice with its
- * ledger record, captured bytes, and freshly rendered desired content.
+ * target path (exact or basename) and join each matched slice with the bytes
+ * on disk and the freshly rendered desired content.
  */
 export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
-  const { config, inventory, ledger, capture, table } = input;
+  const { config, inventory, capture, table } = input;
   const resolveFor = rulesResolver(config, inventory);
-  const ledgerByKey = new Map(ledger.entries.map((entry) => [ledgerKey(entry), entry]));
 
   const slices: ExplainSlice[] = [];
   for (const action of planRules(input)) {
@@ -4261,26 +3702,35 @@ export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
     if (action.app !== target && !pathMatch && !componentMatch) continue;
 
     const row = table.find((candidate) => candidate.id === action.app);
+    const captured = action.path !== null ? capture.targets[action.path] : undefined;
+    // A write action already carries the exact bytes the target would hold,
+    // markers and untouched neighbours included, which the bare render does
+    // not. `unchanged` means the target is already those bytes.
     const desired =
-      action.path !== null && row?.rules && missing.length === 0 && content.length > 0
-        ? row.rules.render(content, action.path)
-        : null;
-    const recorded =
-      action.path !== null
-        ? (ledgerByKey.get(
-            ledgerKey({ app: action.app, type: 'rules', id: null, path: action.path })
-          ) ?? null)
-        : null;
-    const current = action.path !== null ? capture.targets[action.path] : undefined;
-
+      action.content ??
+      (action.outcome === 'unchanged'
+        ? (captured?.content ?? null)
+        : action.path !== null && row?.rules && missing.length === 0 && content.length > 0
+          ? row.rules.render(content, action.path)
+          : null);
+    const current = captured?.content != null ? hashContent(captured.content) : null;
+    const desiredHash = desired !== null ? hashContent(desired) : null;
     const slice: ExplainSlice = {
       app: action.app,
       path: action.path,
       outcome: action.outcome,
-      provenance: recorded?.provenance ?? null,
-      recordedHash: recorded?.hash ?? null,
-      currentHash: current?.content != null ? hashContent(current.content) : null,
-      desiredHash: desired !== null ? hashContent(desired) : null,
+      // A shared host is asb's only between its markers; a dedicated file is
+      // asb's while it holds the render.
+      provenance:
+        row?.rules && !row.rules.dedicated
+          ? captured?.content != null && projectRegion(captured.content) !== null
+            ? 'marker'
+            : null
+          : current !== null && current === desiredHash
+            ? 'identity'
+            : null,
+      currentHash: current,
+      desiredHash,
       desired,
       components: present.map((component) => ({ id: component.id, path: component.path })),
       sources: componentSources(present),

@@ -47,10 +47,6 @@ function managedDir(homes: ScratchHomes, app: HookApp, id: string): string {
   return path.join(managedParent(homes, app), id);
 }
 
-function statePath(homes: ScratchHomes, app: HookApp): string {
-  return path.join(homes.asbHome, 'state', 'hooks', `${app}.json`);
-}
-
 function seedHook(homes: ScratchHomes, id: string, hooks: unknown): string {
   const dir = path.join(homes.asbHome, 'hooks');
   fs.mkdirSync(dir, { recursive: true });
@@ -161,12 +157,6 @@ for (const [label, breakLibrary, expected] of [
         RUN_SH,
         'the distributed payload is untouched'
       );
-      assert.deepEqual(
-        readJson(statePath(homes, 'claude-code')).bundles,
-        ['fmt'],
-        'the record keeps claiming what is still distributed'
-      );
-
       const rows = hooksRows(report);
       const library = rows.find((entry) => entry.app === null && entry.id === 'fmt');
       assert.equal(library?.outcome, expected, 'the library row is the only report');
@@ -229,11 +219,6 @@ test('a bundle that fails to distribute blocks that app config and its record', 
       false,
       'no config points at payload this run never distributed'
     );
-    assert.equal(
-      fs.existsSync(statePath(homes, 'claude-code')),
-      false,
-      'no peer record claims a directory asb never wrote'
-    );
 
     const rows = hooksRows(report);
     assert.equal(rows.find((entry) => entry.id === 'bt')?.outcome, 'failed');
@@ -286,7 +271,7 @@ for (const [label, sabotage, outcome] of [
     'blocked',
   ],
 ] as const) {
-  test(`${label} holds back the config and the record too`, async () => {
+  test(`${label} holds back the config too`, async () => {
     await withScratchHomes(async (homes) => {
       installApps(homes, 'claude-code');
       seedRunner(homes, 'bt');
@@ -296,7 +281,6 @@ for (const [label, sabotage, outcome] of [
       const report = await runSync();
 
       assert.equal(fs.existsSync(configPath(homes, 'claude-code')), false, 'config untouched');
-      assert.equal(fs.existsSync(statePath(homes, 'claude-code')), false, 'record untouched');
       const rows = hooksRows(report);
       assert.equal(rows.find((entry) => entry.id === 'bt')?.outcome, outcome);
       assert.equal(
@@ -312,7 +296,7 @@ for (const [label, sabotage, outcome] of [
 // Convention grants adoption-for-update, never deletion (design :84/:86)
 // ---------------------------------------------------------------------------
 
-test('a first sync into a name-colliding managed directory deletes nothing', async () => {
+test('a first sync into a name-colliding managed directory brings it to the render', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedRunner(homes, 'deploy', '#!/bin/sh\necho library\n');
@@ -324,25 +308,22 @@ test('a first sync into a name-colliding managed directory deletes nothing', asy
 
     await runSync();
 
-    assert.equal(
-      fs.readFileSync(path.join(target, 'notes.md'), 'utf-8'),
-      'user notes',
-      'an unrecorded sibling survives first contact'
-    );
+    // A distributed bundle is a copy of its library directory, so the tree is
+    // brought to the render in one pass. That is what makes it provably asb's
+    // for a later deselection.
+    assert.deepEqual(fs.readdirSync(target).sort(), ['hook.json', 'run.sh']);
     assert.equal(
       fs.readFileSync(path.join(target, 'run.sh'), 'utf-8'),
-      '#!/bin/sh\necho library\n',
-      'the name-matched file is adopted for update'
+      '#!/bin/sh\necho library\n'
     );
 
-    // That write records the id, which is the proof later syncs reconcile on.
     fs.writeFileSync(path.join(target, 'stray.txt'), 'later', 'utf-8');
     await runSync();
 
     assert.deepEqual(
       fs.readdirSync(target).sort(),
       ['hook.json', 'run.sh'],
-      'once recorded, the bundle reconciles to the library tree'
+      'and it stays that copy'
     );
   });
 });
@@ -351,7 +332,7 @@ test('a first sync into a name-colliding managed directory deletes nothing', asy
 // A removal that cannot delete is never reported as one
 // ---------------------------------------------------------------------------
 
-test('a bundle removal that cannot delete reports left-behind and keeps the claim', async () => {
+test('a bundle removal that cannot delete reports left-behind instead', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedRunner(homes, 'bt');
@@ -378,13 +359,7 @@ test('a bundle removal that cannot delete reports left-behind and keeps the clai
     const row = hooksRows(report).find((entry) => entry.id === 'bt');
     assert.equal(row?.outcome, 'left-behind', 'a failed deletion is not a removal');
     assert.match(row?.reason ?? '', new RegExp(bundle), 'the row names what is still on disk');
-    assert.equal(report.exitCode, 1, 'and the run fails');
-
-    assert.deepEqual(
-      readJson(statePath(homes, 'claude-code')).bundles,
-      ['bt'],
-      'the record never claims less than what remains distributed'
-    );
+    assert.equal(report.exitCode, 0, 'reported, but the run itself did nothing wrong');
   });
 });
 
@@ -426,10 +401,10 @@ test('a symlinked codex hooks.json is emptied through the link, never unlinked',
 });
 
 // ---------------------------------------------------------------------------
-// explain covers hooks, with the peer record as the owner
+// explain covers hooks, with the owner derived from the render
 // ---------------------------------------------------------------------------
 
-test('explain resolves hooks by id, app, and path with a peer-record owner', async () => {
+test('explain resolves hooks by id, app, and path with a derived owner', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedRunner(homes, 'bt');
@@ -446,8 +421,8 @@ test('explain resolves hooks by id, app, and path with a peer-record owner', asy
     assert.equal(bundle?.app, 'claude-code', 'a distributed bundle explains to its app slice');
     assert.equal(
       bundle?.provenance,
-      'peer-record',
-      'hook ownership is the peer record, never a ledger entry'
+      'identity',
+      'a distributed bundle is asb’s because it holds what the library renders'
     );
     assert.deepEqual(bundle?.components, [
       { id: 'bt', path: path.join(homes.asbHome, 'hooks', 'bt') },
@@ -457,7 +432,11 @@ test('explain resolves hooks by id, app, and path with a peer-record owner', asy
     const settings = configPath(homes, 'claude-code');
     const definition = (await runExplain('lint')).find((slice) => slice.path === settings);
     assert.equal(definition?.app, 'claude-code');
-    assert.equal(definition?.provenance, 'peer-record');
+    assert.equal(
+      definition?.provenance,
+      null,
+      'the app config is the user’s file whichever groups inside it derive'
+    );
 
     // A selected id the library lacks explains to its library row, not silence.
     const ghost = await runExplain('ghost');
@@ -467,7 +446,7 @@ test('explain resolves hooks by id, app, and path with a peer-record owner', asy
   });
 });
 
-test('one unresolved bundle yields one config deferral and retains peer state', async () => {
+test('an unresolved entry keeps its groups and its bundle, and rewrites nothing', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     const betaDir = seedRunner(homes, 'beta');
@@ -476,49 +455,36 @@ test('one unresolved bundle yields one config deferral and retains peer state', 
 
     const settings = configPath(homes, 'claude-code');
     const beforeConfig = fs.readFileSync(settings, 'utf-8');
-    const beforeState = readJson(statePath(homes, 'claude-code'));
     fs.writeFileSync(path.join(betaDir, 'hook.json'), '{ not json', 'utf-8');
     const report = await runSync();
 
-    const appRows = hooksRows(report).filter(
-      (entry) => entry.app === 'claude-code' && entry.path === settings
-    );
-    assert.equal(appRows.length, 1, 'one config slice produces one actionable row');
-    const deferrals = hooksRows(report).filter(
-      (entry) => entry.app === 'claude-code' && entry.detail === 'not-selected'
-    );
-    assert.equal(deferrals.length, 1, 'the unresolved bundle produces one deferral in total');
-    const row = deferrals[0];
-    assert.equal(row?.path, settings);
-    assert.equal(row?.outcome, 'skipped');
-    assert.equal(row?.detail, 'not-selected');
-    assert.equal(row?.id, 'beta', 'the unresolved entry owns the deferral row');
-    assert.match(row?.reason ?? '', /entry beta is unresolved/);
-    assert.equal(
-      appRows.some((entry) => entry.outcome === 'unchanged'),
-      false,
-      'the peer save does not add a duplicate unchanged row'
-    );
+    // The entry cannot be rendered, so nothing it put in place can be compared
+    // against one: the groups and the bundle stay exactly where they are and
+    // only the library row reports.
     assert.equal(fs.readFileSync(settings, 'utf-8'), beforeConfig, 'the config is retained');
-    assert.deepEqual(
-      readJson(statePath(homes, 'claude-code')),
-      beforeState,
-      'peer state is retained'
-    );
     assert.equal(
       fs.existsSync(managedDir(homes, 'claude-code', 'beta')),
       true,
       'bundle is retained'
+    );
+    const rows = hooksRows(report);
+    assert.equal(
+      rows.find((entry) => entry.app === null && entry.id === 'beta')?.outcome,
+      'failed'
+    );
+    assert.deepEqual(
+      rows.filter((entry) => entry.app === 'claude-code'),
+      [],
+      'a library that cannot render produces no app-level row at all'
     );
     assert.equal(report.exitCode, 1);
   });
 });
 
 /**
- * The stranded channel carries peer-recorded groups only. A group held by
- * predecessor evidence alone was never the record's to hand back, so an
- * unresolved selection must not turn recognition into re-injection — into the
- * config or into the record the next run reads.
+ * Predecessor evidence names asb without naming which hook, so a group holding
+ * it belongs to no selection: an entry that cannot render is no reason to keep
+ * one, and no reason to hand it back into the config either.
  */
 for (const [label, group] of [
   [
@@ -536,7 +502,7 @@ for (const [label, group] of [
     },
   ],
 ] as const) {
-  test(`an unresolved entry does not strand a group recognized by ${label}`, async () => {
+  test(`a group recognized by ${label} leaves even while an entry is unresolved`, async () => {
     await withScratchHomes(async (homes) => {
       installApps(homes, 'claude-code');
       const betaDir = seedRunner(homes, 'beta');
@@ -563,52 +529,14 @@ for (const [label, group] of [
         ['echo mine'],
         'the recognized group is removed, never handed back as stranded'
       );
-      assert.deepEqual(
-        readJson(statePath(homes, 'claude-code')).events,
-        {},
-        'the record does not absorb the recognized residue'
-      );
-      const deferral = hooksRows(report).find(
-        (entry) => entry.app === 'claude-code' && entry.detail === 'not-selected'
-      );
-      assert.match(
-        deferral?.reason ?? '',
-        /^0 recorded group\(s\) and 1 bundle\(s\) kept because entry beta is unresolved/,
-        'only recorded groups count toward the deferral'
+      assert.equal(
+        hooksRows(report).find((entry) => entry.app === null && entry.id === 'beta')?.outcome,
+        'failed',
+        'the unresolved entry is the only thing reported'
       );
     });
   });
 }
-
-test('a device-scoped duplicate does not double the config while the entry is broken', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'claude-code');
-    const d1 = seedHook(homes, 'd1', {
-      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo d1' }] }],
-    });
-    writeUserConfig(
-      homes,
-      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["d1"]\n'
-    );
-    assert.equal((await runSync()).exitCode, 0);
-
-    // A v0.4.32 device-scoped copy holds the same group; merges concatenate
-    // by design so count-bounded removal can strip N — re-merge must not.
-    const deviceDir = path.join(homes.asbHome, 'state', 'hooks', '0123456789abcdef');
-    fs.mkdirSync(deviceDir, { recursive: true });
-    fs.copyFileSync(statePath(homes, 'claude-code'), path.join(deviceDir, 'claude-code.json'));
-    fs.writeFileSync(d1, '{ not json', 'utf-8');
-    const report = await runSync();
-
-    const settings = JSON.parse(fs.readFileSync(configPath(homes, 'claude-code'), 'utf-8'));
-    assert.equal(
-      settings.hooks.UserPromptSubmit.length,
-      1,
-      'the retained group appears once, not once per device copy'
-    );
-    assert.equal(report.exitCode, 1, 'the broken entry still reports');
-  });
-});
 
 // ---------------------------------------------------------------------------
 // 0.4 ownership recognizers: shared machines and predecessor evidence
@@ -655,7 +583,7 @@ test('two machines sharing ASB_HOME do not duplicate bundles across two alternat
   });
 });
 
-test('state loss reclaims bundle identity but not definition identity', async () => {
+test('a repeated sync duplicates neither a bundle nor a definition hook', async () => {
   for (const kind of ['bundle', 'definition'] as const) {
     await withScratchHomes(async (homes) => {
       installApps(homes, 'claude-code');
@@ -671,23 +599,23 @@ test('state loss reclaims bundle identity but not definition identity', async ()
       writeUserConfig(homes, configFor(['claude-code'], [id]));
 
       await runSync();
-      fs.rmSync(statePath(homes, 'claude-code'), { force: true });
       await runSync();
-      const expected = kind === 'bundle' ? 1 : 2;
-      assert.equal(eventGroups(configPath(homes, 'claude-code'), event).length, expected, kind);
-      assert.equal(fs.existsSync(statePath(homes, 'claude-code')), true);
+      // Both kinds are recognized without a record: the bundle by the managed
+      // path its command names, the definition by being what the library
+      // renders. Neither is appended a second time.
+      assert.equal(eventGroups(configPath(homes, 'claude-code'), event).length, 1, kind);
 
       await runSync();
       assert.equal(
         eventGroups(configPath(homes, 'claude-code'), event).length,
-        expected,
+        1,
         `${kind} converges`
       );
     });
   }
 });
 
-test('a byte-identical hand-written definition group is never adopted', async () => {
+test('a byte-identical hand-written definition group is adopted, not duplicated', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     const group = { matcher: '*', hooks: [{ type: 'command', command: 'echo same' }] };
@@ -697,22 +625,24 @@ test('a byte-identical hand-written definition group is never adopted', async ()
     writeUserConfig(homes, configFor(['claude-code'], ['same']));
 
     await runSync();
-    assert.equal(eventGroups(settings, 'PreToolUse').length, 2, 'managed copy is appended');
+    // Nothing distinguishes it from what asb would have written, so asb does
+    // not write a second copy beside it — and deselection takes it out again.
+    assert.deepEqual(eventGroups(settings, 'PreToolUse'), [group], 'no duplicate is appended');
 
     writeUserConfig(homes, configFor(['claude-code'], []));
     await runSync();
-    assert.deepEqual(eventGroups(settings, 'PreToolUse'), [group], 'one user-owned copy remains');
+    assert.equal(readJson(settings).hooks, undefined, 'the group goes out with the selection');
   });
 });
 
-test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', async () => {
+test('legacy markers, tags, and paths are recognition evidence', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
-    const legacyStateGroup = {
-      matcher: 'legacy-state',
-      hooks: [{ type: 'command', command: 'echo from-state' }],
+    const renderedGroup = {
+      matcher: 'rendered',
+      hooks: [{ type: 'command', command: 'echo rendered' }],
     };
-    seedHook(homes, 'test-hook', { PreToolUse: [legacyStateGroup] });
+    seedHook(homes, 'test-hook', { PreToolUse: [renderedGroup] });
     writeUserConfig(homes, configFor(['claude-code'], ['test-hook']));
 
     const legacyRoot = path.join(homes.agentsHome, '.claude', 'hooks', 'asb');
@@ -739,7 +669,7 @@ test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', 
             hooks: [{ type: 'command', command: 'echo tagged' }],
             _asb_source: true,
           },
-          legacyStateGroup,
+          renderedGroup,
           {
             matcher: 'legacy-path',
             hooks: [{ type: 'command', command: `${legacyDir}/run.sh` }],
@@ -748,13 +678,6 @@ test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', 
       },
       _asb_managed_hooks: ['x'],
     });
-    const legacyStatePath = path.join(
-      homes.asbHome,
-      'state',
-      'hooks',
-      `claude-code-${HEX64_A}.json`
-    );
-    writeJson(legacyStatePath, { version: 1, hooks: { PreToolUse: [legacyStateGroup] } });
 
     await runSync();
 
@@ -762,11 +685,10 @@ test('legacy markers, tags, paths, and v0.4.28 state are recognition evidence', 
     assert.equal(raw.includes('_asb'), false);
     assert.equal(raw.includes('asb-managed'), false);
     assert.deepEqual(commandsOf(eventGroups(settings, 'PreToolUse')).sort(), [
-      'echo from-state',
       'echo mine',
+      'echo rendered',
     ]);
     assert.equal(readJson(settings).theme, 'dark');
-    assert.equal(fs.existsSync(legacyStatePath), true, 'legacy evidence is read-only');
     assert.equal(fs.existsSync(legacyDir), true, 'M8 leaves legacy bundle directories untouched');
   });
 });
@@ -882,5 +804,81 @@ test('known foreign-home bundle ids are reclaimed while unknown ids stay user-ow
       assert.equal(commands.includes(unknown), true, `${app}: unknown id preserved`);
       assert.equal(commands.includes('echo mine'), true, `${app}: user command preserved`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A predecessor's group keeps its place and stays named
+// ---------------------------------------------------------------------------
+
+test('a predecessor group is named even after its hook leaves the selection', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedHook(homes, 'alpha', {
+      UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo v2' }] }],
+    });
+    const settings = configPath(homes, 'claude-code');
+    // What an earlier render of `alpha` left: same event and matcher, older
+    // command. Nothing on disk says which hook wrote it, and the library's
+    // current render no longer matches it.
+    writeJson(settings, {
+      hooks: {
+        UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo v1' }] }],
+      },
+    });
+
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    const selected = await runSync();
+    assert.ok(
+      hooksRows(selected).some((row) => row.outcome === 'left-behind' && row.detail === 'unproven'),
+      JSON.stringify(selected.entries, null, 2)
+    );
+
+    // Deselecting takes the render away. The predecessor group is still not
+    // asb's to remove and still kin to a hook the library defines, so the run
+    // still says where it is.
+    writeUserConfig(homes, configFor(['claude-code'], []));
+    const deselected = await runSync();
+
+    assert.deepEqual(commandsOf(eventGroups(settings, 'UserPromptSubmit')), ['echo v1']);
+    assert.ok(
+      hooksRows(deselected).some(
+        (row) => row.outcome === 'left-behind' && row.detail === 'unproven'
+      ),
+      `the group is still there, so the run still names it: ${JSON.stringify(deselected.entries, null, 2)}`
+    );
+  });
+});
+
+test('a marked group an earlier version wrote is rewritten where it sits', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'alpha', {
+      UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo alpha' }] }],
+    });
+    writeUserConfig(homes, configFor(['codex'], ['alpha']));
+
+    // Codex keys its trust by array position, so the group below the marked
+    // one must not move when the marked one is rewritten.
+    const settings = configPath(homes, 'codex');
+    writeJson(settings, {
+      hooks: {
+        UserPromptSubmit: [
+          {
+            matcher: 'go',
+            hooks: [{ type: 'command', command: 'echo alpha\n# asb-managed-by=agent-switchboard' }],
+          },
+          { matcher: 'user', hooks: [{ type: 'command', command: 'echo mine' }] },
+        ],
+      },
+    });
+
+    assert.equal((await runSync()).exitCode, 0);
+
+    assert.deepEqual(
+      commandsOf(eventGroups(settings, 'UserPromptSubmit')),
+      ['echo alpha', 'echo mine'],
+      'the marked group loses its marker in place, and the user group keeps index 1'
+    );
   });
 });

@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { executeAction, runSync } from '../../src/engine/cli.js';
-import type { Ledger } from '../../src/engine/ledger.js';
 import type { Action } from '../../src/engine/plan.js';
 import { hashContent } from '../../src/engine/shapes.js';
 import {
@@ -102,7 +101,7 @@ test('an escaping parent chain blocks identically in dry-run and real run', asyn
   });
 });
 
-test('a symlinked target file writes through the link and removal unlinks only the link', async () => {
+test('a symlinked target writes through the link and keeps it on removal', async () => {
   await withScratchHomes(async (homes) => {
     seedRule(homes, 'base.md', 'Always be kind.\n');
     writeUserConfig(homes, CODEX_CONFIG);
@@ -113,29 +112,25 @@ test('a symlinked target file writes through the link and removal unlinks only t
     const target = ruleFilePath(homes, 'codex');
     fs.symlinkSync(backing, target);
 
-    // First contact adopts the occupied file by convention without writing;
-    // the update lands on the next sync and flips the entry to written.
-    const adoption = await runSync();
-    assert.equal(adoption.exitCode, 0);
-    assert.equal(
-      fs.readFileSync(backing, 'utf-8'),
-      'old hand-managed content\n',
-      'adoption writes nothing'
-    );
-
     const report = await runSync();
     assert.equal(report.exitCode, 0);
-    const rendered = renderedRules('codex', 'Always be kind.\n');
-    assert.equal(fs.readFileSync(backing, 'utf-8'), rendered, 'written through the link');
+    assert.equal(
+      fs.readFileSync(backing, 'utf-8'),
+      `${renderedRules('codex', 'Always be kind.\n')}\nold hand-managed content\n`,
+      'written through the link, above the bytes already there'
+    );
     assert.ok(fs.lstatSync(target).isSymbolicLink(), 'target is still the user link');
 
     writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = []\n');
     const removal = await runSync();
     assert.equal(removal.exitCode, 0);
     assert.equal(removal.summary.removed, 1);
-    assert.ok(!fs.existsSync(target) && !fs.lstatSync(backing).isSymbolicLink());
-    assert.equal(fs.readFileSync(backing, 'utf-8'), rendered, 'the backing file is never deleted');
-    assert.throws(() => fs.lstatSync(target), 'the link itself is gone');
+    assert.equal(
+      fs.readFileSync(backing, 'utf-8'),
+      'old hand-managed content\n',
+      'the region goes, the hand-managed bytes stay'
+    );
+    assert.ok(fs.lstatSync(target).isSymbolicLink(), 'the user link is never unlinked');
   });
 });
 
@@ -145,7 +140,6 @@ test('the executor refuses actions whose target drifted after planning', async (
     fs.mkdirSync(dir, { recursive: true });
     const target = path.join(dir, 'AGENTS.md');
     fs.writeFileSync(target, 'tampered after planning\n');
-    const ledger: Ledger = { version: 1, entries: [] };
 
     const base: Action = {
       app: 'codex',
@@ -158,56 +152,37 @@ test('the executor refuses actions whose target drifted after planning', async (
       content: 'new content\n',
       root: dir,
       expectedHash: hashContent('what planning captured\n'),
-      ledger: {
-        op: 'put',
-        entry: {
-          app: 'codex',
-          type: 'rules',
-          id: null,
-          path: target,
-          shape: 'own-file',
-          hash: hashContent('new content\n'),
-          provenance: 'written',
-          updatedAt: 'now',
-        },
-      },
     };
 
-    const write = executeAction(base, ledger);
+    const write = executeAction(base);
     assert.equal(write.outcome, 'conflict');
     assert.equal(fs.readFileSync(target, 'utf-8'), 'tampered after planning\n');
-    assert.equal(ledger.entries.length, 0, 'no ledger claim on refusal');
 
-    const remove = executeAction({ ...base, op: 'remove', outcome: 'removed' }, ledger);
+    const remove = executeAction({ ...base, op: 'remove', outcome: 'removed' });
     assert.equal(remove.outcome, 'left-behind');
     assert.equal(remove.detail, 'modified');
     assert.equal(fs.existsSync(target), true);
 
-    const matching = executeAction(
-      { ...base, expectedHash: hashContent('tampered after planning\n') },
-      ledger
-    );
+    const matching = executeAction({
+      ...base,
+      expectedHash: hashContent('tampered after planning\n'),
+    });
     assert.equal(matching.outcome, 'written');
     assert.equal(fs.readFileSync(target, 'utf-8'), 'new content\n');
-    assert.equal(ledger.entries.length, 1, 'ledger claim recorded on success');
   });
 });
 
 test('mutations without a containment root are refused, not silently unchecked', async () => {
-  const ledger: Ledger = { version: 1, entries: [] };
-  const entry = executeAction(
-    {
-      app: 'codex',
-      type: 'rules',
-      id: null,
-      path: '/tmp/never-written.md',
-      op: 'write',
-      outcome: 'written',
-      content: 'x',
-      expectedHash: null,
-    },
-    ledger
-  );
+  const entry = executeAction({
+    app: 'codex',
+    type: 'rules',
+    id: null,
+    path: '/tmp/never-written.md',
+    op: 'write',
+    outcome: 'written',
+    content: 'x',
+    expectedHash: null,
+  });
   assert.equal(entry.outcome, 'blocked');
   assert.equal(entry.detail, 'path-escape');
   assert.equal(fs.existsSync('/tmp/never-written.md'), false);

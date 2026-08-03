@@ -113,7 +113,7 @@ Also reads: `.github/instructions/*.instructions.md`, `copilot-instructions.md`,
 
 ### ASB Distribution Strategy
 
-Distribute as per-file rules (like Cursor), writing to `.trae/rules/asb-rules.md` with `alwaysApply: true` frontmatter. Map `extras.trae` fields to frontmatter. Falls back to AGENTS.md compatibility (enabled by default).
+Distribute as per-file rules (like Cursor), writing to `.trae/rules/rules.md` with `alwaysApply: true` frontmatter. Map `extras.trae` fields to frontmatter. Falls back to AGENTS.md compatibility (enabled by default).
 
 ## Unsupported Features
 

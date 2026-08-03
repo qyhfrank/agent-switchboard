@@ -32,8 +32,7 @@ test('explain by component id joins every slice with owner, hashes, and desired 
     assert.deepEqual(slices.map((slice) => slice.app).sort(), ['claude-code', 'codex']);
     for (const slice of slices) {
       assert.equal(slice.outcome, 'unchanged');
-      assert.equal(slice.provenance, 'written');
-      assert.equal(slice.recordedHash, slice.desiredHash);
+      assert.equal(slice.provenance, 'marker');
       assert.equal(slice.currentHash, slice.desiredHash);
       assert.equal(slice.desired, fs.readFileSync(slice.path as string, 'utf-8'));
       assert.deepEqual(slice.components, [
@@ -56,7 +55,7 @@ test('explain matches app ids and path basenames to single slices', async () => 
     const byPath = await runExplain('CLAUDE.md');
     assert.equal(byPath.length, 1);
     assert.equal(byPath[0].app, 'claude-code');
-    assert.equal(byPath[0].provenance, null, 'nothing synced yet: no ledger record');
+    assert.equal(byPath[0].provenance, null, 'nothing synced yet: nothing proves the slice');
     assert.equal(byPath[0].currentHash, null, 'target file absent');
     assert.notEqual(byPath[0].desiredHash, null);
   });
@@ -86,15 +85,14 @@ test('renderExplain names the miss and renders matched slices with desired conte
     app: 'codex',
     path: '/x/.codex/AGENTS.md',
     outcome: 'unchanged',
-    provenance: 'written',
-    recordedHash: 'a'.repeat(64),
+    provenance: 'marker',
     currentHash: 'a'.repeat(64),
     desiredHash: 'a'.repeat(64),
     desired: 'Always be kind.\n',
     components: [{ id: 'base', path: '/lib/rules/base.md' }],
   };
   const text = renderExplain([slice], 'base');
-  assert.match(text, /owner: written \(recorded aaaaaaaaaaaa\)/);
+  assert.match(text, /owner: marker\n/);
   assert.match(text, /base {2}\/lib\/rules\/base\.md/);
   assert.match(text, /--- desired content \(codex\) ---/);
   assert.match(text, /Always be kind\./);

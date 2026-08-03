@@ -5,8 +5,7 @@ import { test } from 'node:test';
 import { appRows, projectAppRows } from '../../src/engine/apps.js';
 import { runExplain, runSync } from '../../src/engine/cli.js';
 import { effectiveSelection, loadConfig } from '../../src/engine/config.js';
-import { loadProjectManifest, peerStatePath, projectManifestPath } from '../../src/engine/peer.js';
-import { projectRegion } from '../../src/engine/shapes.js';
+import { mergeProjectRegion, projectRegion } from '../../src/engine/shapes.js';
 import {
   installApps,
   seedRule,
@@ -158,11 +157,10 @@ test('managed collision error preflights the whole project before any write', as
     assert.equal(report.exitCode, 1);
     assert.equal(fs.readFileSync(occupied, 'utf-8'), 'foreign\n');
     assert.equal(fs.existsSync(path.join(project, '.cursor', 'commands', 'ship.md')), false);
-    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
   });
 });
 
-test('managed takeover overwrites the named foreign project target and records ownership', async () => {
+test('managed takeover overwrites the named foreign project target and then owns it', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -179,7 +177,14 @@ test('managed takeover overwrites the named foreign project target and records o
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(fs.readFileSync(occupied, 'utf-8'), 'desired\n');
-    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), true);
+
+    // The takeover leaves the render on the target, and that is the whole
+    // proof it is asb's: deselecting the command reclaims those bytes.
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[commands]\nenabled = []\n');
+    const deselected = await runSync({ project });
+
+    assert.equal(deselected.exitCode, 0, JSON.stringify(deselected.entries, null, 2));
+    assert.equal(fs.existsSync(occupied), false);
   });
 });
 
@@ -200,8 +205,9 @@ test('shared project AGENTS.md has one strict 0.4 marker writer', async () => {
     const content = fs.readFileSync(agents, 'utf-8');
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(content.match(/<!-- asb:rules:start -->/g)?.length, 1);
-    assert.equal(content.match(/<!-- asb:rules:end -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- rules:start -->/g)?.length, 1);
+    assert.equal(content.match(/<!-- rules:end -->/g)?.length, 1);
+    assert.ok(!/asb/i.test(content), 'the written project region never names asb');
     assert.match(content, /# Shared rule/);
     assert.match(content, /# User instructions/);
     assert.equal(
@@ -234,19 +240,58 @@ test('malformed shared AGENTS markers fail closed without repair guessing', asyn
   });
 });
 
-test('project marker parser accepts one 0.4 pair and rejects partial or reordered pairs', () => {
+test('deselecting the project rules region preserves every byte outside it', () => {
+  const existing = [
+    '# My instructions',
+    '',
+    '<!-- rules:start -->',
+    'Managed rules, then a line I added by hand.',
+    '<!-- rules:end -->',
+    '',
+    'A trailing note of mine.',
+    '',
+  ].join('\n');
+
+  const result = mergeProjectRegion(existing, '');
+
+  assert.ok(!result.includes('rules:start'));
+  assert.ok(!result.includes('Managed rules'));
+  assert.ok(!result.includes('a line I added by hand'));
+  assert.ok(result.includes('# My instructions'));
+  assert.ok(result.includes('A trailing note of mine.'));
+});
+
+test('a region an earlier version wrapped is rewritten in place, not duplicated', () => {
+  const existing =
+    'Mine above\n<!-- asb:rules:start -->\nold\n<!-- asb:rules:end -->\nMine below\n';
+  const result = mergeProjectRegion(existing, 'new');
+
+  assert.equal(result.match(/<!-- rules:start -->/g)?.length, 1);
+  assert.ok(!result.includes('asb:rules'));
+  assert.ok(!result.includes('old'));
+  assert.ok(result.includes('new'));
+  assert.ok(result.includes('Mine above'));
+  assert.ok(result.includes('Mine below'));
+});
+
+test('project marker parser accepts one pair in either spelling and rejects partial or reordered pairs', () => {
+  assert.equal(
+    projectRegion('before\n<!-- rules:start -->\nmanaged\n<!-- rules:end -->\nafter\n'),
+    '<!-- rules:start -->\nmanaged\n<!-- rules:end -->'
+  );
   assert.equal(
     projectRegion('before\n<!-- asb:rules:start -->\nmanaged\n<!-- asb:rules:end -->\nafter\n'),
     '<!-- asb:rules:start -->\nmanaged\n<!-- asb:rules:end -->'
   );
+  assert.throws(() => projectRegion('<!-- rules:start -->\nmanaged\n'), /incomplete/i);
   assert.throws(() => projectRegion('<!-- asb:rules:start -->\nmanaged\n'), /incomplete/i);
   assert.throws(
-    () => projectRegion('<!-- asb:rules:end -->\nmanaged\n<!-- asb:rules:start -->\n'),
+    () => projectRegion('<!-- rules:end -->\nmanaged\n<!-- rules:start -->\n'),
     /reordered/i
   );
 });
 
-test('project hooks keep ownership in the scoped hooks v1 state, never the manifest', async () => {
+test('project hooks land in the project config and leave it on deselection', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -268,30 +313,32 @@ test('project hooks keep ownership in the scoped hooks v1 state, never the manif
     projectConfig(project);
 
     const first = await runSync({ project });
-    const globalPeer = path.join(homes.asbHome, 'state', 'hooks', 'claude-code.json');
-    const projectPeer = peerStatePath(homes.asbHome, 'claude-code', project);
-    const state = JSON.parse(fs.readFileSync(projectPeer, 'utf-8')) as {
-      events: Record<string, unknown[]>;
+    const projectSettings = path.join(project, '.claude', 'settings.local.json');
+    const landed = JSON.parse(fs.readFileSync(projectSettings, 'utf-8')) as {
+      hooks: Record<string, unknown[]>;
     };
 
     assert.equal(first.exitCode, 0, JSON.stringify(first.entries, null, 2));
-    assert.equal(fs.existsSync(globalPeer), false);
-    assert.equal(state.events.UserPromptSubmit.length, 1);
-    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
+    assert.equal(landed.hooks.UserPromptSubmit.length, 1);
+    // A project run touches the repository and nothing else: no global config,
+    // and no machine state of its own.
+    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.claude', 'settings.json')), false);
+    assert.equal(fs.existsSync(path.join(homes.asbHome, 'state', 'hooks')), false);
+    assert.deepEqual(fs.readdirSync(homes.stateHome), []);
 
     fs.writeFileSync(path.join(project, '.asb.toml'), '[hooks]\nenabled = []\n');
     const second = await runSync({ project });
-    const settings = JSON.parse(
-      fs.readFileSync(path.join(project, '.claude', 'settings.local.json'), 'utf-8')
-    ) as Record<string, unknown>;
+    const settings = JSON.parse(fs.readFileSync(projectSettings, 'utf-8')) as Record<
+      string,
+      unknown
+    >;
 
     assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
     assert.equal(Object.hasOwn(settings, 'hooks'), false);
-    assert.equal(fs.existsSync(projectPeer), false);
   });
 });
 
-test('project hook bundle cleanup follows the scoped 0.4 ownership list', async () => {
+test('an edited project hook bundle is preserved and reported, never swept', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -322,65 +369,22 @@ test('project hook bundle cleanup follows the scoped 0.4 ownership list', async 
 
     const report = await runSync({ project });
 
+    // The group in the config names the managed path, so it is asb's and goes;
+    // the tree no longer matches the render, so in a repository it stays and is
+    // named instead.
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(fs.existsSync(path.dirname(target)), false);
-    assert.equal(fs.existsSync(peerStatePath(homes.asbHome, 'claude-code', project)), false);
+    assert.equal(fs.readFileSync(target, 'utf-8'), '#!/bin/sh\necho edited\n');
+    const row = report.entries.find((entry) => entry.type === 'hooks' && entry.id === 'tool');
+    assert.equal(row?.outcome, 'left-behind');
+    assert.equal(row?.detail, 'unproven');
+    const settings = JSON.parse(
+      fs.readFileSync(path.join(project, '.claude', 'settings.local.json'), 'utf-8')
+    ) as Record<string, unknown>;
+    assert.equal(Object.hasOwn(settings, 'hooks'), false);
   });
 });
 
-test('a corrupt project manifest aborts before project writes and remains byte-exact', async () => {
-  await withScratchHomes(async (homes) => {
-    const project = path.join(homes.root, 'project');
-    fs.mkdirSync(project);
-    installApps(homes, 'cursor');
-    seed(homes.asbHome, 'commands/build.md', 'desired\n');
-    writeUserConfig(
-      homes,
-      '[applications]\nenabled = ["cursor"]\n\n[commands]\nenabled = ["build"]\n'
-    );
-    projectConfig(project);
-    const manifestPath = projectManifestPath(homes.asbHome, project);
-    fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
-    const corrupt = '{ "version": 1, "updatedAt": "x", "sections": ';
-    fs.writeFileSync(manifestPath, corrupt);
-
-    const report = await runSync({ project });
-
-    assert.equal(report.exitCode, 1);
-    assert.equal(fs.readFileSync(manifestPath, 'utf-8'), corrupt);
-    assert.equal(fs.existsSync(path.join(project, '.cursor', 'commands', 'build.md')), false);
-    assert.equal(report.entries[0]?.path, manifestPath);
-  });
-});
-
-test('a live slug collision names both roots and applies no second-project write', async () => {
-  await withScratchHomes(async (homes) => {
-    const first = path.join(homes.root, 'a--b', 'c');
-    const second = path.join(homes.root, 'a', 'b--c');
-    fs.mkdirSync(first, { recursive: true });
-    fs.mkdirSync(second, { recursive: true });
-    installApps(homes, 'cursor');
-    seed(homes.asbHome, 'commands/build.md', 'desired\n');
-    writeUserConfig(
-      homes,
-      '[applications]\nenabled = ["cursor"]\n\n[commands]\nenabled = ["build"]\n'
-    );
-    projectConfig(first);
-    projectConfig(second);
-
-    const firstRun = await runSync({ project: first });
-    const secondRun = await runSync({ project: second });
-    const reason = secondRun.entries[0]?.reason ?? '';
-
-    assert.equal(firstRun.exitCode, 0, JSON.stringify(firstRun.entries, null, 2));
-    assert.equal(secondRun.exitCode, 1);
-    assert.match(reason, new RegExp(first.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.match(reason, new RegExp(second.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-    assert.equal(fs.existsSync(path.join(second, '.cursor', 'commands', 'build.md')), false);
-  });
-});
-
-test('managed cleanup keeps modified command proof until the bytes can be reclaimed', async () => {
+test('managed cleanup keeps a modified command and names it instead of sweeping', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -397,58 +401,16 @@ test('managed cleanup keeps modified command proof until the bytes can be reclai
     fs.writeFileSync(path.join(project, '.asb.toml'), '[commands]\nenabled = []\n');
 
     const report = await runSync({ project });
-    const manifest = JSON.parse(
-      fs.readFileSync(projectManifestPath(homes.asbHome, project), 'utf-8')
-    ) as { sections: { commands?: Record<string, unknown> } };
+    const row = report.entries.find((entry) => entry.path === target);
 
-    assert.equal(report.exitCode, 1);
+    assert.equal(report.exitCode, 0, 'preserving a user edit is not a failure');
     assert.equal(fs.readFileSync(target, 'utf-8'), 'user edit\n');
-    assert.ok(manifest.sections.commands?.['build::cursor']);
+    assert.equal(row?.outcome, 'left-behind');
+    assert.equal(row?.detail, 'unproven');
   });
 });
 
-test('manifest save failure reports unproven writes and the next sync records them', async () => {
-  await withScratchHomes(async (homes) => {
-    const project = path.join(homes.root, 'project');
-    fs.mkdirSync(project);
-    installApps(homes, 'cursor');
-    seed(homes.asbHome, 'commands/build.md', 'desired\n');
-    writeUserConfig(
-      homes,
-      '[applications]\nenabled = ["cursor"]\n\n[commands]\nenabled = ["build"]\n'
-    );
-    projectConfig(project);
-    const manifestPath = projectManifestPath(homes.asbHome, project);
-    const originalRename = fs.renameSync;
-    fs.renameSync = ((oldPath: fs.PathLike, newPath: fs.PathLike) => {
-      if (path.resolve(String(newPath)) === manifestPath) throw new Error('fixture write failure');
-      originalRename(oldPath, newPath);
-    }) as typeof fs.renameSync;
-
-    let failed: Awaited<ReturnType<typeof runSync>>;
-    try {
-      failed = await runSync({ project });
-    } finally {
-      fs.renameSync = originalRename;
-    }
-
-    const target = path.join(project, '.cursor', 'commands', 'build.md');
-    const manifestFailure = failed.entries.find((entry) => entry.path === manifestPath);
-    assert.equal(failed.exitCode, 1);
-    assert.equal(fs.readFileSync(target, 'utf-8'), 'desired\n');
-    assert.equal(fs.existsSync(manifestPath), false);
-    assert.match(manifestFailure?.reason ?? '', /written without durable peer proof/i);
-    assert.match(manifestFailure?.reason ?? '', /next successful sync re-records ownership/i);
-
-    const recovered = await runSync({ project });
-    assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.entries, null, 2));
-    assert.ok(
-      loadProjectManifest(homes.asbHome, project).manifest?.sections.commands?.['build::cursor']
-    );
-  });
-});
-
-test('exclusive cleanup removes recognizable files and non-reserved bundles, then retires manifest', async () => {
+test('exclusive cleanup removes recognizable files and non-reserved bundles', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -476,7 +438,6 @@ test('exclusive cleanup removes recognizable files and non-reserved bundles, the
     assert.equal(fs.existsSync(path.join(project, '.cursor', 'commands', 'build.md')), false);
     assert.equal(fs.existsSync(path.dirname(orphan)), false);
     assert.equal(fs.existsSync(reserved), true);
-    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
 
     fs.writeFileSync(
       path.join(project, '.asb.toml'),
@@ -484,11 +445,14 @@ test('exclusive cleanup removes recognizable files and non-reserved bundles, the
     );
     const managedAgain = await runSync({ project });
     assert.equal(managedAgain.exitCode, 0, JSON.stringify(managedAgain.entries, null, 2));
-    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), true);
+    assert.equal(
+      fs.readFileSync(path.join(project, '.cursor', 'commands', 'build.md'), 'utf-8'),
+      'desired\n'
+    );
   });
 });
 
-test('project mode none creates no output, manifest ownership, or project ledger entry', async () => {
+test('project mode none writes nothing to the project or the machine', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -504,13 +468,12 @@ test('project mode none creates no output, manifest ownership, or project ledger
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(fs.existsSync(path.join(project, '.cursor', 'commands', 'build.md')), false);
-    assert.equal(fs.existsSync(projectManifestPath(homes.asbHome, project)), false);
-    // A project-scope run never touches the machine ledger at all.
-    assert.equal(fs.existsSync(path.join(homes.stateHome, 'ledger.json')), false);
+    // A project-scope run leaves the machine's state dir empty.
+    assert.deepEqual(fs.readdirSync(homes.stateHome), []);
   });
 });
 
-test('a failed exclusive cleanup preserves the prior managed manifest byte-exact', async () => {
+test('a failed exclusive cleanup fails the run and preserves the escaping link', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -522,22 +485,21 @@ test('a failed exclusive cleanup preserves the prior managed manifest byte-exact
     );
     projectConfig(project);
     await runSync({ project });
-    const manifestPath = projectManifestPath(homes.asbHome, project);
-    const before = fs.readFileSync(manifestPath, 'utf-8');
     fs.writeFileSync(
       path.join(project, '.asb.toml'),
       '[distribution.project]\nmode = "exclusive"\n\n[skills]\nenabled = []\n'
     );
     const outside = path.join(homes.root, 'outside-skill');
     fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'keep.md'), 'outside\n');
     const link = path.join(project, '.cursor', 'skills', 'escape');
     fs.symlinkSync(outside, link, 'dir');
 
     const report = await runSync({ project });
 
     assert.equal(report.exitCode, 1);
-    assert.equal(fs.readFileSync(manifestPath, 'utf-8'), before);
     assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
+    assert.equal(fs.readFileSync(path.join(outside, 'keep.md'), 'utf-8'), 'outside\n');
   });
 });
 

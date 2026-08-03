@@ -300,7 +300,7 @@ test('a plugin server is selectable on its own, without installing the plugin', 
 
     assert.deepEqual(Object.keys(readMcpHost(homes, 'cursor') ?? {}), ['pack-alpha']);
     assert.equal(
-      fs.existsSync(path.join(homes.agentsHome, '.cursor', 'rules', 'asb-rules.mdc')),
+      fs.existsSync(path.join(homes.agentsHome, '.cursor', 'rules', 'rules.mdc')),
       false,
       'nothing else from the plugin comes along'
     );

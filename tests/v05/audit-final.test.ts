@@ -13,10 +13,9 @@ import {
   selectedFor,
 } from '../../src/engine/cli.js';
 import { loadConfig } from '../../src/engine/config.js';
-import { acquireRunLock, ledgerPath, loadLedger } from '../../src/engine/ledger.js';
-import { projectManifestPath } from '../../src/engine/peer.js';
 import { type Action, groupKeyActions } from '../../src/engine/plan.js';
 import { renderExplain } from '../../src/engine/report.js';
+import { acquireRunLock, lastRunPath } from '../../src/engine/runstate.js';
 import { applyKeysEdits } from '../../src/engine/shapes.js';
 import { readSourceCatalog } from '../../src/engine/sources.js';
 import {
@@ -51,7 +50,7 @@ async function runMain(argv: string[]): Promise<{ code: number; out: string; err
   }
 }
 
-test('A1 global and project ledger claims stay inside their planning scope in both orders', async () => {
+test('A1 global and project runs stay inside their planning scope in both orders', async () => {
   for (const order of ['project-first', 'global-first'] as const) {
     await withScratchHomes(async (homes) => {
       const project = path.join(homes.root, 'project');
@@ -463,7 +462,7 @@ test('A12 scoped picker selection comes only from the target layer', async () =>
   });
 });
 
-test('B1 a failed stale bundle deletion stays claimed and reports left-behind', async () => {
+test('B1 a failed stale bundle deletion reports left-behind and the next run finishes it', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     const source = seedSkill(homes, 'alpha', { files: { 'old.txt': 'old\n' } });
@@ -498,10 +497,12 @@ test('B1 a failed stale bundle deletion stays claimed and reports left-behind', 
     assert.equal(entry?.outcome, 'left-behind', JSON.stringify(report.entries, null, 2));
     assert.equal(entry?.detail, 'remove-failed');
     assert.ok(fs.existsSync(staleTarget));
-    const proof = loadLedger(homes.stateHome).entries.find(
-      (candidate) => candidate.path === bundle
-    );
-    assert.ok(proof?.files?.includes('old.txt'), JSON.stringify(proof, null, 2));
+
+    // The bundle is asb's because the library renders it, so nothing about the
+    // failure has to be remembered: the next run takes the file again.
+    const retry = await runSync();
+    assert.equal(retry.exitCode, 0, JSON.stringify(retry.entries, null, 2));
+    assert.equal(fs.existsSync(staleTarget), false);
   });
 });
 
@@ -628,33 +629,6 @@ test('B7 marketplace plugin names must encode one child path segment', async () 
   });
 });
 
-test('B8 null project manifest entries are contained as corrupt state', async () => {
-  await withScratchHomes(async (homes) => {
-    const project = path.join(homes.root, 'project');
-    fs.mkdirSync(project);
-    fs.writeFileSync(
-      path.join(project, '.asb.toml'),
-      '[distribution.project]\nmode = "managed"\n\n[applications]\nenabled = ["codex"]\n'
-    );
-    installApps(homes, 'codex');
-    const manifest = projectManifestPath(homes.asbHome, project);
-    fs.mkdirSync(path.dirname(manifest), { recursive: true });
-    fs.writeFileSync(
-      manifest,
-      JSON.stringify({
-        version: 1,
-        updatedAt: '2000-01-01T00:00:00.000Z',
-        projectRoot: project,
-        sections: { mcp: { 'alpha::codex': null } },
-      })
-    );
-
-    const report = await runSync({ project });
-    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
-    assert.ok(report.entries.some((entry) => entry.detail === 'parse-error'));
-  });
-});
-
 test('B11 selection and explain JSON use the standard report envelope', async () => {
   await withScratchHomes(async (homes) => {
     writeUserConfig(homes, '[applications]\nenabled = []\n');
@@ -688,9 +662,9 @@ test('B9 changelog enumerates all eight ratified migration-visible changes', () 
   }
 });
 
-test('a project sync records ownership in the manifest only, never the machine ledger', async () => {
+test('a project sync writes no machine state and leaves the last-run fact alone', async () => {
   await withScratchHomes(async (homes) => {
-    const project = path.join(homes.root, 'proj-ledger');
+    const project = path.join(homes.root, 'proj-state');
     fs.mkdirSync(project);
     fs.writeFileSync(
       path.join(project, '.asb.toml'),
@@ -706,32 +680,26 @@ test('a project sync records ownership in the manifest only, never the machine l
     const report = await runSync({ project });
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.ok(report.entries.some((entry) => entry.outcome === 'written'));
-    assert.deepEqual(loadLedger(homes.stateHome).entries, []);
-    assert.equal(
-      fs.existsSync(ledgerPath(homes.stateHome)),
-      false,
-      'a project-only run never creates the machine ledger'
+    assert.deepEqual(
+      fs.existsSync(homes.stateHome) ? fs.readdirSync(homes.stateHome) : [],
+      [],
+      'a project-only run leaves nothing behind in the state dir'
     );
 
     const globalReport = await runSync();
     assert.equal(globalReport.exitCode, 0, JSON.stringify(globalReport.entries, null, 2));
-    const bytes = fs.readFileSync(ledgerPath(homes.stateHome), 'utf-8');
+    const bytes = fs.readFileSync(lastRunPath(homes.stateHome), 'utf-8');
     const second = await runSync({ project });
     assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
     assert.equal(
-      fs.readFileSync(ledgerPath(homes.stateHome), 'utf-8'),
+      fs.readFileSync(lastRunPath(homes.stateHome), 'utf-8'),
       bytes,
-      'a project run neither rewrites the global store nor replaces its last-run fact'
+      'a project run does not replace the machine last-run fact'
     );
   });
 });
 
-test('a canceled structured write never publishes peer ownership', () => {
-  const peer = {
-    asbHome: '/tmp/none',
-    target: { app: 'claude-code' },
-    state: { version: 1, groups: {}, bundles: [], updatedAt: '' },
-  } as unknown as NonNullable<Action['peer']>;
+test('a canceled structured write carries none of its edits', () => {
   const base: Action = {
     app: 'claude-code',
     type: 'hooks',
@@ -742,7 +710,6 @@ test('a canceled structured write never publishes peer ownership', () => {
     root: '/tmp/none',
     expectedHash: null,
     content: '{}',
-    peer,
     keyEdits: {
       format: 'json',
       edits: [{ keyPath: ['hooks'], value: { a: 1 } }],
@@ -752,7 +719,6 @@ test('a canceled structured write never publishes peer ownership', () => {
   const other: Action = {
     ...base,
     type: 'mcp',
-    peer: undefined,
     keyEdits: {
       format: 'json',
       edits: [{ keyPath: ['hooks', 'x'], value: 2 }],
@@ -763,7 +729,7 @@ test('a canceled structured write never publishes peer ownership', () => {
   assert.equal(grouped.length, 2);
   for (const action of grouped) {
     assert.equal(action.outcome, 'conflict', JSON.stringify(action));
-    assert.equal(action.peer, undefined, 'a canceled action must carry no peer publication');
+    assert.equal(action.keyEdits, undefined, 'a canceled action carries no edit to apply');
   }
 });
 

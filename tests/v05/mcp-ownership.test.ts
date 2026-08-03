@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runExplain, runSync } from '../../src/engine/cli.js';
-import type { Ledger, LedgerEntry } from '../../src/engine/ledger.js';
 import type { Report, ReportEntry } from '../../src/engine/report.js';
 import {
   detectDir,
@@ -32,30 +31,11 @@ import {
  * changed expectation.
  *
  * Also adapted: 0.4's global write reset `mcpServers` to `{}` and repopulated
- * it, destroying any hand-written server (quarry R-2). Here an unrecorded key
- * is foreign until identity proves it.
+ * it, destroying any hand-written server (quarry R-2). Here a key is foreign
+ * until identity proves it.
  */
 
 const ALPHA = { command: 'npx', args: ['-y', 'alpha'] };
-
-function ledgerOf(homes: ScratchHomes): Ledger {
-  const filePath = path.join(homes.stateHome, 'ledger.json');
-  if (!fs.existsSync(filePath)) return { version: 1, entries: [] };
-  return JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Ledger;
-}
-
-function mcpEntries(homes: ScratchHomes): LedgerEntry[] {
-  return ledgerOf(homes).entries.filter((entry) => entry.type === 'mcp');
-}
-
-function writeLedger(homes: ScratchHomes, ledger: Ledger): void {
-  fs.mkdirSync(homes.stateHome, { recursive: true });
-  fs.writeFileSync(
-    path.join(homes.stateHome, 'ledger.json'),
-    `${JSON.stringify(ledger, null, 2)}\n`,
-    'utf-8'
-  );
-}
 
 function seedHost(homes: ScratchHomes, app: McpAppId, content: string): string {
   const filePath = mcpHostPath(homes, app);
@@ -82,13 +62,13 @@ function row(report: Report, id: string): ReportEntry | undefined {
   return report.entries.find((entry) => entry.type === 'mcp' && entry.id === id);
 }
 
-test('a key asb never wrote is foreign, and the run refuses to overwrite it', async () => {
+test('selecting a server puts the library definition at its key, and nothing else', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     const host = seedHost(
       homes,
       'cursor',
-      '{\n  "mcpServers": {\n    "alpha": { "command": "mine", "args": ["hand-written"] }\n  }\n}\n'
+      '{\n  "mcpServers": {\n    "alpha": { "command": "mine", "args": ["hand-written"] },\n    "theirs": { "command": "theirs" }\n  }\n}\n'
     );
     seedMcpLibrary(homes, { alpha: ALPHA });
     config(homes, ['cursor'], ['alpha']);
@@ -96,24 +76,22 @@ test('a key asb never wrote is foreign, and the run refuses to overwrite it', as
     const report = await runSync({});
 
     assert.deepEqual(readMcpHost(homes, 'cursor')?.alpha, {
-      command: 'mine',
-      args: ['hand-written'],
+      command: 'npx',
+      args: ['-y', 'alpha'],
+      type: 'stdio',
     });
-    const blocked = row(report, 'alpha');
-    assert.equal(blocked?.outcome, 'blocked');
-    assert.equal(blocked?.detail, 'foreign');
-    assert.equal(mcpEntries(homes).length, 0, 'nothing is claimed');
-    assert.equal(report.exitCode, 1);
-    assert.ok(fs.readFileSync(host, 'utf-8').includes('hand-written'));
+    assert.deepEqual(readMcpHost(homes, 'cursor')?.theirs, { command: 'theirs' });
+    assert.equal(report.exitCode, 0);
+    assert.ok(fs.readFileSync(host, 'utf-8').includes('theirs'));
   });
 });
 
-test('a key already holding asb’s own render is adopted by identity', async () => {
+test('a key already holding asb’s own render needs no write', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     seedMcpLibrary(homes, { alpha: ALPHA });
     config(homes, ['cursor'], ['alpha']);
-    seedHost(
+    const before = seedHost(
       homes,
       'cursor',
       `${JSON.stringify(
@@ -122,17 +100,12 @@ test('a key already holding asb’s own render is adopted by identity', async ()
         2
       )}\n`
     );
+    const bytes = fs.readFileSync(before, 'utf-8');
 
     const report = await runSync({});
 
-    const adopted = row(report, 'alpha');
-    assert.equal(adopted?.outcome, 'adopted');
-    assert.equal(adopted?.detail, 'identity');
-    const [entry] = mcpEntries(homes);
-    assert.equal(entry.provenance, 'identity');
-    assert.deepEqual(entry.keys, ['mcpServers', 'alpha']);
-    assert.equal(entry.shape, 'keys');
-    assert.equal(entry.id, 'alpha');
+    assert.equal(row(report, 'alpha')?.outcome, 'unchanged');
+    assert.equal(fs.readFileSync(before, 'utf-8'), bytes, 'the host is not rewritten');
   });
 });
 
@@ -159,7 +132,6 @@ test('foreign servers beside an owned key survive every write and every removal'
       (entry) => entry.type === 'mcp' && entry.outcome === 'written'
     );
     assert.equal(write?.reason, 'retired alpha');
-    assert.equal(mcpEntries(homes).length, 0);
     const content = JSON.parse(fs.readFileSync(mcpHostPath(homes, 'cursor'), 'utf-8'));
     assert.equal(content.otherSetting, true);
   });
@@ -201,7 +173,7 @@ test('trae erases a type key it once wrote when the definition loses it', async 
   });
 });
 
-test('an owned slice edited by hand conflicts and the target is not touched', async () => {
+test('a selected slice edited by hand takes the library definition again', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     seedMcpLibrary(homes, { alpha: ALPHA });
@@ -214,21 +186,18 @@ test('an owned slice edited by hand conflicts and the target is not touched', as
     };
     edited.mcpServers.alpha.args = ['-y', 'edited-by-hand'];
     fs.writeFileSync(host, `${JSON.stringify(edited, null, 2)}\n`, 'utf-8');
-    const before = fs.readFileSync(host, 'utf-8');
 
     seedMcpLibrary(homes, { alpha: { command: 'npx', args: ['-y', 'alpha', '--new'] } });
     const report = await runSync({});
 
-    assert.equal(fs.readFileSync(host, 'utf-8'), before, 'the target is untouched');
-    const conflict = row(report, 'alpha');
-    assert.equal(conflict?.outcome, 'conflict');
-    assert.match(conflict?.reason ?? '', /modified since asb last wrote it/);
-    assert.equal(mcpEntries(homes).length, 1, 'the claim stands so the user can resolve it');
-    assert.equal(report.exitCode, 1);
+    // Selecting a server asks for the library's definition at that key, so the
+    // edit loses to it rather than deadlocking the run. Edit the library entry.
+    assert.deepEqual(readMcpHost(homes, 'cursor')?.alpha.args, ['-y', 'alpha', '--new']);
+    assert.equal(report.exitCode, 0);
   });
 });
 
-test('a deselected slice edited by hand is left behind and the claim is dropped', async () => {
+test('a deselected slice whose command was changed is left alone and not named', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     seedMcpLibrary(homes, { alpha: ALPHA });
@@ -245,29 +214,28 @@ test('a deselected slice edited by hand is left behind and the claim is dropped'
     config(homes, ['cursor'], []);
     const report = await runSync({});
 
+    // A key running a different program is a different server that happens to
+    // carry the name, whoever typed it. It stays, and nothing is said about it.
     assert.equal(readMcpHost(homes, 'cursor')?.alpha.command, 'user-edited');
-    const left = row(report, 'alpha');
-    assert.equal(left?.outcome, 'left-behind');
-    assert.equal(left?.detail, 'modified');
-    assert.equal(mcpEntries(homes).length, 0, 'the claim is relinquished, the value stays');
+    assert.equal(row(report, 'alpha'), undefined, JSON.stringify(report.entries, null, 2));
+    assert.equal(report.exitCode, 0);
   });
 });
 
-test('a deselected slice already gone reports removed and drops its record', async () => {
+test('a deselected slice already gone is nothing to report', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     seedMcpLibrary(homes, { alpha: ALPHA });
     config(homes, ['cursor'], ['alpha']);
     await runSync({});
 
-    fs.writeFileSync(mcpHostPath(homes, 'cursor'), '{\n  "mcpServers": {}\n}\n', 'utf-8');
+    const empty = '{\n  "mcpServers": {}\n}\n';
+    fs.writeFileSync(mcpHostPath(homes, 'cursor'), empty, 'utf-8');
     config(homes, ['cursor'], []);
     const report = await runSync({});
 
-    const removed = row(report, 'alpha');
-    assert.equal(removed?.outcome, 'removed');
-    assert.equal(removed?.detail, 'already-absent');
-    assert.equal(mcpEntries(homes).length, 0);
+    assert.equal(row(report, 'alpha'), undefined, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.readFileSync(mcpHostPath(homes, 'cursor'), 'utf-8'), empty);
   });
 });
 
@@ -282,10 +250,6 @@ test('removal takes one key and leaves the other owned keys in place', async () 
     const report = await runSync({});
 
     assert.deepEqual(Object.keys(readMcpHost(homes, 'codex') ?? {}), ['beta']);
-    assert.deepEqual(
-      mcpEntries(homes).map((entry) => entry.id),
-      ['beta']
-    );
     assert.equal(row(report, 'beta')?.outcome, 'unchanged');
     const write = report.entries.find(
       (entry) => entry.type === 'mcp' && entry.outcome === 'written'
@@ -316,73 +280,6 @@ test('two ids that sanitize to one key fail that app rather than take turns', as
   });
 });
 
-test('a keys record without a key path aborts the run before any write', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor');
-    seedMcpLibrary(homes, { alpha: ALPHA });
-    config(homes, ['cursor'], ['alpha']);
-    writeLedger(homes, {
-      version: 1,
-      entries: [
-        {
-          app: 'cursor',
-          type: 'mcp',
-          id: 'alpha',
-          path: mcpHostPath(homes, 'cursor'),
-          shape: 'keys',
-          hash: 'deadbeef',
-          provenance: 'written',
-          updatedAt: new Date().toISOString(),
-        },
-      ],
-    });
-
-    await assert.rejects(runSync({}), /keys entry records no key path/);
-    assert.equal(fs.existsSync(mcpHostPath(homes, 'cursor')), false);
-  });
-});
-
-test('a keys record whose key path is malformed aborts the run', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor');
-    seedMcpLibrary(homes, { alpha: ALPHA });
-    config(homes, ['cursor'], ['alpha']);
-    writeLedger(homes, {
-      version: 1,
-      entries: [
-        {
-          app: 'cursor',
-          type: 'mcp',
-          id: 'alpha',
-          path: mcpHostPath(homes, 'cursor'),
-          shape: 'keys',
-          hash: 'deadbeef',
-          keys: [] as string[],
-          provenance: 'written',
-          updatedAt: new Date().toISOString(),
-        },
-      ],
-    });
-
-    await assert.rejects(runSync({}), /keys is not a non-empty key path/);
-  });
-});
-
-test('the recorded key path is the sanitized key that is actually on disk', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'codex');
-    seedMcpLibrary(homes, { 'my.server:one': ALPHA });
-    config(homes, ['codex'], ['my.server:one']);
-
-    await runSync({});
-
-    const [entry] = mcpEntries(homes);
-    assert.equal(entry.id, 'my.server:one', 'the record is keyed by the authored id');
-    assert.deepEqual(entry.keys, ['mcp_servers', 'my-server-one']);
-    assert.deepEqual(Object.keys(readMcpHost(homes, 'codex') ?? {}), ['my-server-one']);
-  });
-});
-
 test('a host whose parent resolves outside the app root is refused', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'trae');
@@ -401,7 +298,6 @@ test('a host whose parent resolves outside the app root is refused', async () =>
     assert.equal(blocked?.outcome, 'blocked');
     assert.equal(blocked?.detail, 'path-escape');
     assert.equal(fs.existsSync(path.join(elsewhere, 'mcp.json')), false);
-    assert.equal(mcpEntries(homes).length, 0);
   });
 });
 
@@ -417,8 +313,7 @@ test('explain resolves a server by its identity, per app, with both hashes', asy
     assert.equal(slices.length, 2, 'one slice per app that carries the server');
     for (const slice of slices) {
       assert.equal(slice.outcome, 'unchanged');
-      assert.equal(slice.provenance, 'written');
-      assert.equal(slice.recordedHash, slice.currentHash);
+      assert.equal(slice.provenance, 'identity');
       assert.equal(slice.desiredHash, slice.currentHash);
       assert.deepEqual(slice.components, [{ id: 'alpha', path: definitions }]);
       assert.ok(slice.desired?.includes('npx'));
@@ -431,23 +326,20 @@ test('explain resolves a server by its identity, per app, with both hashes', asy
   });
 });
 
-test('explain names a blocked foreign key and what is in the way', async () => {
+test('explain names a key asb cannot splice and what is in the way', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor');
-    seedHost(
-      homes,
-      'cursor',
-      '{\n  "mcpServers": {\n    "alpha": { "command": "theirs" }\n  }\n}\n'
-    );
-    seedMcpLibrary(homes, { alpha: ALPHA });
-    config(homes, ['cursor'], ['alpha']);
+    installApps(homes, 'codex');
+    seedHost(homes, 'codex', SUB_TABLE_HOST);
+    seedMcpLibrary(homes, {
+      alpha: { command: 'npx', args: ['-y', 'alpha'], env: { FOO: 'two' } },
+    });
+    config(homes, ['codex'], ['alpha']);
 
     const [slice] = await runExplain('alpha');
 
     assert.equal(slice.outcome, 'blocked');
     assert.equal(slice.detail, 'foreign');
     assert.equal(slice.provenance, null);
-    assert.equal(slice.recordedHash, null);
     assert.notEqual(slice.currentHash, slice.desiredHash);
   });
 });
@@ -469,9 +361,10 @@ test('a codex table replaced by hand with an inline form is never spliced', asyn
       fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'),
       'mcp_servers = { alpha = { command = "npx" } }\n'
     );
-    const conflict = row(report, 'alpha');
-    assert.equal(conflict?.outcome, 'conflict');
-    assert.match(conflict?.reason ?? '', /not written as a table/);
+    const blocked = row(report, 'alpha');
+    assert.equal(blocked?.outcome, 'blocked');
+    assert.equal(blocked?.detail, 'foreign');
+    assert.match(blocked?.reason ?? '', /not written as a table/);
   });
 });
 
@@ -505,10 +398,9 @@ test('an owned key with a descendant table conflicts rather than being half-writ
     seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
     config(homes, ['codex'], ['alpha']);
     await runSync({});
-    assert.equal(mcpEntries(homes).length, 1);
 
     // Reformatted by hand into the sub-table spelling: same value, same order,
-    // so the recorded hash still matches and nothing has drifted.
+    // so the key still holds the render and nothing has drifted.
     seedHost(homes, 'codex', SUB_TABLE_HOST);
     seedMcpLibrary(homes, {
       alpha: { command: 'npx', args: ['-y', 'alpha'], env: { FOO: 'two' } },
@@ -516,9 +408,10 @@ test('an owned key with a descendant table conflicts rather than being half-writ
     const report = await runSync({});
 
     assert.equal(fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'), SUB_TABLE_HOST);
-    const conflict = row(report, 'alpha');
-    assert.equal(conflict?.outcome, 'conflict');
-    assert.match(conflict?.reason ?? '', /mcp_servers\.alpha\.env/);
+    const blocked = row(report, 'alpha');
+    assert.equal(blocked?.outcome, 'blocked');
+    assert.equal(blocked?.detail, 'foreign');
+    assert.match(blocked?.reason ?? '', /mcp_servers\.alpha\.env/);
     // A splice of the parent span would write `env.FOO` beside the orphaned
     // header and leave the whole document unreadable to codex.
     assert.deepEqual(readMcpHost(homes, 'codex')?.alpha, ALPHA_SUB_TABLE);
@@ -532,7 +425,6 @@ test('a quoted sibling name is not a descendant: the owned key stays writable', 
     seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
     config(homes, ['codex'], ['alpha']);
     await runSync({});
-    assert.equal(mcpEntries(homes).length, 1);
 
     // A server literally named `alpha.beta` — a legal sibling key whose header
     // spells the dot inside quotes. It nests nothing under `alpha`.
@@ -558,7 +450,6 @@ test('a descendant table is never re-merged behind a hash that says otherwise', 
     seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
     config(homes, ['codex'], ['alpha']);
     await runSync({});
-    const [recorded] = mcpEntries(homes);
 
     // The desired value loses `env` entirely. Splicing the parent span writes
     // bytes identical to what is there, so the host looks unchanged while the
@@ -567,13 +458,13 @@ test('a descendant table is never re-merged behind a hash that says otherwise', 
     seedMcpLibrary(homes, { alpha: { command: 'npx', args: ['-y', 'alpha'] } });
     const report = await runSync({});
 
-    assert.equal(row(report, 'alpha')?.outcome, 'conflict');
+    assert.equal(row(report, 'alpha')?.outcome, 'blocked');
     assert.deepEqual(readMcpHost(homes, 'codex')?.alpha, ALPHA_SUB_TABLE, 'env is still merged');
-    assert.equal(mcpEntries(homes)[0].hash, recorded.hash, 'no hash for a value asb did not write');
+    assert.equal(fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'), SUB_TABLE_HOST);
   });
 });
 
-test('a hand-written key with a descendant table is never adopted by identity', async () => {
+test('a key spelled across sub-tables already holds the render, so nothing happens', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedMcpLibrary(homes, { alpha: ALPHA_SUB_TABLE });
@@ -582,12 +473,11 @@ test('a hand-written key with a descendant table is never adopted by identity', 
 
     const report = await runSync({});
 
+    // Whoever wrote those headers, the server they describe is the library's.
+    // Nothing needs writing, so the spelling asb could not splice never comes
+    // up — it does the moment the definition moves on, and that run blocks.
     assert.equal(fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8'), SUB_TABLE_HOST);
-    const blocked = row(report, 'alpha');
-    assert.equal(blocked?.outcome, 'blocked');
-    assert.equal(blocked?.detail, 'foreign');
-    assert.match(blocked?.reason ?? '', /mcp_servers\.alpha\.env/);
-    assert.equal(mcpEntries(homes).length, 0, 'asb never claims a slice it cannot edit');
+    assert.equal(row(report, 'alpha')?.outcome, 'unchanged');
   });
 });
 
@@ -606,23 +496,5 @@ test('a deselected key with a descendant table is left behind, not reported reti
     const left = row(report, 'alpha');
     assert.equal(left?.outcome, 'left-behind');
     assert.match(left?.reason ?? '', /mcp_servers\.alpha\.env/);
-    assert.equal(mcpEntries(homes).length, 0, 'the claim goes either way');
-  });
-});
-
-test('a second run re-proves ownership from the record the first one wrote', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor');
-    seedMcpLibrary(homes, { alpha: ALPHA });
-    config(homes, ['cursor'], ['alpha']);
-    await runSync({});
-    assert.equal(mcpEntries(homes).length, 1);
-
-    const report = await runSync({});
-
-    assert.equal(report.exitCode, 0);
-    assert.equal(row(report, 'alpha')?.outcome, 'unchanged');
-    assert.equal(mcpEntries(homes).length, 1);
-    assert.equal(mcpEntries(homes)[0].provenance, 'written');
   });
 });

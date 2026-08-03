@@ -18,35 +18,8 @@ import {
 } from './config.js';
 import { expandHome, type RemoteSource } from './git.js';
 import { type ImportOptions, type ImportResult, importFromApp } from './importer.js';
-import {
-  acquireRunLock,
-  type Ledger,
-  type LedgerEntry,
-  ledgerKey,
-  ledgerPath,
-  loadLedger,
-  type RunLock,
-  saveLedger,
-} from './ledger.js';
 import { buildPluginExpansion, type LibraryInventory, scanLibrary } from './library.js';
 import { applyNative, captureNative, planNative } from './native.js';
-import {
-  consumeLegacyManagedState,
-  loadPeerState,
-  loadProjectManifest,
-  type ProjectLibrarySection,
-  type ProjectManifest,
-  projectManifestKeyParts,
-  recordManagedMcpEntry,
-  recordProjectLibraryEntry,
-  recordProjectRulesEntry,
-  removeManagedMcpEntry,
-  removeProjectLibraryEntry,
-  removeProjectRulesEntry,
-  savePeerState,
-  saveProjectManifest,
-  uniqueProjectManifestPaths,
-} from './peer.js';
 import {
   type Action,
   type CapturedHookApp,
@@ -75,7 +48,6 @@ import {
   planSources,
   planStatusAll,
   preflightProjectActions,
-  projectMcpPeerLedgerEntries,
   STATUS_TYPES,
   type SyncCapture,
 } from './plan.js';
@@ -91,9 +63,18 @@ import {
   renderReport,
 } from './report.js';
 import {
+  acquireRunLock,
+  clearOwnershipStores,
+  lastRunPath,
+  loadLastRun,
+  type RunLock,
+  saveLastRun,
+} from './runstate.js';
+import {
   applyBundleFiles,
   bundleFingerprint,
   hashContent,
+  legacyDedicatedRulesPath,
   listTargetFiles,
   parseStructured,
   removeBundleSlice,
@@ -113,6 +94,7 @@ import {
   readSourceCatalog,
   refreshableSources,
   removeSource,
+  retireSourceSelection,
   type SourceCatalog,
   type UpdateRow,
   updateSources,
@@ -144,118 +126,11 @@ export interface SyncOptions {
   env?: NodeJS.ProcessEnv;
 }
 
-function projectRelative(projectRoot: string, targetPath: string): string | null {
-  const relative = path.relative(projectRoot, targetPath);
-  if (relative === '' || path.isAbsolute(relative) || relative.split(path.sep).includes('..')) {
-    return null;
-  }
-  return relative.split(path.sep).join('/');
-}
-
-function pathInside(root: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return (
-    relative === '' || (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
-  );
-}
-
-function globalPlanningEntry(
-  entry: LedgerEntry,
-  config: ResolvedConfig,
-  table: readonly AppRow[]
-): boolean {
-  if (entry.app === 'agents' && entry.type === 'skills') {
-    return pathInside(AGENTS_SKILLS_UNION.dir(config.homes), entry.path);
-  }
-  const row = table.find((candidate) => candidate.id === entry.app);
-  if (!row) return false;
-  if (entry.type === 'rules' && row.rules) {
-    return pathInside(row.rules.root(config.homes, entry.path), entry.path);
-  }
-  if (entry.type === 'commands' || entry.type === 'agents') {
-    const target = row[entry.type];
-    return target ? pathInside(target.root(config.homes), entry.path) : false;
-  }
-  if (entry.type === 'skills' && row.skills) {
-    return pathInside(row.skills.root(config.homes), entry.path);
-  }
-  if (entry.type === 'mcp' && row.mcp) {
-    return path.resolve(entry.path) === path.resolve(row.mcp.path(config.homes));
-  }
-  return false;
-}
-
-function planningLedgerForScope(
-  ledger: Ledger,
-  config: ResolvedConfig,
-  globalTable: readonly AppRow[]
-): Ledger {
-  return {
-    ...ledger,
-    entries: config.project
-      ? []
-      : ledger.entries.filter((entry) => globalPlanningEntry(entry, config, globalTable)),
-  };
-}
-
-/** Planner-only proof view. The machine ledger is never seeded from peer state. */
-function projectManifestProofs(manifest: ProjectManifest, projectRoot: string): LedgerEntry[] {
-  const root = path.resolve(projectRoot);
-  const proofs: LedgerEntry[] = [];
-  for (const section of ['skills', 'commands', 'agents'] as const) {
-    for (const [key, entry] of Object.entries(manifest.sections[section] ?? {})) {
-      if (
-        typeof entry.relativePath !== 'string' ||
-        typeof entry.targetId !== 'string' ||
-        typeof entry.hash !== 'string'
-      ) {
-        continue;
-      }
-      const targetPath = path.resolve(root, entry.relativePath);
-      if (projectRelative(root, targetPath) === null) continue;
-      proofs.push({
-        app: entry.targetId,
-        type: section,
-        id: projectManifestKeyParts(key).id,
-        path: targetPath,
-        shape: section === 'skills' ? 'own-dir' : 'own-file',
-        hash: entry.hash,
-        provenance: 'peer-record',
-        updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '',
-      });
-    }
-  }
-  for (const entry of Object.values(manifest.sections.rules ?? {})) {
-    if (
-      typeof entry.relativePath !== 'string' ||
-      typeof entry.hash !== 'string' ||
-      !Array.isArray(entry.targetIds)
-    ) {
-      continue;
-    }
-    const targetPath = path.resolve(root, entry.relativePath);
-    if (projectRelative(root, targetPath) === null) continue;
-    proofs.push({
-      app: entry.targetIds[0] ?? 'project',
-      type: 'rules',
-      id: null,
-      path: targetPath,
-      shape: entry.mode === 'block' ? 'region' : 'own-file',
-      hash: entry.hash,
-      provenance: 'peer-record',
-      updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : '',
-    });
-  }
-  return proofs;
-}
-
 function captureFor(
   config: ReturnType<typeof loadConfig>,
-  ledger: Ledger,
   table: readonly AppRow[],
   inventory: LibraryInventory,
-  allApps = false,
-  projectManifest?: ReturnType<typeof loadProjectManifest>['manifest']
+  allApps = false
 ): SyncCapture {
   const capture: SyncCapture = {
     installed: {},
@@ -266,7 +141,6 @@ function captureFor(
     hooks: {},
     mcp: {},
     legacy: [],
-    ...(projectManifest ? { projectManifest } : {}),
   };
 
   const captureFile = (root: string, targetPath: string): void => {
@@ -293,23 +167,15 @@ function captureFor(
     const targetPath = row.rules.path(config.homes);
     capture.rulePaths[appId] = targetPath;
     captureFile(row.rules.root(config.homes, targetPath), targetPath);
-    for (const stale of ledger.entries) {
-      if (
-        stale.app !== appId ||
-        stale.type !== 'rules' ||
-        stale.id !== null ||
-        stale.path === targetPath ||
-        capture.targets[stale.path]
-      ) {
-        continue;
-      }
-      captureFile(row.rules.root(config.homes, stale.path), stale.path);
+    if (row.rules.dedicated) {
+      const legacy = legacyDedicatedRulesPath(targetPath);
+      captureFile(row.rules.root(config.homes, legacy), legacy);
     }
   }
 
-  // Commands and agents are own-file targets. Snapshot every selected or
-  // known library filename plus every recorded path; the planner never
-  // reverse-parses a filename into an id.
+  // Commands and agents are own-file targets. Snapshot every selected and
+  // every known library filename; the planner never reverse-parses a filename
+  // into an id.
   for (const appId of config.apps.enabled) {
     const app = table.find((candidate) => candidate.id === appId);
     if (!app) continue;
@@ -325,16 +191,11 @@ function captureFor(
           .map((component) => component.id),
       ]);
       for (const id of ids) captureFile(root, path.join(dir, row.filename(id)));
-      for (const entry of ledger.entries) {
-        if (entry.app === appId && entry.type === type && entry.shape === 'own-file') {
-          captureFile(root, entry.path);
-        }
-      }
     }
   }
 
   // Skills parents: list present child dirs, then snapshot every bundle the
-  // planner can possibly touch — selected, recorded, or name-present.
+  // planner can possibly touch — selected or name-present.
   const skillRows: { app: string; dir: string; root: string; reserved: readonly string[] }[] = [];
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId);
@@ -367,15 +228,6 @@ function captureFor(
     }
     capture.bundleDirs[row.dir] = present;
 
-    const recorded = ledger.entries
-      .filter(
-        (entry) =>
-          entry.app === row.app &&
-          entry.type === 'skills' &&
-          entry.id !== null &&
-          path.dirname(entry.path) === row.dir
-      )
-      .map((entry) => entry.id as string);
     const selected = row.app === 'agents' ? [] : effectiveSelection(config, row.app, 'skills');
     const unionSelected =
       row.app === 'agents'
@@ -384,7 +236,7 @@ function captureFor(
             .flatMap((member) => effectiveSelection(config, member, 'skills'))
         : [];
     const candidates = new Set(
-      [...selected, ...unionSelected, ...recorded, ...present].filter(
+      [...selected, ...unionSelected, ...present].filter(
         (id) => !id.startsWith('.') && !row.reserved.includes(id)
       )
     );
@@ -482,8 +334,8 @@ function captureFor(
     }
   }
 
-  // Hooks: the app config it merges into, the peer record that says which
-  // groups are asb's, and every bundle directory that record can reclaim.
+  // Hooks: the app config the groups merge into, and every bundle directory
+  // a library hook could be sitting in.
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId)?.hooks;
     if (!row) continue;
@@ -495,12 +347,6 @@ function captureFor(
       content: null,
       config: {},
       escapes: targetEscapesRoot(root, configPath),
-      state: loadPeerState(config.homes.asbHome, row.stateTarget, config.project ?? undefined),
-      legacyGroups: consumeLegacyManagedState(
-        config.homes.asbHome,
-        row.stateTarget,
-        config.project ?? undefined
-      ),
     };
     if (captured.exists) {
       try {
@@ -517,9 +363,14 @@ function captureFor(
     }
     capture.hooks[appId] = captured;
 
+    // Every hook the library defines could have a bundle sitting there, so
+    // each one is measured whether it is selected or not: that is what tells
+    // a tree asb wrote from one it did not.
     const claimable = new Set([
       ...effectiveSelection(config, appId, 'hooks'),
-      ...captured.state.bundles,
+      ...inventory.components
+        .filter((component) => component.type === 'hooks' && component.files !== undefined)
+        .map((component) => component.id),
     ]);
     for (const id of claimable) {
       const bundlePath = path.join(row.bundleDir(config.homes), id);
@@ -537,9 +388,12 @@ function captureFor(
   // MCP hosts: the document each app keeps its server map in. The path is
   // resolved here (opencode prefers an existing .jsonc) so the planner reads
   // one settled location rather than probing the disk itself.
+  // A project run also reads the hosts of apps it is not enabled for, so a key
+  // it wrote there before comes out when the app leaves the selection. Only an
+  // existing file is opened, so this costs a stat per app.
   const mcpApps = new Set([
     ...config.apps.enabled,
-    ...Object.values(projectManifest?.sections.mcp ?? {}).map((entry) => entry.targetId),
+    ...(config.project ? table.filter((row) => row.mcp).map((row) => row.id) : []),
   ]);
   for (const appId of mcpApps) {
     const row = table.find((candidate) => candidate.id === appId)?.mcp;
@@ -612,112 +466,9 @@ function toEntry(action: Action): ReportEntry {
   return entry;
 }
 
-function applyLedgerMutation(ledger: Ledger, action: Action): boolean {
-  if (!action.ledger) return false;
-  let changed = false;
-  for (const mutation of Array.isArray(action.ledger) ? action.ledger : [action.ledger]) {
-    if (mutation.op === 'put') {
-      const key = ledgerKey(mutation.entry);
-      const index = ledger.entries.findIndex((entry) => ledgerKey(entry) === key);
-      if (index >= 0) ledger.entries[index] = mutation.entry;
-      else ledger.entries.push(mutation.entry);
-      changed = true;
-      continue;
-    }
-    const before = ledger.entries.length;
-    ledger.entries = ledger.entries.filter((entry) => ledgerKey(entry) !== mutation.key);
-    changed = changed || ledger.entries.length !== before;
-  }
-  return changed;
-}
-
-function projectEntryFromLedgerKey(key: string): Pick<LedgerEntry, 'app' | 'type' | 'id' | 'path'> {
-  const [app = '', type = '', id = '', targetPath = ''] = key.split('\0');
-  return { app, type, id: id || null, path: targetPath };
-}
-
-function applyProjectManifestMutation(action: Action): void {
-  const project = action.projectManifest;
-  if (!project || !action.ledger) return;
-  const mutations = Array.isArray(action.ledger) ? action.ledger : [action.ledger];
-  for (const mutation of mutations) {
-    if (mutation.op === 'delete') {
-      const entry = projectEntryFromLedgerKey(mutation.key);
-      const relativePath = projectRelative(project.projectRoot, entry.path);
-      if (relativePath === null) continue;
-      if (
-        (entry.type === 'skills' || entry.type === 'commands' || entry.type === 'agents') &&
-        entry.id !== null
-      ) {
-        removeProjectLibraryEntry(
-          project.manifest,
-          entry.type as ProjectLibrarySection,
-          entry.id,
-          entry.app
-        );
-      } else if (entry.type === 'mcp' && entry.id !== null) {
-        removeManagedMcpEntry(project.manifest, `${entry.id}::${entry.app}`);
-      } else if (entry.type === 'rules') {
-        removeProjectRulesEntry(project.manifest, relativePath);
-      }
-      continue;
-    }
-    const entry = mutation.entry;
-    const relativePath = projectRelative(project.projectRoot, entry.path);
-    if (relativePath === null) continue;
-    if (
-      (entry.type === 'skills' || entry.type === 'commands' || entry.type === 'agents') &&
-      entry.id !== null
-    ) {
-      const section = entry.type as ProjectLibrarySection;
-      if (
-        (section === 'skills' && entry.shape === 'own-dir') ||
-        (section !== 'skills' && entry.shape === 'own-file')
-      ) {
-        recordProjectLibraryEntry(project.manifest, section, entry.id, {
-          relativePath,
-          targetId: entry.app,
-          hash: entry.hash,
-          updatedAt: entry.updatedAt,
-        });
-      }
-      continue;
-    }
-    if (entry.type === 'mcp' && entry.id !== null) {
-      if (entry.shape === 'keys' && entry.serverKey) {
-        recordManagedMcpEntry(project.manifest, entry.id, {
-          relativePath,
-          targetId: entry.app,
-          serverKey: entry.serverKey,
-          updatedAt: entry.updatedAt,
-        });
-      }
-      continue;
-    }
-    if (entry.type === 'rules') {
-      if (entry.shape === 'region' || entry.shape === 'own-file') {
-        recordProjectRulesEntry(project.manifest, {
-          relativePath,
-          mode: entry.shape === 'region' ? 'block' : 'full',
-          targetIds: action.members ?? [entry.app],
-          hash: entry.hash,
-          updatedAt: entry.updatedAt,
-        });
-      }
-    }
-  }
-}
-
-export function executeAction(
-  action: Action,
-  ledger: Ledger,
-  // Project runs prove ownership in the project manifest alone; a machine
-  // ledger holding project rows hands global planning claims over files a
-  // project owns (a project rooted inside an app root would lose them).
-  recordInLedger = true
-): ReportEntry {
+export function executeAction(action: Action): ReportEntry {
   // Native rows own no file: the manager's own verbs are the apply, and its
-  // reported state is the proof, so nothing here reaches the ledger.
+  // reported state is the proof.
   if (action.native) {
     const failure = applyNative(action.native);
     if (failure === undefined) return toEntry(action);
@@ -792,15 +543,15 @@ export function executeAction(
         } else if (action.bundle.exclusive) {
           fs.rmSync(action.path, { recursive: true });
         } else {
-          // A deletion that did not happen is never reported as one: the
-          // claim stays with the ledger or the peer record, so the payload
-          // remains reclaimable instead of orphaned by a false success.
+          // A deletion that did not happen is never reported as one, or the
+          // payload is orphaned by a false success: what is still on disk is
+          // named instead, and the next run measures it again.
           const leftBehind = removeBundleSlice(action.path, action.bundle.stale);
           if (leftBehind.length > 0) {
             return failure(
               'left-behind',
               'remove-failed',
-              `could not delete ${leftBehind.length} recorded file(s) under ${action.path}; it is still installed — fix its permissions or delete it yourself, then re-run asb sync`
+              `could not delete ${leftBehind.length} distributed file(s) under ${action.path}; it is still installed — fix its permissions or delete it yourself, then re-run asb sync`
             );
           }
         }
@@ -809,50 +560,24 @@ export function executeAction(
         return failure('failed', 'write-error', message);
       }
 
-      // The recorded proof is the measured post-write tree, foreign extras
-      // included; an unprovable result records no ownership at all.
-      if (action.op === 'write' && !Array.isArray(action.ledger) && action.ledger?.op === 'put') {
-        const measured = bundleFingerprint(action.path);
-        if (measured === undefined) {
-          return failure(
-            'failed',
-            'write-error',
-            'bundle is unprovable after writing (symlink or special file appeared); no ownership recorded'
-          );
-        }
-        const applied = {
-          ...action,
-          ledger: {
-            op: 'put',
-            entry: {
-              ...action.ledger.entry,
-              hash: measured,
-              files: [...new Set([...action.bundle.files.map((file) => file.rel), ...leftBehind])],
-            },
-          },
-        } satisfies Action;
-        if (recordInLedger) applyLedgerMutation(ledger, applied);
-        applyProjectManifestMutation(applied);
-        if (leftBehind.length > 0) {
-          return failure(
-            'left-behind',
-            'remove-failed',
-            `could not delete ${leftBehind.length} recorded file(s) under ${action.path}; fix its permissions or delete it yourself, then re-run asb sync`
-          );
-        }
-        return toEntry(action);
+      // A tree that cannot be measured after the write is a tree no later run
+      // can prove is asb's, which is the same as never having written it.
+      if (action.op === 'write' && bundleFingerprint(action.path) === undefined) {
+        return failure(
+          'failed',
+          'write-error',
+          'bundle is unprovable after writing (symlink or special file appeared)'
+        );
       }
 
       if (leftBehind.length > 0) {
         return failure(
           'left-behind',
           'remove-failed',
-          `could not delete ${leftBehind.length} recorded file(s) under ${action.path}; fix its permissions or delete it yourself, then re-run asb sync`
+          `could not delete ${leftBehind.length} distributed file(s) under ${action.path}; fix its permissions or delete it yourself, then re-run asb sync`
         );
       }
 
-      if (recordInLedger) applyLedgerMutation(ledger, action);
-      applyProjectManifestMutation(action);
       return toEntry(action);
     }
 
@@ -881,51 +606,11 @@ export function executeAction(
     }
   }
 
-  if (recordInLedger) applyLedgerMutation(ledger, action);
-  applyProjectManifestMutation(action);
-
-  // The peer record is published only once its own slice landed: a config
-  // holding groups no record claims is a leak, and a record claiming groups
-  // no config holds authorizes deleting the user's.
-  if (action.peer) {
-    try {
-      savePeerState(
-        action.peer.asbHome,
-        action.peer.target,
-        action.peer.state,
-        action.peer.projectRoot
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // The config already landed, so a review the run asked for still stands;
-      // the failure must not swallow it, or the user loses the step the write
-      // made necessary.
-      const reason =
-        action.reason !== undefined
-          ? `${action.reason}; hook ownership state could not be saved (${message})`
-          : `hook ownership state could not be saved (${message})`;
-      return {
-        ...toEntry(action),
-        outcome: 'failed',
-        detail: 'write-error',
-        reason,
-      };
-    }
-  }
   return toEntry(action);
 }
 
 const NO_FAILURES: ReadonlySet<string> = new Set();
 
-/**
- * One gated pass over the plan. An action whose required bundles did not land
- * is skipped instead of executed — an app config may not point at payload
- * this run failed to distribute, and the record that authorizes deleting it
- * may not claim it. The record also goes out still claiming anything whose
- * removal failed, so shared state never says less than what remains on disk.
- * Preview walks the same gate, so a dry run cannot promise a write the real
- * run refuses.
- */
 function reconcile(
   actions: readonly Action[],
   run: (action: Action) => ReportEntry
@@ -953,23 +638,7 @@ function reconcile(
       continue;
     }
 
-    // A failed write blocks its own config through `requires` above, so an id
-    // that reaches a peer publish failed to be REMOVED: it is still
-    // distributed, and the record must keep saying so.
-    const entry = run(
-      action.peer && slot.size > 0
-        ? {
-            ...action,
-            peer: {
-              ...action.peer,
-              state: {
-                ...action.peer.state,
-                bundles: [...new Set([...action.peer.state.bundles, ...slot])],
-              },
-            },
-          }
-        : action
-    );
+    const entry = run(action);
     entries.push(entry);
 
     if (entry.id !== null && FAILING_OUTCOMES.has(entry.outcome)) {
@@ -985,7 +654,7 @@ function reconcile(
 /**
  * Which source a row belongs to, for `--source`. Component ids carry their
  * plugin as a prefix, so attribution is a lookup, not a guess. A row nothing
- * attributes to a source — an app-level skip, an aggregate target, a ledger
+ * attributes to a source — an app-level skip, an aggregate target, a write
  * failure — is never hidden by the filter.
  */
 function sourceAttribution(catalog: SourceCatalog): (action: Action) => string | null {
@@ -1139,9 +808,9 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     );
   }
 
-  // A real run takes the lock before ledger and capture: the whole
-  // capture → plan → apply sequence executes against serialized state, so a
-  // plan built from another run's pre-apply snapshot can never fire.
+  // A real run takes the lock before capture: the whole capture → plan →
+  // apply sequence executes against serialized state, so a plan built from
+  // another run's pre-apply snapshot can never fire.
   const lock: RunLock | null = dryRun ? null : acquireRunLock(config.homes.stateHome);
   const scope = {
     profile: config.profile,
@@ -1150,58 +819,9 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   };
 
   try {
-    const ledger = loadLedger(config.homes.stateHome);
+    const previousLastRun = loadLastRun(config.homes.stateHome);
+    if (!dryRun) clearOwnershipStores(config.homes.stateHome, config.homes.asbHome);
     const sources = runSourcesPhase(config, opts, dryRun);
-    const manifestLoad =
-      config.project && projectMode !== 'none'
-        ? (() => {
-            uniqueProjectManifestPaths(config.homes.asbHome, [config.project as string]);
-            return loadProjectManifest(config.homes.asbHome, config.project as string);
-          })()
-        : null;
-    if (manifestLoad?.collision) {
-      const report = buildReport(scope, [
-        ...cutoverWarnings.map(toEntry),
-        {
-          app: 'project',
-          type: null,
-          id: null,
-          path: manifestLoad.path,
-          outcome: 'failed',
-          detail: 'slug-collision',
-          reason: `${manifestLoad.error ?? 'project manifest slug collision'}; no project file was written`,
-        },
-      ]);
-      if (ledger.lastRun) report.lastRun = ledger.lastRun;
-      return report;
-    }
-    if (manifestLoad?.corrupt || (manifestLoad && manifestLoad.manifest === null)) {
-      const report = buildReport(scope, [
-        ...cutoverWarnings.map(toEntry),
-        {
-          app: 'project',
-          type: null,
-          id: null,
-          path: manifestLoad.path,
-          outcome: 'failed',
-          detail: 'parse-error',
-          reason: `project manifest is corrupt (${manifestLoad.error ?? 'unrecognized shape'}); no project file was written`,
-        },
-      ]);
-      if (ledger.lastRun) report.lastRun = ledger.lastRun;
-      return report;
-    }
-    const manifestBefore = manifestLoad?.manifest ? JSON.stringify(manifestLoad.manifest) : null;
-    let planningLedger = planningLedgerForScope(ledger, config, globalTable);
-    if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
-      planningLedger = {
-        ...planningLedger,
-        entries: [
-          ...planningLedger.entries,
-          ...projectManifestProofs(manifestLoad.manifest, config.project),
-        ],
-      };
-    }
     let catalog = readSourceCatalog(config);
 
     // Readiness and resolution are pre-write conditions. Distributing against
@@ -1228,7 +848,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         ].map(toEntry),
         { aborted: true }
       );
-      if (ledger.lastRun) aborted.lastRun = ledger.lastRun;
+      if (previousLastRun) aborted.lastRun = previousLastRun;
       return aborted;
     }
 
@@ -1247,45 +867,14 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
     }
 
-    const capture = captureFor(
-      resolved,
-      planningLedger,
-      table,
-      inventory,
-      opts.all === true,
-      manifestLoad?.manifest
-    );
-    const now = new Date().toISOString();
-    if (projectMode === 'managed' && manifestLoad?.manifest) {
-      for (const proof of planningLedger.entries) {
-        if (proof.type !== 'skills' || proof.shape !== 'own-dir') continue;
-        const files = capture.bundles[proof.path]?.files;
-        if (files) proof.files = files.map((file) => file.rel);
-      }
-      planningLedger = {
-        ...planningLedger,
-        entries: [
-          ...planningLedger.entries,
-          ...projectMcpPeerLedgerEntries(
-            resolved,
-            inventory,
-            capture,
-            table,
-            manifestLoad.manifest,
-            now
-          ),
-        ],
-      };
-    }
+    const capture = captureFor(resolved, table, inventory, opts.all === true);
     const nativeState = captureNative(resolved, catalog, table, env, capture.installed, dryRun);
 
     const planInput = {
       config: resolved,
       inventory,
-      ledger: planningLedger,
       capture,
       table,
-      now,
       project: projectPolicy,
     };
     const mcpActions = planMcp(planInput);
@@ -1410,100 +999,43 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
       );
     }
     actions = groupKeyActions(actions);
-    if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
-      actions = actions.map((action) => ({
-        ...action,
-        projectManifest: {
-          manifest: manifestLoad.manifest as ProjectManifest,
-          projectRoot: config.project as string,
-        },
-      }));
-    }
     if (projectPolicy) actions = preflightProjectActions(actions, projectPolicy);
 
     if (dryRun) {
       const preview = buildReport(scope, reconcile(actions, toEntry));
-      if (ledger.lastRun) preview.lastRun = ledger.lastRun;
+      if (previousLastRun) preview.lastRun = previousLastRun;
       return preview;
     }
 
-    const entries = reconcile(actions, (action) => executeAction(action, ledger, !config.project));
+    const entries = reconcile(actions, executeAction);
 
-    // Every real global run stamps the last-run fact; `status` (dry) reports
-    // it. A project run's proof is its manifest: the machine ledger — entries
-    // and last-run fact alike — is global-only and stays untouched.
-    const previousLastRun = ledger.lastRun;
+    // Every real global run stamps the last-run fact and `status` (dry)
+    // reports it: the one thing a run leaves behind that the next one does not
+    // re-derive. A project run writes nothing to the machine's state dir.
     if (!config.project) {
       const counts = new Map<string, number>();
       for (const entry of entries) {
         counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
       }
-      ledger.lastRun = {
-        at: planInput.now,
-        summary:
-          [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(', ') ||
-          'nothing to do',
-      };
-
       try {
-        saveLedger(config.homes.stateHome, ledger);
+        saveLastRun(config.homes.stateHome, {
+          at: new Date().toISOString(),
+          summary:
+            [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(', ') ||
+            'nothing to do',
+        });
       } catch (error) {
-        // Files changed but the proof did not persist: that is a failure of
-        // this run, reported as such — identity adoption re-proves ownership
-        // on the next run.
+        // The marker is a convenience, not proof of anything: every slice
+        // re-derives next run whether or not this landed. Say so and move on.
         const message = error instanceof Error ? error.message : String(error);
         entries.push({
           app: null,
           type: null,
           id: null,
-          path: ledgerPath(config.homes.stateHome),
+          path: lastRunPath(config.homes.stateHome),
           outcome: 'failed',
           detail: 'write-error',
-          reason: `ownership ledger could not be saved (${message})`,
-        });
-      }
-    }
-
-    if (
-      config.project &&
-      projectMode === 'managed' &&
-      manifestLoad?.manifest &&
-      manifestBefore !== null
-    ) {
-      if (manifestLoad.needsSave || JSON.stringify(manifestLoad.manifest) !== manifestBefore) {
-        try {
-          saveProjectManifest(manifestLoad.path, manifestLoad.manifest);
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          entries.push({
-            app: 'project',
-            type: null,
-            id: null,
-            path: manifestLoad.path,
-            outcome: 'failed',
-            detail: 'write-error',
-            reason: `project manifest could not be saved (${message}); project targets were written without durable peer proof, and the next successful sync re-records ownership`,
-          });
-        }
-      }
-    }
-    if (
-      projectMode === 'exclusive' &&
-      manifestLoad?.existed &&
-      !entries.some((entry) => FAILING_OUTCOMES.has(entry.outcome))
-    ) {
-      try {
-        fs.rmSync(manifestLoad.path);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        entries.push({
-          app: 'project',
-          type: null,
-          id: null,
-          path: manifestLoad.path,
-          outcome: 'failed',
-          detail: 'write-error',
-          reason: `stale project manifest could not be retired (${message})`,
+          reason: `last-run marker could not be saved (${message})`,
         });
       }
     }
@@ -1538,74 +1070,17 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     projectMode === 'none'
       ? projectTable.map((row) => ({ id: row.id, detectDir: row.detectDir }))
       : projectTable;
-  const ledger = loadLedger(config.homes.stateHome);
-  const manifestLoad =
-    config.project && projectMode !== 'none'
-      ? (() => {
-          uniqueProjectManifestPaths(config.homes.asbHome, [config.project as string]);
-          return loadProjectManifest(config.homes.asbHome, config.project as string);
-        })()
-      : null;
-  if (manifestLoad?.collision) {
-    throw new ConfigError(manifestLoad.error ?? 'project manifest slug collision');
-  }
-  if (manifestLoad?.corrupt || (manifestLoad && manifestLoad.manifest === null)) {
-    throw new ConfigError(
-      `project manifest is corrupt (${manifestLoad.error ?? 'unrecognized shape'})`
-    );
-  }
-  let planningLedger = planningLedgerForScope(ledger, config, globalTable);
-  if (config.project && projectMode === 'managed' && manifestLoad?.manifest) {
-    planningLedger = {
-      ...planningLedger,
-      entries: [
-        ...planningLedger.entries,
-        ...projectManifestProofs(manifestLoad.manifest, config.project),
-      ],
-    };
-  }
   const catalog = readSourceCatalog(config);
   const inventory = scanLibrary({ env, plugins: catalog.plugins });
   const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
-  const capture = captureFor(
-    resolved,
-    planningLedger,
-    table,
-    inventory,
-    false,
-    manifestLoad?.manifest
-  );
-  const now = new Date().toISOString();
-  if (projectMode === 'managed' && manifestLoad?.manifest) {
-    for (const proof of planningLedger.entries) {
-      if (proof.type !== 'skills' || proof.shape !== 'own-dir') continue;
-      const files = capture.bundles[proof.path]?.files;
-      if (files) proof.files = files.map((file) => file.rel);
-    }
-    planningLedger = {
-      ...planningLedger,
-      entries: [
-        ...planningLedger.entries,
-        ...projectMcpPeerLedgerEntries(
-          resolved,
-          inventory,
-          capture,
-          table,
-          manifestLoad.manifest,
-          now
-        ),
-      ],
-    };
-  }
+  const capture = captureFor(resolved, table, inventory);
   const nativeState = captureNative(resolved, catalog, globalTable, env, capture.installed, true);
 
   const planInput = {
     config: resolved,
     inventory,
-    ledger: planningLedger,
     capture,
     table,
-    now,
     project: projectPolicy,
   };
   const wantedTypes = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
@@ -1733,10 +1208,32 @@ export async function runAddSource(location: string, opts: AddSourceOptions = {}
   ]);
 }
 
+/** One row per id this command disabled: a config edit is never silent. */
+function retiredEntries(
+  retired: readonly { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[],
+  namespace: string
+): ReportEntry[] {
+  return retired.map((row) => ({
+    app: null,
+    type: row.type,
+    id: row.id,
+    path: null,
+    outcome: 'removed' as const,
+    detail: 'retired',
+    reason: `disabled in [${row.type}] because source "${namespace}" provided it`,
+  }));
+}
+
 /**
  * Retire a source: its managed content, its declaration, its derived caches,
  * and every enabled entry it put there. The retired ids are reported one per
  * row — a config edit the user did not type is never silent.
+ *
+ * A distributed slice proves it is asb's by matching what the library renders,
+ * so the order is load-bearing: this source's entries leave the selection
+ * first, a full distribution takes their targets out while the source can
+ * still be rendered, and only then does the content itself go. Removing the
+ * content first would leave every file it distributed behind, unprovable.
  */
 export async function runRemoveSource(namespace: string, opts: SyncOptions = {}): Promise<Report> {
   const env = opts.env ?? process.env;
@@ -1755,12 +1252,75 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
   );
 
   // Retirement compares canonical ids, so it needs the same expansion the
-  // selection was written against.
-  const { retired } = removeSource(withPluginExpansion(config, expansion), namespace, {
+  // selection was written against. Every channel goes at once: a component
+  // still selected through the plugin list or a per-app override would
+  // survive the sweep below and outlive the library entry that proves it.
+  const retired = retireSourceSelection(
+    withPluginExpansion(config, expansion),
+    namespace,
     componentIds,
     pluginIds,
+    env
+  );
+  // Unfiltered on purpose: a `--source`, `--app`, or `--type` narrowing meant
+  // for the report would otherwise leave part of what this source distributed
+  // behind, and nothing could prove it later.
+  const swept = await runSync({
+    profile: opts.profile,
+    project: opts.project,
+    noUpdate: true,
     env,
   });
+
+  // A slice this source distributed that the sweep could not take is the one
+  // state the source has to outlive: while it is still declared the library
+  // can render that slice, so fixing the cause and re-running finishes the
+  // job. `missing` and a hand-edited copy are not that state — neither
+  // resolves on a later run, and holding the source hostage to them would
+  // pin it in the config forever.
+  const distributed = new Set(componentIds);
+  // A rules host, a hooks config, an MCP host: these fail as a whole and name
+  // no component, so what attributes them is the type they cover.
+  const distributedTypes = new Set(
+    pluginIds.flatMap((id) => Object.keys(expansion.byPlugin[id] ?? {}))
+  );
+  const stranded = swept.entries.filter((entry) => {
+    const mine =
+      entry.id !== null
+        ? distributed.has(entry.id)
+        : entry.type !== null && distributedTypes.has(entry.type);
+    if (!mine) return false;
+    if (entry.outcome === 'failed' || entry.outcome === 'blocked' || entry.outcome === 'conflict') {
+      return true;
+    }
+    // A deletion the file system refused is the retryable shape of
+    // `left-behind`: the bytes are still the ones the library renders, so
+    // the next run takes them once the cause is fixed.
+    return entry.outcome === 'left-behind' && entry.detail === 'remove-failed';
+  });
+  if (stranded.length > 0) {
+    return buildReport(scope, [
+      {
+        app: null,
+        type: null,
+        id: namespace,
+        path: source?.path ?? null,
+        outcome: 'blocked',
+        reason: `kept: ${stranded.length} slice(s) it distributed could not be taken, and removing it now would leave them with nothing able to prove them; resolve the rows below and re-run asb remove ${namespace}`,
+      },
+      ...retiredEntries(retired, namespace),
+      ...swept.entries,
+    ]);
+  }
+
+  const remaining = loadConfig({ profile: opts.profile, env });
+  retired.push(
+    ...removeSource(withPluginExpansion(remaining, expansion), namespace, {
+      componentIds,
+      pluginIds,
+      env,
+    }).retired
+  );
 
   const entries: ReportEntry[] = [
     {
@@ -1769,21 +1329,11 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
       id: namespace,
       path: source?.path ?? null,
       outcome: 'removed',
-      reason: 'source removed; run asb sync to retire what it distributed',
+      reason: 'source removed with everything it distributed',
     },
+    ...retiredEntries(retired, namespace),
   ];
-  for (const row of retired) {
-    entries.push({
-      app: null,
-      type: row.type,
-      id: row.id,
-      path: null,
-      outcome: 'removed',
-      detail: 'retired',
-      reason: `disabled in [${row.type}] because source "${namespace}" provided it`,
-    });
-  }
-  return buildReport(scope, entries);
+  return buildReport(scope, [...entries, ...swept.entries]);
 }
 
 export async function runImport(
@@ -1999,7 +1549,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   registerScopeFlags(
     program
       .command('explain')
-      .description('one target: owner, recorded and current hashes, desired content')
+      .description('one target: owner, current and desired hashes, desired content')
       .argument('<target>', 'component id, app id, or target path')
   ).action((target: string, _args: unknown, cmd: Command) => {
     parsed = { command: 'explain', target, options: scopeOptions(cmd) };
@@ -2477,6 +2027,10 @@ export async function main(argv: readonly string[]): Promise<number> {
 
     if (invocation.command === 'explain') {
       const slices = await runExplain(invocation.target, invocation.options);
+      // `explain` answers a question about one target, so it reports on the
+      // wider set: a slice asb declined to touch is a run working as intended
+      // but an answer of "not resolved", and a script asking about it wants
+      // to hear so.
       const exitCode =
         slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome)) ? 0 : 1;
       process.stdout.write(

@@ -862,7 +862,7 @@ export function removeSource(
   }
   finishRemoveSource(config.homes, namespace, cacheOwnerPath);
   return {
-    retired: retireSelection(
+    retired: retireSourceSelection(
       config,
       namespace,
       opts.componentIds ?? [],
@@ -873,13 +873,14 @@ export function removeSource(
 }
 
 /**
- * Splice this source's ids out of every enabled list that carries them. A
- * dangling id is not fatal in 0.5 — it reports as `missing` — but leaving one
- * behind means the next `add` of an unrelated source silently re-enables it.
+ * Splice this source's ids out of every enabled list that carries them: the
+ * global lists, the plugin list, and the per-app overrides. Between them
+ * those are every channel `effectiveSelection` reads, which is what makes
+ * this the step that has to come before the source stops being renderable.
  * The comparison runs on canonical ids while the edit names the spelling the
  * user wrote, so an entry enabled through a bare alias retires too.
  */
-function retireSelection(
+export function retireSourceSelection(
   config: ResolvedConfig,
   namespace: string,
   componentIds: readonly string[],
@@ -918,9 +919,31 @@ function retireSelection(
     if (Array.isArray(override) || typeof override !== 'object' || override === null) continue;
     const native = (override as { native_plugins?: { enabled?: string[] } }).native_plugins;
     const hits = (native?.enabled ?? []).filter(pluginMatch);
-    if (hits.length === 0) continue;
-    editSelection({ type: 'native_plugins', app, disable: hits, env });
-    for (const id of hits) retired.push({ type: 'native_plugins', id });
+    if (hits.length > 0) {
+      editSelection({ type: 'native_plugins', app, disable: hits, env });
+      for (const id of hits) retired.push({ type: 'native_plugins', id });
+    }
+    // The per-app plugin cell feeds the same expansion the global list does,
+    // so a plugin enabled only here still expands to components.
+    const perApp = (override as { plugins?: { enabled?: string[]; add?: string[] } }).plugins;
+    const perAppPlugins = [...(perApp?.enabled ?? []), ...(perApp?.add ?? [])].filter(pluginMatch);
+    if (perAppPlugins.length > 0) {
+      editSelection({ type: 'plugins', app, disable: perAppPlugins, env });
+      for (const id of perAppPlugins) retired.push({ type: 'plugins', id });
+    }
+    // A per-app override selects for that app alone, in any of its three
+    // spellings, and an id left in one of them is still distributed.
+    for (const type of SELECTION_TYPES) {
+      const cell = (override as Record<string, { enabled?: string[]; add?: string[] }>)[type];
+      if (!cell || typeof cell !== 'object') continue;
+      const componentHits = [...(cell.enabled ?? []), ...(cell.add ?? [])].filter(
+        (ref) =>
+          wantedComponents.has(expansion?.componentAliases[ref] ?? ref) || spelledComponent(ref)
+      );
+      if (componentHits.length === 0) continue;
+      editSelection({ type, app, disable: componentHits, env });
+      for (const id of componentHits) retired.push({ type, id });
+    }
   }
 
   return retired;
