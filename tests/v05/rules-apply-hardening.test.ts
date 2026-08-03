@@ -102,7 +102,7 @@ test('an escaping parent chain blocks identically in dry-run and real run', asyn
   });
 });
 
-test('a symlinked target file writes through the link and removal unlinks only the link', async () => {
+test('a symlinked target writes through the link and keeps it on removal', async () => {
   await withScratchHomes(async (homes) => {
     seedRule(homes, 'base.md', 'Always be kind.\n');
     writeUserConfig(homes, CODEX_CONFIG);
@@ -113,29 +113,25 @@ test('a symlinked target file writes through the link and removal unlinks only t
     const target = ruleFilePath(homes, 'codex');
     fs.symlinkSync(backing, target);
 
-    // First contact adopts the occupied file by convention without writing;
-    // the update lands on the next sync and flips the entry to written.
-    const adoption = await runSync();
-    assert.equal(adoption.exitCode, 0);
-    assert.equal(
-      fs.readFileSync(backing, 'utf-8'),
-      'old hand-managed content\n',
-      'adoption writes nothing'
-    );
-
     const report = await runSync();
     assert.equal(report.exitCode, 0);
-    const rendered = renderedRules('codex', 'Always be kind.\n');
-    assert.equal(fs.readFileSync(backing, 'utf-8'), rendered, 'written through the link');
+    assert.equal(
+      fs.readFileSync(backing, 'utf-8'),
+      `${renderedRules('codex', 'Always be kind.\n')}\nold hand-managed content\n`,
+      'written through the link, above the bytes already there'
+    );
     assert.ok(fs.lstatSync(target).isSymbolicLink(), 'target is still the user link');
 
     writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = []\n');
     const removal = await runSync();
     assert.equal(removal.exitCode, 0);
     assert.equal(removal.summary.removed, 1);
-    assert.ok(!fs.existsSync(target) && !fs.lstatSync(backing).isSymbolicLink());
-    assert.equal(fs.readFileSync(backing, 'utf-8'), rendered, 'the backing file is never deleted');
-    assert.throws(() => fs.lstatSync(target), 'the link itself is gone');
+    assert.equal(
+      fs.readFileSync(backing, 'utf-8'),
+      'old hand-managed content\n',
+      'the region goes, the hand-managed bytes stay'
+    );
+    assert.ok(fs.lstatSync(target).isSymbolicLink(), 'the user link is never unlinked');
   });
 });
 

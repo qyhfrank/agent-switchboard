@@ -213,9 +213,14 @@ export function mdcWrap(body: string): string {
   return lines.join('\n');
 }
 
+/** The marked region a shared host carries around the composed body. */
+export function rulesRegion(composed: string): string {
+  return `<!-- rules:start -->\n${composed.trimEnd()}\n<!-- rules:end -->\n`;
+}
+
 /** Expected on-disk bytes for an app's rules target given the composed body. */
 export function renderedRules(app: RuleAppId, composed: string): string {
-  return FRONTMATTER_APPS.has(app) ? mdcWrap(composed) : composed;
+  return FRONTMATTER_APPS.has(app) ? mdcWrap(composed) : rulesRegion(composed);
 }
 
 export function writeUserConfig(homes: ScratchHomes, toml: string): void {

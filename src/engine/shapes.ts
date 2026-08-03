@@ -91,6 +91,30 @@ export function composeRules(
   return { content, hash: hashContent(content), sections };
 }
 
+/**
+ * Whether `content` is a composition of the given rule blocks and nothing
+ * else. A version that wrote the whole host file left no marker to find, so
+ * this is how such a file is still recognized as a render rather than as
+ * something the user wrote: it reassembles from library blocks, joined the
+ * way `composeRules` joins them.
+ */
+export function composedFromRuleBlocks(content: string, blocks: readonly string[]): boolean {
+  if (content.length === 0 || blocks.length === 0) return false;
+  let position = 0;
+  while (position < content.length) {
+    let matched = 0;
+    for (const block of blocks) {
+      if (block.length > matched && content.startsWith(block, position)) matched = block.length;
+    }
+    if (matched === 0) return false;
+    position += matched;
+    if (position === content.length) return true;
+    if (content[position] !== '\n') return false;
+    position += 1;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Region shape (markdown hosts; delimiters double as on-disk ownership proof)
 // ---------------------------------------------------------------------------
@@ -107,6 +131,15 @@ const LEGACY_REGION_START = '<!-- asb:rules:start -->';
 const LEGACY_REGION_END = '<!-- asb:rules:end -->';
 
 export type RegionPlacement = 'prepend' | 'append';
+
+/**
+ * The name an earlier version gave a dedicated rules file at this same path.
+ * Sweeping it is what carries a machine across the rename; it goes once no
+ * supported upgrade path still starts from a file carrying the old prefix.
+ */
+export function legacyDedicatedRulesPath(targetPath: string): string {
+  return path.join(path.dirname(targetPath), `asb-${path.basename(targetPath)}`);
+}
 
 function markerOffsets(content: string, marker: string): number[] {
   const offsets: number[] = [];

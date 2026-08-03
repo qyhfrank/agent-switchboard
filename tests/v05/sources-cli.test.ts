@@ -10,6 +10,7 @@ import {
   commitAndPush,
   createGitFixture,
   installApps,
+  renderedRules,
   ruleFilePath,
   type ScratchHomes,
   seedRule,
@@ -183,7 +184,10 @@ test('an enabled plugin whose source is not there is reported with the path asb 
     // One warning, and the rest of the run still happens.
     const report = await runSync();
     assert.ok(report.entries.some((entry) => entry.outcome === 'missing'));
-    assert.equal(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), 'Be kind.\n');
+    assert.equal(
+      fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'),
+      renderedRules('claude-code', 'Be kind.\n')
+    );
   });
 });
 
@@ -332,7 +336,10 @@ test('an external entry asb cannot fetch stays visible instead of silent', async
     assert.equal(row.outcome, 'missing');
     // A content failure inside a ready source is contained: siblings still land.
     assert.equal(report.exitCode, 1);
-    assert.equal(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), 'Be kind.\n');
+    assert.equal(
+      fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'),
+      renderedRules('claude-code', 'Be kind.\n')
+    );
   });
 });
 
@@ -395,7 +402,10 @@ test('an unreadable manifest inside a ready source stays a contained row', async
 
     assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
     assert.ok(report.entries.some((entry) => entry.detail === 'source-error'));
-    assert.equal(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), 'Be kind.\n');
+    assert.equal(
+      fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'),
+      renderedRules('claude-code', 'Be kind.\n')
+    );
   });
 });
 

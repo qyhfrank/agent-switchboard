@@ -94,6 +94,7 @@ import {
   applyBundleFiles,
   bundleFingerprint,
   hashContent,
+  legacyDedicatedRulesPath,
   listTargetFiles,
   parseStructured,
   removeBundleSlice,
@@ -293,17 +294,9 @@ function captureFor(
     const targetPath = row.rules.path(config.homes);
     capture.rulePaths[appId] = targetPath;
     captureFile(row.rules.root(config.homes, targetPath), targetPath);
-    for (const stale of ledger.entries) {
-      if (
-        stale.app !== appId ||
-        stale.type !== 'rules' ||
-        stale.id !== null ||
-        stale.path === targetPath ||
-        capture.targets[stale.path]
-      ) {
-        continue;
-      }
-      captureFile(row.rules.root(config.homes, stale.path), stale.path);
+    if (row.rules.dedicated) {
+      const legacy = legacyDedicatedRulesPath(targetPath);
+      captureFile(row.rules.root(config.homes, legacy), legacy);
     }
   }
 

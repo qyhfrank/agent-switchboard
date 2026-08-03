@@ -33,7 +33,6 @@ test('explain by component id joins every slice with owner, hashes, and desired 
     for (const slice of slices) {
       assert.equal(slice.outcome, 'unchanged');
       assert.equal(slice.provenance, 'written');
-      assert.equal(slice.recordedHash, slice.desiredHash);
       assert.equal(slice.currentHash, slice.desiredHash);
       assert.equal(slice.desired, fs.readFileSync(slice.path as string, 'utf-8'));
       assert.deepEqual(slice.components, [
