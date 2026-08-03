@@ -6,7 +6,7 @@ import { appRows, projectAppRows } from '../../src/engine/apps.js';
 import { runExplain, runSync } from '../../src/engine/cli.js';
 import { effectiveSelection, loadConfig } from '../../src/engine/config.js';
 import { loadProjectManifest, peerStatePath, projectManifestPath } from '../../src/engine/peer.js';
-import { projectRegion } from '../../src/engine/shapes.js';
+import { mergeProjectRegion, projectRegion } from '../../src/engine/shapes.js';
 import {
   installApps,
   seedRule,
@@ -233,6 +233,40 @@ test('malformed shared AGENTS markers fail closed without repair guessing', asyn
     assert.equal(fs.readFileSync(agents, 'utf-8'), broken);
     assert.match(report.entries.find((entry) => entry.path === agents)?.reason ?? '', /duplicate/i);
   });
+});
+
+test('deselecting the project rules region preserves every byte outside it', () => {
+  const existing = [
+    '# My instructions',
+    '',
+    '<!-- rules:start -->',
+    'Managed rules, then a line I added by hand.',
+    '<!-- rules:end -->',
+    '',
+    'A trailing note of mine.',
+    '',
+  ].join('\n');
+
+  const result = mergeProjectRegion(existing, '');
+
+  assert.ok(!result.includes('rules:start'));
+  assert.ok(!result.includes('Managed rules'));
+  assert.ok(!result.includes('a line I added by hand'));
+  assert.ok(result.includes('# My instructions'));
+  assert.ok(result.includes('A trailing note of mine.'));
+});
+
+test('a region an earlier version wrapped is rewritten in place, not duplicated', () => {
+  const existing =
+    'Mine above\n<!-- asb:rules:start -->\nold\n<!-- asb:rules:end -->\nMine below\n';
+  const result = mergeProjectRegion(existing, 'new');
+
+  assert.equal(result.match(/<!-- rules:start -->/g)?.length, 1);
+  assert.ok(!result.includes('asb:rules'));
+  assert.ok(!result.includes('old'));
+  assert.ok(result.includes('new'));
+  assert.ok(result.includes('Mine above'));
+  assert.ok(result.includes('Mine below'));
 });
 
 test('project marker parser accepts one pair in either spelling and rejects partial or reordered pairs', () => {

@@ -106,72 +106,7 @@ const REGION_END = '<!-- rules:end -->';
 const LEGACY_REGION_START = '<!-- asb:rules:start -->';
 const LEGACY_REGION_END = '<!-- asb:rules:end -->';
 
-/** Bounds of the marker pair in either spelling, or null when the host has none. */
-function regionBounds(content: string): { start: number; end: number } | null {
-  const pairs = [
-    [REGION_START, REGION_END],
-    [LEGACY_REGION_START, LEGACY_REGION_END],
-  ] as const;
-  for (const [open, close] of pairs) {
-    const startIdx = content.indexOf(open);
-    const endIdx = content.indexOf(close);
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      return { start: startIdx, end: endIdx + close.length };
-    }
-  }
-  return null;
-}
-
 export type RegionPlacement = 'prepend' | 'append';
-
-/**
- * Merge managed content into a shared host, preserving everything outside the
- * markers. Existing marker pair → replace between them; no markers → insert
- * per placement; empty content → remove the block entirely.
- */
-export function mergeRegion(
-  existing: string,
-  content: string,
-  placement: RegionPlacement = 'prepend'
-): string {
-  const bounds = regionBounds(existing);
-
-  if (content.length === 0) {
-    return bounds === null ? existing : removeRegion(existing);
-  }
-
-  const block = `${REGION_START}\n${content.trimEnd()}\n${REGION_END}`;
-
-  if (bounds !== null) {
-    return `${existing.slice(0, bounds.start)}${block}${existing.slice(bounds.end)}`;
-  }
-
-  const trimmed = existing.trimEnd();
-  if (trimmed.length === 0) return `${block}\n`;
-  if (placement === 'prepend') return `${block}\n\n${trimmed}\n`;
-  return `${trimmed}\n\n${block}\n`;
-}
-
-/** Remove the managed block and its markers, preserving the rest. */
-export function removeRegion(content: string): string {
-  const bounds = regionBounds(content);
-  if (bounds === null) return content;
-
-  const kept = content.slice(0, bounds.start) + content.slice(bounds.end);
-  const result = kept.replace(/\n{3,}/g, '\n\n').trim();
-  return result.length > 0 ? `${result}\n` : '';
-}
-
-/** The managed slice of a host, or null when no marker pair exists. */
-export function extractRegion(content: string): string | null {
-  const bounds = regionBounds(content);
-  return bounds === null ? null : content.slice(bounds.start, bounds.end);
-}
-
-/** True when the host has asb's own region markers (ownership proof 2). */
-export function hasRegionMarkers(content: string): boolean {
-  return extractRegion(content) !== null;
-}
 
 function markerOffsets(content: string, marker: string): number[] {
   const offsets: number[] = [];
@@ -237,15 +172,6 @@ export function mergeProjectRegion(
   const trimmed = existing.trimEnd();
   if (trimmed.length === 0) return `${block}\n`;
   return placement === 'prepend' ? `${block}\n\n${trimmed}\n` : `${trimmed}\n\n${block}\n`;
-}
-
-/**
- * A dedicated asb file (asb-rules prefix) is safe for full replace; a shared
- * file needs region merge in managed contexts.
- */
-export function isDedicatedFile(filePath: string): boolean {
-  const basename = path.basename(filePath).split('\\').pop() ?? '';
-  return basename.startsWith('asb-rules');
 }
 
 // ---------------------------------------------------------------------------
