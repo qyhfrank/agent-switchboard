@@ -141,7 +141,7 @@ export interface Action {
   type: string | null;
   id: string | null;
   path: string | null;
-  op: 'write' | 'remove' | 'adopt' | 'none';
+  op: 'write' | 'remove' | 'none';
   outcome: Outcome;
   detail?: string;
   reason?: string;
@@ -1688,7 +1688,7 @@ export function planLegacyOpencode(input: PlanInput): Action[] {
           outcome: 'left-behind',
           detail: 'unproven',
           reason:
-            'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
+            'filename matches a library component but the file is not what the library renders; delete it yourself or enable it to have it written',
         });
       };
       if (entry.bundle) {
@@ -2772,7 +2772,7 @@ export function planMcp(input: PlanInput): Action[] {
           type: 'mcp',
           id: slice.id,
           path: captured.path,
-          op: slice.outcome === 'adopted' ? 'adopt' : 'none',
+          op: 'none',
           outcome: slice.outcome,
         };
         if (slice.detail !== undefined) action.detail = slice.detail;
@@ -2836,7 +2836,7 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
       action.app === 'codex' &&
       action.type === 'mcp' &&
       ((action.op === 'write' && action.reason?.includes('wrote ') === true) ||
-        (action.id !== null && (action.outcome === 'unchanged' || action.outcome === 'adopted')))
+        (action.id !== null && action.outcome === 'unchanged'))
   );
   if (!planned) return [];
 

@@ -2,8 +2,8 @@
 
 Agent Switchboard (ASB) keeps one library of rules, commands, agents, skills,
 hooks, MCP servers, and plugins synchronized across supported coding agents.
-The 0.5 engine plans from a captured filesystem state, applies only recognized
-ownership, and reports the same outcome vocabulary in text and JSON.
+The 0.5 engine plans from a captured filesystem state, writes only what it can
+prove is its own, and reports the same outcome vocabulary in text and JSON.
 
 ## Requirements
 
@@ -122,7 +122,7 @@ Configuration is strict after the supported 0.4 compatibility spellings are
 migrated in memory. Unknown keys, invalid target shapes, and type errors fail
 before planning. Supported compatibility inputs include `active`, the former
 agents/subagents split, legacy plugin forms, and `[extensions]` parser
-tolerance during the shared-library peer window.
+tolerance.
 
 ## Supported applications
 
@@ -154,7 +154,7 @@ root_key = "mcpServers"
 Executable `.mjs` and `.js` target extensions are not loaded by 0.5. When
 files remain directly under `ASB_HOME/extensions`, every reconciliation emits
 one non-failing warning pointing to `[targets.<id>]`. ASB leaves those files
-unchanged because a 0.4 peer may still use the shared library.
+alone: they are yours to delete once the `[targets.<id>]` tables replace them.
 
 ## Sources and plugins
 
@@ -169,9 +169,39 @@ External marketplace entries are materialized only when selected content needs
 them. The predecessor marketplace cache is read only to retire entries whose
 identity is verified; 0.5 never writes that cache.
 
-`asb remove <source>` removes the source declaration and retires the
-plugin-expanded enabled ids that came from it. Local content is preserved
-unless ASB has source ownership proof for the managed checkout.
+`asb remove <source>` retires the plugin-expanded enabled ids that came from
+the source, takes the slices they distributed, and only then drops the
+declaration and any managed checkout. The order is load-bearing: a component
+the library can no longer render proves nothing, so removing the content first
+would leave every file it distributed behind. A local directory you pointed at
+is never deleted.
+
+## Ownership
+
+A slice is ASB's when it holds what the library renders for it. That
+comparison is made fresh on every run and nothing is written down, so there is
+no ownership record to lose, migrate, or disagree with a second machine about.
+
+Four shapes carry the comparison. A dedicated file compares by its bytes; a
+distributed bundle by its file set, contents, and executable bits; a key
+inside a structured host by the serialized value at that key, never by the
+key's name; and a region between ASB's delimiters inside a file it shares is
+proven by the delimiters themselves, so bytes outside them survive every sync.
+
+Deselecting a component removes its slice while that slice still holds the
+render. One that says something else is a target ASB cannot attribute: under
+your home directory it is swept as a stale copy of something ASB distributed
+under a name it owns, and inside a repository it is preserved and named,
+because the repository is shared.
+
+`asb explain <target>` names what proves a slice right now: `identity` for a
+target holding the render, `marker` for a delimited region, `managed-path` for
+a command running a distributed file, `native-manager` for work an
+application's own plugin manager owns, and `unproven` when nothing does.
+
+The state directory (`XDG_STATE_HOME/asb`, else `~/.local/state/asb`) holds
+`run.lock` while a run is in flight and `last-run.json` afterwards. Neither
+decides what ASB owns.
 
 ## MCP ownership
 
@@ -179,10 +209,11 @@ MCP definitions live in `ASB_HOME/mcp.json` under `mcpServers`. ASB masks
 credential values in `explain` and report output while preserving environment
 variable names.
 
-ASB does not create empty MCP host files. An existing empty container is not
-ownership evidence. For an owned server, 0.5 replaces the managed value as a
-whole. If its recorded bytes drift, the write conflicts instead of merging
-unknown foreign subkeys into the managed value.
+A server is ASB's while the value at its key equals the render, so a
+hand-written server sharing a library id is never read, written, or removed.
+ASB does not create empty MCP host files, and an existing empty container is
+evidence of nothing. An owned value is replaced whole rather than merged, so a
+drifted one conflicts instead of absorbing unknown foreign subkeys.
 
 Writers preserve unrelated bytes in shared JSON, JSONC, YAML, and TOML hosts.
 They cannot restore comments or formatting already removed by an earlier
@@ -201,23 +232,30 @@ collision = "warn-skip"
 ```
 
 Project modes are `managed`, `exclusive`, and `none`. Managed mode preserves
-foreign content and records project ownership in a peer manifest. Its
-collision policies are `warn-skip`, `error`, and `takeover`. A corrupt or
-ambiguous manifest fails closed before project writes.
+foreign content; its collision policies are `warn-skip`, `error`, and
+`takeover`. A project run writes nothing outside the repository, and proves
+what it owns against the same library render a global run compares to.
+
+Because a repository is shared, a target ASB cannot attribute is preserved and
+named rather than swept. The rules region inside `AGENTS.md` is delimited, and
+those delimiters are its proof, so it is rewritten and removed like any other
+marked region while bytes outside it are left alone.
 
 Codex project trust is add-only. ASB preserves an existing trusted value,
 refuses untrusted or malformed values, and provides no trust-removal path.
 
-## Hooks and shared peers
+## Hooks
 
-Hook ownership is identified by peer state and predecessor-compatible markers,
-managed paths, known ids, and read-only legacy evidence. Recognized bundle
-groups survive shared-home machine alternation without duplication.
+A hook group in an application's configuration is ASB's when its command runs
+a file ASB distributed, or when it equals a group the library renders. A group
+ASB cannot attribute keeps its content and its place: Codex records trust
+against a group's array index, so a group that did not change is rewritten
+where it already sits instead of being moved behind whatever else is there.
 
-After total hook state loss, managed bundle paths can re-establish identity.
-A single-file definition hook cannot be claimed from byte equality alone, so
-an indistinguishable hand-written group remains user-owned and a definition
-may be appended again. This is the accepted 0.4 compatibility ceiling.
+A definition hook owns no directory, so a hand-written group byte-identical to
+its render is taken as ASB's rather than duplicated beside itself. A group a
+predecessor wrote whose command names no distributed file is reported once and
+left for you to remove.
 
 ## Development
 
