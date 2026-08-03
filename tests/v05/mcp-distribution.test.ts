@@ -419,8 +419,8 @@ test('a server secret never reaches a report line, on any path through the run',
       foreign: { command: 'npx', env: { TOKEN: secret } },
     });
     enableAll(homes, ['owned', 'foreign'], ['cursor', 'codex', 'gemini']);
-    // A key asb never wrote, holding a different secret: the blocked reason
-    // has to describe the collision without quoting either side.
+    // A key holding a different secret under a name the library also uses: the
+    // write that replaces it may not quote either side.
     fs.mkdirSync(path.dirname(mcpHostPath(homes, 'cursor')), { recursive: true });
     fs.writeFileSync(
       mcpHostPath(homes, 'cursor'),
@@ -429,24 +429,25 @@ test('a server secret never reaches a report line, on any path through the run',
     );
 
     await runSync({});
-    // Then drift the owned slice so the conflict reason is generated too.
+    // Then customize one server and drop it, so the left-behind reason runs too.
     const gemini = mcpHostPath(homes, 'gemini');
     const root = JSON.parse(fs.readFileSync(gemini, 'utf-8')) as {
       mcpServers: Record<string, Record<string, unknown>>;
     };
     root.mcpServers.owned.env = { TOKEN: 'edited' };
     fs.writeFileSync(gemini, JSON.stringify(root), 'utf-8');
+    enableAll(homes, ['foreign'], ['cursor', 'codex', 'gemini']);
     const report = await runSync({});
 
     const outcomes = new Set(report.entries.map((entry) => entry.outcome));
-    assert.ok(outcomes.has('blocked') && outcomes.has('conflict'), 'both reason paths ran');
+    assert.ok(outcomes.has('written') && outcomes.has('left-behind'), 'both reason paths ran');
     const text = report.entries
       .map((entry) => `${entry.reason ?? ''} ${entry.detail ?? ''} ${entry.id ?? ''}`)
       .join('\n');
     assert.equal(text.includes(secret), false, 'no reason quotes a server env value');
     assert.equal(renderReport(report).includes(secret), false, 'nor does the rendered report');
     // The value still reaches the target it was meant for.
-    assert.deepEqual(readMcpHost(homes, 'codex')?.owned.env, { TOKEN: secret });
+    assert.deepEqual(readMcpHost(homes, 'codex')?.foreign.env, { TOKEN: secret });
   });
 });
 

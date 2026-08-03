@@ -200,7 +200,7 @@ export function renderCodexAgent(component: Component): string | null {
   }
   const instructions = component.content.trim();
   if (instructions) value.developer_instructions = instructions;
-  return `# managed-by: asb\n${tomlStringify(value as Parameters<typeof tomlStringify>[0])}`;
+  return tomlStringify(value as Parameters<typeof tomlStringify>[0]);
 }
 
 export function codexAgentConfigValue(
@@ -208,7 +208,7 @@ export function codexAgentConfigValue(
   filename: string
 ): Record<string, unknown> {
   return {
-    description: component.metadata.description || `ASB-managed agent role: ${component.id}`,
+    description: component.metadata.description || `${component.id} agent role`,
     config_file: `agents/${filename}`,
   };
 }

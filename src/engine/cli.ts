@@ -75,7 +75,6 @@ import {
   planSources,
   planStatusAll,
   preflightProjectActions,
-  projectMcpPeerLedgerEntries,
   STATUS_TYPES,
   type SyncCapture,
 } from './plan.js';
@@ -531,9 +530,12 @@ function captureFor(
   // MCP hosts: the document each app keeps its server map in. The path is
   // resolved here (opencode prefers an existing .jsonc) so the planner reads
   // one settled location rather than probing the disk itself.
+  // A project run also reads the hosts of apps it is not enabled for, so a key
+  // it wrote there before comes out when the app leaves the selection. Only an
+  // existing file is opened, so this costs a stat per app.
   const mcpApps = new Set([
     ...config.apps.enabled,
-    ...Object.values(projectManifest?.sections.mcp ?? {}).map((entry) => entry.targetId),
+    ...(config.project ? table.filter((row) => row.mcp).map((row) => row.id) : []),
   ]);
   for (const appId of mcpApps) {
     const row = table.find((candidate) => candidate.id === appId)?.mcp;
@@ -1256,20 +1258,6 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
         const files = capture.bundles[proof.path]?.files;
         if (files) proof.files = files.map((file) => file.rel);
       }
-      planningLedger = {
-        ...planningLedger,
-        entries: [
-          ...planningLedger.entries,
-          ...projectMcpPeerLedgerEntries(
-            resolved,
-            inventory,
-            capture,
-            table,
-            manifestLoad.manifest,
-            now
-          ),
-        ],
-      };
     }
     const nativeState = captureNative(resolved, catalog, table, env, capture.installed, dryRun);
 
@@ -1576,20 +1564,6 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
       const files = capture.bundles[proof.path]?.files;
       if (files) proof.files = files.map((file) => file.rel);
     }
-    planningLedger = {
-      ...planningLedger,
-      entries: [
-        ...planningLedger.entries,
-        ...projectMcpPeerLedgerEntries(
-          resolved,
-          inventory,
-          capture,
-          table,
-          manifestLoad.manifest,
-          now
-        ),
-      ],
-    };
   }
   const nativeState = captureNative(resolved, catalog, globalTable, env, capture.installed, true);
 

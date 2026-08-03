@@ -100,7 +100,7 @@ test('codex agents require extras.codex and render a managed role plus addressed
   });
   assert.equal(
     renderCodexAgent(role),
-    '# managed-by: asb\nmodel = "gpt-test"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "Review carefully."\n'
+    'model = "gpt-test"\nmodel_reasoning_effort = "high"\ndeveloper_instructions = "Review carefully."\n'
   );
 
   const row = APP_ROWS.find((candidate) => candidate.id === 'codex')?.agents;

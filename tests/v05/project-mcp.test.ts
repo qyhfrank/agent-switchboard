@@ -274,7 +274,7 @@ test('exclusive project MCP removes every server but keeps unrelated host keys',
   });
 });
 
-test('shared Trae MCP retires inactive owner proof and removes the last inactive key', async () => {
+test('a key two Trae apps share outlives the first of them and goes with the last', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
@@ -287,9 +287,13 @@ test('shared Trae MCP retires inactive owner proof and removes the last inactive
 
     writeUserConfig(homes, '[applications]\nenabled = ["trae"]\n');
     const second = await runSync({ project });
-    const afterOne = loadProjectManifest(homes.asbHome, project).manifest;
+    const shared = path.join(project, '.trae', 'mcp.json');
     assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
-    assert.deepEqual(Object.keys(afterOne?.sections.mcp ?? {}), ['alpha::trae']);
+    assert.ok(
+      (JSON.parse(fs.readFileSync(shared, 'utf-8')) as { mcpServers: Record<string, unknown> })
+        .mcpServers.alpha,
+      'trae still wants the key trae-cn shares with it'
+    );
 
     writeUserConfig(homes, '[applications]\nenabled = []\n');
     const third = await runSync({ project });

@@ -260,7 +260,7 @@ test('Codex retains owned activation while a selected role cannot be written', a
   });
 });
 
-test('Codex removes its activation scalar and the empty table on true deselection', async () => {
+test('Codex takes its role keys back on deselection and leaves the feature flag', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seed(
@@ -279,7 +279,10 @@ test('Codex removes its activation scalar and the empty table on true deselectio
     await runSync();
     const content = fs.readFileSync(configPath, 'utf-8');
     assert.match(content, /^# keep$/m);
-    assert.doesNotMatch(content, /\[features\]|multi_agent/);
+    assert.doesNotMatch(content, /\[agents\.reviewer\]/);
+    // `multi_agent = true` is what a Codex user running their own roles writes
+    // too, so there is nothing in it that says asb put it there.
+    assert.match(content, /multi_agent = true/);
   });
 });
 
