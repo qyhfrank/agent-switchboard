@@ -284,11 +284,36 @@ npm run build
 Git or native-manager subprocesses and may be denied by restricted sandboxes;
 the remaining suites do not need subprocess permission.
 
-## Preparing 0.5
+### Releasing
 
-The repository builds a 0.5.0 candidate after the cut-over gates pass. A local
-build, package, changelog entry, or smoke comparison does not publish a release
-and does not create a Git tag. Release operators must separately run the
-project's publish workflow after its audit and user-journey gates succeed.
+Publish patch releases through the Release workflow. Start on a clean `main`
+branch synchronized with `origin`. Bump the package without creating a tag,
+move the `Unreleased` changelog entries under the new version, and commit both:
 
-See `CHANGELOG.md` for the intentional 0.5 migration differences.
+```bash
+npm version patch --no-git-tag-version
+git add package.json CHANGELOG.md
+git commit -m "chore(release): v<version>"
+```
+
+Run the release gates against that exact commit:
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm run build
+pnpm test
+pnpm run smoke:baseline
+```
+
+After the final audit and user-journey checks pass, create and push the tag:
+
+```bash
+git tag -a v<version> -m "chore(release): v<version>"
+git push origin main --follow-tags
+```
+
+Do not run `npm publish` locally. Pushing the tag triggers
+`.github/workflows/publish.yml`. After the workflow publishes, install the
+released version with `npm install -g agent-switchboard@<version>` and verify
+`asb --version`.
