@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import { appRows, projectAppRows } from '../../src/engine/apps.js';
 import { runExplain, runSync } from '../../src/engine/cli.js';
 import { effectiveSelection, loadConfig } from '../../src/engine/config.js';
-import { loadProjectManifest, peerStatePath, projectManifestPath } from '../../src/engine/peer.js';
+import { peerStatePath, projectManifestPath } from '../../src/engine/peer.js';
 import { mergeProjectRegion, projectRegion } from '../../src/engine/shapes.js';
 import {
   installApps,
