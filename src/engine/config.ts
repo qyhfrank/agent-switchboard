@@ -1358,10 +1358,7 @@ function writeConfigFile(filePath: string, content: string, label: string): void
     // new file: no link to follow, default creation mode
   }
   fs.mkdirSync(path.dirname(resolved), { recursive: true });
-  const temp = path.join(
-    path.dirname(resolved),
-    `.${path.basename(resolved)}.asb-tmp-${process.pid}`
-  );
+  const temp = path.join(path.dirname(resolved), `.${path.basename(resolved)}.tmp-${process.pid}`);
   fs.writeFileSync(temp, content, 'utf-8');
   if (mode !== null) fs.chmodSync(temp, mode);
   fs.renameSync(temp, resolved);

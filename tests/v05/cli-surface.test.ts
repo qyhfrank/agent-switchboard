@@ -132,7 +132,7 @@ test('dry-run scope prefixes every action line', () => {
       app: 'cursor',
       type: 'rules',
       id: null,
-      path: '/x/.cursor/rules/asb-rules.mdc',
+      path: '/x/.cursor/rules/rules.mdc',
       outcome: 'written',
       detail: 'created',
     },

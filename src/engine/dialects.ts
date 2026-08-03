@@ -12,7 +12,7 @@ import { tomlKey } from './shapes.js';
 
 /** Frozen 0.4.35 mdc frontmatter wrap used by cursor/trae/trae-cn rules targets. */
 export function wrapMdcFrontmatter(body: string): string {
-  const lines = ['---', 'description: Agent Switchboard Rules', 'alwaysApply: true', '---', ''];
+  const lines = ['---', 'description: Rules', 'alwaysApply: true', '---', ''];
   if (body.length > 0) lines.push(body);
   return lines.join('\n');
 }

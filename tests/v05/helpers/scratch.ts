@@ -198,17 +198,17 @@ export function ruleFilePath(homes: ScratchHomes, app: RuleAppId): string {
     case 'opencode':
       return path.join(opencodeRoot(home), 'AGENTS.md');
     case 'cursor':
-      return path.join(home, '.cursor', 'rules', 'asb-rules.mdc');
+      return path.join(home, '.cursor', 'rules', 'rules.mdc');
     case 'trae':
-      return path.join(home, '.trae', 'user_rules', 'asb-rules.md');
+      return path.join(home, '.trae', 'user_rules', 'rules.md');
     case 'trae-cn':
-      return path.join(home, '.trae-cn', 'user_rules', 'asb-rules.md');
+      return path.join(home, '.trae-cn', 'user_rules', 'rules.md');
   }
 }
 
 /** Frozen mdc frontmatter render used by cursor/trae/trae-cn rules targets. */
 export function mdcWrap(body: string): string {
-  const lines = ['---', 'description: Agent Switchboard Rules', 'alwaysApply: true', '---', ''];
+  const lines = ['---', 'description: Rules', 'alwaysApply: true', '---', ''];
   if (body.length > 0) lines.push(body);
   return lines.join('\n');
 }

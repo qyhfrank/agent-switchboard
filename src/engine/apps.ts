@@ -481,8 +481,8 @@ export const APP_ROWS: readonly AppRow[] = [
     detectDir: (homes) => path.join(homes.agentsHome, '.cursor'),
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
-      path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'asb-rules.mdc'),
-      projectPath: (root) => path.join(root, '.cursor', 'rules', 'asb-rules.mdc'),
+      path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'rules.mdc'),
+      projectPath: (root) => path.join(root, '.cursor', 'rules', 'rules.mdc'),
       render: wrapMdcFrontmatter,
       dedicated: true,
     },
@@ -528,8 +528,8 @@ export const APP_ROWS: readonly AppRow[] = [
     detectDir: (homes) => vendorDataDir(homes.agentsHome, 'Trae'),
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
-      path: (homes) => path.join(homes.agentsHome, '.trae', 'user_rules', 'asb-rules.md'),
-      projectPath: (root) => path.join(root, '.trae', 'rules', 'asb-rules.md'),
+      path: (homes) => path.join(homes.agentsHome, '.trae', 'user_rules', 'rules.md'),
+      projectPath: (root) => path.join(root, '.trae', 'rules', 'rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
     },
@@ -555,8 +555,8 @@ export const APP_ROWS: readonly AppRow[] = [
     detectDir: (homes) => vendorDataDir(homes.agentsHome, 'Trae CN'),
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae-cn'),
-      path: (homes) => path.join(homes.agentsHome, '.trae-cn', 'user_rules', 'asb-rules.md'),
-      projectPath: (root) => path.join(root, '.trae', 'rules', 'asb-rules.md'),
+      path: (homes) => path.join(homes.agentsHome, '.trae-cn', 'user_rules', 'rules.md'),
+      projectPath: (root) => path.join(root, '.trae', 'rules', 'rules.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
     },

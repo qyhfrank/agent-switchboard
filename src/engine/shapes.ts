@@ -1082,7 +1082,7 @@ export function writeFileAtomic(targetPath: string, content: string | Buffer): v
   const mode = existing ? existing.mode & 0o777 : null;
   const temp = path.join(
     directory,
-    `.${path.basename(resolved)}.asb-tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
+    `.${path.basename(resolved)}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`
   );
   try {
     if (typeof content === 'string') {
