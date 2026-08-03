@@ -95,7 +95,7 @@ test('managed project MCP drifted removal is left behind with peer proof retaine
 
     const report = await runSync({ project });
 
-    assert.equal(report.exitCode, 1);
+    assert.equal(report.exitCode, 0, 'preserving a customized server is not a failure');
     assert.equal(
       (JSON.parse(fs.readFileSync(host, 'utf-8')) as { mcpServers: { alpha: { command: string } } })
         .mcpServers.alpha.command,

@@ -1397,59 +1397,6 @@ export function planSkills(input: PlanInput): Action[] {
 
 type EntryType = 'commands' | 'agents';
 
-function removeEntryRecord(
-  app: string,
-  type: EntryType,
-  recorded: LedgerEntry,
-  current: CapturedTarget,
-  root: string,
-  keepProofOnLeftBehind = false
-): Action {
-  const base = { app, type, id: recorded.id, path: recorded.path };
-  const drop: LedgerMutation = { op: 'delete', key: ledgerKey(recorded) };
-  if (!current.exists) {
-    return { ...base, op: 'none', outcome: 'removed', detail: 'already-absent', ledger: drop };
-  }
-  if (current.escapes === true) {
-    return {
-      ...base,
-      op: 'none',
-      outcome: 'blocked',
-      detail: 'path-escape',
-      reason: `parent directory of ${recorded.path} resolves outside the app root; not touching it`,
-    };
-  }
-  if (recorded.provenance === 'convention') {
-    return {
-      ...base,
-      op: 'none',
-      outcome: 'left-behind',
-      detail: 'unproven',
-      reason: 'file was adopted by convention for update only; preserved',
-      ...(keepProofOnLeftBehind ? {} : { ledger: drop }),
-    };
-  }
-  const currentHash = current.content === null ? null : hashContent(current.content);
-  if (currentHash !== recorded.hash) {
-    return {
-      ...base,
-      op: 'none',
-      outcome: 'left-behind',
-      detail: 'modified',
-      reason: `edited since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash?.slice(0, 12) ?? 'unreadable'}); delete it yourself or re-enable it`,
-      ...(keepProofOnLeftBehind ? {} : { ledger: drop }),
-    };
-  }
-  return {
-    ...base,
-    op: 'remove',
-    outcome: 'removed',
-    root,
-    expectedHash: currentHash,
-    ledger: drop,
-  };
-}
-
 interface ConfigCandidate {
   component: Component;
   filename: string;
@@ -1685,7 +1632,7 @@ function planEntryConfig(
 }
 
 function planEntries(input: PlanInput, type: EntryType): Action[] {
-  const { config, inventory, ledger, capture, table, now } = input;
+  const { config, inventory, capture, table, now } = input;
   const actions: Action[] = [];
   const byId = new Map(
     inventory.components
@@ -1744,7 +1691,6 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       }
     }
 
-    const desiredRecords = new Set<string>();
     const configCandidates: ConfigCandidate[] = [];
     let selectedEligible = false;
     for (const id of selected) {
@@ -1784,9 +1730,6 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       }
       selectedEligible = true;
       if (collisions.has(id)) continue;
-      const recordKey = ledgerKey({ app, type, id, path: targetPath });
-      desiredRecords.add(recordKey);
-      const recorded = ledger.entries.find((entry) => ledgerKey(entry) === recordKey) ?? null;
       const current = capture.targets[targetPath] ?? { exists: false, content: null };
       const base = { app, type, id, path: targetPath };
       const desiredHash = hashContent(desired);
@@ -1831,168 +1774,98 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
         actions.push({
           ...base,
           op: 'none',
-          outcome: recorded ? 'conflict' : 'blocked',
-          detail: recorded ? undefined : 'foreign',
+          outcome: 'blocked',
+          detail: 'foreign',
           reason: 'target exists but cannot be read; not touching it',
         });
         protectedIds.add(id);
         continue;
+      } else if (current.content === desired) {
+        roleReady = true;
+        actions.push({ ...base, op: 'none', outcome: 'unchanged' });
+      } else if (input.project && input.project.collision !== 'takeover') {
+        // A project tree is shared with the repository, so an occupied target
+        // that is not the render stays the repository's until takeover.
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'foreign',
+          reason: 'project target holds content that is not the current render; preserved',
+        });
       } else {
-        const currentHash = hashContent(current.content);
-        if (recorded && currentHash !== recorded.hash) {
-          if (input.project?.collision === 'takeover') {
-            roleReady = true;
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              content: desired,
-              root: target.root(config.homes),
-              expectedHash: currentHash,
-              ledger: put('written'),
-            });
-          } else {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'conflict',
-              reason: `modified since asb last wrote it (recorded ${recorded.hash.slice(0, 12)}, current ${currentHash.slice(0, 12)}); resolve by hand`,
-            });
-            protectedIds.add(id);
-          }
-          if (roleReady) configCandidates.push({ component, filename, rolePath: targetPath });
-          continue;
-        }
-        if (currentHash === desiredHash) {
-          roleReady = true;
-          actions.push(
-            recorded
-              ? { ...base, op: 'none', outcome: 'unchanged' }
-              : {
-                  ...base,
-                  op: 'adopt',
-                  outcome: 'adopted',
-                  detail: 'identity',
-                  ledger: put('identity'),
-                }
-          );
-        } else if (recorded) {
-          roleReady = true;
-          actions.push({
-            ...base,
-            op: 'write',
-            outcome: 'written',
-            detail: 'updated',
-            content: desired,
-            root: target.root(config.homes),
-            expectedHash: currentHash,
-            ledger: put('written'),
-          });
-        } else if (input.project) {
-          if (input.project.collision === 'takeover') {
-            roleReady = true;
-            actions.push({
-              ...base,
-              op: 'write',
-              outcome: 'written',
-              detail: 'takeover',
-              content: desired,
-              root: target.root(config.homes),
-              expectedHash: currentHash,
-              ledger: put('written'),
-            });
-          } else {
-            actions.push({
-              ...base,
-              op: 'none',
-              outcome: 'conflict',
-              detail: 'foreign',
-              reason: 'project target is occupied and the peer manifest does not own it; preserved',
-            });
-          }
-        } else {
-          actions.push({
-            ...base,
-            op: 'adopt',
-            outcome: 'adopted',
-            detail: 'convention',
-            reason: 'existing filename adopted for update; the next sync writes desired content',
-            ledger: {
-              op: 'put',
-              entry: {
-                app,
-                type,
-                id,
-                path: targetPath,
-                shape: 'own-file',
-                hash: currentHash,
-                provenance: 'convention',
-                updatedAt: now,
-              },
-            },
-          });
-        }
+        // The app table declares this directory and the library owns this
+        // filename, so a selected component writes its render in one pass.
+        // Editing a distributed copy is not supported; edit the library entry.
+        roleReady = true;
+        actions.push({
+          ...base,
+          op: 'write',
+          outcome: 'written',
+          detail: input.project ? 'takeover' : 'updated',
+          content: desired,
+          root: target.root(config.homes),
+          expectedHash: hashContent(current.content),
+          ledger: put('written'),
+        });
       }
       if (roleReady) configCandidates.push({ component, filename, rolePath: targetPath });
     }
 
-    for (const recorded of ledger.entries) {
-      if (recorded.app !== app || recorded.type !== type || recorded.shape !== 'own-file') continue;
-      if (
-        desiredRecords.has(ledgerKey(recorded)) ||
-        (recorded.id !== null && protectedIds.has(recorded.id))
-      )
-        continue;
-      const current = capture.targets[recorded.path] ?? { exists: false, content: null };
-      actions.push(
-        removeEntryRecord(
-          app,
-          type,
-          recorded,
-          current,
-          target.root(config.homes),
-          input.project !== undefined
-        )
-      );
-    }
-
+    // Deselected. A file that is byte-for-byte the render is provably asb's
+    // and comes out on that proof alone. A selected component is rewritten
+    // whenever it drifts, so a distributed copy only fails that test once the
+    // user has edited it, and their edit is reported rather than deleted.
+    // Exclusive project mode is the one place that still clears the directory,
+    // because the user asked for exactly that.
     const selectedSet = new Set(selected);
     for (const component of byId.values()) {
-      if (selectedSet.has(component.id)) continue;
+      if (selectedSet.has(component.id) || protectedIds.has(component.id)) continue;
       const targetPath = path.join(target.dir(config.homes), target.filename(component.id));
       const current = capture.targets[targetPath];
       if (!current?.exists) continue;
-      const recorded = ledger.entries.some(
-        (entry) => ledgerKey(entry) === ledgerKey({ app, type, id: component.id, path: targetPath })
-      );
-      if (!recorded) {
-        actions.push(
-          input.project?.mode === 'exclusive' && current.content !== null
-            ? {
-                app,
-                type,
-                id: component.id,
-                path: targetPath,
-                op: 'remove',
-                outcome: 'removed',
-                detail: 'exclusive-cleanup',
-                root: target.root(config.homes),
-                expectedHash: hashContent(current.content),
-              }
-            : {
-                app,
-                type,
-                id: component.id,
-                path: targetPath,
-                op: 'none',
-                outcome: 'left-behind',
-                detail: 'unproven',
-                reason:
-                  'filename matches a library component but has no ownership record; delete it yourself or enable it to adopt',
-              }
-        );
+      const base = { app, type, id: component.id, path: targetPath };
+      if (current.content === null) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            'target matches a library component by name but cannot be read; delete it yourself',
+        });
+        continue;
       }
+      let rendered: string | null = null;
+      try {
+        rendered = target.render(component);
+      } catch {
+        rendered = null;
+      }
+      const proven = rendered !== null && current.content === rendered;
+      const exclusive = input.project?.mode === 'exclusive';
+      if (!proven && !exclusive) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason: 'edited since asb last wrote it; delete it yourself or re-enable it',
+        });
+        continue;
+      }
+      actions.push({
+        ...base,
+        op: 'remove',
+        outcome: 'removed',
+        ...(proven ? {} : { detail: 'exclusive-cleanup' }),
+        root: target.root(config.homes),
+        expectedHash: hashContent(current.content),
+        ledger: {
+          op: 'delete',
+          key: ledgerKey({ app, type, id: component.id, path: targetPath }),
+        },
+      });
     }
     actions.push(
       ...planEntryConfig(input, app, target, configCandidates, protectedIds, selectedEligible)

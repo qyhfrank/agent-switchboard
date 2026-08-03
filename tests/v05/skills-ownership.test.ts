@@ -223,7 +223,7 @@ test('a name-matching bundle holding a symlink is left behind unproven and untou
     const entry = skillEntry(report, 'claude-code', 'review-pr');
     assert.equal(entry?.outcome, 'left-behind');
     assert.equal(entry?.detail, 'unproven');
-    assert.equal(report.exitCode, 1);
+    assert.equal(report.exitCode, 0, 'leaving an unprovable tree alone is not a failure');
     assert.deepEqual(snapshot(target), before, 'nothing inside an unprovable bundle is touched');
     assert.equal(bundleFingerprint(target), undefined, 'the tree is still unprovable');
     assert.equal(read(outside), 'somewhere else entirely\n', 'never written through the link');

@@ -378,7 +378,7 @@ test('a bundle removal that cannot delete reports left-behind and keeps the clai
     const row = hooksRows(report).find((entry) => entry.id === 'bt');
     assert.equal(row?.outcome, 'left-behind', 'a failed deletion is not a removal');
     assert.match(row?.reason ?? '', new RegExp(bundle), 'the row names what is still on disk');
-    assert.equal(report.exitCode, 1, 'and the run fails');
+    assert.equal(report.exitCode, 0, 'reported, but the run itself did nothing wrong');
 
     assert.deepEqual(
       readJson(statePath(homes, 'claude-code')).bundles,

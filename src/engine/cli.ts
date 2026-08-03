@@ -89,6 +89,7 @@ import {
   renderCompactStatus,
   renderExplain,
   renderReport,
+  runFailed,
 } from './report.js';
 import {
   applyBundleFiles,
@@ -2471,7 +2472,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     if (invocation.command === 'explain') {
       const slices = await runExplain(invocation.target, invocation.options);
       const exitCode =
-        slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome)) ? 0 : 1;
+        slices.length > 0 && !runFailed(slices.map((slice) => slice.outcome)) ? 0 : 1;
       process.stdout.write(
         invocation.options.json
           ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), slices, exitCode), null, 2)}\n`
