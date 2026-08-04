@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.2
+
 ### One sync, two scopes
 
 `asb sync` reconciles the machine's user scope and, when a project is in play,
