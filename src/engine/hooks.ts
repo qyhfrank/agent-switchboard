@@ -1,8 +1,8 @@
 /**
  * Who wrote a hook group in an app config, read from the group itself. A
  * command running a file under the app's managed hook directory names the
- * library hook it came from; a predecessor's marker line says asb without
- * saying which hook. Everything else in the config is the user's.
+ * library hook it came from; predecessor markers and paths may do the same.
+ * Everything else in the config is the user's.
  */
 
 const LEGACY_MARKER_LINES = [
@@ -29,11 +29,13 @@ export interface OwnershipContext {
 
 /**
  * Which library hook a group in an app config belongs to. `managed` carries
- * the id a managed path inside the group's commands names; `legacy` is a
- * predecessor's own marker, which proves the group is asb's without saying
- * which hook it came from.
+ * the id a managed path inside the group's commands names; `legacy` carries
+ * an id when predecessor evidence names exactly one known hook.
  */
-export type HookGroupOwner = { kind: 'managed'; id: string } | { kind: 'legacy' } | null;
+export type HookGroupOwner =
+  | { kind: 'managed'; id: string }
+  | { kind: 'legacy'; id: string | null }
+  | null;
 
 function findPathTokenIndexes(command: string, pathPrefix: string): number[] {
   const needle = `${pathPrefix}/`;
@@ -169,6 +171,32 @@ function managedIdOf(
   return null;
 }
 
+function legacyIdOf(
+  group: unknown,
+  legacyAsbRoots: readonly string[],
+  knownManagedIds: ReadonlySet<string>
+): string | null {
+  const ids = new Set<string>();
+  for (const command of groupCommands(group)) {
+    for (const line of command.split(/\r?\n/)) {
+      const marker = '# asb-hook-id=';
+      const trimmed = line.trim();
+      if (!trimmed.startsWith(marker)) continue;
+      const id = trimmed.slice(marker.length).trim();
+      if (knownManagedIds.has(id)) ids.add(id);
+    }
+    for (const root of legacyAsbRoots) {
+      for (const id of extractPathTokenSegments(command, root)) {
+        if (knownManagedIds.has(id)) ids.add(id);
+      }
+    }
+    for (const id of extractIdsByPattern(command, LEGACY_ASB_ID_ANY_HOME_RE)) {
+      if (knownManagedIds.has(id)) ids.add(id);
+    }
+  }
+  return ids.size === 1 ? ([...ids][0] ?? null) : null;
+}
+
 /**
  * A group's owner, from the group alone. A command running a file under the
  * app's managed hook directory, named after a hook the library defines, is
@@ -180,8 +208,9 @@ export function hookGroupOwner(group: unknown, ctx: OwnershipContext): HookGroup
     const id = managedIdOf(group, managedRoots, ctx.knownManagedIds);
     if (id !== null) return { kind: 'managed', id };
   }
-  if (isLegacyOwnedGroup(group, ctx.legacyAsbRoots.map(normalizeRoot), ctx.knownManagedIds)) {
-    return { kind: 'legacy' };
+  const legacyAsbRoots = ctx.legacyAsbRoots.map(normalizeRoot);
+  if (isLegacyOwnedGroup(group, legacyAsbRoots, ctx.knownManagedIds)) {
+    return { kind: 'legacy', id: legacyIdOf(group, legacyAsbRoots, ctx.knownManagedIds) };
   }
   return null;
 }

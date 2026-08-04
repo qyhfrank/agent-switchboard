@@ -1961,7 +1961,7 @@ export function planHooks(input: PlanInput): Action[] {
       managedRoots: [managedParent, preferHomeVar(managedParent)],
       knownManagedIds: new Set(
         inventory.components
-          .filter((component) => component.type === 'hooks' && component.files !== undefined)
+          .filter((component) => component.type === 'hooks')
           .map((component) => component.id)
       ),
     };
@@ -2182,7 +2182,7 @@ export function planHooks(input: PlanInput): Action[] {
       const out: unknown[] = [];
       for (const group of existingHooks[event] ?? []) {
         const owner = hookGroupOwner(group, ownership);
-        const id = owner?.kind === 'managed' ? owner.id : renderOwnerOf(group, event);
+        const id = owner?.id ?? renderOwnerOf(group, event);
         if (owner === null && id === null) {
           out.push(group);
           if (kinToLibrary(group, event)) unproven.push({ event, matcher: matcherOf(group) });

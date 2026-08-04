@@ -3,6 +3,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { AppRow } from './apps.js';
 import { ConfigError, effectiveSelection, type Homes, type ResolvedConfig } from './config.js';
+import { hookGroupOwner } from './hooks.js';
 import type { LibraryInventory } from './library.js';
 import { renderHookGroups } from './plan.js';
 import { writeFileAtomic } from './shapes.js';
@@ -272,6 +273,12 @@ async function importHooks(
           .filter((component) => component.type === 'hooks')
           .map((component) => [component.id, component])
       );
+      const managedRoot = row.hooks.bundleDir(homes);
+      const ownership = {
+        managedRoots: [managedRoot],
+        legacyAsbRoots: [path.join(path.dirname(managedRoot), 'asb')],
+        knownManagedIds: new Set(byId.keys()),
+      };
       const owned: Record<string, unknown[]> = {};
       for (const selected of effectiveSelection(context.config, row.id, 'hooks')) {
         const component = byId.get(selected);
@@ -286,7 +293,7 @@ async function importHooks(
       }
       const userHooks: Record<string, unknown[]> = {};
       for (const [event, groups] of Object.entries(content.hooks as Record<string, unknown[]>)) {
-        const remaining = [...groups];
+        const remaining = groups.filter((group) => hookGroupOwner(group, ownership) === null);
         for (const group of owned[event] ?? []) {
           const index = remaining.findIndex((candidate) => isDeepStrictEqual(candidate, group));
           if (index >= 0) remaining.splice(index, 1);

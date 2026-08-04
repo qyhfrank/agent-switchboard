@@ -693,6 +693,43 @@ test('legacy markers, tags, and paths are recognition evidence', async () => {
   });
 });
 
+test('legacy hook ids preserve multiple group positions within one event', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedHook(homes, 'alpha', {
+      PreToolUse: [{ matcher: 'alpha', hooks: [{ type: 'command', command: 'echo alpha' }] }],
+    });
+    seedHook(homes, 'beta', {
+      PreToolUse: [{ matcher: 'beta', hooks: [{ type: 'command', command: 'echo beta' }] }],
+    });
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha', 'beta']));
+    const settings = configPath(homes, 'claude-code');
+    writeJson(settings, {
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'alpha',
+            hooks: [{ type: 'command', command: 'echo alpha\n# asb-hook-id=alpha' }],
+          },
+          { matcher: 'user', hooks: [{ type: 'command', command: 'echo mine' }] },
+          {
+            matcher: 'beta',
+            hooks: [{ type: 'command', command: 'echo beta\n# asb-hook-id=beta' }],
+          },
+        ],
+      },
+    });
+
+    const report = await runSync();
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(
+      eventGroups(settings, 'PreToolUse').map((group) => group.matcher),
+      ['alpha', 'user', 'beta']
+    );
+  });
+});
+
 test('v0.4.28 hash-path groups are reclaimed without deleting their directories', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');

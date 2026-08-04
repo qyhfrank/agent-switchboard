@@ -8,6 +8,8 @@ import { renderGeminiCommand } from '../../src/engine/dialects.js';
 import { scanLibrary } from '../../src/engine/library.js';
 import { installApps, withScratchHomes } from './helpers/scratch.js';
 
+const HOOK_DIR = `\${HOOK_DIR}`;
+
 function write(filePath: string, content: string): void {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, content, 'utf-8');
@@ -122,6 +124,62 @@ test('no-type import uses every app reader and existing files skip unless forced
       second.entries.every((entry) => entry.outcome === 'skipped'),
       true
     );
+  });
+});
+
+test('hook import excludes a stale group proven by its managed bundle path', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const hookDir = path.join(homes.asbHome, 'hooks', 'managed');
+    write(
+      path.join(hookDir, 'hook.json'),
+      `${JSON.stringify({
+        name: 'managed',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'old',
+              hooks: [{ type: 'command', command: `${HOOK_DIR}/run.sh` }],
+            },
+          ],
+        },
+      })}\n`
+    );
+    write(path.join(hookDir, 'run.sh'), '#!/bin/sh\n');
+    write(
+      path.join(homes.asbHome, 'config.toml'),
+      '[applications]\nenabled = ["claude-code"]\n\n[hooks]\nenabled = ["managed"]\n'
+    );
+    await runSync();
+    const settings = path.join(homes.agentsHome, '.claude', 'settings.json');
+    const installed = JSON.parse(fs.readFileSync(settings, 'utf-8')) as {
+      hooks: { PreToolUse: unknown[] };
+    };
+    const user = { matcher: 'user', hooks: [{ type: 'command', command: 'echo user' }] };
+    installed.hooks.PreToolUse.push(user);
+    write(settings, `${JSON.stringify(installed)}\n`);
+    write(
+      path.join(hookDir, 'hook.json'),
+      `${JSON.stringify({
+        name: 'managed',
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'new',
+              hooks: [{ type: 'command', command: `${HOOK_DIR}/run.sh` }],
+            },
+          ],
+        },
+      })}\n`
+    );
+
+    const result = await runImport('claude-code', undefined, { types: ['hooks'], force: true });
+
+    assert.equal(result.exitCode, 0, JSON.stringify(result.entries, null, 2));
+    const imported = scanLibrary().components.find(
+      (entry) => entry.type === 'hooks' && entry.id === 'claude-code-hooks'
+    );
+    assert.deepEqual(imported?.hooks, { PreToolUse: [user] });
   });
 });
 
