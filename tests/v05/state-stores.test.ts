@@ -272,6 +272,45 @@ test('a malformed source component keeps its render evidence until it can be swe
   });
 });
 
+test('an unreadable marketplace keeps its declaration and distributed slices', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const sourcePath = path.join(homes.asbHome, 'plugins', 'shop');
+    seedSource(homes, 'shop', {
+      '.claude-plugin/marketplace.json': JSON.stringify({
+        name: 'shop',
+        plugins: [{ name: 'pack', source: './pack' }],
+      }),
+      'pack/skills/deploy/SKILL.md': skillDoc('deploy'),
+    });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["pack@shop:deploy"]',
+        '',
+        '[plugins.sources]',
+        `shop = ${JSON.stringify(sourcePath)}`,
+        '',
+      ].join('\n')
+    );
+    await runSync();
+    const bundle = path.join(skillsParentDir(homes, 'claude-code'), 'pack@shop:deploy');
+    assert.ok(fs.existsSync(bundle));
+    fs.writeFileSync(path.join(sourcePath, '.claude-plugin', 'marketplace.json'), '{ not json');
+
+    const report = await runRemoveSource('shop');
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.ok(fs.existsSync(bundle));
+    assert.ok(fs.existsSync(sourcePath));
+    assert.match(fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'), /\bshop\b/);
+  });
+});
+
 test('a source stays renderable while an installed target that may hold it is inactive', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code', 'codex');

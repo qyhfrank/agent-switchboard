@@ -1245,6 +1245,18 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
     const catalog = readSourceCatalog(config);
     const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
     if (!source?.configured) throw new ConfigError(`Source "${namespace}" not found.`);
+    if (catalog.failed.some((failure) => failure.namespace === namespace)) {
+      return buildReport(scope, [
+        {
+          app: null,
+          type: null,
+          id: namespace,
+          path: source.path,
+          outcome: 'blocked',
+          reason: `kept: source "${namespace}" could not be read completely; repair it before removal`,
+        },
+      ]);
+    }
 
     const inventory = scanLibrary({ env, plugins: catalog.plugins });
     const expansion = buildPluginExpansion(catalog.plugins, inventory);
@@ -1905,6 +1917,17 @@ export async function runSelectionCommand(
 }
 
 async function runSelectionPicker(
+  options: CliOptions
+): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
+  const lock = acquireRunLock(resolveHomes(options.env ?? process.env).stateHome);
+  try {
+    return await runLockedSelectionPicker(options);
+  } finally {
+    lock.release();
+  }
+}
+
+async function runLockedSelectionPicker(
   options: CliOptions
 ): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
   if ((options.apps?.length ?? 0) > 1) {

@@ -3,7 +3,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { parse as parseToml } from '@iarna/toml';
-import { parseCliArgs, resolvePickerOrder, runSelectionCommand } from '../../src/engine/cli.js';
+import {
+  main,
+  parseCliArgs,
+  resolvePickerOrder,
+  runSelectionCommand,
+} from '../../src/engine/cli.js';
 import { editSelection } from '../../src/engine/config.js';
 import { withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
@@ -102,6 +107,29 @@ test('a selection command changes nothing while another run holds the lock', asy
       runSelectionCommand(invocation.command, invocation.ids, invocation.options),
       /appears to be active/
     );
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+  });
+});
+
+test('the interactive selection picker changes nothing while another run holds the lock', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[commands]\nenabled = ["old"]\n');
+    const configPath = path.join(homes.asbHome, 'config.toml');
+    const before = fs.readFileSync(configPath, 'utf-8');
+    fs.mkdirSync(homes.stateHome, { recursive: true });
+    fs.writeFileSync(path.join(homes.stateHome, 'run.lock'), `${process.pid} held\n`);
+    const stderr = process.stderr.write.bind(process.stderr);
+    let err = '';
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      err += chunk.toString();
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      assert.equal(await main(['enable']), 2);
+    } finally {
+      process.stderr.write = stderr;
+    }
+    assert.match(err, /appears to be active/);
     assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
   });
 });
