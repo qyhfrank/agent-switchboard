@@ -1310,7 +1310,13 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
       },
       lock
     );
-    if (swept.exitCode === 2) {
+    const unrelatedAbort =
+      swept.exitCode === 2 &&
+      swept.entries.some(
+        (entry) =>
+          entry.id !== namespace && entry.outcome === 'failed' && entry.detail === 'source-error'
+      );
+    if (unrelatedAbort) {
       return buildReport(scope, [
         {
           app: null,
