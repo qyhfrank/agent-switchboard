@@ -2080,18 +2080,27 @@ export function planHooks(input: PlanInput): Action[] {
       return null;
     };
     // A group asb cannot prove is kin to a library hook when it shares that
-    // hook's event and matcher, which is what an older render of it looks
-    // like. Kinship reads every hook the library defines rather than the
-    // selected ones, so deselecting a hook does not silence the report on the
-    // predecessor group it left behind.
-    const kinToLibrary = (group: unknown, event: string): boolean => {
-      for (const byEvent of renders.values()) {
+    // hook's event and a concrete (non-empty string) matcher. Missing and empty
+    // matchers are the default shape for many hooks, so matching on them alone
+    // flags foreign installers that share only an event. Kinship still reads
+    // every library hook, not only the selected ones, so deselecting a hook
+    // does not silence the report on a predecessor that kept its matcher.
+    // Ceiling: an unbundled no-matcher inline hook that drifts leaves a silent
+    // residual (still not deleted); managed-path hooks are unaffected.
+    const kinIdOf = (group: unknown, event: string): string | null => {
+      const matcher = matcherOf(group);
+      if (typeof matcher !== 'string' || matcher.length === 0) return null;
+      for (const [id, byEvent] of renders) {
         if (
-          groupsFor(byEvent, event).some((candidate) => matcherOf(candidate) === matcherOf(group))
-        )
-          return true;
+          groupsFor(byEvent, event).some((candidate) => {
+            const other = matcherOf(candidate);
+            return typeof other === 'string' && other.length > 0 && other === matcher;
+          })
+        ) {
+          return id;
+        }
       }
-      return false;
+      return null;
     };
 
     // A selected id the library cannot resolve — absent file, parse failure —
@@ -2261,7 +2270,7 @@ export function planHooks(input: PlanInput): Action[] {
     const merged: Record<string, unknown[]> = Object.create(null);
     let appended = 0;
     let removedGroups = 0;
-    const unproven: { event: string; matcher: unknown }[] = [];
+    const unproven: { event: string; matcher: string; id: string }[] = [];
     const protectedIds = new Set(unresolved);
     for (const event of new Set([...Object.keys(existingHooks), ...Object.keys(desired)])) {
       const queue = new Map<string, unknown[]>();
@@ -2275,7 +2284,11 @@ export function planHooks(input: PlanInput): Action[] {
         const id = owner?.id ?? renderOwnerOf(group, event);
         if (owner === null && id === null) {
           out.push(group);
-          if (kinToLibrary(group, event)) unproven.push({ event, matcher: matcherOf(group) });
+          const kinId = kinIdOf(group, event);
+          const matcher = matcherOf(group);
+          if (kinId !== null && typeof matcher === 'string') {
+            unproven.push({ event, matcher, id: kinId });
+          }
           continue;
         }
         if (id !== null && protectedIds.has(id)) {
@@ -2308,7 +2321,7 @@ export function planHooks(input: PlanInput): Action[] {
     // Naming a group costs the file nothing, so the report comes before the
     // decision to leave the file alone: a predecessor group is reported once
     // per run whether or not this run has anything to write.
-    for (const { event, matcher } of unproven) {
+    for (const { event, matcher, id: kinId } of unproven) {
       actions.push({
         app,
         type: 'hooks',
@@ -2317,9 +2330,7 @@ export function planHooks(input: PlanInput): Action[] {
         op: 'none',
         outcome: 'left-behind',
         detail: 'unproven',
-        reason: `a ${event} group${
-          typeof matcher === 'string' ? ` matching ${matcher}` : ''
-        } in ${configPath} is not one asb can prove it wrote — usually an older render of a hook it now writes elsewhere in the file; delete it yourself`,
+        reason: `a ${event} group matching ${matcher} in ${configPath} is not one asb can prove it wrote — likely an older render of ${kinId}; delete it yourself`,
       });
     }
 

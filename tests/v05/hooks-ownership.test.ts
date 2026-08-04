@@ -866,10 +866,11 @@ test('a predecessor group is named even after its hook leaves the selection', as
 
     writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
     const selected = await runSync();
-    assert.ok(
-      hooksRows(selected).some((row) => row.outcome === 'left-behind' && row.detail === 'unproven'),
-      JSON.stringify(selected.entries, null, 2)
+    const named = hooksRows(selected).find(
+      (row) => row.outcome === 'left-behind' && row.detail === 'unproven'
     );
+    assert.ok(named, JSON.stringify(selected.entries, null, 2));
+    assert.match(named.reason ?? '', /older render of alpha/, named.reason ?? '');
 
     // Deselecting takes the render away. The predecessor group is still not
     // asb's to remove and still kin to a hook the library defines, so the run
@@ -884,6 +885,112 @@ test('a predecessor group is named even after its hook leaves the selection', as
       ),
       `the group is still there, so the run still names it: ${JSON.stringify(deselected.entries, null, 2)}`
     );
+  });
+});
+
+test('a no-matcher foreign group is not reported as left-behind even when a selected hook shares the event', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    // Selected library hook also has no matcher on UserPromptSubmit (ponytail shape).
+    seedHook(homes, 'tracker', {
+      UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'echo tracker' }] }],
+    });
+    const settings = configPath(homes, 'codex');
+    writeJson(settings, {
+      hooks: {
+        UserPromptSubmit: [
+          { hooks: [{ type: 'command', command: 'echo foreign-installer' }] },
+          { hooks: [{ type: 'command', command: 'echo tracker' }] },
+        ],
+      },
+    });
+    writeUserConfig(homes, configFor(['codex'], ['tracker']));
+
+    const report = await runSync();
+    assert.equal(
+      hooksRows(report).filter((row) => row.outcome === 'left-behind').length,
+      0,
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.ok(
+      commandsOf(eventGroups(settings, 'UserPromptSubmit')).includes('echo foreign-installer'),
+      'foreign group stays'
+    );
+  });
+});
+
+test('a no-matcher foreign group is not reported when only an unselected library hook shares the event', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'idle', {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo idle' }] }],
+      Stop: [{ hooks: [{ type: 'command', command: 'echo stop-idle' }] }],
+    });
+    const settings = configPath(homes, 'codex');
+    writeJson(settings, {
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo foreign-start' }] }],
+        Stop: [{ hooks: [{ type: 'command', command: 'echo foreign-stop' }] }],
+      },
+    });
+    // Nothing selected: the unselected library hook must not make foreign groups noisy.
+    writeUserConfig(homes, configFor(['codex'], []));
+
+    const report = await runSync();
+    assert.equal(
+      hooksRows(report).filter((row) => row.outcome === 'left-behind').length,
+      0,
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.deepEqual(commandsOf(eventGroups(settings, 'SessionStart')), ['echo foreign-start']);
+    assert.deepEqual(commandsOf(eventGroups(settings, 'Stop')), ['echo foreign-stop']);
+  });
+});
+
+test('an empty-string matcher is not kinship, even when the library uses the same empty matcher', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'blank', {
+      UserPromptSubmit: [{ matcher: '', hooks: [{ type: 'command', command: 'echo blank' }] }],
+    });
+    const settings = configPath(homes, 'codex');
+    writeJson(settings, {
+      hooks: {
+        UserPromptSubmit: [{ matcher: '', hooks: [{ type: 'command', command: 'echo foreign' }] }],
+      },
+    });
+    writeUserConfig(homes, configFor(['codex'], ['blank']));
+
+    const report = await runSync();
+    assert.equal(
+      hooksRows(report).filter((row) => row.outcome === 'left-behind').length,
+      0,
+      JSON.stringify(report.entries, null, 2)
+    );
+  });
+});
+
+test('a concrete matcher that does not equal any library matcher is not left-behind', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedHook(homes, 'alpha', {
+      UserPromptSubmit: [{ matcher: 'go', hooks: [{ type: 'command', command: 'echo alpha' }] }],
+    });
+    const settings = configPath(homes, 'codex');
+    const foreign = {
+      matcher: 'other',
+      hooks: [{ type: 'command', command: 'echo foreign' }],
+    };
+    writeJson(settings, { hooks: { UserPromptSubmit: [foreign] } });
+    writeUserConfig(homes, configFor(['codex'], ['alpha']));
+
+    const report = await runSync();
+    assert.equal(
+      hooksRows(report).filter((row) => row.outcome === 'left-behind').length,
+      0,
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.deepEqual(eventGroups(settings, 'UserPromptSubmit')[0], foreign);
   });
 });
 

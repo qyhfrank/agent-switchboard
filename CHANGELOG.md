@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Hooks unproven residuals
+
+- **Unowned hook groups report `left-behind (unproven)` only when they share
+  an event and a concrete non-empty matcher with a library hook.** Missing and
+  empty matchers no longer establish kinship, so foreign installers that only
+  share an event (for example a parallel Codex hooks installer) stay silent.
+  The reason names the likely library id. Groups are still never auto-deleted.
+
 ## 0.5.2
 
 ### One sync, two scopes

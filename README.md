@@ -388,9 +388,10 @@ against a group's array index, so a group that did not change is rewritten
 where it already sits instead of being moved behind whatever else is there.
 
 A definition hook owns no directory, so a hand-written group byte-identical to
-its render is taken as ASB's rather than duplicated beside itself. A group a
-predecessor wrote whose command names no distributed file is reported once and
-left for you to remove.
+its render is taken as ASB's rather than duplicated beside itself. An unowned
+group that shares an event and a concrete non-empty matcher with a library
+hook is reported as left-behind and left for you to remove; groups with no
+matcher or an empty matcher stay silent so foreign installers are not flagged.
 
 ## Development
 

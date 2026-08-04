@@ -162,6 +162,7 @@ test('a group sharing an event and matcher with a library hook is reported, neve
     const named = hookRows(report).filter((row) => row.outcome === 'left-behind');
     assert.equal(named.length, 1, JSON.stringify(report.entries, null, 2));
     assert.match(named[0].reason ?? '', /UserPromptSubmit/);
+    assert.match(named[0].reason ?? '', /older render of alpha/, named[0].reason ?? '');
     assert.equal(named[0].path, hooksJson(homes));
     assert.deepEqual(groups(homes)[0], stale, 'the group asb cannot prove stays put');
     assert.equal(groups(homes).length, 2, 'and the selected hook lands beside it');
