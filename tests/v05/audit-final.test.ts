@@ -50,7 +50,7 @@ async function runMain(argv: string[]): Promise<{ code: number; out: string; err
   }
 }
 
-test('A1 global and project runs stay inside their planning scope in both orders', async () => {
+test('A1 a run with a project root and a plain one agree in both orders', async () => {
   for (const order of ['project-first', 'global-first'] as const) {
     await withScratchHomes(async (homes) => {
       const project = path.join(homes.root, 'project');
@@ -82,8 +82,61 @@ test('A1 global and project runs stay inside their planning scope in both orders
         ),
         false
       );
+      for (const entry of [...globalStatus.entries, ...projectStatus.entries]) {
+        if (entry.scope !== 'user' || entry.path === null) continue;
+        assert.equal(
+          entry.path.startsWith(`${project}${path.sep}`),
+          false,
+          `the user phase plans machine targets only (${entry.path})`
+        );
+      }
     });
   }
+});
+
+test('A1 a repository layer adds, hides, and flips nothing at user scope', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'claude-code', 'cursor');
+    seedSkill(homes, 'present');
+    seedSkill(homes, 'repo-only');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[skills]\nenabled = ["present", "gone"]\n'
+    );
+    // The repository replaces both lists it names, which under the frozen 0.4
+    // merge is the strongest thing a layer can do: a different app, a
+    // different selection, and no mention of the id the machine is missing.
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[applications]\nenabled = ["cursor"]\n\n[skills]\nenabled = ["repo-only"]\n'
+    );
+
+    const plain = await runSync({ dryRun: true });
+    const withRepo = await runSync({ dryRun: true, project });
+    const userRows = (report: Awaited<ReturnType<typeof runSync>>) =>
+      report.entries.filter((entry) => entry.scope === 'user');
+
+    assert.deepEqual(userRows(withRepo), userRows(plain));
+    assert.ok(
+      userRows(plain).some((entry) => entry.id === 'gone' && entry.outcome === 'missing'),
+      JSON.stringify(plain.entries, null, 2)
+    );
+    assert.equal(plain.exitCode, 1);
+    assert.equal(withRepo.exitCode, plain.exitCode, 'a repository cannot answer for the machine');
+    assert.equal(
+      userRows(withRepo).some((entry) => entry.id === 'repo-only'),
+      false,
+      'and what it adds stays in it'
+    );
+    assert.ok(
+      withRepo.entries.some(
+        (entry) => entry.scope === 'project' && entry.id === 'repo-only' && entry.app === 'cursor'
+      ),
+      JSON.stringify(withRepo.entries, null, 2)
+    );
+  });
 });
 
 test('A4 atomic rewrites preserve an existing private mode on the temp and target', async () => {
@@ -218,7 +271,7 @@ test('A5 explain masks every credential value after every builtin MCP dialect', 
     );
 
     for (const id of ['local', 'remote']) {
-      const slices = await runExplain(id);
+      const { slices } = await runExplain(id);
       for (const row of APP_ROWS.filter((candidate) => candidate.mcp)) {
         const slice = slices.find((candidate) => candidate.app === row.id);
         assert.ok(slice, `${row.id}/${id}`);
@@ -239,22 +292,32 @@ test('A6 removing the project marker span preserves every user byte around it', 
     await withScratchHomes(async (homes) => {
       const project = path.join(homes.root, `project-${placement}`);
       fs.mkdirSync(project);
-      const projectConfig = `[distribution.project]\nmode = "managed"\n\n[distribution.project.rules]\nplacement = "${placement}"\n\n[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n`;
+      const projectConfig = `[distribution.project]\nmode = "managed"\n\n[distribution.project.rules]\nplacement = "${placement}"\n\n[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared", "repo"]\n`;
       fs.writeFileSync(path.join(project, '.asb.toml'), projectConfig);
       const agents = path.join(project, 'AGENTS.md');
       const userBytes = '# First user section\n\n\n# Second user section\n';
       fs.writeFileSync(agents, userBytes);
       installApps(homes, 'codex');
       seedRule(homes, 'shared.md', 'Managed.\n');
+      seedRule(homes, 'repo.md', 'Repository rule.\n');
       writeUserConfig(
         homes,
         '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
       );
       assert.equal((await runSync({ project })).exitCode, 0, placement);
 
+      // The repository hosts the increment alone, at the placement it asked
+      // for, joined to the user's own sections by one blank line.
+      const region = '<!-- rules:start -->\nRepository rule.\n<!-- rules:end -->';
+      assert.equal(
+        fs.readFileSync(agents, 'utf-8'),
+        placement === 'prepend' ? `${region}\n\n${userBytes}` : `${userBytes}\n${region}\n`,
+        placement
+      );
+
       fs.writeFileSync(
         path.join(project, '.asb.toml'),
-        projectConfig.replace('enabled = ["shared"]', 'enabled = []')
+        projectConfig.replace('enabled = ["shared", "repo"]', 'enabled = ["shared"]')
       );
       assert.equal((await runSync({ project })).exitCode, 0, placement);
       assert.equal(fs.readFileSync(agents, 'utf-8'), userBytes, placement);
@@ -411,8 +474,8 @@ test('A10 status and explain expose component-free sources and plugins', async (
     const typed = await runSync({ dryRun: true, types: ['plugins'] });
     assert.ok(typed.entries.some((entry) => entry.id === 'shop'));
     assert.ok(typed.entries.some((entry) => entry.id === 'empty@shop'));
-    assert.ok((await runExplain('shop')).length > 0);
-    assert.ok((await runExplain('empty@shop')).length > 0);
+    assert.ok((await runExplain('shop')).slices.length > 0);
+    assert.ok((await runExplain('empty@shop')).slices.length > 0);
   });
 });
 
@@ -459,6 +522,38 @@ test('A12 scoped picker selection comes only from the target layer', async () =>
     const projectConfig = loadConfig({ profile: 'work', project });
     assert.deepEqual(selectedFor(projectConfig, 'commands', undefined), []);
     assert.deepEqual(selectedFor(projectConfig, 'commands', 'cursor'), []);
+  });
+});
+
+test('a profile stands in for config.toml, section by section', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedRule(homes, 'shared.md', '# Shared rule\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
+    );
+    // A profile declares everything it uses: this one enables the app and
+    // names no rules at all.
+    fs.writeFileSync(
+      path.join(homes.asbHome, 'work.toml'),
+      '[applications]\nenabled = ["codex"]\n'
+    );
+    const target = ruleFilePath(homes, 'codex');
+    const body = (): string => (fs.existsSync(target) ? fs.readFileSync(target, 'utf-8') : '');
+
+    assert.equal((await runSync()).exitCode, 0);
+    assert.match(body(), /# Shared rule/);
+
+    assert.equal((await runSync({ profile: 'work' })).exitCode, 0);
+    assert.doesNotMatch(
+      body(),
+      /# Shared rule/,
+      'a section absent from the profile selects nothing, and the render proves the removal'
+    );
+
+    assert.equal((await runSync()).exitCode, 0);
+    assert.match(body(), /# Shared rule/, 'the next plain run restores config.toml’s own set');
   });
 });
 
@@ -662,39 +757,38 @@ test('B9 changelog enumerates all eight ratified migration-visible changes', () 
   }
 });
 
-test('a project sync writes no machine state and leaves the last-run fact alone', async () => {
+test('the project phase writes no machine state and every run stamps the last-run fact', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'proj-state');
     fs.mkdirSync(project);
     fs.writeFileSync(
       path.join(project, '.asb.toml'),
-      '[distribution.project]\nmode = "managed"\n\n[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
+      '[distribution.project]\nmode = "managed"\n\n[rules]\nenabled = ["shared", "repo"]\n'
     );
     installApps(homes, 'codex');
     seedRule(homes, 'shared.md', 'Managed.\n');
+    seedRule(homes, 'repo.md', 'Repo only.\n');
     writeUserConfig(
       homes,
       '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["shared"]\n'
     );
 
-    const report = await runSync({ project });
-    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.ok(report.entries.some((entry) => entry.outcome === 'written'));
-    assert.deepEqual(
-      fs.existsSync(homes.stateHome) ? fs.readdirSync(homes.stateHome) : [],
-      [],
-      'a project-only run leaves nothing behind in the state dir'
-    );
-
     const globalReport = await runSync();
     assert.equal(globalReport.exitCode, 0, JSON.stringify(globalReport.entries, null, 2));
-    const bytes = fs.readFileSync(lastRunPath(homes.stateHome), 'utf-8');
-    const second = await runSync({ project });
-    assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
-    assert.equal(
-      fs.readFileSync(lastRunPath(homes.stateHome), 'utf-8'),
-      bytes,
-      'a project run does not replace the machine last-run fact'
+    const machineState = fs.readdirSync(homes.stateHome).sort();
+    assert.deepEqual(machineState, ['last-run.json']);
+
+    fs.rmSync(lastRunPath(homes.stateHome));
+    const report = await runSync({ project });
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.ok(
+      report.entries.some((entry) => entry.scope === 'project' && entry.outcome === 'written'),
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.deepEqual(
+      fs.readdirSync(homes.stateHome).sort(),
+      machineState,
+      'the user phase stamps the run and the project phase adds nothing beside it'
     );
   });
 });

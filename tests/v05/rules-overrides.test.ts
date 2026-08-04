@@ -117,7 +117,7 @@ test('a removed rule for one app changes only that app target bytes', async () =
     assert.match(codexBytes, /Alpha body\./);
     assert.ok(!codexBytes.includes('Beta body.'), 'removed rule stays out of the codex render');
 
-    const slices = await runExplain('codex');
+    const { slices } = await runExplain('codex');
     assert.deepEqual(
       slices[0].components.map((component) => component.id),
       ['alpha'],

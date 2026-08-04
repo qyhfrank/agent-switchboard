@@ -4,16 +4,25 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { parse } from '@iarna/toml';
 import { editSelection, loadConfig } from '../../src/engine/config.js';
-import { withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+import { type ScratchHomes, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
 function readUserConfig(asbHome: string): string {
   return fs.readFileSync(path.join(asbHome, 'config.toml'), 'utf-8');
 }
 
+function writeProfile(homes: ScratchHomes, name: string, toml: string): string {
+  const filePath = path.join(homes.asbHome, `${name}.toml`);
+  fs.writeFileSync(filePath, toml, 'utf-8');
+  return filePath;
+}
+
+function parsedRules(filePath: string): unknown {
+  const parsed = parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
+  return ((parsed.rules ?? {}) as Record<string, unknown>).enabled;
+}
+
 function parsedRulesEnabled(asbHome: string): unknown {
-  const parsed = parse(readUserConfig(asbHome)) as Record<string, unknown>;
-  const rules = (parsed.rules ?? {}) as Record<string, unknown>;
-  return rules.enabled;
+  return parsedRules(path.join(asbHome, 'config.toml'));
 }
 
 test('loadConfig without any config file yields an empty selection', async () => {
@@ -110,6 +119,93 @@ test('enable appends after the last element when ] shares its line', async () =>
       ['alpha', 'beta'],
       'additions never jump ahead of existing ids'
     );
+  });
+});
+
+test('a profile stands in for config.toml instead of merging over it', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["alpha"]\n'
+    );
+    writeProfile(
+      homes,
+      'aws',
+      '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["beta"]\n'
+    );
+
+    const config = loadConfig({ profile: 'aws' });
+
+    assert.deepEqual(config.selection.rules, ['beta']);
+    assert.deepEqual(config.apps.enabled, ['codex'], 'the profile is the whole selection');
+    assert.deepEqual(
+      config.layers.map((layer) => layer.kind),
+      ['user', 'profile'],
+      'config.toml is still read: a profile inherits its infrastructure'
+    );
+    assert.equal(config.profile, 'aws');
+  });
+});
+
+test('a profile inherits machine infrastructure and never contributes its own', async () => {
+  await withScratchHomes(async (homes) => {
+    const library = path.join(homes.root, 'lib');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["alpha"]\n\n' +
+        `[ui]\npage_size = 35\n\n[plugins.sources]\nlib = ${JSON.stringify(library)}\n`
+    );
+    writeProfile(
+      homes,
+      'aws',
+      '[applications]\nenabled = ["codex"]\n\n[rules]\nenabled = ["lib:style"]\n\n[ui]\npage_size = 5\n'
+    );
+
+    const config = loadConfig({ profile: 'aws' });
+
+    assert.deepEqual(config.selection.rules, ['lib:style']);
+    assert.equal(config.plugins.sources.lib, library, 'sources live in config.toml in every run');
+    assert.equal(config.ui.pageSize, 35, "a profile's infrastructure keys never merge");
+  });
+});
+
+test('a section the profile leaves out selects nothing', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["alpha"]\n\n[commands]\nenabled = ["ship"]\n'
+    );
+    writeProfile(homes, 'aws', '[applications]\nenabled = ["claude-code"]\n');
+
+    const config = loadConfig({ profile: 'aws' });
+
+    assert.deepEqual(config.selection.rules, [], 'a profile declares everything it uses');
+    assert.deepEqual(config.selection.commands, []);
+  });
+});
+
+test('ASB_PROFILE names the same file -p does', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[rules]\nenabled = ["alpha"]\n');
+    writeProfile(homes, 'aws', '[rules]\nenabled = ["beta"]\n');
+    process.env.ASB_PROFILE = 'aws';
+
+    assert.deepEqual(loadConfig().selection.rules, ['beta']);
+    assert.equal(loadConfig().profile, 'aws');
+  });
+});
+
+test('a rule enabled under a profile lands in the profile file alone', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[rules]\nenabled = ["alpha"]\n');
+    const profilePath = writeProfile(homes, 'aws', '# aws machine\n[rules]\nenabled = ["beta"]\n');
+    const untouched = readUserConfig(homes.asbHome);
+
+    editSelection({ type: 'rules', enable: ['gamma'], profile: 'aws' });
+
+    assert.deepEqual(parsedRules(profilePath), ['beta', 'gamma']);
+    assert.match(fs.readFileSync(profilePath, 'utf-8'), /# aws machine/);
+    assert.equal(readUserConfig(homes.asbHome), untouched, 'the edit never reaches config.toml');
   });
 });
 

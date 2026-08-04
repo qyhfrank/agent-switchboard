@@ -97,7 +97,7 @@ export interface SkillsTargetRow {
 export interface EntryTargetRow {
   root(homes: Homes): string;
   dir(homes: Homes): string;
-  /** Dormant until M7 wires project scope. */
+  /** Project destination; absent means this cell is global-only. */
   projectDir?(projectRoot: string): string;
   filename(id: string): string;
   /** Null is an explicit per-app eligibility skip. */
@@ -167,6 +167,11 @@ export interface McpTargetRow {
    * reads the disk, so the planner takes the path from the capture.
    */
   path(homes: Homes): string;
+  /**
+   * Every candidate host location the app may keep its server map in — the
+   * guard must see dormant alternates, not just the selector's pick.
+   */
+  paths?: (homes: Homes) => string[];
   /** Project host document; absent means this cell is global-only. */
   projectPath?(projectRoot: string): string;
   format: KeysFormat;
@@ -472,6 +477,10 @@ export const APP_ROWS: readonly AppRow[] = [
       ...JSON_MCP_ROW,
       root: (homes) => opencodeRoot(homes.agentsHome),
       path: (homes) => opencodeConfigPath(opencodeRoot(homes.agentsHome)),
+      paths: (homes) => {
+        const root = opencodeRoot(homes.agentsHome);
+        return [path.join(root, 'opencode.jsonc'), path.join(root, 'opencode.json')];
+      },
       projectPath: (root) => opencodeConfigPath(path.join(root, '.opencode')),
       rootKey: 'mcp',
       sanitize: false,

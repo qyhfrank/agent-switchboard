@@ -115,9 +115,24 @@ test('non-clean entries render with outcome, detail, and reason', () => {
       outcome: 'skipped',
       detail: 'app-not-installed',
       reason: 'not found; add "cursor" to [applications].assume_installed to sync anyway',
+      scope: 'user',
     },
-    { app: 'codex', type: 'rules', id: null, path: '/x/AGENTS.md', outcome: 'unchanged' },
-    { app: 'gemini', type: 'rules', id: null, path: '/x/g/AGENTS.md', outcome: 'unchanged' },
+    {
+      app: 'codex',
+      type: 'rules',
+      id: null,
+      path: '/x/AGENTS.md',
+      outcome: 'unchanged',
+      scope: 'user',
+    },
+    {
+      app: 'gemini',
+      type: 'rules',
+      id: null,
+      path: '/x/g/AGENTS.md',
+      outcome: 'unchanged',
+      scope: 'user',
+    },
   ];
   const text = renderReport(buildReport(SCOPE, entries));
   assert.match(text, /skipped \(app-not-installed\)/);
@@ -135,8 +150,32 @@ test('dry-run scope prefixes every action line', () => {
       path: '/x/.cursor/rules/rules.mdc',
       outcome: 'written',
       detail: 'created',
+      scope: 'user',
     },
   ];
   const text = renderReport(buildReport({ ...SCOPE, dryRun: true }, entries));
   assert.match(text, /\[dry-run\] written \(created\)/);
+});
+
+test('one run reads as the user phase first and the repository increment after', () => {
+  const entries: ReportEntry[] = [
+    {
+      app: 'codex',
+      type: 'rules',
+      id: null,
+      path: '/repo/AGENTS.md',
+      outcome: 'written',
+      scope: 'project',
+    },
+    {
+      app: 'codex',
+      type: 'rules',
+      id: null,
+      path: '/x/.codex/AGENTS.md',
+      outcome: 'written',
+      scope: 'user',
+    },
+  ];
+  const text = renderReport(buildReport(SCOPE, entries));
+  assert.match(text, /codex:[\s\S]*codex \(project\):/);
 });

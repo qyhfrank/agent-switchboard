@@ -38,6 +38,10 @@ function rulesEntries(report: Report): ReportEntry[] {
   return report.entries.filter((entry) => entry.type === 'rules');
 }
 
+function writeProfile(homes: Parameters<typeof seedRule>[0], name: string, toml: string): void {
+  fs.writeFileSync(path.join(homes.asbHome, `${name}.toml`), toml, 'utf-8');
+}
+
 test('first sync writes composed rules to every enabled installed app', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes);
@@ -364,6 +368,188 @@ test('dry-run reports the same actions the real run performs and writes nothing'
         }))
         .sort((a, b) => String(a.app).localeCompare(String(b.app)));
     assert.deepEqual(shape(dry), shape(real));
+  });
+});
+
+test('a profile syncs from its own file and retires what config.toml distributed', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    await runSync();
+    const target = ruleFilePath(homes, 'claude-code');
+    assert.equal(fs.readFileSync(target, 'utf-8'), renderedRules('claude-code', 'First version\n'));
+
+    writeProfile(homes, 'aws', configFor(['claude-code'], ['beta']));
+    const profiled = await runSync({ profile: 'aws' });
+
+    assert.equal(rulesEntry(profiled, 'claude-code')?.outcome, 'written');
+    assert.equal(
+      fs.readFileSync(target, 'utf-8'),
+      renderedRules('claude-code', 'Beta body\n'),
+      "the profile is the whole selection; config.toml's own is not read"
+    );
+    assert.equal(profiled.exitCode, 0);
+
+    // A profile is which file the run reads, never a state the run records.
+    const plain = await runSync();
+    assert.equal(fs.readFileSync(target, 'utf-8'), renderedRules('claude-code', 'First version\n'));
+    assert.equal(plain.exitCode, 0);
+  });
+});
+
+test('a section absent from the profile selects nothing and the render proves the removal', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha', 'beta']));
+    await runSync();
+    const target = ruleFilePath(homes, 'claude-code');
+    assert.equal(fs.existsSync(target), true);
+
+    writeProfile(homes, 'aws', '[applications]\nenabled = ["claude-code"]\n');
+    const report = await runSync({ profile: 'aws' });
+
+    assert.equal(rulesEntry(report, 'claude-code')?.outcome, 'removed');
+    assert.equal(fs.existsSync(target), false, 'nothing selected, and the render says it was ours');
+    assert.equal(report.exitCode, 0);
+  });
+});
+
+test('a profile enabling no applications reconciles nothing and the report says so', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    await runSync();
+    const target = ruleFilePath(homes, 'claude-code');
+    const distributed = fs.readFileSync(target, 'utf-8');
+
+    // A selection with no applications has no reconciliation universe: the
+    // run is a no-op, and without the row that reads as "nothing to do".
+    writeProfile(homes, 'aws', '[rules]\nenabled = ["beta"]\n');
+    const report = await runSync({ profile: 'aws' });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(rulesEntries(report), []);
+    const idle = report.entries.find((entry) => entry.detail === 'no-applications');
+    assert.ok(idle, JSON.stringify(report.entries, null, 2));
+    assert.equal(idle.outcome, 'skipped');
+    assert.equal(idle.path, path.join(homes.asbHome, 'aws.toml'));
+    assert.match(idle.reason ?? '', /\[applications\]/);
+    assert.equal(fs.readFileSync(target, 'utf-8'), distributed, 'and nothing was touched');
+  });
+});
+
+test('a config.toml enabling no applications reports exactly what it always did', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    await runSync();
+    const target = ruleFilePath(homes, 'claude-code');
+    const distributed = fs.readFileSync(target, 'utf-8');
+
+    // The row belongs to a profile, which is a selection the run was told to
+    // read. A machine whose own configuration enables nothing is the run that
+    // has always had nothing to do, and it reads the same as before.
+    writeUserConfig(homes, '[rules]\nenabled = ["beta"]\n');
+    const report = await runSync();
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(
+      report.entries.filter((entry) => entry.detail === 'no-applications'),
+      []
+    );
+    assert.equal(fs.readFileSync(target, 'utf-8'), distributed);
+  });
+});
+
+test('ASB_PROFILE picks the selection file -p would have named', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    writeProfile(homes, 'aws', configFor(['claude-code'], ['beta']));
+    process.env.ASB_PROFILE = 'aws';
+
+    const report = await runSync();
+
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'),
+      renderedRules('claude-code', 'Beta body\n')
+    );
+    assert.equal(report.exitCode, 0);
+  });
+});
+
+test('a profile naming a file that does not exist fails the run instead of reconciling nothing', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['claude-code'], ['alpha']));
+    await runSync();
+    const target = ruleFilePath(homes, 'claude-code');
+    const distributed = fs.readFileSync(target, 'utf-8');
+
+    const expected = path.join(homes.asbHome, 'nosuch.toml');
+    for (const report of [
+      await runSync({ profile: 'nosuch' }),
+      await (async () => {
+        process.env.ASB_PROFILE = 'nosuch';
+        try {
+          return await runSync();
+        } finally {
+          delete process.env.ASB_PROFILE;
+        }
+      })(),
+    ]) {
+      const row = report.entries.find((entry) => entry.detail === 'profile-missing');
+      assert.ok(row, JSON.stringify(report.entries, null, 2));
+      assert.equal(row.outcome, 'missing');
+      assert.equal(row.id, 'nosuch');
+      assert.equal(row.path, expected);
+      assert.match(row.reason ?? '', /ASB_PROFILE/);
+      assert.equal(report.exitCode, 1);
+      assert.deepEqual(rulesEntries(report), [], 'an absent selection reconciles nothing');
+      assert.equal(fs.readFileSync(target, 'utf-8'), distributed, 'and nothing was touched');
+    }
+  });
+});
+
+test('the repository region composes only the rules user scope does not already carry', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['codex'], ['alpha']));
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[rules]\nenabled = ["alpha", "beta"]\n');
+
+    const report = await runSync({ project });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'codex'), 'utf-8'),
+      renderedRules('codex', 'First version\n'),
+      'the user phase never loads the project layer'
+    );
+    const repoRules = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8');
+    assert.equal(
+      repoRules,
+      renderedRules('codex', 'Beta body\n'),
+      'the repository carries only what it adds'
+    );
+    assert.ok(!repoRules.includes('First version'), 'agent context stops double-loading');
+
+    assert.deepEqual(
+      rulesEntries(report).map((entry) => ({ scope: entry.scope, path: entry.path })),
+      [
+        { scope: 'user', path: ruleFilePath(homes, 'codex') },
+        { scope: 'project', path: path.join(project, 'AGENTS.md') },
+      ],
+      'every row says which scope it belongs to, user rows first'
+    );
   });
 });
 

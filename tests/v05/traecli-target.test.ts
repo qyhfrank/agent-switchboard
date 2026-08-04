@@ -97,7 +97,7 @@ test('traecli MCP keeps foreign TOML content and owns its own key by identity', 
     assert.equal(parsed.model, 'gpt-5.1');
     assert.equal(parsed.mcp_servers?.foreign?.command, 'theirs');
     assert.equal(parsed.mcp_servers?.alpha?.command, 'run');
-    const [slice] = await runExplain('alpha');
+    const [slice] = (await runExplain('alpha')).slices;
     assert.equal(slice?.app, 'traecli');
     assert.equal(slice?.provenance, 'identity', 'the value under the key is the whole proof');
     assert.equal(slice?.outcome, 'unchanged');
@@ -128,13 +128,14 @@ test('project AGENTS.md keeps one marker writer with codex, gemini, opencode, an
     installApps(homes, 'codex', 'gemini', 'opencode');
     fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
     seedRule(homes, 'project.md', '# Shared rule\n');
+    seedRule(homes, 'repo.md', '# Repo rule\n');
     writeUserConfig(
       homes,
       '[applications]\nenabled = ["codex", "gemini", "opencode", "traecli"]\n\n[rules]\nenabled = ["project"]\n'
     );
     fs.writeFileSync(
       path.join(projectReal, '.asb.toml'),
-      '[distribution.project]\nmode = "managed"\ncollision = "warn-skip"\n'
+      '[distribution.project]\nmode = "managed"\ncollision = "warn-skip"\n\n[rules]\nenabled = ["project", "repo"]\n'
     );
     const agents = path.join(projectReal, 'AGENTS.md');
     fs.writeFileSync(agents, '# User instructions\n');
@@ -145,10 +146,17 @@ test('project AGENTS.md keeps one marker writer with codex, gemini, opencode, an
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(content.match(/<!-- rules:start -->/g)?.length, 1);
     assert.equal(content.match(/<!-- rules:end -->/g)?.length, 1);
-    assert.match(content, /# Shared rule/);
+    assert.match(content, /# Repo rule/);
+    assert.doesNotMatch(
+      content,
+      /# Shared rule/,
+      'the region composes the increment; the user scope already carries the rest'
+    );
     assert.match(content, /# User instructions/);
     assert.deepEqual(
-      report.entries.filter((entry) => entry.type === 'rules').map((entry) => entry.path),
+      report.entries
+        .filter((entry) => entry.scope === 'project' && entry.type === 'rules')
+        .map((entry) => entry.path),
       [agents],
       'all four contributors fold into the one region rather than writing beside it'
     );

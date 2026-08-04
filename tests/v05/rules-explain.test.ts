@@ -28,7 +28,7 @@ test('explain by component id joins every slice with owner, hashes, and desired 
     installApps(homes, 'claude-code', 'codex');
     await runSync();
 
-    const slices = await runExplain('base');
+    const { slices } = await runExplain('base');
     assert.deepEqual(slices.map((slice) => slice.app).sort(), ['claude-code', 'codex']);
     for (const slice of slices) {
       assert.equal(slice.outcome, 'unchanged');
@@ -48,11 +48,11 @@ test('explain matches app ids and path basenames to single slices', async () => 
     writeUserConfig(homes, CONFIG);
     installApps(homes, 'claude-code', 'codex');
 
-    const byApp = await runExplain('codex');
+    const { slices: byApp } = await runExplain('codex');
     assert.equal(byApp.length, 1);
     assert.equal(byApp[0].path, ruleFilePath(homes, 'codex'));
 
-    const byPath = await runExplain('CLAUDE.md');
+    const { slices: byPath } = await runExplain('CLAUDE.md');
     assert.equal(byPath.length, 1);
     assert.equal(byPath[0].app, 'claude-code');
     assert.equal(byPath[0].provenance, null, 'nothing synced yet: nothing proves the slice');
@@ -66,7 +66,7 @@ test('explain shows an enabled-but-undetected app as skipped, never invents a pl
     seedRule(homes, 'base.md', 'Always be kind.\n');
     writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n\n[rules]\nenabled = ["base"]\n');
 
-    const slices = await runExplain('cursor');
+    const { slices } = await runExplain('cursor');
     assert.equal(slices.length, 1);
     assert.equal(slices[0].outcome, 'skipped');
     assert.equal(slices[0].detail, 'app-not-installed');
@@ -74,7 +74,7 @@ test('explain shows an enabled-but-undetected app as skipped, never invents a pl
     assert.equal(slices[0].provenance, null);
     assert.equal(slices[0].desired, null);
 
-    assert.deepEqual(await runExplain('nope'), []);
+    assert.deepEqual((await runExplain('nope')).slices, []);
   });
 });
 

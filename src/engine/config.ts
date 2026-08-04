@@ -5,9 +5,10 @@ import { parse as parseToml } from '@iarna/toml';
 import { z } from 'zod';
 
 /**
- * Configuration: environment roots, the three config layers (user < profile <
- * project), strict validation with a legacy-input whitelist, and the
- * comment-preserving selection editor.
+ * Configuration: environment roots, the base selection file (`config.toml`, or
+ * a profile in its place) over the machine infrastructure `config.toml` always
+ * owns, with an optional project layer above them, strict validation with a
+ * legacy-input whitelist, and the comment-preserving selection editor.
  *
  * Frozen 0.4.35 contracts: file locations and env overrides (ASB_HOME,
  * ASB_CONFIG, ASB_AGENTS_HOME, ASB_CACHE_HOME, legacy ~/.agent-switchboard),
@@ -147,11 +148,17 @@ function migratePluginsSection(input: unknown): unknown {
     };
   }
 
-  const sources = obj.sources;
-  if (isPlainObject(sources) && !('source' in sources)) {
-    if (obj.enabled === undefined) return { ...obj, enabled: [] };
-    return input;
-  }
+  // Only a table this recognizes as 0.3 is rewritten: a modern partial
+  // `[plugins]` keeps exactly the keys its file wrote, so a layer that
+  // declares one sub-table deep-merges instead of replacing the list a lower
+  // layer selected. `sources` is the modern map itself — a member named
+  // `source` is a location entry, never a 0.3 plugin sub-table.
+  const legacy = Object.entries(obj).some(
+    ([key, value]) =>
+      (key !== 'auto_update' && typeof value === 'boolean') ||
+      (key !== 'sources' && isPlainObject(value) && 'source' in value)
+  );
+  if (!legacy) return input;
 
   const migratedSources: Record<string, unknown> = {};
   const enabled: string[] = [];
@@ -167,6 +174,10 @@ function migratePluginsSection(input: unknown): unknown {
       exclude = value;
       continue;
     }
+    if (key === 'sources' && isPlainObject(value)) {
+      preserved[key] = value;
+      continue;
+    }
     if (typeof value === 'boolean') {
       if (value) enabled.push(key);
       continue;
@@ -179,6 +190,9 @@ function migratePluginsSection(input: unknown): unknown {
     preserved[key] = value;
   }
 
+  if (isPlainObject(preserved.sources)) {
+    preserved.sources = { ...migratedSources, ...preserved.sources };
+  }
   const result: Record<string, unknown> = { sources: migratedSources, enabled, ...preserved };
   if (exclude !== undefined) result.exclude = exclude;
   return result;
@@ -625,6 +639,46 @@ function readLayer(kind: ConfigLayer['kind'], filePath: string): ConfigLayer {
   return { kind, path: filePath, exists: true, values: result.data };
 }
 
+/** Machine setup: what a selection file runs on rather than what it selects. */
+const INFRASTRUCTURE_SECTIONS: ReadonlySet<string> = new Set([
+  'targets',
+  'extensions',
+  'distribution',
+  'ui',
+]);
+const INFRASTRUCTURE_PLUGIN_KEYS: ReadonlySet<string> = new Set(['sources', 'auto_update']);
+
+/**
+ * A layer's two halves. Selection is everything a selection file replaces
+ * wholesale — the applications table with its per-app overrides, the six
+ * component sections, `[plugins].enabled` and `[plugins].exclude`.
+ * Infrastructure is the rest, and only `config.toml`'s counts: sources it
+ * declares are the only ones that ever reach the network or the machine cache.
+ */
+function splitLayer(values: ConfigLayerValues): {
+  selection: Record<string, unknown>;
+  infrastructure: Record<string, unknown>;
+} {
+  const selection: Record<string, unknown> = {};
+  const infrastructure: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) continue;
+    if (key !== 'plugins') {
+      (INFRASTRUCTURE_SECTIONS.has(key) ? infrastructure : selection)[key] = value;
+      continue;
+    }
+    const selected: Record<string, unknown> = {};
+    const machine: Record<string, unknown> = {};
+    for (const [name, item] of Object.entries(value as Record<string, unknown>)) {
+      if (item === undefined) continue;
+      (INFRASTRUCTURE_PLUGIN_KEYS.has(name) ? machine : selected)[name] = item;
+    }
+    if (Object.keys(selected).length > 0) selection.plugins = selected;
+    if (Object.keys(machine).length > 0) infrastructure.plugins = machine;
+  }
+  return { selection, infrastructure };
+}
+
 function mergeDeep(target: Record<string, unknown>, source: Record<string, unknown>): void {
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined) continue;
@@ -763,6 +817,25 @@ export function effectiveSelection(
 }
 
 /**
+ * What the overlay selects for this app and type that the base does not: the
+ * increment project scope distributes, in overlay order. The difference is
+ * taken over canonical ids, so both configs must already carry the library's
+ * expansion. An app the base does not enable holds nothing at user scope and
+ * contributes an empty base side.
+ */
+export function selectionDelta(
+  overlay: ResolvedConfig,
+  base: ResolvedConfig,
+  appId: string,
+  type: ComponentType
+): string[] {
+  const already = new Set(
+    base.apps.enabled.includes(appId) ? effectiveSelection(base, appId, type) : []
+  );
+  return effectiveSelection(overlay, appId, type).filter((id) => !already.has(id));
+}
+
+/**
  * Every plugin the enabled apps point at, whether by naming the plugin or by
  * enabling one of its components. A component ref carries its plugin as a
  * prefix, so the second channel is a lookup through the same aliases rather
@@ -831,10 +904,14 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
   const env = opts.env ?? process.env;
   const homes = resolveHomes(env);
 
-  const layers: ConfigLayer[] = [readLayer('user', userConfigPath(homes, env))];
-
+  // A profile is a whole selection file, not an overlay: it stands in for the
+  // user config's selection for the run instead of merging over it.
   const profileName = opts.profile?.trim() || env.ASB_PROFILE?.trim() || null;
-  if (profileName) layers.push(readLayer('profile', profileConfigPath(homes, profileName)));
+  const userLayer = readLayer('user', userConfigPath(homes, env));
+  const profileLayer = profileName
+    ? readLayer('profile', profileConfigPath(homes, profileName))
+    : null;
+  const layers: ConfigLayer[] = [userLayer, ...(profileLayer ? [profileLayer] : [])];
 
   let projectRoot: string | null = null;
   if (opts.project) {
@@ -845,10 +922,27 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
       throw new ConfigError(`Project root does not exist or cannot be resolved: ${requested}`);
     }
   }
-  if (projectRoot) layers.push(readLayer('project', projectConfigPath(projectRoot)));
+  const projectLayer = projectRoot ? readLayer('project', projectConfigPath(projectRoot)) : null;
+  if (projectLayer) layers.push(projectLayer);
 
+  // Selection from the active file alone, infrastructure from `config.toml`
+  // always: a profile stays a selection file instead of a copy of the machine
+  // setup. The project layer then stacks over that base with the frozen 0.4
+  // merge, and the two views one run reconciles are this call with and
+  // without a project root.
   const merged: Record<string, unknown> = {};
-  for (const layer of layers) mergeDeep(merged, layer.values as Record<string, unknown>);
+  mergeDeep(merged, splitLayer((profileLayer ?? userLayer).values).selection);
+  mergeDeep(merged, splitLayer(userLayer.values).infrastructure);
+  if (projectLayer) {
+    const { selection, infrastructure } = splitLayer(projectLayer.values);
+    // `[targets]`, `[extensions]`, `[distribution]` and `[ui]` are a
+    // repository's to set; plugin sources are not, so `plugins.sources` names
+    // the machine's own in every scope and no repository declaration reaches
+    // the catalog a selection resolves against.
+    delete infrastructure.plugins;
+    mergeDeep(merged, selection);
+    mergeDeep(merged, infrastructure);
+  }
 
   const section = (name: string): Record<string, unknown> =>
     isPlainObject(merged[name]) ? (merged[name] as Record<string, unknown>) : {};
@@ -1186,9 +1280,10 @@ export interface EditSourceOptions {
 }
 
 /**
- * Write or remove one `[plugins.sources]` declaration by splicing the user
- * config, so every unrelated comment and commented-out line survives. The
- * result is re-parsed before it replaces the original.
+ * Write or remove one `[plugins.sources]` declaration by splicing
+ * `config.toml`, which owns sources in every run, so every unrelated comment
+ * and commented-out line survives. The result is re-parsed before it replaces
+ * the original.
  */
 export function editSourceDeclaration(options: EditSourceOptions): void {
   const env = options.env ?? process.env;

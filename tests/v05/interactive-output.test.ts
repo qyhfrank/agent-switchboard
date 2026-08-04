@@ -54,6 +54,7 @@ const UPDATED_CLAUDE: ReportEntry = {
   path: CLAUDE_MD,
   outcome: 'written',
   detail: 'updated',
+  scope: 'user',
 };
 
 /** The shape `sourceRow` emits for an enabled source whose content is absent. */
@@ -64,6 +65,7 @@ const MISSING_SOURCE: ReportEntry = {
   path: RL_HARNESS,
   outcome: 'missing',
   reason: `enabled but its source content is not there; expected ${RL_HARNESS}`,
+  scope: 'user',
 };
 
 const removedRows = (app: string): ReportEntry[] =>
@@ -73,6 +75,7 @@ const removedRows = (app: string): ReportEntry[] =>
     id,
     path: path.join(HOME, '.claude', 'plugins', id),
     outcome: 'removed' as const,
+    scope: 'user' as const,
   }));
 
 const unchangedRows = (count: number, apps: readonly string[]): ReportEntry[] =>
@@ -82,6 +85,7 @@ const unchangedRows = (count: number, apps: readonly string[]): ReportEntry[] =>
     id: `component-${index}`,
     path: path.join(HOME, '.asb', 'rules', `component-${index}.md`),
     outcome: 'unchanged' as const,
+    scope: 'user' as const,
   }));
 
 const BUSY_SYNC = buildReport(PROFILE_SCOPE, [
@@ -332,6 +336,7 @@ const LEFT_BEHIND: ReportEntry = {
   path: path.join(HOME, '.cursor', 'rules', 'legacy-rule.mdc'),
   outcome: 'left-behind',
   reason: 'nothing proves asb wrote it, so it stays where it is',
+  scope: 'user',
 };
 
 const failingRow = (outcome: 'blocked' | 'conflict'): ReportEntry => ({
@@ -341,6 +346,7 @@ const failingRow = (outcome: 'blocked' | 'conflict'): ReportEntry => ({
   path: path.join(HOME, '.codex', 'AGENTS.md'),
   outcome,
   reason: 'the target holds content asb did not write',
+  scope: 'user',
 });
 
 test('glyphs carry severity on their own and the verdict follows the exit code', () => {
@@ -379,7 +385,14 @@ test('the summary line carries the severity of the worst thing in it', () => {
 
 /** What `planCatalogStatus` emits: catalog rows belong to no app. */
 const CATALOG_ROWS: ReportEntry[] = [
-  { app: null, type: 'plugins', id: 'lark-cli', path: null, outcome: 'unchanged' },
+  {
+    app: null,
+    type: 'plugins',
+    id: 'lark-cli',
+    path: null,
+    outcome: 'unchanged',
+    scope: 'user',
+  },
   {
     app: null,
     type: 'plugins',
@@ -387,6 +400,7 @@ const CATALOG_ROWS: ReportEntry[] = [
     path: null,
     outcome: 'skipped',
     detail: 'unselected',
+    scope: 'user',
   },
   {
     app: null,
@@ -395,6 +409,7 @@ const CATALOG_ROWS: ReportEntry[] = [
     path: null,
     outcome: 'skipped',
     detail: 'unselected',
+    scope: 'user',
   },
 ];
 
@@ -416,6 +431,7 @@ test('a quiet report that is not app components in sync keeps its counts', () =>
       path: null,
       outcome: 'skipped',
       detail: 'app-not-installed',
+      scope: 'user',
     },
   ]);
   assert.equal(
@@ -484,6 +500,7 @@ test('one error in two component types stays two rows', () => {
     path: custom,
     outcome: 'failed',
     reason: `cannot read ${custom}`,
+    scope: 'user',
   });
 
   const report = buildReport(PROFILE_SCOPE, [

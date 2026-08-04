@@ -553,7 +553,7 @@ test('one poisoned host does not take sync, status and explain down with it', as
       preview.entries.some((entry) => entry.app === 'codex'),
       true
     );
-    const slices = await runExplain('alpha');
+    const { slices } = await runExplain('alpha');
     assert.equal(
       slices.some((slice) => slice.app === 'codex'),
       true

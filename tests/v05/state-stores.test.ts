@@ -30,11 +30,29 @@ function skillDoc(name: string): string {
   return `---\nname: ${name}\ndescription: ${name} does a thing\n---\n\nBody of ${name}.\n`;
 }
 
-function seedSource(homes: ScratchHomes, namespace: string, files: Record<string, string>): void {
+function seedSource(
+  homes: ScratchHomes,
+  namespace: string,
+  files: Record<string, string>,
+  parent = path.join(homes.asbHome, 'plugins')
+): string {
+  const root = path.join(parent, namespace);
   for (const [relative, content] of Object.entries(files)) {
-    const filePath = path.join(homes.asbHome, 'plugins', namespace, relative);
+    const filePath = path.join(root, relative);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, content, 'utf-8');
+  }
+  return root;
+}
+
+/** Run a body with the process rooted in `dir`, whatever it throws. */
+async function inCwd<T>(dir: string, body: () => Promise<T>): Promise<T> {
+  const previous = process.cwd();
+  process.chdir(dir);
+  try {
+    return await body();
+  } finally {
+    process.chdir(previous);
   }
 }
 
@@ -80,34 +98,31 @@ test('a sync clears the stores an earlier version wrote and leaves only run stat
   });
 });
 
-test('a project run writes nothing to the machine state directory', async () => {
+test('the project phase records nothing beside the marker every run leaves', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'repo');
-    fs.mkdirSync(path.join(project, '.git'), { recursive: true });
+    fs.mkdirSync(project, { recursive: true });
     installApps(homes, 'claude-code');
     seedRule(homes, 'alpha.md', 'Be kind.\n');
+    seedRule(homes, 'repo.md', 'Repo only.\n');
     writeUserConfig(
       homes,
-      [
-        '[applications]',
-        'enabled = ["claude-code"]',
-        '',
-        '[rules]',
-        'enabled = ["alpha"]',
-        '',
-        '[distribution.project]',
-        'mode = "managed"',
-        '',
-      ].join('\n')
+      '[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["alpha"]\n'
     );
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[rules]\nenabled = ["alpha", "repo"]\n');
 
     const report = await runSync({ project });
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(
-      fs.existsSync(homes.stateHome) && fs.readdirSync(homes.stateHome).length > 0,
-      false,
-      'a repository run proves itself from the repository, not from this machine'
+    assert.match(
+      fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'),
+      /Repo only/,
+      'the increment reached the repository'
+    );
+    assert.deepEqual(
+      fs.readdirSync(homes.stateHome).sort(),
+      ['last-run.json'],
+      'the user phase stamps the run; the project phase adds no record of what it put in a repository'
     );
     assert.equal(fs.existsSync(path.join(homes.asbHome, 'state', 'manifests')), false);
   });
@@ -157,6 +172,216 @@ test('removing a source takes what it distributed in the same run', async () => 
       /team/,
       'the declaration and both selections are out of the config'
     );
+  });
+});
+
+test('removing a source takes the slices it put in the named project too', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        '',
+      ].join('\n')
+    );
+    // An app the base does not enable holds nothing at user scope, so its
+    // whole selection is increment and lands at project destinations. The
+    // machine carries no cursor install, so retirement has no inactive app to
+    // hold the source back for.
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[applications]\nenabled = ["claude-code", "cursor"]\nassume_installed = ["cursor"]\n'
+    );
+
+    await runSync({ project });
+    const machine = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    const inRepo = path.join(project, '.cursor', 'skills', 'team:deploy');
+    assert.ok(fs.existsSync(machine), 'the source distributed at user scope');
+    assert.ok(fs.existsSync(inRepo), 'and into the repository the run named');
+
+    const report = await runRemoveSource('team', { project });
+
+    // The sweep is unfiltered and inherits both phases, so the repository is
+    // cleared while the library entry can still prove the tree is asb's.
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.existsSync(machine), false);
+    assert.equal(fs.existsSync(inRepo), false);
+  });
+});
+
+/**
+ * The sweep behind `asb remove` inherits both phases, and the ids it is
+ * taking are wanted in neither: the repository's `.asb.toml` is not asb's to
+ * edit, so what stops its copy from being written back — or from being
+ * stranded past the library entry that proves it — is that the retirement
+ * names those ids for both phases at once.
+ */
+test('removing a source reaches the repository copy in the same ambient run', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    installApps(homes, 'claude-code');
+    // Outside <asbHome>/plugins: there, dropping the declaration is what makes
+    // the namespace stop resolving, while a directory under it stays
+    // discoverable by its presence alone.
+    const vendor = seedSource(
+      homes,
+      'x',
+      { 'skills/foo/SKILL.md': skillDoc('foo') },
+      path.join(homes.root, 'vendor')
+    );
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[plugins.sources]',
+        `x = ${JSON.stringify(vendor)}`,
+        '',
+      ].join('\n')
+    );
+    // Only the repository selects it, so the machine never holds a copy.
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[skills]\nenabled = ["x:foo"]\n');
+    const inRepo = path.join(project, '.claude', 'skills', 'x:foo');
+    const configPath = path.join(homes.asbHome, 'config.toml');
+
+    await inCwd(project, async () => {
+      assert.equal((await runSync()).exitCode, 0);
+      assert.ok(fs.existsSync(inRepo), 'the increment reached the repository');
+
+      const report = await runRemoveSource('x');
+
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+      assert.equal(fs.existsSync(inRepo), false, 'and left with the source that proved it');
+      assert.equal(fs.readFileSync(configPath, 'utf-8').includes(vendor), false);
+      // The sweep reconciled this repository, so the report names it.
+      assert.equal(report.scope.project, project);
+
+      // The repository's file still names the id, which is correct: the next
+      // run is where a selection nothing can render says so.
+      const after = await runSync();
+      assert.ok(
+        after.entries.some((entry) => entry.id === 'x:foo' && entry.outcome === 'missing'),
+        JSON.stringify(after.entries, null, 2)
+      );
+    });
+  });
+});
+
+test('removing a source never writes a fresh repository copy of what it takes', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    installApps(homes, 'claude-code');
+    const vendor = seedSource(
+      homes,
+      'x',
+      { 'skills/foo/SKILL.md': skillDoc('foo') },
+      path.join(homes.root, 'vendor')
+    );
+    // Both levels select it, so the increment is empty and the repository
+    // holds nothing — until a sweep that subtracts the retiring ids from one
+    // phase only recomputes the increment as if the machine never wanted it.
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["x:foo"]',
+        '',
+        '[plugins.sources]',
+        `x = ${JSON.stringify(vendor)}`,
+        '',
+      ].join('\n')
+    );
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[skills]\nenabled = ["x:foo"]\n');
+    const machine = path.join(skillsParentDir(homes, 'claude-code'), 'x:foo');
+    const inRepo = path.join(project, '.claude', 'skills', 'x:foo');
+
+    await inCwd(project, async () => {
+      assert.equal((await runSync()).exitCode, 0);
+      assert.ok(fs.existsSync(machine));
+      assert.equal(fs.existsSync(inRepo), false, 'nothing the machine already carries is copied');
+
+      const report = await runRemoveSource('x');
+
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+      assert.equal(fs.existsSync(machine), false);
+      assert.equal(fs.existsSync(inRepo), false, 'and no copy appears on the way out');
+    });
+  });
+});
+
+test('a source outlives a project preflight that suppressed its sweep', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    installApps(homes, 'claude-code');
+    const vendor = seedSource(
+      homes,
+      'x',
+      { 'skills/foo/SKILL.md': skillDoc('foo') },
+      path.join(homes.root, 'vendor')
+    );
+    seedSkill(homes, 'keep');
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[plugins.sources]',
+        `x = ${JSON.stringify(vendor)}`,
+        '',
+      ].join('\n')
+    );
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[distribution.project]\ncollision = "error"\n\n[skills]\nenabled = ["x:foo", "keep"]\n'
+    );
+    const inRepo = path.join(project, '.claude', 'skills', 'x:foo');
+    const unrelated = path.join(project, '.claude', 'skills', 'keep');
+    const configPath = path.join(homes.asbHome, 'config.toml');
+
+    assert.equal((await runSync({ project })).exitCode, 0);
+    assert.ok(fs.existsSync(inRepo), 'the increment reached the repository');
+
+    // An unrelated repository copy stops being the render, and `collision =
+    // "error"` answers that by suppressing every project write in the run —
+    // the sweep's deletion of this source's copy among them.
+    fs.appendFileSync(path.join(unrelated, 'SKILL.md'), 'A line the repository added.\n');
+
+    const report = await runRemoveSource('x', { project });
+
+    assert.ok(fs.existsSync(inRepo), 'the copy the preflight refused to take is still there');
+    assert.match(
+      fs.readFileSync(configPath, 'utf-8'),
+      /\bx =/,
+      'and so is the source, which is the only thing that can still prove it'
+    );
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+
+    // Resolving the collision is the whole repair: the next run takes the copy
+    // while the library can still render it.
+    fs.rmSync(unrelated, { recursive: true });
+    const retry = await runRemoveSource('x', { project });
+
+    assert.equal(retry.exitCode, 0, JSON.stringify(retry.entries, null, 2));
+    assert.equal(fs.existsSync(inRepo), false, 'and the repository is clear');
   });
 });
 
@@ -579,7 +804,7 @@ test('explain names what proves ownership now, not what a record once said', asy
     );
     await runSync();
 
-    const proven = await runExplain('deploy');
+    const { slices: proven } = await runExplain('deploy');
     const before = proven.filter((slice) => slice.app !== null);
     assert.ok(before.length > 0, JSON.stringify(proven, null, 2));
     assert.ok(
@@ -590,7 +815,7 @@ test('explain names what proves ownership now, not what a record once said', asy
     const doc = path.join(skillsParentDir(homes, 'claude-code'), 'deploy', 'SKILL.md');
     fs.appendFileSync(doc, '\nA line the user added.\n');
 
-    const after = (await runExplain('deploy')).filter((slice) => slice.app !== null);
+    const after = (await runExplain('deploy')).slices.filter((slice) => slice.app !== null);
     assert.ok(
       after.every((slice) => slice.provenance === null),
       `an edited tree stops being provably asb’s: ${JSON.stringify(after, null, 2)}`

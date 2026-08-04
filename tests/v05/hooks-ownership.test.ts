@@ -414,7 +414,7 @@ test('explain resolves hooks by id, app, and path with a derived owner', async (
     writeUserConfig(homes, configFor(['claude-code'], ['bt', 'lint', 'ghost']));
     await runSync();
 
-    const bundleSlices = await runExplain('bt');
+    const { slices: bundleSlices } = await runExplain('bt');
     const bundle = bundleSlices.find(
       (slice) => slice.path === managedDir(homes, 'claude-code', 'bt')
     );
@@ -430,7 +430,7 @@ test('explain resolves hooks by id, app, and path with a derived owner', async (
 
     // A definition hook owns no directory; its slice is the app config.
     const settings = configPath(homes, 'claude-code');
-    const definition = (await runExplain('lint')).find((slice) => slice.path === settings);
+    const definition = (await runExplain('lint')).slices.find((slice) => slice.path === settings);
     assert.equal(definition?.app, 'claude-code');
     assert.equal(
       definition?.provenance,
@@ -439,7 +439,7 @@ test('explain resolves hooks by id, app, and path with a derived owner', async (
     );
 
     // A selected id the library lacks explains to its library row, not silence.
-    const ghost = await runExplain('ghost');
+    const { slices: ghost } = await runExplain('ghost');
     assert.equal(ghost.length, 1);
     assert.equal(ghost[0]?.app, null);
     assert.equal(ghost[0]?.outcome, 'missing');

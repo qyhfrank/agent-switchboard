@@ -12,9 +12,11 @@ import {
   loadConfig,
   mergeIncrementalSelection,
   nearestKey,
+  projectConfigPath,
   type ResolvedConfig,
   resolveHomes,
   SELECTION_TYPES,
+  selectionDelta,
   withPluginExpansion,
 } from './config.js';
 import { expandHome, type RemoteSource } from './git.js';
@@ -36,6 +38,7 @@ import {
   explainSources,
   groupKeyActions,
   type ProjectPlanPolicy,
+  pathInside,
   planAgents,
   planCatalogStatus,
   planCodexProjectTrust,
@@ -53,6 +56,7 @@ import {
   type SyncCapture,
 } from './plan.js';
 import {
+  type ActionEntry,
   buildJsonEnvelope,
   buildReport,
   FAILING_OUTCOMES,
@@ -76,11 +80,13 @@ import {
   applyBundleFiles,
   bundleFingerprint,
   hashContent,
+  isContainedIn,
   legacyDedicatedRulesPath,
   listTargetFiles,
   parseStructured,
   removeBundleSlice,
   removeManagedFile,
+  resolveWritePath,
   targetEscapesRoot,
   writeFileAtomic,
 } from './shapes.js';
@@ -105,18 +111,24 @@ import {
 
 /**
  * Command bodies. `runSync` is the one reconciliation: load → capture →
- * plan → (apply) → report. Preview is the same pipeline with the writer
- * disabled — the actions are computed once from one captured input, so
- * preview and apply cannot diverge structurally.
+ * plan → (apply) → report, run once for the machine's scope and then, when a
+ * project root is in play, once for what that repository adds over it.
+ * Preview is the same pipeline with the writer disabled — the actions are
+ * computed once from one captured input, so preview and apply cannot diverge
+ * structurally.
  */
 
 export interface SyncOptions {
   dryRun?: boolean;
   apps?: readonly string[];
   types?: readonly string[];
+  /** Selection file standing in for `config.toml` this run. */
   profile?: string;
+  /** Project root; the invocation directory's own `.asb.toml` is found without it. */
   project?: string;
   sources?: readonly string[];
+  /** Component ids a retirement is taking out; no scope wants them this run. */
+  retiring?: readonly string[];
   /** Refresh managed clones over the network before planning. */
   update?: boolean;
   /** Explicit suppression, including of `[plugins].auto_update`. */
@@ -128,11 +140,39 @@ export interface SyncOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/**
+ * Containment for one declared target. A row rooted in the repository answers
+ * the project phase's only question — does the write land inside it — so on
+ * top of the parent-chain rule it is also measured on the path the write
+ * resolves to: a leaf symlinked out of the tree is an escape, not the
+ * write-through the user scope allows, a parent chain that leaves the
+ * tree stays an escape even when the leaf loops back in, and a write
+ * landing on one of the machine's own resolved surfaces is an escape
+ * however the row reached it. Rows rooted elsewhere (the machine's Codex
+ * trust host) keep the parent-chain rule alone.
+ */
+function escapesRoot(root: string, targetPath: string, project?: ProjectGuard): boolean {
+  if (targetEscapesRoot(root, targetPath)) return true;
+  if (project === undefined || !pathInside(project.root, path.resolve(root))) {
+    return false;
+  }
+  if (!project.complete) return true;
+  const resolved = locateWrite(targetPath);
+  // Unresolvable (a link cycle in the chain): not provably contained.
+  if (resolved === null) return true;
+  return (
+    !isContainedIn(project.root, resolved) ||
+    project.surfaces.some((surface) => pathInside(surface, resolved))
+  );
+}
+
 function captureFor(
-  config: ReturnType<typeof loadConfig>,
+  config: ResolvedConfig,
   table: readonly AppRow[],
   inventory: LibraryInventory,
-  allApps = false
+  selection: (appId: string, type: ComponentType) => string[],
+  allApps = false,
+  project?: ProjectGuard
 ): SyncCapture {
   const capture: SyncCapture = {
     installed: {},
@@ -147,7 +187,7 @@ function captureFor(
 
   const captureFile = (root: string, targetPath: string): void => {
     if (capture.targets[targetPath]) return;
-    const escapes = targetEscapesRoot(root, targetPath);
+    const escapes = escapesRoot(root, targetPath, project);
     try {
       capture.targets[targetPath] = {
         exists: true,
@@ -187,7 +227,7 @@ function captureFor(
       const root = row.root(config.homes);
       const dir = row.dir(config.homes);
       const ids = new Set([
-        ...effectiveSelection(config, appId, type),
+        ...selection(appId, type),
         ...inventory.components
           .filter((component) => component.type === type)
           .map((component) => component.id),
@@ -230,12 +270,12 @@ function captureFor(
     }
     capture.bundleDirs[row.dir] = present;
 
-    const selected = row.app === 'agents' ? [] : effectiveSelection(config, row.app, 'skills');
+    const selected = row.app === 'agents' ? [] : selection(row.app, 'skills');
     const unionSelected =
       row.app === 'agents'
         ? AGENTS_SKILLS_UNION.members
             .filter((member) => config.apps.enabled.includes(member))
-            .flatMap((member) => effectiveSelection(config, member, 'skills'))
+            .flatMap((member) => selection(member, 'skills'))
         : [];
     const candidates = new Set(
       [...selected, ...unionSelected, ...present].filter(
@@ -245,7 +285,7 @@ function captureFor(
     for (const id of candidates) {
       const bundlePath = path.join(row.dir, id);
       if (capture.bundles[bundlePath]) continue;
-      const escapes = targetEscapesRoot(row.root, bundlePath);
+      const escapes = escapesRoot(row.root, bundlePath, project);
       const exists = fs.existsSync(bundlePath);
       capture.bundles[bundlePath] = {
         exists,
@@ -317,7 +357,7 @@ function captureFor(
               exists,
               files: exists ? listTargetFiles(legacyPath) : null,
               fingerprint: exists ? (bundleFingerprint(legacyPath) ?? null) : null,
-              escapes: targetEscapesRoot(opencode.skills.root(config.homes), legacyPath),
+              escapes: escapesRoot(opencode.skills.root(config.homes), legacyPath, project),
             };
             scan.entries.push({
               type: 'skills',
@@ -348,7 +388,7 @@ function captureFor(
       exists: fs.existsSync(configPath),
       content: null,
       config: {},
-      escapes: targetEscapesRoot(root, configPath),
+      escapes: escapesRoot(root, configPath, project),
     };
     if (captured.exists) {
       try {
@@ -369,7 +409,7 @@ function captureFor(
     // each one is measured whether it is selected or not: that is what tells
     // a tree asb wrote from one it did not.
     const claimable = new Set([
-      ...effectiveSelection(config, appId, 'hooks'),
+      ...selection(appId, 'hooks'),
       ...inventory.components
         .filter((component) => component.type === 'hooks' && component.files !== undefined)
         .map((component) => component.id),
@@ -382,7 +422,7 @@ function captureFor(
         exists,
         files: exists ? listTargetFiles(bundlePath) : null,
         fingerprint: exists ? (bundleFingerprint(bundlePath) ?? null) : null,
-        escapes: targetEscapesRoot(root, bundlePath),
+        escapes: escapesRoot(root, bundlePath, project),
       };
     }
   }
@@ -407,7 +447,7 @@ function captureFor(
       content: null,
       root: {},
       tables: [],
-      escapes: targetEscapesRoot(row.root(config.homes), hostPath),
+      escapes: escapesRoot(row.root(config.homes), hostPath, project),
     };
     if (captured.exists) {
       try {
@@ -434,7 +474,7 @@ function captureFor(
       content: null,
       root: {},
       tables: [],
-      escapes: targetEscapesRoot(root, hostPath),
+      escapes: escapesRoot(root, hostPath, project),
     };
     if (captured.exists) {
       try {
@@ -455,8 +495,8 @@ function captureFor(
   return capture;
 }
 
-function toEntry(action: Action): ReportEntry {
-  const entry: ReportEntry = {
+function toEntry(action: Action): ActionEntry {
+  const entry: ActionEntry = {
     app: action.app,
     type: action.type,
     id: action.id,
@@ -468,7 +508,7 @@ function toEntry(action: Action): ReportEntry {
   return entry;
 }
 
-export function executeAction(action: Action): ReportEntry {
+export function executeAction(action: Action, project?: ProjectGuard): ActionEntry {
   // Native rows own no file: the manager's own verbs are the apply, and its
   // reported state is the proof.
   if (action.native) {
@@ -490,8 +530,8 @@ export function executeAction(action: Action): ReportEntry {
       outcome: 'blocked' | 'conflict' | 'left-behind' | 'failed',
       detail: string | undefined,
       reason: string
-    ): ReportEntry => {
-      const entry: ReportEntry = {
+    ): ActionEntry => {
+      const entry: ActionEntry = {
         app: action.app,
         type: action.type,
         id: action.id,
@@ -512,7 +552,7 @@ export function executeAction(action: Action): ReportEntry {
         'action carries no containment root; not touching it'
       );
     }
-    if (targetEscapesRoot(action.root, action.path)) {
+    if (escapesRoot(action.root, action.path, project)) {
       return failure(
         'blocked',
         'path-escape',
@@ -615,9 +655,9 @@ const NO_FAILURES: ReadonlySet<string> = new Set();
 
 function reconcile(
   actions: readonly Action[],
-  run: (action: Action) => ReportEntry
-): ReportEntry[] {
-  const entries: ReportEntry[] = [];
+  run: (action: Action) => ActionEntry
+): ActionEntry[] {
+  const entries: ActionEntry[] = [];
   const failed = new Map<string, Set<string>>();
   const failedPaths = new Set<string>();
 
@@ -701,7 +741,11 @@ function isComponentType(value: string | null): value is ComponentType {
   return value !== null && (SELECTION_TYPES as readonly string[]).includes(value);
 }
 
-function statusActionMatchesId(action: Action, glob: string, config: ResolvedConfig): boolean {
+function statusActionMatchesId(
+  action: Action,
+  glob: string,
+  selection: (appId: string, type: ComponentType) => string[]
+): boolean {
   if (action.id !== null) return matchesIdGlob(action.id, glob);
   if (
     action.app === null ||
@@ -711,7 +755,7 @@ function statusActionMatchesId(action: Action, glob: string, config: ResolvedCon
   ) {
     return false;
   }
-  return effectiveSelection(config, action.app, action.type).some((id) => matchesIdGlob(id, glob));
+  return selection(action.app, action.type).some((id) => matchesIdGlob(id, glob));
 }
 
 /**
@@ -768,30 +812,450 @@ function extensionCutoverWarning(asbHome: string): Action[] {
   ];
 }
 
+/** Resolve through symlinks where possible; an absent path is its own answer. */
+function canonical(target: string): string {
+  try {
+    return fs.realpathSync(target);
+  } catch {
+    return path.resolve(target);
+  }
+}
+
+/**
+ * `[plugins.sources]` outside `config.toml` is inert: the machine's own
+ * configuration is the only one that can put a source on this machine, so a
+ * profile's or a repository's declaration is reported and never cloned,
+ * refreshed, or resolved. Its ids resolve against the machine's library like
+ * any other. A declaration repeating `config.toml`'s own is reported too: it
+ * is inert all the same, and the operator reads where the namespace resolves
+ * from the row. Only one physical file read as two layers has nothing to say.
+ */
+function inertSources(config: ResolvedConfig, kind: 'profile' | 'project'): Action[] {
+  const layer = config.layers.find((candidate) => candidate.kind === kind);
+  const machine = config.layers.find((candidate) => candidate.kind === 'user');
+  if (!layer || !machine || canonical(layer.path) === canonical(machine.path)) return [];
+  return Object.entries(layer.values.plugins?.sources ?? {}).map(([namespace]) => ({
+    app: null,
+    type: null,
+    id: namespace,
+    path: layer.path,
+    op: 'none' as const,
+    outcome: 'skipped' as const,
+    detail: `${kind}-source`,
+    reason: `declared in ${kind === 'profile' ? 'this profile' : 'the project layer'}; sources live in ${machine.path} only, so nothing was cloned or resolved from it`,
+  }));
+}
+
+/**
+ * `-p`/`ASB_PROFILE` names the file the run reads its selection from, so a
+ * name with no file behind it reconciles against nothing at all. An empty
+ * report reads as a healthy no-op, which is the one thing this run is not.
+ * A missing `config.toml` is left alone: that is a machine with no selection
+ * yet, not a name that resolved to nothing.
+ */
+function missingProfile(config: ResolvedConfig): Action[] {
+  const layer = config.layers.find((candidate) => candidate.kind === 'profile');
+  if (!layer || layer.exists) return [];
+  return [
+    {
+      app: null,
+      type: null,
+      id: config.profile,
+      path: layer.path,
+      op: 'none',
+      outcome: 'missing',
+      detail: 'profile-missing',
+      reason: `no selection file at ${layer.path}; create it, or check the name given to -p / ASB_PROFILE`,
+    },
+  ];
+}
+
+/**
+ * A profile that exists and enables no applications reconciles nothing.
+ * Without the row that is indistinguishable from a run with nothing left to
+ * do, and a profile is a file the run was told to read. `config.toml` enabling
+ * nothing is that same empty run, and has always reported as one.
+ */
+function idleSelection(config: ResolvedConfig): Action[] {
+  if (config.profile === null || config.apps.enabled.length > 0) return [];
+  const layer = config.layers.find((candidate) => candidate.kind === 'profile');
+  if (!layer?.exists) return [];
+  return [
+    {
+      app: null,
+      type: null,
+      id: null,
+      path: layer.path,
+      op: 'none',
+      outcome: 'skipped',
+      detail: 'no-applications',
+      reason:
+        'this selection file enables no applications, so the run reconciles nothing; list them under [applications] enabled',
+    },
+  ];
+}
+
+/**
+ * A cell with no project destination cannot host an increment: the repository
+ * asked for content the project table has nowhere to put, so the gap is a row
+ * rather than a silent drop.
+ */
+function unhostedIncrements(
+  config: ResolvedConfig,
+  table: readonly AppRow[],
+  selection: (appId: string, type: ComponentType) => string[]
+): Action[] {
+  const actions: Action[] = [];
+  for (const appId of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === appId);
+    if (!row) continue;
+    for (const type of SELECTION_TYPES) {
+      if (row[type] !== undefined) continue;
+      const ids = selection(appId, type);
+      if (ids.length === 0) continue;
+      actions.push({
+        app: appId,
+        type,
+        id: null,
+        path: null,
+        op: 'none',
+        outcome: 'skipped',
+        detail: 'no-project-target',
+        reason: `${appId} has no project destination for ${type}; ${ids.join(', ')} reached no repository target`,
+      });
+    }
+  }
+  return actions;
+}
+
+/** resolveWritePath, with a link cycle resolving nowhere. */
+function locateWrite(target: string): string | null {
+  try {
+    return resolveWritePath(target);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The machine's own declared write surfaces for the rows given: files, and
+ * managed parents. Which rows count is the caller's question — the refusal
+ * scan speaks for the apps this run syncs, while the guard covers every row,
+ * because a disabled app's dormant config is still the machine's file.
+ */
+function userSurfaces(
+  base: ResolvedConfig,
+  rows: readonly AppRow[],
+  union: boolean
+): { leaves: { what: string; dir: string }[]; dirs: string[]; complete: boolean } {
+  let complete = true;
+  const children = (dir: string): string[] => {
+    try {
+      return fs.readdirSync(dir).map((name) => path.join(dir, name));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') complete = false;
+      return [];
+    }
+  };
+  const leaves: { what: string; dir: string }[] = [];
+  const dirs: string[] = [];
+  for (const row of rows) {
+    const paths: string[] = [];
+    if (row.rules) {
+      const targetPath = row.rules.path(base.homes);
+      paths.push(targetPath);
+      if (row.rules.dedicated) paths.push(legacyDedicatedRulesPath(targetPath));
+    }
+    if (row.mcp) paths.push(...(row.mcp.paths?.(base.homes) ?? [row.mcp.path(base.homes)]));
+    if (row.hooks) {
+      const bundleDir = row.hooks.bundleDir(base.homes);
+      dirs.push(bundleDir);
+      paths.push(row.hooks.path(base.homes), ...children(bundleDir));
+    }
+    for (const type of ['commands', 'agents'] as const) {
+      const entry = row[type];
+      if (!entry) continue;
+      const dir = entry.dir(base.homes);
+      dirs.push(dir);
+      paths.push(...children(dir));
+      if (row.id === 'opencode') {
+        const legacyDir = path.join(path.dirname(dir), type === 'commands' ? 'command' : 'agent');
+        dirs.push(legacyDir);
+        paths.push(...children(legacyDir));
+      }
+      if (entry.config) paths.push(entry.config.path(base.homes));
+    }
+    if (row.skills) {
+      const dir = row.skills.dir(base.homes);
+      dirs.push(dir);
+      paths.push(...children(dir));
+      if (row.id === 'opencode') {
+        const legacyDir = path.join(path.dirname(dir), 'skill');
+        dirs.push(legacyDir);
+        paths.push(...children(legacyDir));
+      }
+    }
+    for (const leaf of paths) leaves.push({ what: `a ${row.id} user file`, dir: leaf });
+  }
+  if (union) {
+    const dir = AGENTS_SKILLS_UNION.dir(base.homes);
+    dirs.push(dir);
+    for (const leaf of children(dir)) {
+      leaves.push({ what: 'a shared agents skill', dir: leaf });
+    }
+  }
+  return { leaves, dirs, complete };
+}
+
+/**
+ * What the project phase must never touch: its containment root, plus the
+ * resolved write locations of the machine's own configuration. Enumerating
+ * project cells cannot be complete — cleanup reaches disabled apps and a
+ * project leaf link redirects within the repository — so every project-phase
+ * target is also measured against these at its own write location.
+ */
+export interface ProjectGuard {
+  root: string;
+  surfaces: readonly string[];
+  complete: boolean;
+}
+
+function projectGuard(
+  base: ResolvedConfig,
+  userTable: readonly AppRow[],
+  root: string
+): ProjectGuard {
+  const { leaves, dirs, complete: enumerationComplete } = userSurfaces(base, userTable, true);
+  let complete = enumerationComplete;
+  const locateSurface = (target: string): string | null => {
+    try {
+      fs.realpathSync(target);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ELOOP' && code !== 'ENOENT' && code !== 'ENOTDIR') {
+        complete = false;
+      }
+    }
+    try {
+      return resolveWritePath(target);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code !== 'ELOOP' &&
+        code !== 'ENOENT' &&
+        code !== 'ENOTDIR' &&
+        !(error instanceof Error && error.message.startsWith('ELOOP:'))
+      ) {
+        complete = false;
+      }
+      return null;
+    }
+  };
+  const surfaces = [...leaves.map(({ dir }) => dir), ...dirs].flatMap(
+    (target) => locateSurface(target) ?? []
+  );
+  return {
+    root,
+    surfaces,
+    complete,
+  };
+}
+
+/**
+ * A user-scope leaf symlink is written through (Mackup), so a leaf whose
+ * write location is a managed project destination hands the project phase the
+ * user phase's own bytes as removable renders. Parent-chain links already
+ * block as escapes and directory aliases match the root candidates; a leaf
+ * link onto a project cell is the remaining static overlap. Both sides
+ * resolve with the write path's own rule — dangling links followed, missing
+ * tails lexical — so the scan sees exactly what a write would touch. A leaf
+ * resolving elsewhere in the repository collides with nothing the project
+ * phase manages and keeps both phases.
+ */
+function userLeafOnProjectCell(
+  base: ResolvedConfig,
+  userTable: readonly AppRow[],
+  overlay: ResolvedConfig,
+  overlayTable: readonly AppRow[]
+): { what: string; dir: string } | null {
+  const root = overlay.project as string;
+  const cells: string[] = [];
+  for (const row of overlayTable) {
+    if (!overlay.apps.enabled.includes(row.id)) continue;
+    if (row.rules?.projectPath) cells.push(row.rules.projectPath(root));
+    for (const type of ['commands', 'agents'] as const) {
+      const dir = row[type]?.projectDir?.(root);
+      if (dir) cells.push(dir);
+    }
+    if (row.skills?.projectDir) cells.push(row.skills.projectDir(root));
+    if (row.hooks?.projectPath) cells.push(row.hooks.projectPath(root));
+    if (row.hooks?.projectBundleDir) cells.push(row.hooks.projectBundleDir(root));
+    if (row.mcp?.projectPath) cells.push(row.mcp.projectPath(root));
+  }
+  if (AGENTS_SKILLS_UNION.participates(overlay.apps.enabled)) {
+    cells.push(AGENTS_SKILLS_UNION.dir(base.homes, root));
+  }
+  // A cell resolving out of the repository is the outward alias the project
+  // phase already blocks per row; only cells that stay inside can overlap.
+  const resolvedCells = cells.flatMap((cell) => {
+    const real = locateWrite(cell);
+    return real !== null && pathInside(root, real) ? real : [];
+  });
+
+  const enabledRows = userTable.filter((row) => base.apps.enabled.includes(row.id));
+  return (
+    userSurfaces(
+      base,
+      enabledRows,
+      AGENTS_SKILLS_UNION.participates(base.apps.enabled)
+    ).leaves.find(({ dir }) => {
+      const real = locateWrite(dir);
+      return real !== null && resolvedCells.some((cell) => pathInside(cell, real));
+    }) ?? null
+  );
+}
+
+/**
+ * The two views one run reconciles: the base selection file, and that file
+ * with the project's own `.asb.toml` over it. `-P` names the project root;
+ * otherwise the invocation directory's own `.asb.toml` names it, and only that
+ * directory — a subdirectory of a repository is not the repository.
+ */
+function resolveScopes(
+  opts: SyncOptions,
+  env: NodeJS.ProcessEnv
+): {
+  base: ResolvedConfig;
+  overlay: ResolvedConfig | null;
+  userTable: readonly AppRow[];
+  supersetTable: readonly AppRow[];
+  projectTable: readonly AppRow[];
+  project: ProjectPlanPolicy | undefined;
+  /** User-scope rows the run earns before any phase plans. */
+  notices: Action[];
+} {
+  const projectRoot =
+    opts.project ??
+    (fs.existsSync(path.join(process.cwd(), '.asb.toml')) ? process.cwd() : undefined);
+  const base = loadConfig({ profile: opts.profile, env });
+  const notices: Action[] = inertSources(base, 'profile');
+
+  // The user phase never loads the project layer, so a `.asb.toml` that
+  // replaces a list can never rewrite a global target, whatever directory the
+  // run happens from.
+  const userTable = appRows(base);
+
+  // A repository the run only found by looking costs the project phase when
+  // its layer is unusable, never the machine's own reconciliation: the row
+  // carries what the loader said and the user phase still reconciles. Under
+  // `-P` the root is the caller's own instruction, so the error is the answer.
+  let overlay: ResolvedConfig | null = null;
+  let overlayTable = userTable;
+  if (projectRoot) {
+    try {
+      overlay = loadConfig({ profile: opts.profile, project: projectRoot, env });
+      overlayTable = appRows(overlay);
+    } catch (error) {
+      if (opts.project !== undefined || !(error instanceof ConfigError)) throw error;
+      overlay = null;
+      notices.push({
+        app: null,
+        type: null,
+        id: null,
+        path: projectConfigPath(projectRoot),
+        op: 'none',
+        outcome: 'failed',
+        detail: 'project-config',
+        reason: `${error.message}; no project phase ran`,
+      });
+    }
+  }
+
+  // Two scopes writing one physical tree would let the project phase treat the
+  // fresh user-phase writes under it as removable renders, so a root that
+  // holds the agents home — or holds one enabled app's own directory, aliased
+  // into it — is refused whole and the report says so.
+  if (overlay?.project) {
+    const root = overlay.project;
+    const held = [
+      { what: 'the agents home', dir: base.homes.agentsHome },
+      // The union row writes under a root no single app row declares.
+      ...(AGENTS_SKILLS_UNION.participates(base.apps.enabled)
+        ? [{ what: 'the shared agents directory', dir: AGENTS_SKILLS_UNION.root(base.homes) }]
+        : []),
+      ...userTable
+        .filter((row) => base.apps.enabled.includes(row.id))
+        .flatMap((row) =>
+          [
+            // Detection and writing may live apart (Trae detects in the
+            // vendor data dir, writes under ~/.trae), so every declared
+            // containment root counts, not the detection heuristic alone.
+            row.detectDir(base.homes),
+            ...(['rules', 'commands', 'agents', 'skills', 'hooks', 'mcp'] as const).flatMap(
+              (type) => row[type]?.root(base.homes) ?? []
+            ),
+          ].map((dir) => ({ what: `${row.id}'s own directory`, dir }))
+        ),
+    ].find((candidate) => pathInside(root, canonical(candidate.dir)));
+    const overlap = held ?? userLeafOnProjectCell(base, userTable, overlay, overlayTable);
+    if (overlap) {
+      notices.push({
+        app: null,
+        type: null,
+        id: null,
+        path: root,
+        op: 'none',
+        outcome: 'skipped',
+        detail: 'project-refused',
+        reason: `project root holds ${overlap.what} (${overlap.dir}); one tree cannot be both scopes, so no project phase ran`,
+      });
+      overlay = null;
+    }
+  }
+
+  const supersetTable = overlay ? overlayTable : userTable;
+  const mode = overlay?.distribution.project.mode;
+  const project: ProjectPlanPolicy | undefined =
+    overlay?.project && (mode === 'managed' || mode === 'exclusive')
+      ? {
+          root: overlay.project,
+          mode,
+          collision: mode === 'exclusive' ? 'takeover' : overlay.distribution.project.collision,
+          explicit: opts.project !== undefined,
+        }
+      : undefined;
+  return {
+    base,
+    overlay,
+    userTable,
+    supersetTable,
+    // Mode "none" leaves the project phase out of the run entirely.
+    projectTable: project ? projectAppRows(supersetTable, project.root) : [],
+    project,
+    notices,
+  };
+}
+
 export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promise<Report> {
   const env = opts.env ?? process.env;
   const dryRun = opts.dryRun === true;
 
-  const config = loadConfig({ profile: opts.profile, project: opts.project, env });
-  const cutoverWarnings = extensionCutoverWarning(config.homes.asbHome);
-  const globalTable = appRows(config);
-  const projectMode = config.project ? config.distribution.project.mode : null;
-  const activeProjectMode =
-    projectMode === 'managed' || projectMode === 'exclusive' ? projectMode : undefined;
-  const projectPolicy: ProjectPlanPolicy | undefined =
-    config.project && activeProjectMode
-      ? {
-          root: config.project,
-          mode: activeProjectMode,
-          collision:
-            activeProjectMode === 'exclusive' ? 'takeover' : config.distribution.project.collision,
-        }
-      : undefined;
-  const projectTable = config.project ? projectAppRows(globalTable, config.project) : globalTable;
-  const table =
-    projectMode === 'none'
-      ? projectTable.map((row) => ({ id: row.id, detectDir: row.detectDir }))
-      : projectTable;
+  const {
+    base,
+    overlay,
+    userTable,
+    supersetTable,
+    projectTable,
+    project: projectPolicy,
+    notices,
+  } = resolveScopes(opts, env);
+  const preludeRows = [
+    ...notices,
+    ...missingProfile(base),
+    ...idleSelection(base),
+    ...extensionCutoverWarning(base.homes.asbHome),
+  ];
   const knownTypes = new Set<string>(STATUS_TYPES);
   for (const type of opts.types ?? []) {
     if (knownTypes.has(type)) continue;
@@ -800,7 +1264,7 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
       `Unknown status type "${type}"${suggestion ? ` — did you mean "${suggestion}"?` : '.'}`
     );
   }
-  const appIds = globalTable.map((row) => row.id);
+  const appIds = supersetTable.map((row) => row.id);
   const knownApps = new Set(appIds);
   for (const app of opts.apps ?? []) {
     if (knownApps.has(app)) continue;
@@ -810,22 +1274,30 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
     );
   }
 
-  // A real run takes the lock before capture: the whole capture → plan →
-  // apply sequence executes against serialized state, so a plan built from
-  // another run's pre-apply snapshot can never fire.
-  const lock: RunLock | null = dryRun ? null : (heldLock ?? acquireRunLock(config.homes.stateHome));
+  // A real run takes the lock before the first capture and holds it across
+  // both phases: every capture → plan → apply sequence executes against
+  // serialized state, so a plan built from another run's pre-apply snapshot
+  // can never fire.
+  const lock: RunLock | null = dryRun ? null : (heldLock ?? acquireRunLock(base.homes.stateHome));
   const ownsLock = !dryRun && heldLock === undefined;
+  // Only a project the run actually reconciles is this run's scope: a root
+  // refused, or left out by mode "none", is named by its own row instead.
   const scope = {
-    profile: config.profile,
-    project: config.project,
+    profile: base.profile,
+    project: projectPolicy?.root ?? null,
     dryRun,
   };
 
   try {
-    const previousLastRun = loadLastRun(config.homes.stateHome);
-    if (!dryRun) clearOwnershipStores(config.homes.stateHome, config.homes.asbHome);
-    const sources = runSourcesPhase(config, opts, dryRun);
-    let catalog = readSourceCatalog(config);
+    const previousLastRun = loadLastRun(base.homes.stateHome);
+    if (!dryRun) clearOwnershipStores(base.homes.stateHome, base.homes.asbHome);
+    // Sources, catalog, inventory and expansion describe the one library both
+    // phases read, and it is the machine's: they materialize once, from the
+    // base infrastructure alone, so no clone, fetch, or namespace resolution
+    // can originate in a repository. Overlay selections resolve against what
+    // that library holds.
+    const sources = runSourcesPhase(base, opts, dryRun);
+    let catalog = readSourceCatalog(base);
 
     // Readiness and resolution are pre-write conditions. Distributing against
     // a partial inventory re-renders every aggregate without the broken
@@ -840,15 +1312,15 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
       const aborted = buildReport(
         scope,
         [
-          ...cutoverWarnings,
+          ...preludeRows,
           ...planSources({
-            config,
+            config: base,
             catalog: { ...catalog, absent: [] },
             ...sources,
             entries: [],
             dryRun,
           }),
-        ].map(toEntry),
+        ].map((action) => ({ ...toEntry(action), scope: 'user' as const })),
         { aborted: true }
       );
       if (previousLastRun) aborted.lastRun = previousLastRun;
@@ -856,172 +1328,241 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
     }
 
     let inventory = scanLibrary({ env, plugins: catalog.plugins });
-
-    // What the sources contribute is only known after the scan, so the
-    // expansion joins the configuration here rather than at load time.
-    let resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+    let expansion = buildPluginExpansion(catalog.plugins, inventory);
 
     // An external entry is content the selection points at and the scan could
     // not see, so fetching one changes what the library holds: read it again.
-    const sourceEntries = ensureEntriesReady(resolved, catalog, { dryRun });
+    const sourceEntries = ensureEntriesReady(withPluginExpansion(base, expansion), catalog, {
+      dryRun,
+    });
     if (sourceEntries.some((entry) => entry.status === 'fetched')) {
-      catalog = readSourceCatalog(config);
+      catalog = readSourceCatalog(base);
       inventory = scanLibrary({ env, plugins: catalog.plugins });
-      resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+      expansion = buildPluginExpansion(catalog.plugins, inventory);
     }
 
-    const capture = captureFor(resolved, table, inventory, opts.all === true);
-    const nativeState = captureNative(resolved, catalog, table, env, capture.installed, dryRun);
+    // What the sources contribute is only known after the scan, so the
+    // expansion joins both views here rather than at load time.
+    const resolvedBase = withPluginExpansion(base, expansion);
+    const resolvedOverlay = overlay ? withPluginExpansion(overlay, expansion) : null;
 
-    const planInput = {
-      config: resolved,
-      inventory,
-      capture,
-      table,
-      project: projectPolicy,
-    };
-    const mcpActions = planMcp(planInput);
-    let actions = [
-      ...cutoverWarnings,
-      ...planSources({ config: resolved, catalog, ...sources, entries: sourceEntries, dryRun }),
-      ...planRules(planInput),
-      ...planCommands(planInput),
-      ...planAgents(planInput),
-      ...planSkills(planInput),
-      ...(config.project ? [] : planLegacyOpencode(planInput)),
-      ...planHooks(planInput),
-      ...mcpActions,
-      ...planCodexProjectTrust(planInput, mcpActions),
-      // Native rows run last: their registration setting shares a document
-      // with the hooks target, and this one re-reads it after that write.
-      ...planNative({
-        config: resolved,
-        catalog,
-        capture: nativeState,
-        table,
-        env,
-        installed: capture.installed,
-        dryRun,
-      }),
-    ];
+    // Readiness materializes before planning, so a real run's catalog already
+    // proves what a cloned source provides; only a dry run still has
+    // namespaces whose content is unknowable.
+    const pendingNamespaces = new Set(
+      dryRun
+        ? sources.readiness
+            .filter((row) => row.action && row.status !== 'error')
+            .map((row) => row.namespace)
+        : []
+    );
+    // What the machine's own selection file points at is what the library owes
+    // it, so the user phase reports exactly these; a repository adds a gap of
+    // its own, never hides or invents one at user scope.
+    const baseGaps = planSelectedPluginGaps(resolvedBase, catalog, pendingNamespaces);
+    const baseGapIds = new Set(baseGaps.map((action) => action.id));
+
+    // Ids a retirement is taking out are wanted in neither scope this run:
+    // whatever the selection files still say, this run distributes none of
+    // them, so the sweep takes every copy while the library can still prove
+    // it instead of stranding one past its own entry.
+    const retiring = new Set(opts.retiring ?? []);
+    const wanted = (ids: readonly string[]): string[] =>
+      retiring.size === 0 ? [...ids] : ids.filter((id) => !retiring.has(id));
+    const userSelection = (appId: string, type: ComponentType): string[] =>
+      wanted(effectiveSelection(resolvedBase, appId, type));
 
     const outOfScopeUnresolved =
       selectedSources === null
         ? []
         : catalog.unresolved.filter((row) => !selectedSources.has(row.namespace));
-    if (outOfScopeUnresolved.length > 0) {
-      const names = outOfScopeUnresolved.map((row) => row.namespace).join(', ');
-      actions = actions.map((action) =>
-        action.app !== null &&
-        action.id === null &&
-        action.type !== null &&
-        ['rules', 'hooks', 'mcp'].includes(action.type)
-          ? {
-              app: action.app,
-              type: action.type,
-              id: null,
-              path: action.path,
-              op: 'none',
-              outcome: 'failed',
-              detail: 'aggregate-blocked',
-              reason: `source(s) ${names} are unresolved outside this --source run; previous aggregate content is left in place`,
-            }
-          : action
-      );
-    }
 
-    if (opts.all === true) {
-      // The typed probe rows replace the rules planner's one generic app
-      // absence row and make `--type` filtering unambiguous.
-      actions = actions.filter(
-        (action) =>
-          !(action.app !== null && action.type === null && action.detail === 'app-not-installed')
-      );
-      const represented = new Set(
-        actions.flatMap((action) =>
-          action.id === null || action.type === null ? [] : [`${action.type}\0${action.id}`]
-        )
-      );
-      actions.push(
-        ...planStatusAll(planInput).filter(
+    /**
+     * One pipeline, run once per scope: capture → plan → filters → shared-host
+     * merge → project preflight → reconcile. Rows about the library itself
+     * belong to the user phase, which speaks for it once.
+     */
+    const runPhase = (
+      config: ResolvedConfig,
+      table: readonly AppRow[],
+      selection: (appId: string, type: ComponentType) => string[],
+      project?: ProjectPlanPolicy
+    ): ReportEntry[] => {
+      const userPhase = project === undefined;
+      const guard = project ? projectGuard(resolvedBase, userTable, project.root) : undefined;
+      const capture = captureFor(config, table, inventory, selection, opts.all === true, guard);
+      const planInput = {
+        config,
+        inventory,
+        capture,
+        table,
+        selection,
+        ...(project ? { project } : {}),
+      };
+      const mcpActions = planMcp(planInput);
+      let actions = [
+        ...(userPhase
+          ? [
+              ...preludeRows,
+              ...planSources({
+                config: resolvedBase,
+                catalog,
+                ...sources,
+                entries: sourceEntries,
+                dryRun,
+              }),
+            ]
+          : [...inertSources(config, 'project'), ...unhostedIncrements(config, table, selection)]),
+        ...planRules(planInput),
+        ...planCommands(planInput),
+        ...planAgents(planInput),
+        ...planSkills(planInput),
+        ...(userPhase ? planLegacyOpencode(planInput) : []),
+        ...planHooks(planInput),
+        ...mcpActions,
+        // Project trust is written for a repository, from an explicit root:
+        // the user phase has no project to trust.
+        ...(project ? planCodexProjectTrust(planInput, mcpActions) : []),
+        // Native rows run last: their registration setting shares a document
+        // with the hooks target, and this one re-reads it after that write. A
+        // plugin manager is the machine's, so only the user phase speaks to it.
+        ...(userPhase
+          ? planNative({
+              config,
+              catalog,
+              capture: captureNative(config, catalog, table, env, capture.installed, dryRun),
+              table,
+              env,
+              installed: capture.installed,
+              dryRun,
+            })
+          : []),
+      ];
+
+      if (outOfScopeUnresolved.length > 0) {
+        const names = outOfScopeUnresolved.map((row) => row.namespace).join(', ');
+        actions = actions.map((action) =>
+          action.app !== null &&
+          action.id === null &&
+          action.type !== null &&
+          ['rules', 'hooks', 'mcp'].includes(action.type)
+            ? {
+                app: action.app,
+                type: action.type,
+                id: null,
+                path: action.path,
+                op: 'none',
+                outcome: 'failed',
+                detail: 'aggregate-blocked',
+                reason: `source(s) ${names} are unresolved outside this --source run; previous aggregate content is left in place`,
+              }
+            : action
+        );
+      }
+
+      if (userPhase && opts.all === true) {
+        // The typed probe rows replace the rules planner's one generic app
+        // absence row and make `--type` filtering unambiguous.
+        actions = actions.filter(
           (action) =>
-            action.detail !== 'not-selected' ||
-            action.id === null ||
-            action.type === null ||
-            !represented.has(`${action.type}\0${action.id}`)
-        )
+            !(action.app !== null && action.type === null && action.detail === 'app-not-installed')
+        );
+        const represented = new Set(
+          actions.flatMap((action) =>
+            action.id === null || action.type === null ? [] : [`${action.type}\0${action.id}`]
+          )
+        );
+        actions.push(
+          ...planStatusAll(planInput).filter(
+            (action) =>
+              action.detail !== 'not-selected' ||
+              action.id === null ||
+              action.type === null ||
+              !represented.has(`${action.type}\0${action.id}`)
+          )
+        );
+      }
+      // The catalog is the machine's, so the phase that speaks for it reports
+      // what it holds.
+      if (userPhase && (opts.all === true || opts.types?.includes('plugins') === true)) {
+        actions.push(...planCatalogStatus(resolvedBase, catalog, inventory));
+      }
+      // Each phase names the refs its own selection cannot resolve, less the
+      // ones the user phase already reported.
+      actions.push(
+        ...(userPhase
+          ? baseGaps
+          : planSelectedPluginGaps(config, catalog, pendingNamespaces).filter(
+              (action) => !baseGapIds.has(action.id)
+            ))
       );
-    }
-    if (opts.all === true || opts.types?.includes('plugins') === true) {
-      actions.push(...planCatalogStatus(resolved, catalog, inventory));
-    }
-    actions.push(
-      ...planSelectedPluginGaps(
-        resolved,
-        catalog,
-        // Readiness materializes before planning, so a real run's catalog
-        // already proves what a cloned source provides; only a dry run still
-        // has namespaces whose content is unknowable.
-        new Set(
-          dryRun
-            ? sources.readiness
-                .filter((row) => row.action && row.status !== 'error')
-                .map((row) => row.namespace)
-            : []
-        )
-      )
-    );
 
-    // Filters select which actions execute, never which inputs the planner saw.
-    if (opts.apps && opts.apps.length > 0) {
-      const wanted = new Set(opts.apps);
-      actions = actions.filter(
-        (action) =>
-          action.app === null ||
-          wanted.has(action.app) ||
-          action.members?.some((member) => wanted.has(member)) === true
+      // Filters select which actions execute, never which inputs the planner saw.
+      if (opts.apps && opts.apps.length > 0) {
+        const wanted = new Set(opts.apps);
+        actions = actions.filter(
+          (action) =>
+            action.app === null ||
+            wanted.has(action.app) ||
+            action.members?.some((member) => wanted.has(member)) === true
+        );
+      }
+      if (opts.types && opts.types.length > 0) {
+        const wanted = new Set(opts.types);
+        actions = actions.filter((action) => action.type === null || wanted.has(action.type));
+      }
+      if (opts.sources && opts.sources.length > 0) {
+        const wanted = new Set(opts.sources);
+        const owner = sourceAttribution(catalog);
+        actions = actions.filter((action) => {
+          const source = owner(action);
+          return source === null || wanted.has(source);
+        });
+      }
+      if (opts.idGlob) {
+        actions = actions.filter(
+          (action) =>
+            action.detail === 'extensions-removed' ||
+            statusActionMatchesId(action, opts.idGlob as string, selection)
+        );
+      }
+      actions = groupKeyActions(actions);
+      if (project) actions = preflightProjectActions(actions, project);
+
+      const phaseScope: ReportEntry['scope'] = userPhase ? 'user' : 'project';
+      return reconcile(actions, dryRun ? toEntry : (action) => executeAction(action, guard)).map(
+        (entry) => ({
+          ...entry,
+          scope: phaseScope,
+        })
       );
-    }
-    if (opts.types && opts.types.length > 0) {
-      const wanted = new Set(opts.types);
-      actions = actions.filter((action) => action.type === null || wanted.has(action.type));
-    }
-    if (opts.sources && opts.sources.length > 0) {
-      const wanted = new Set(opts.sources);
-      const owner = sourceAttribution(catalog);
-      actions = actions.filter((action) => {
-        const source = owner(action);
-        return source === null || wanted.has(source);
-      });
-    }
-    if (opts.idGlob) {
-      actions = actions.filter(
-        (action) =>
-          action.detail === 'extensions-removed' ||
-          statusActionMatchesId(action, opts.idGlob as string, resolved)
-      );
-    }
-    actions = groupKeyActions(actions);
-    if (projectPolicy) actions = preflightProjectActions(actions, projectPolicy);
+    };
 
-    if (dryRun) {
-      const preview = buildReport(scope, reconcile(actions, toEntry));
-      if (previousLastRun) preview.lastRun = previousLastRun;
-      return preview;
+    // Strictly in order: the project phase captures after the user phase has
+    // applied, so it plans against what that phase wrote (the shared Codex
+    // config) instead of stale bytes.
+    const entries = runPhase(resolvedBase, userTable, userSelection);
+    if (projectPolicy && resolvedOverlay) {
+      // A repository carries only what it adds: user-scope content is already
+      // visible to every app in every directory, so distributing it again
+      // would double-load it.
+      const overlayConfig = resolvedOverlay;
+      const projectSelection = (appId: string, type: ComponentType): string[] =>
+        wanted(selectionDelta(overlayConfig, resolvedBase, appId, type));
+      entries.push(...runPhase(overlayConfig, projectTable, projectSelection, projectPolicy));
     }
 
-    const entries = reconcile(actions, executeAction);
-
-    // Every real global run stamps the last-run fact and `status` (dry)
-    // reports it: the one thing a run leaves behind that the next one does not
-    // re-derive. A project run writes nothing to the machine's state dir.
-    if (!config.project) {
+    // Every real run stamps the last-run fact and `status` (dry) reports it:
+    // the one thing a run leaves behind that the next one does not re-derive.
+    // It is the user phase's, like every other machine-local file — the
+    // project phase writes nothing outside the repository.
+    if (!dryRun) {
       const counts = new Map<string, number>();
       for (const entry of entries) {
         counts.set(entry.outcome, (counts.get(entry.outcome) ?? 0) + 1);
       }
       try {
-        saveLastRun(config.homes.stateHome, {
+        saveLastRun(base.homes.stateHome, {
           at: new Date().toISOString(),
           summary:
             [...counts.entries()].map(([outcome, count]) => `${count} ${outcome}`).join(', ') ||
@@ -1035,10 +1576,11 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
           app: null,
           type: null,
           id: null,
-          path: lastRunPath(config.homes.stateHome),
+          path: lastRunPath(base.homes.stateHome),
           outcome: 'failed',
           detail: 'write-error',
           reason: `last-run marker could not be saved (${message})`,
+          scope: 'user',
         });
       }
     }
@@ -1051,76 +1593,99 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
   }
 }
 
-export async function runExplain(target: string, opts: SyncOptions = {}): Promise<ExplainSlice[]> {
-  const env = opts.env ?? process.env;
-  const config = loadConfig({ profile: opts.profile, project: opts.project, env });
-  validateAppIds(config, opts.apps ?? []);
-  const globalTable = appRows(config);
-  const projectMode = config.project ? config.distribution.project.mode : null;
-  const activeProjectMode =
-    projectMode === 'managed' || projectMode === 'exclusive' ? projectMode : undefined;
-  const projectPolicy: ProjectPlanPolicy | undefined =
-    config.project && activeProjectMode
-      ? {
-          root: config.project,
-          mode: activeProjectMode,
-          collision:
-            activeProjectMode === 'exclusive' ? 'takeover' : config.distribution.project.collision,
-        }
-      : undefined;
-  const projectTable = config.project ? projectAppRows(globalTable, config.project) : globalTable;
-  const table =
-    projectMode === 'none'
-      ? projectTable.map((row) => ({ id: row.id, detectDir: row.detectDir }))
-      : projectTable;
-  const catalog = readSourceCatalog(config);
-  const inventory = scanLibrary({ env, plugins: catalog.plugins });
-  const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
-  const capture = captureFor(resolved, table, inventory);
-  const nativeState = captureNative(resolved, catalog, globalTable, env, capture.installed, true);
+/** An explain row carries the phase that produced it, as a report entry does. */
+export type ScopedSlice = ExplainSlice & { scope: ReportEntry['scope'] };
 
-  const planInput = {
-    config: resolved,
-    inventory,
-    capture,
-    table,
+export async function runExplain(
+  target: string,
+  opts: SyncOptions = {}
+): Promise<{ scope: Report['scope']; slices: ScopedSlice[] }> {
+  const env = opts.env ?? process.env;
+  const {
+    base,
+    overlay,
+    userTable,
+    projectTable,
     project: projectPolicy,
-  };
+  } = resolveScopes(opts, env);
+  validateAppIds(overlay ?? base, opts.apps ?? []);
+  // The library is the machine's in both phases, so it resolves from the base
+  // infrastructure exactly as a sync resolves it.
+  const catalog = readSourceCatalog(base);
+  const inventory = scanLibrary({ env, plugins: catalog.plugins });
+  const expansion = buildPluginExpansion(catalog.plugins, inventory);
+  const resolvedBase = withPluginExpansion(base, expansion);
+  const resolvedOverlay = overlay ? withPluginExpansion(overlay, expansion) : null;
+
   const wantedTypes = opts.types && opts.types.length > 0 ? new Set(opts.types) : null;
   const wants = (type: string): boolean => wantedTypes === null || wantedTypes.has(type);
+
+  // The same two scopes a sync reconciles, read instead of applied.
+  const explainPhase = (
+    config: ResolvedConfig,
+    table: readonly AppRow[],
+    selection: (appId: string, type: ComponentType) => string[],
+    project?: ProjectPlanPolicy
+  ): ScopedSlice[] => {
+    const scope: ReportEntry['scope'] = project === undefined ? 'user' : 'project';
+    const guard = project ? projectGuard(resolvedBase, userTable, project.root) : undefined;
+    const capture = captureFor(config, table, inventory, selection, false, guard);
+    const planInput = {
+      config,
+      inventory,
+      capture,
+      table,
+      selection,
+      ...(project ? { project } : {}),
+    };
+    return [
+      ...(wants('rules') ? explainRules(planInput, target) : []),
+      ...(wants('commands') ? explainCommands(planInput, target) : []),
+      ...(wants('agents') ? explainAgents(planInput, target) : []),
+      ...(wants('skills') ? explainSkills(planInput, target) : []),
+      ...(wants('hooks') ? explainHooks(planInput, target) : []),
+      ...(wants('mcp') ? explainMcp(planInput, target) : []),
+      ...(project === undefined && wants('native_plugins')
+        ? explainNative(
+            {
+              config,
+              catalog,
+              capture: captureNative(config, catalog, table, env, capture.installed, true),
+              table,
+              env,
+              installed: capture.installed,
+              dryRun: true,
+            },
+            target
+          )
+        : []),
+    ].map((slice) => ({ ...slice, scope }));
+  };
+
   // Explain never clones or fetches: it reads what a preview would report.
-  let slices = [
+  let slices: ScopedSlice[] = [
     ...explainSources(
       {
-        config: resolved,
+        config: resolvedBase,
         catalog,
-        readiness: ensureSourcesReady(resolved, { dryRun: true }),
+        readiness: ensureSourcesReady(resolvedBase, { dryRun: true }),
         updates: [],
         pendingRefresh: [],
-        entries: ensureEntriesReady(resolved, catalog, { dryRun: true }),
+        entries: ensureEntriesReady(resolvedBase, catalog, { dryRun: true }),
         dryRun: true,
       },
       target,
       inventory
+    ).map((slice) => ({ ...slice, scope: 'user' as const })),
+    ...explainPhase(resolvedBase, userTable, (appId, type) =>
+      effectiveSelection(resolvedBase, appId, type)
     ),
-    ...(wants('rules') ? explainRules(planInput, target) : []),
-    ...(wants('commands') ? explainCommands(planInput, target) : []),
-    ...(wants('agents') ? explainAgents(planInput, target) : []),
-    ...(wants('skills') ? explainSkills(planInput, target) : []),
-    ...(wants('hooks') ? explainHooks(planInput, target) : []),
-    ...(wants('mcp') ? explainMcp(planInput, target) : []),
-    ...(wants('native_plugins')
-      ? explainNative(
-          {
-            config: resolved,
-            catalog,
-            capture: nativeState,
-            table: globalTable,
-            env,
-            installed: capture.installed,
-            dryRun: true,
-          },
-          target
+    ...(projectPolicy && resolvedOverlay
+      ? explainPhase(
+          resolvedOverlay,
+          projectTable,
+          (appId, type) => selectionDelta(resolvedOverlay, resolvedBase, appId, type),
+          projectPolicy
         )
       : []),
   ];
@@ -1129,12 +1694,18 @@ export async function runExplain(target: string, opts: SyncOptions = {}): Promis
     slices = slices.filter((slice) => slice.app === null || wanted.has(slice.app));
   }
   // A source row carries its configured location, which can carry a token.
-  return slices.map((slice) => {
-    const clean = { ...slice };
-    if (slice.reason) clean.reason = redactCredentials(slice.reason);
-    if (slice.path) clean.path = redactCredentials(slice.path);
-    return clean;
-  });
+  return {
+    // The scopes the answer covers are the ones this read resolved, exactly as
+    // a sync names them: a root refused, or left out by mode "none", is no
+    // more this answer's project than an absent one.
+    scope: { profile: base.profile, project: projectPolicy?.root ?? null, dryRun: false },
+    slices: slices.map((slice) => {
+      const clean = { ...slice };
+      if (slice.reason) clean.reason = redactCredentials(slice.reason);
+      if (slice.path) clean.path = redactCredentials(slice.path);
+      return clean;
+    }),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,7 +1725,7 @@ export interface AddSourceOptions extends SyncOptions {
  * Declare a source. A git transport clones (or subtrees) into asb's own tree
  * first and is declared only once that succeeded; anything else is a local
  * directory the user keeps owning. The persisted declaration is always
- * credential-free, so a token in the argument never reaches config.toml.
+ * credential-free, so a token in the argument never reaches the selection file.
  */
 export async function runAddSource(location: string, opts: AddSourceOptions = {}): Promise<Report> {
   const env = opts.env ?? process.env;
@@ -1207,6 +1778,7 @@ export async function runAddSource(location: string, opts: AddSourceOptions = {}
       path: source?.path ?? null,
       outcome: 'written',
       reason: `added as "${namespace}"${detail}`,
+      scope: 'user',
     },
   ]);
 }
@@ -1224,6 +1796,7 @@ function retiredEntries(
     outcome: 'removed' as const,
     detail: 'retired',
     reason: `disabled in [${row.type}] because source "${namespace}" provided it`,
+    scope: 'user' as const,
   }));
 }
 
@@ -1243,7 +1816,7 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
   const lock = acquireRunLock(resolveHomes(env).stateHome);
   try {
     const config = loadConfig({ profile: opts.profile, env });
-    const scope = { profile: config.profile, project: config.project, dryRun: false };
+    let scope = { profile: config.profile, project: config.project, dryRun: false };
     const catalog = readSourceCatalog(config);
     const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
     if (!source?.configured) throw new ConfigError(`Source "${namespace}" not found.`);
@@ -1256,6 +1829,7 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
           path: source.path,
           outcome: 'blocked',
           reason: `kept: source "${namespace}" could not be read completely; repair it before removal`,
+          scope: 'user',
         },
       ]);
     }
@@ -1297,6 +1871,7 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
           path: source.path,
           outcome: 'blocked',
           reason: `kept: installed but inactive app(s) ${inactive.join(', ')} may still hold content from this source; enable and sync them before re-running asb remove ${namespace}`,
+          scope: 'user',
         },
       ]);
     }
@@ -1319,11 +1894,19 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
       {
         profile: opts.profile,
         project: opts.project,
+        // The project layer is the repository's file, not asb's to edit, so a
+        // `.asb.toml` still naming these ids keeps wanting them. Naming them
+        // here is what lets the sweep take their project copies while the
+        // library can still prove them.
+        retiring: componentIds,
         noUpdate: true,
         env,
       },
       lock
     );
+    // The sweep is what reaches a repository at all, so from here on its own
+    // header is the run's scope: anything else names a root these rows contradict.
+    scope = swept.scope;
     const unrelatedAbort =
       swept.exitCode === 2 &&
       swept.entries.some(
@@ -1339,6 +1922,7 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
           path: source.path,
           outcome: 'blocked',
           reason: `kept: the cleanup run aborted before it could prove every distributed slice was removed; resolve the rows below and re-run asb remove ${namespace}`,
+          scope: 'user',
         },
         ...retiredEntries(retired, namespace),
         ...swept.entries,
@@ -1365,10 +1949,13 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
       ) {
         return true;
       }
-      // A deletion the file system refused is the retryable shape of
-      // `left-behind`: the bytes are still the ones the library renders, so
-      // the next run takes them once the cause is fixed.
-      return entry.outcome === 'left-behind' && entry.detail === 'remove-failed';
+      // A deletion the file system refused, and one a project collision
+      // suppressed, are the retryable shapes: the bytes are still the ones the
+      // library renders, so the next run takes them once the cause is fixed.
+      return (
+        (entry.outcome === 'left-behind' && entry.detail === 'remove-failed') ||
+        (entry.outcome === 'skipped' && entry.detail === 'project-preflight')
+      );
     });
     if (stranded.length > 0) {
       return buildReport(scope, [
@@ -1379,6 +1966,7 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
           path: source.path,
           outcome: 'blocked',
           reason: `kept: ${stranded.length} slice(s) it distributed could not be taken, and removing it now would leave them with nothing able to prove them; resolve the rows below and re-run asb remove ${namespace}`,
+          scope: 'user',
         },
         ...retiredEntries(retired, namespace),
         ...swept.entries,
@@ -1402,6 +1990,7 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
         path: source.path,
         outcome: 'removed',
         reason: 'source removed with everything it distributed',
+        scope: 'user',
       },
       ...retiredEntries(retired, namespace),
     ];
@@ -1431,7 +2020,7 @@ export interface InitResult {
   agentsPath?: string;
 }
 
-/** Write the dormant M6 project example; M7 owns making project scope live. */
+/** Write the commented project example a sync in this directory reads. */
 export function runInit(
   projectDir: string,
   options: { force?: boolean; createAgentsMd?: boolean } = {}
@@ -1453,7 +2042,8 @@ export function runInit(
   const scaffold = [
     '# ASB project configuration',
     '# Docs: README.md#project-configuration',
-    '# Uncomment the sections you want M7 project scope to apply.',
+    '# `asb sync` in this directory reconciles your user scope first, then',
+    '# distributes what this file adds on top of it into this repository.',
     '',
     '# [applications]',
     '# enabled = [',
@@ -1535,8 +2125,8 @@ function registerScopeFlags(target: Command): Command {
     .option('--app <app>', 'narrow the plan to named apps', collect, [])
     .option('--type <type>', 'narrow the plan to named types', collect, [])
     .option('--all', 'include inactive inventory and app/type probe rows (status only)')
-    .option('-p, --profile <name>', 'per-machine selection set')
-    .option('-P, --project <dir>', 'apply that repo project config at project scope')
+    .option('-p, --profile <name>', 'selection file to use in place of config.toml')
+    .option('-P, --project <dir>', 'project root; otherwise ./.asb.toml is detected')
     .option('--json', 'machine-readable output');
 }
 
@@ -1562,7 +2152,13 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   const version = JSON.parse(
     fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf-8')
   ).version as string;
-  program.name('asb').version(version).exitOverride();
+  program
+    .name('asb')
+    .description(
+      'reconcile agent configuration in two scopes: the machine from its selection file, then a repository from its own .asb.toml'
+    )
+    .version(version)
+    .exitOverride();
   program.configureOutput({
     writeOut: (message) => process.stdout.write(message),
     writeErr: () => {},
@@ -1593,7 +2189,11 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
   };
 
   registerScopeFlags(
-    program.command('sync').description('reconcile every installed app to the library')
+    program
+      .command('sync')
+      .description(
+        'reconcile every installed app: user scope from the selection file, then the project increment'
+      )
   ).action((_args: unknown, cmd: Command) => {
     parsed = { command: 'sync', options: scopeOptions(cmd) };
   });
@@ -2132,7 +2732,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     }
 
     if (invocation.command === 'explain') {
-      const slices = await runExplain(invocation.target, invocation.options);
+      const { scope, slices } = await runExplain(invocation.target, invocation.options);
       // `explain` answers a question about one target, so it reports on the
       // wider set: a slice asb declined to touch is a run working as intended
       // but an answer of "not resolved", and a script asking about it wants
@@ -2141,7 +2741,7 @@ export async function main(argv: readonly string[]): Promise<number> {
         slices.length > 0 && !slices.some((slice) => FAILING_OUTCOMES.has(slice.outcome)) ? 0 : 1;
       process.stdout.write(
         invocation.options.json
-          ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), slices, exitCode), null, 2)}\n`
+          ? `${JSON.stringify(buildJsonEnvelope(scope, slices, exitCode), null, 2)}\n`
           : renderExplain(slices, invocation.target, surface())
       );
       return exitCode;

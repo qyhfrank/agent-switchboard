@@ -888,6 +888,7 @@ export function retireSourceSelection(
   env: NodeJS.ProcessEnv | undefined
 ): { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[] {
   const expansion = config.plugins.expansion;
+  const profile = config.profile ?? undefined;
   const retired: { type: ComponentType | 'plugins' | 'native_plugins'; id: string }[] = [];
   // An id spelled `name@<namespace>` names this source even when the source
   // never resolved, so no catalog row could enumerate it.
@@ -901,7 +902,7 @@ export function retireSourceSelection(
         wantedComponents.has(expansion?.componentAliases[ref] ?? ref) || spelledComponent(ref)
     );
     if (hits.length === 0) continue;
-    editSelection({ type, disable: hits, env });
+    editSelection({ type, disable: hits, profile, env });
     for (const id of hits) retired.push({ type, id });
   }
 
@@ -910,17 +911,22 @@ export function retireSourceSelection(
     wantedPlugins.has(expansion?.pluginAliases[ref] ?? ref) || spelledPlugin(ref);
   const pluginHits = config.selection.plugins.filter(pluginMatch);
   if (pluginHits.length > 0) {
-    editSelection({ type: 'plugins', disable: pluginHits, env });
+    editSelection({ type: 'plugins', disable: pluginHits, profile, env });
     for (const id of pluginHits) retired.push({ type: 'plugins', id });
   }
 
-  const userApps = config.layers.find((layer) => layer.kind === 'user')?.values.applications ?? {};
-  for (const [app, override] of Object.entries(userApps)) {
+  // The active selection file is the one this edit writes, so its own
+  // overrides are what the sweep reads: under a profile that file is the
+  // profile.
+  const selectionKind = config.profile ? 'profile' : 'user';
+  const baseApps =
+    config.layers.find((layer) => layer.kind === selectionKind)?.values.applications ?? {};
+  for (const [app, override] of Object.entries(baseApps)) {
     if (Array.isArray(override) || typeof override !== 'object' || override === null) continue;
     const native = (override as { native_plugins?: { enabled?: string[] } }).native_plugins;
     const hits = (native?.enabled ?? []).filter(pluginMatch);
     if (hits.length > 0) {
-      editSelection({ type: 'native_plugins', app, disable: hits, env });
+      editSelection({ type: 'native_plugins', app, disable: hits, profile, env });
       for (const id of hits) retired.push({ type: 'native_plugins', id });
     }
     // The per-app plugin cell feeds the same expansion the global list does,
@@ -928,7 +934,7 @@ export function retireSourceSelection(
     const perApp = (override as { plugins?: { enabled?: string[]; add?: string[] } }).plugins;
     const perAppPlugins = [...(perApp?.enabled ?? []), ...(perApp?.add ?? [])].filter(pluginMatch);
     if (perAppPlugins.length > 0) {
-      editSelection({ type: 'plugins', app, disable: perAppPlugins, env });
+      editSelection({ type: 'plugins', app, disable: perAppPlugins, profile, env });
       for (const id of perAppPlugins) retired.push({ type: 'plugins', id });
     }
     // A per-app override selects for that app alone, in any of its three
@@ -941,7 +947,7 @@ export function retireSourceSelection(
           wantedComponents.has(expansion?.componentAliases[ref] ?? ref) || spelledComponent(ref)
       );
       if (componentHits.length === 0) continue;
-      editSelection({ type, app, disable: componentHits, env });
+      editSelection({ type, app, disable: componentHits, profile, env });
       for (const id of componentHits) retired.push({ type, id });
     }
   }

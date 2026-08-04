@@ -6,11 +6,12 @@ import {
   type EntryTargetRow,
   type HooksTargetRow,
   type McpTargetRow,
+  type RulesTargetRow,
 } from './apps.js';
 import {
+  type ComponentType,
   effectiveIncludeDelimiters,
   effectivePlugins,
-  effectiveSelection,
   isPlainObject,
   type ResolvedConfig,
   SELECTION_TYPES,
@@ -186,6 +187,8 @@ export interface ProjectPlanPolicy {
   root: string;
   mode: 'managed' | 'exclusive';
   collision: 'warn-skip' | 'error' | 'takeover';
+  /** `-P` named this root; a root detected in the cwd did not. */
+  explicit: boolean;
 }
 
 export interface PlanInput {
@@ -193,6 +196,14 @@ export interface PlanInput {
   inventory: LibraryInventory;
   capture: SyncCapture;
   table: readonly AppRow[];
+  /**
+   * The wanted set per app and type: the base file's selection in the user
+   * phase, its increment over that file in the project phase. Planners never
+   * derive it themselves, so one subtraction in the sync composition decides
+   * what every planner distributes.
+   */
+  selection(appId: string, type: ComponentType): string[];
+  /** Present exactly in the project phase. */
   project?: ProjectPlanPolicy;
 }
 
@@ -211,7 +222,7 @@ export function planStatusAll(input: PlanInput): Action[] {
   const selected = new Set<string>();
   for (const app of config.apps.enabled) {
     for (const type of SELECTION_TYPES) {
-      for (const id of effectiveSelection(config, app, type)) selected.add(`${type}\0${id}`);
+      for (const id of input.selection(app, type)) selected.add(`${type}\0${id}`);
     }
   }
 
@@ -368,14 +379,12 @@ interface ResolvedRuleSet {
 }
 
 /**
- * Per-app rules resolution: the app's effective selection (global overlaid by
- * its override) composed with its effective delimiter setting. Apps sharing
- * one effective set share one composition.
+ * Per-app rules resolution: the phase's wanted set for the app composed with
+ * its effective delimiter setting. Apps sharing one wanted set share one
+ * composition.
  */
-function rulesResolver(
-  config: ResolvedConfig,
-  inventory: LibraryInventory
-): (appId: string) => ResolvedRuleSet {
+function rulesResolver(input: PlanInput): (appId: string) => ResolvedRuleSet {
+  const { config, inventory } = input;
   const byId = new Map(
     inventory.components
       .filter((component) => component.type === 'rules')
@@ -383,7 +392,7 @@ function rulesResolver(
   );
   const cache = new Map<string, ResolvedRuleSet>();
   return (appId) => {
-    const ids = effectiveSelection(config, appId, 'rules');
+    const ids = input.selection(appId, 'rules');
     const includeDelimiters = effectiveIncludeDelimiters(config, appId);
     const key = JSON.stringify([includeDelimiters, ids]);
     let resolved = cache.get(key);
@@ -426,6 +435,33 @@ function ruleBlockResolver(
     }
     return blocks;
   };
+}
+
+/** Stand-in body used to read a render's wrapper; no rule content holds it. */
+const RENDER_PROBE = 'ASB_RULES_BODY';
+
+/**
+ * Whether a dedicated target holds a render of library rules — the current
+ * one or a stale one — which is the proof a markerless shared host already
+ * gets. The render wraps the composed body, so rendering a probe body names
+ * the wrapper, and what is left inside it has to reassemble from library rule
+ * blocks. Anything else is content the repository wrote.
+ */
+function rendersRuleBlocks(
+  row: RulesTargetRow,
+  targetPath: string,
+  content: string | null,
+  blocks: readonly string[]
+): boolean {
+  if (content === null) return false;
+  const [prefix, suffix, ...extra] = row.render(RENDER_PROBE, targetPath).split(RENDER_PROBE);
+  if (suffix === undefined || extra.length > 0) return false;
+  if (content.length < prefix.length + suffix.length) return false;
+  if (!content.startsWith(prefix) || !content.endsWith(suffix)) return false;
+  return composedFromRuleBlocks(
+    content.slice(prefix.length, content.length - suffix.length),
+    blocks
+  );
 }
 
 /**
@@ -552,38 +588,41 @@ export function planRules(input: PlanInput): Action[] {
   const actions: Action[] = [];
   const staleActions: Action[] = [];
 
-  // Library-level failures always surface, selected or not (containment: the
-  // failed entry errors, everything else proceeds).
-  for (const failure of inventory.failed) {
-    actions.push({
-      app: null,
-      type: failure.type,
-      id: failure.id,
-      path: failure.path,
-      op: 'none',
-      outcome: 'failed',
-      detail: 'parse-error',
-      reason: failure.error,
-    });
-  }
-
-  // An id two sources both claim resolves to the first reading; the losing
-  // source is named so the collision is visible rather than inferred from
+  // Library-level facts belong to the one library both phases read, so the
+  // user phase is their single voice: failures always surface, selected or not
+  // (containment: the failed entry errors, everything else proceeds), and an
+  // id two sources both claim resolves to the first reading with the losing
+  // source named, so the collision is visible rather than inferred from
   // content nobody asked for.
-  for (const duplicate of inventory.duplicates) {
-    actions.push({
-      app: null,
-      type: duplicate.type,
-      id: duplicate.id,
-      path: duplicate.path,
-      op: 'none',
-      outcome: 'skipped',
-      detail: 'duplicate-id',
-      reason: `"${duplicate.id}" is already provided by ${duplicate.keptSource}; ${duplicate.source} is not used`,
-    });
+  if (!input.project) {
+    for (const failure of inventory.failed) {
+      actions.push({
+        app: null,
+        type: failure.type,
+        id: failure.id,
+        path: failure.path,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: failure.error,
+      });
+    }
+
+    for (const duplicate of inventory.duplicates) {
+      actions.push({
+        app: null,
+        type: duplicate.type,
+        id: duplicate.id,
+        path: duplicate.path,
+        op: 'none',
+        outcome: 'skipped',
+        detail: 'duplicate-id',
+        reason: `"${duplicate.id}" is already provided by ${duplicate.keptSource}; ${duplicate.source} is not used`,
+      });
+    }
   }
 
-  const resolveFor = rulesResolver(config, inventory);
+  const resolveFor = rulesResolver(input);
   const ruleBlocksFor = ruleBlockResolver(config, inventory);
 
   // One library-level row per id any enabled app selects but the library
@@ -778,7 +817,26 @@ export function planRules(input: PlanInput): Action[] {
       // here and the filename is the only claim left. A path this table names
       // carries the name asb chose for the slice, so location is the proof.
       // The name sweep stays out of a project tree the repository shares.
-      if (!current.exists || input.project) continue;
+      if (!current.exists) continue;
+      // In a project tree the name proves nothing, so what a file holds is the
+      // whole claim: bytes composed of library rule blocks are a render this
+      // repository no longer has any increment for, and they go.
+      if (input.project) {
+        if (
+          currentHash !== null &&
+          rendersRuleBlocks(row.rules, targetPath, current.content, ruleBlocksFor(appId))
+        ) {
+          actions.push({
+            ...base,
+            op: 'remove',
+            outcome: 'removed',
+            detail: 'stale-copy',
+            root,
+            expectedHash: currentHash,
+          });
+        }
+        continue;
+      }
       if (currentHash === null) {
         actions.push({
           ...base,
@@ -842,17 +900,22 @@ export function planRules(input: PlanInput): Action[] {
       continue;
     }
 
-    // Occupied with bytes that are not the render. Globally the filename is
-    // asb's own, so the render is written in one pass. A project tree is
-    // shared with the repository, so only an explicit takeover overwrites
-    // what is already there.
-    if (input.project && input.project.collision !== 'takeover') {
+    // Occupied with bytes that are not the current render. Globally the
+    // filename is asb's own, so the render is written in one pass. A project
+    // tree is shared with the repository: a stale render is still asb's and
+    // follows the increment, while anything else is the repository's and is
+    // preserved — a kept edit is the run working as intended, so the row
+    // carries the signal without failing the run. `collision = "error"` is the
+    // setting that asks for a failure instead; takeover overwrites.
+    const stale = rendersRuleBlocks(row.rules, targetPath, current.content, ruleBlocksFor(appId));
+    if (input.project && input.project.collision !== 'takeover' && !stale) {
+      const errors = input.project.collision === 'error';
       actions.push({
         ...base,
         op: 'none',
-        outcome: 'conflict',
-        detail: 'foreign',
-        reason: 'project target holds content that is not the current render; preserved',
+        outcome: errors ? 'conflict' : 'left-behind',
+        detail: errors ? 'foreign' : 'unproven',
+        reason: 'project target holds content that is not a render of library rules; preserved',
       });
       continue;
     }
@@ -860,7 +923,7 @@ export function planRules(input: PlanInput): Action[] {
       ...base,
       op: 'write',
       outcome: 'written',
-      detail: input.project ? 'takeover' : 'updated',
+      detail: input.project && !stale ? 'takeover' : 'updated',
       content: desired,
       root,
       expectedHash: currentHash,
@@ -945,7 +1008,7 @@ export function planSkills(input: PlanInput): Action[] {
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId);
     if (!row?.skills || !detected(appId)) continue;
-    const effective = effectiveSelection(config, appId, 'skills');
+    const effective = input.selection(appId, 'skills');
     for (const id of effective) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
@@ -973,7 +1036,7 @@ export function planSkills(input: PlanInput): Action[] {
   if (useAgentsDir) {
     for (const member of activeMembers) {
       if (table.find((candidate) => candidate.id === member)?.skills) continue;
-      for (const id of effectiveSelection(config, member, 'skills')) {
+      for (const id of input.selection(member, 'skills')) {
         if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
       }
     }
@@ -1001,11 +1064,7 @@ export function planSkills(input: PlanInput): Action[] {
 
   const unionSelected =
     useAgentsDir && activeMembers.length > 0
-      ? [
-          ...new Set(
-            activeMembers.flatMap((member) => effectiveSelection(config, member, 'skills'))
-          ),
-        ]
+      ? [...new Set(activeMembers.flatMap((member) => input.selection(member, 'skills')))]
       : [];
   const unionDir = AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined);
   // Dormant unless a member is enabled AND detected: an enabled but
@@ -1483,7 +1542,7 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
   );
   const missing = new Set<string>();
   for (const app of config.apps.enabled) {
-    for (const id of effectiveSelection(config, app, type)) {
+    for (const id of input.selection(app, type)) {
       if (!byId.has(id) && !failedIds.has(id)) missing.add(id);
     }
   }
@@ -1503,7 +1562,7 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
   for (const app of config.apps.enabled) {
     const target = table.find((row) => row.id === app)?.[type];
     if (!target || (capture.installed[app] !== true && !assumeInstalled.has(app))) continue;
-    const selected = effectiveSelection(config, app, type);
+    const selected = input.selection(app, type);
     const protectedIds = new Set(selected.filter((id) => !byId.has(id) || failedIds.has(id)));
     const filenames = new Map<string, string[]>();
     for (const id of selected) {
@@ -1705,7 +1764,7 @@ export function planAgents(input: PlanInput): Action[] {
 
 /** Retire recognized OpenCode singular-layout entries after replacements land. */
 export function planLegacyOpencode(input: PlanInput): Action[] {
-  const { config, capture, inventory, table } = input;
+  const { capture, inventory, table } = input;
   const actions: Action[] = [];
   const opencode = table.find((row) => row.id === 'opencode');
   const components = new Map(
@@ -1725,7 +1784,7 @@ export function planLegacyOpencode(input: PlanInput): Action[] {
       });
       continue;
     }
-    const selected = new Set(effectiveSelection(config, 'opencode', scan.type));
+    const selected = new Set(input.selection('opencode', scan.type));
     for (const entry of scan.entries) {
       const replacement = selected.has(entry.id);
       const base = { app: 'opencode', type: entry.type, id: entry.id, path: entry.path };
@@ -1926,7 +1985,7 @@ export function planHooks(input: PlanInput): Action[] {
     const row = table.find((candidate) => candidate.id === appId)?.hooks;
     if (!row) continue;
     if (capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
-    const selected = effectiveSelection(config, appId, 'hooks');
+    const selected = input.selection(appId, 'hooks');
     for (const id of selected) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
@@ -2738,7 +2797,7 @@ export function planMcp(input: PlanInput): Action[] {
     const enabled = enabledApps.has(appId);
     if (enabled && capture.installed[appId] !== true && !assumeInstalled.has(appId)) continue;
     if (!enabled && capture.mcp[appId]?.exists !== true) continue;
-    const selected = enabled ? effectiveSelection(config, appId, 'mcp') : [];
+    const selected = enabled ? input.selection(appId, 'mcp') : [];
     for (const id of selected) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
     }
@@ -2898,7 +2957,12 @@ export function planMcp(input: PlanInput): Action[] {
   return actions;
 }
 
-/** Add-only Codex trust for a project whose MCP destination is active. */
+/**
+ * Add-only Codex trust for a project whose MCP destination is active. The row
+ * writes outside the repository, so only a run that named the project asks for
+ * it: syncing inside a cloned repository leaves the machine's Codex trust
+ * exactly as it found it, and says so where the write would have been.
+ */
 export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Action[]): Action[] {
   if (!input.project) return [];
   const planned = mcpActions.some(
@@ -2918,6 +2982,17 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
     id: null,
     path: captured.path,
   } as const;
+  if (!input.project.explicit) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'skipped',
+        detail: 'ambient-project',
+        reason: `${input.project.root} was detected in the working directory rather than named, so Codex project trust is not written; re-run with -P ${input.project.root} to trust it`,
+      },
+    ];
+  }
   if (captured.escapes === true) {
     return [
       {
@@ -3096,7 +3171,7 @@ export function groupKeyActions(actions: readonly Action[]): Action[] {
   return grouped;
 }
 
-function pathInside(root: string, candidate: string): boolean {
+export function pathInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return (
     relative === '' || (!path.isAbsolute(relative) && !relative.split(path.sep).includes('..'))
@@ -3168,7 +3243,7 @@ export function explainMcp(input: PlanInput, target: string): ExplainSlice[] {
       appId,
       row,
       captured,
-      effectiveSelection(config, appId, 'mcp'),
+      input.selection(appId, 'mcp'),
       byId,
       new Set<string>(),
       input.project
@@ -3652,7 +3727,7 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
  * is the app config it merged into.
  */
 export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
-  const { config, inventory, capture } = input;
+  const { inventory, capture } = input;
   const byId = new Map(
     inventory.components
       .filter((component) => component.type === 'hooks')
@@ -3670,8 +3745,7 @@ export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
     if (action.path === null) continue;
     // A definition entry owns no directory of its own, so a library id the
     // app actually carries also matches that app's config slice.
-    const carried =
-      byId.has(target) && effectiveSelection(config, action.app, 'hooks').includes(target);
+    const carried = byId.has(target) && input.selection(action.app, 'hooks').includes(target);
     const idMatch = action.id === target || (action.id === null && carried);
     const pathMatch = action.path === target || action.path.endsWith(`${path.sep}${target}`);
     if (!idMatch && action.app !== target && !pathMatch) continue;
@@ -3715,8 +3789,8 @@ export function explainHooks(input: PlanInput, target: string): ExplainSlice[] {
  * on disk and the freshly rendered desired content.
  */
 export function explainRules(input: PlanInput, target: string): ExplainSlice[] {
-  const { config, inventory, capture, table } = input;
-  const resolveFor = rulesResolver(config, inventory);
+  const { capture, table } = input;
+  const resolveFor = rulesResolver(input);
 
   const slices: ExplainSlice[] = [];
   for (const action of planRules(input)) {

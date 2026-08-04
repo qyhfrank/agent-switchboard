@@ -55,6 +55,12 @@ test('--help and --version succeed on the engine surface', async () => {
 
   assert.equal(help.code, 0, help.err);
   assert.match(help.out, /Usage: asb/);
+  // Help describes the run as it happens: one sync, two scopes. Read past the
+  // wrapping the terminal width imposes.
+  assert.match(
+    help.out.replace(/\s+/g, ' '),
+    /user scope from the selection file, then the project increment/
+  );
   assert.equal(help.err, '');
   assert.equal(reported.code, 0, reported.err);
   assert.equal(reported.out.trim(), version);
@@ -218,7 +224,7 @@ test('explain completes command and agent slices with source, owner, and all has
       ['build', commandSource],
       ['reviewer', agentSource],
     ] as const) {
-      const slices = await runExplain(id);
+      const { slices } = await runExplain(id);
       assert.equal(slices.length, 1, JSON.stringify(slices, null, 2));
       const [slice] = slices;
       assert.equal(slice.provenance, 'identity');
@@ -237,7 +243,7 @@ test('explain covers native manager state and attributes its plugin source witho
       '[applications]\nenabled = ["codex"]\nassume_installed = ["codex"]\n\n[applications.codex.native_plugins]\nenabled = ["bare"]\n'
     );
 
-    const slices = await runExplain('demo@bare');
+    const { slices } = await runExplain('demo@bare');
     assert.equal(slices.length, 1, JSON.stringify(slices, null, 2));
     assert.equal(slices[0].app, 'codex');
     assert.equal(slices[0].provenance, 'native-manager');
@@ -268,7 +274,7 @@ test('explain keeps MCP credential map keys and masks every value', async () => 
     );
     await runSync();
 
-    const output = renderExplain(await runExplain('alpha'), 'alpha');
+    const output = renderExplain((await runExplain('alpha')).slices, 'alpha');
 
     assert.equal(output.includes(placeholder), false);
     for (const key of ['API_TOKEN', 'Authorization', 'X-Api-Key', 'X-Env-Key']) {
@@ -306,13 +312,81 @@ test('explain masks env values through the kv-array dialect too', async () => {
     );
     await runSync();
 
-    const slices = await runExplain('alpha');
+    const { slices } = await runExplain('alpha');
     const output = renderExplain(slices, 'alpha');
 
     assert.equal(output.includes(placeholder), false);
     assert.equal(JSON.stringify(slices).includes(placeholder), false);
     assert.match(output, /API_TOKEN/);
     assert.match(output, /\*\*\*/);
+  });
+});
+
+test('explain --json says which scope each entry was read in', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(path.join(homes.asbHome, 'commands', 'ship.md'), 'Ship it.\n');
+    write(path.join(homes.asbHome, 'commands', 'audit.md'), 'Audit it.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = ["ship"]\n'
+    );
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[commands]\nenabled = ["ship", "audit"]\n');
+    await runSync({ project });
+
+    const explained = await runMain(['explain', 'claude-code', '--json', '-P', project]);
+
+    assert.equal(explained.code, 0, explained.out || explained.err);
+    const { entries } = JSON.parse(explained.out) as {
+      entries: { path: string; scope: string }[];
+    };
+    // A script reading the envelope tells the machine's copy from the
+    // repository's increment by the row, not by the path it has to parse.
+    const paths = (scope: string): string[] =>
+      entries.filter((entry) => entry.scope === scope).map((entry) => entry.path);
+    assert.deepEqual(paths('user'), [
+      path.join(homes.agentsHome, '.claude', 'commands', 'ship.md'),
+    ]);
+    assert.deepEqual(paths('project'), [path.join(project, '.claude', 'commands', 'audit.md')]);
+  });
+});
+
+test('explain --json names the project it read, detected or given', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    write(path.join(homes.asbHome, 'commands', 'ship.md'), 'Ship it.\n');
+    write(path.join(homes.asbHome, 'commands', 'audit.md'), 'Audit it.\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[commands]\nenabled = ["ship"]\n'
+    );
+    const project = path.join(homes.root, 'repo');
+    fs.mkdirSync(project, { recursive: true });
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[commands]\nenabled = ["ship", "audit"]\n');
+
+    const previous = process.cwd();
+    process.chdir(project);
+    let explained: { code: number; out: string; err: string };
+    try {
+      explained = await runMain(['explain', 'claude-code', '--json']);
+    } finally {
+      process.chdir(previous);
+    }
+
+    assert.equal(explained.code, 0, explained.err);
+    const answer = JSON.parse(explained.out) as {
+      scope: { project: string | null };
+      entries: { scope: string }[];
+    };
+    // The envelope names the scopes the answer covers, so it cannot deny the
+    // project its own entries were read in.
+    assert.equal(answer.scope.project, project);
+    assert.ok(
+      answer.entries.some((entry) => entry.scope === 'project'),
+      explained.out
+    );
   });
 });
 

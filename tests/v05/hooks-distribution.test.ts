@@ -564,3 +564,66 @@ test('a codex hooks write reports the trust review Codex still requires', async 
     assert.equal(removal?.reason, undefined, 'nothing new needs a review');
   });
 });
+
+const WATCH_LIBRARY = {
+  UserPromptSubmit: [{ matcher: '*', hooks: [{ type: 'command', command: 'echo watch' }] }],
+};
+const WATCH_RENDERED = { matcher: '*', hooks: [{ type: 'command', command: 'echo watch' }] };
+
+/** Project settings.local.json: claude-code's project-scope hooks cell. */
+function projectConfigPath(project: string): string {
+  return path.join(project, '.claude', 'settings.local.json');
+}
+
+test('only the hooks a repository adds over the user level land in it', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'claude-code');
+    seedHook(homes, 'lint', LINT_LIBRARY);
+    seedHook(homes, 'watch', WATCH_LIBRARY);
+    writeUserConfig(homes, configFor(['claude-code'], ['lint']));
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[hooks]\nenabled = ["lint", "watch"]\n');
+
+    const report = await runSync({ project });
+    const local = projectConfigPath(project);
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(eventGroups(configPath(homes, 'claude-code'), 'UserPromptSubmit'), [
+      LINT_RENDERED,
+    ]);
+    // The machine's config loads `lint` in every directory, so a repository
+    // copy would run it twice; `watch` is what this repository adds.
+    assert.deepEqual(eventGroups(local, 'UserPromptSubmit'), [WATCH_RENDERED]);
+    assert.equal(hooksRows(report).find((entry) => entry.path === local)?.scope, 'project');
+  });
+});
+
+test('a hook the user level takes over leaves the repository, its own groups intact', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'claude-code');
+    seedHook(homes, 'lint', LINT_LIBRARY);
+    writeUserConfig(homes, configFor(['claude-code'], []));
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[hooks]\nenabled = ["lint"]\n');
+
+    // The repository as an earlier run left it, plus a group of its own.
+    await runSync({ project });
+    const local = projectConfigPath(project);
+    const settings = readJson(local);
+    (settings.hooks as Record<string, unknown[]>).UserPromptSubmit.unshift(USER_GROUP_A);
+    writeJson(local, settings);
+
+    writeUserConfig(homes, configFor(['claude-code'], ['lint']));
+    const report = await runSync({ project });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    // The group holds the render, so it is asb's and goes; the repository's own
+    // group is nobody's business but its author's.
+    assert.deepEqual(eventGroups(local, 'UserPromptSubmit'), [USER_GROUP_A]);
+    assert.deepEqual(eventGroups(configPath(homes, 'claude-code'), 'UserPromptSubmit'), [
+      LINT_RENDERED,
+    ]);
+  });
+});

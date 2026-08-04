@@ -60,7 +60,7 @@ test('explain by skill id joins the live tree and its source bundle', async () =
     await runSync();
 
     const target = path.join(skillsParentDir(homes, 'claude-code'), 'review-pr');
-    const slices = await runExplain('review-pr');
+    const { slices } = await runExplain('review-pr');
 
     assert.equal(slices.length, 1);
     const slice = slices[0];
@@ -84,11 +84,11 @@ test('explain matches a skill by target path basename and by app id', async () =
     writeUserConfig(homes, baseConfig(['review-pr']));
     await runSync();
 
-    const byPath = await runExplain('skills/review-pr');
+    const { slices: byPath } = await runExplain('skills/review-pr');
     assert.equal(byPath.length, 1, 'a path suffix matches the bundle dir');
     assert.equal(byPath[0].app, 'claude-code');
 
-    const byApp = await runExplain('claude-code');
+    const { slices: byApp } = await runExplain('claude-code');
     assert.ok(
       byApp.some((slice) => slice.path?.endsWith(`${path.sep}review-pr`)),
       'an app id surfaces its skills slices'
@@ -107,7 +107,7 @@ test('explain shows a user-modified bundle as a pending rewrite with diverging h
     const distributed = bundleFingerprint(target);
     fs.writeFileSync(path.join(target, 'SKILL.md'), 'edited\n');
 
-    const slices = await runExplain('review-pr');
+    const { slices } = await runExplain('review-pr');
 
     assert.equal(slices[0]?.outcome, 'written');
     assert.equal(slices[0]?.currentHash, bundleFingerprint(target));
@@ -120,7 +120,7 @@ test('explain names a missing skill instead of returning silence', async () => {
     installApps(homes, 'claude-code');
     writeUserConfig(homes, baseConfig(['ghost']));
 
-    const slices = await runExplain('ghost');
+    const { slices } = await runExplain('ghost');
 
     assert.equal(slices.length, 1);
     assert.equal(slices[0]?.app, null);
@@ -137,7 +137,7 @@ test('explain surfaces a parse failure for a selected malformed skill', async ()
     fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: broken\n', 'utf-8');
     writeUserConfig(homes, baseConfig(['broken']));
 
-    const slices = await runExplain('broken');
+    const { slices } = await runExplain('broken');
 
     assert.equal(slices.length, 1);
     assert.equal(slices[0]?.app, null);

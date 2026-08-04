@@ -7,10 +7,15 @@ import {
   main,
   parseCliArgs,
   resolvePickerOrder,
+  runAddSource,
   runSelectionCommand,
 } from '../../src/engine/cli.js';
 import { editSelection } from '../../src/engine/config.js';
-import { withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+import { type ScratchHomes, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+
+function readConfigFile(homes: ScratchHomes, name: string): string {
+  return fs.readFileSync(path.join(homes.asbHome, name), 'utf-8');
+}
 
 test('ordered replacement preserves comments, symlink target, mode, and idempotence', async () => {
   await withScratchHomes(async (homes) => {
@@ -134,6 +139,58 @@ test('the interactive selection picker changes nothing while another run holds t
   });
 });
 
+test('enable -p edits the named selection file and leaves config.toml alone', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[commands]\nenabled = ["old"]\n');
+    fs.writeFileSync(
+      path.join(homes.asbHome, 'aws.toml'),
+      '[commands]\nenabled = ["kept"]\n',
+      'utf-8'
+    );
+    const untouched = readConfigFile(homes, 'config.toml');
+
+    const invocation = parseCliArgs(['enable', 'new', '--type', 'commands', '-p', 'aws']);
+    assert.equal(invocation.command, 'enable');
+    if (invocation.command !== 'enable') return;
+    assert.equal(invocation.options.profile, 'aws');
+    await runSelectionCommand(invocation.command, invocation.ids, invocation.options);
+
+    const parsed = parseToml(readConfigFile(homes, 'aws.toml')) as {
+      commands?: { enabled?: string[] };
+    };
+    assert.deepEqual(parsed.commands?.enabled, ['kept', 'new']);
+    assert.equal(readConfigFile(homes, 'config.toml'), untouched);
+  });
+});
+
+test('a source added while a profile is active is declared in config.toml', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    fs.writeFileSync(
+      path.join(homes.asbHome, 'aws.toml'),
+      '[applications]\nenabled = ["claude-code"]\n',
+      'utf-8'
+    );
+    const untouched = readConfigFile(homes, 'aws.toml');
+    const local = path.join(homes.root, 'local-lib');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(local, 'rules', 'style.md'), '# Style\n', 'utf-8');
+    process.env.ASB_PROFILE = 'aws';
+
+    // A profile selects; it never owns the machine's setup. The declaration
+    // lands in the file every run resolves sources from, whichever selection
+    // file that run reads.
+    const report = await runAddSource(local, { as: 'lib' });
+
+    assert.equal(report.exitCode, 0);
+    const parsed = parseToml(readConfigFile(homes, 'config.toml')) as {
+      plugins?: { sources?: Record<string, unknown> };
+    };
+    assert.equal(parsed.plugins?.sources?.lib, local);
+    assert.equal(readConfigFile(homes, 'aws.toml'), untouched);
+  });
+});
+
 test('enable/disable parse on the unified surface and picker order rejects bad permutations', () => {
   const parsed = parseCliArgs(['enable', 'alpha', '--type', 'rules', '--app', 'cursor']);
   assert.equal(parsed.command, 'enable');
@@ -146,4 +203,27 @@ test('enable/disable parse on the unified surface and picker order rejects bad p
   assert.throws(() => resolvePickerOrder('1', ['a', 'b']), /exactly 2/);
   assert.throws(() => resolvePickerOrder('1,1', ['a', 'b']), /duplicate/i);
   assert.throws(() => resolvePickerOrder('a,c', ['a', 'b']), /unknown/i);
+});
+
+test('a repository-declared source contributes nothing an enable -P can resolve', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    const vendored = path.join(homes.root, 'vendored');
+    fs.mkdirSync(project, { recursive: true });
+    fs.mkdirSync(path.join(vendored, 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(vendored, 'commands', 'leak.md'), 'repository body\n', 'utf-8');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      `[plugins.sources]\nevil = ${JSON.stringify(vendored)}\n`,
+      'utf-8'
+    );
+
+    // Sources are config.toml's in every scope, so the id the repository
+    // would supply resolves against the machine's library and is not there.
+    await assert.rejects(
+      runSelectionCommand('enable', ['evil:leak'], { project }),
+      /Unknown component "evil:leak"/
+    );
+  });
 });

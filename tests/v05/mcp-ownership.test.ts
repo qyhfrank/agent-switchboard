@@ -308,7 +308,7 @@ test('explain resolves a server by its identity, per app, with both hashes', asy
     config(homes, ['cursor', 'codex'], ['alpha']);
     await runSync({});
 
-    const slices = await runExplain('alpha');
+    const { slices } = await runExplain('alpha');
 
     assert.equal(slices.length, 2, 'one slice per app that carries the server');
     for (const slice of slices) {
@@ -335,7 +335,7 @@ test('explain names a key asb cannot splice and what is in the way', async () =>
     });
     config(homes, ['codex'], ['alpha']);
 
-    const [slice] = await runExplain('alpha');
+    const [slice] = (await runExplain('alpha')).slices;
 
     assert.equal(slice.outcome, 'blocked');
     assert.equal(slice.detail, 'foreign');

@@ -353,3 +353,39 @@ test('an enabled but undetected union member leaves union state dormant', async 
     assert.equal(entryFor(second, 'agents', 'alpha'), undefined, 'union row ran while dormant');
   });
 });
+
+test('the project union directory holds the increment, never the machine copies', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex', 'gemini');
+    seedSkill(homes, 'alpha');
+    seedSkill(homes, 'repo');
+    writeUserConfig(
+      homes,
+      config({ apps: ['codex', 'gemini'], skills: ['alpha'], agentsDir: true })
+    );
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[distribution.project]\nmode = "managed"\n\n[skills]\nenabled = ["alpha", "repo"]\n'
+    );
+
+    const report = await runSync({ project });
+    const projectUnion = path.join(project, '.agents', 'skills');
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.existsSync(path.join(projectUnion, 'repo', 'SKILL.md')), true);
+    assert.equal(
+      fs.existsSync(path.join(projectUnion, 'alpha')),
+      false,
+      'every member already reads alpha from ~/.agents/skills'
+    );
+    assert.equal(fs.existsSync(path.join(agentsBundle(homes, 'alpha'), 'SKILL.md')), true);
+    const written = report.entries.filter(
+      (entry) => entry.type === 'skills' && entry.id === 'repo'
+    );
+    assert.equal(written.length, 1, 'both members share the one project union destination');
+    assert.equal(written[0]?.scope, 'project');
+    assert.equal(written[0]?.path, path.join(projectUnion, 'repo'));
+  });
+});

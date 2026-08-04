@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+### One sync, two scopes
+
+`asb sync` reconciles the machine's user scope and, when a project is in play,
+that repository's own additions: two phases of one run, under one lock, with
+one report and one exit code.
+
+- **A profile replaces the user configuration's selection instead of layering
+  over it.** `-p aws`, or `ASB_PROFILE=aws`, takes `[applications]`, the
+  component sections, and `[plugins].enabled` from `~/.asb/aws.toml` alone. A
+  selection section the profile omits selects nothing, so content `config.toml`
+  distributed earlier is deselected for that run and removed wherever the
+  render proves it. Machine infrastructure (`[plugins].sources`,
+  `[plugins].auto_update`, `[targets]`, `[extensions]`, `[distribution]`,
+  `[ui]`) still comes from `config.toml`, so a profile carries a selection and
+  never a copy of the machine setup. A profile meaning "the user configuration
+  plus tweaks" has to write its selection out in full; one enabling no
+  applications reconciles nothing, and the report says so. The two files used
+  to deep-merge.
+- **`[plugins.sources]` outside `config.toml` is inert.** A source declared in
+  a profile or in a repository's `.asb.toml` is reported once and never cloned
+  or refreshed: sources live in `config.toml`, and every selection resolves
+  against the machine's own library. `asb add` and `asb remove` write there
+  under any profile.
+- **`-P <dir>` is no longer a project-only run.** Every run reconciles user
+  scope first and the project after it; `-P` names the project root. A script
+  that used `-P` for an isolated project pass reconciles the machine as well.
+- **`./.asb.toml` is detected.** `asb`, `sync`, `status`, and `explain` run the
+  project phase when the invocation directory holds an `.asb.toml` — that
+  directory only, never a parent, and never against an explicit `-P`. A root
+  that is or contains the agents home is refused with a report row, because one
+  tree cannot be both scopes. An edit keeps explicit targeting: `enable` and
+  `disable` write to the file `-P` or `-p` names, otherwise to `config.toml`.
+- **A project receives the increment, not the whole selection.** Per app and
+  type, project destinations get what `<root>/.asb.toml` selects over the base
+  file and nothing more, compared after alias resolution and plugin expansion.
+  User-level content is already visible to every app in every directory, so a
+  repository synced by an earlier version loses its user-level duplicates on
+  the first run of this version wherever the render proves them, and a drifted
+  copy is reported `left-behind`. The `AGENTS.md` region composes increment
+  rules only, and an increment for an app and type whose cell has no project
+  destination is reported rather than dropped. A project still only adds: no
+  spelling in `.asb.toml` withholds user-scope content from one repository.
+- **Codex project trust is written only under an explicit `-P`.** A detected
+  project plans its phase without the trust row, so `asb sync` inside a
+  repository you cloned never adds it to the machine's trusted projects.
+- **Report entries carry their scope.** Text output reads the whole user phase
+  before the project rows, and JSON entries carry `scope`. The last-run marker
+  is written by every real run, the user phase's to write, where a run given a
+  project used to leave it unwritten.
+
+### Migration notes
+
+- **MIG-16, profile semantics:** Breaking. A profile replaces the user
+  configuration's selection instead of layering over it, so a profile written
+  as a patch selects only what it spells out and the run removes the rest
+  wherever the render proves it. Write the selection out in full;
+  infrastructure keys are inherited from `config.toml` and need no copy.
+
 ### Reports render as a screen in an interactive terminal
 
 When stdout is a terminal, a report answers "am I in sync?" instead of logging

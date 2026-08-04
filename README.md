@@ -5,6 +5,10 @@ hooks, MCP servers, and plugins synchronized across supported coding agents.
 The 0.5 engine plans from a captured filesystem state, writes only what it can
 prove is its own, and reports the same outcome vocabulary in text and JSON.
 
+One `asb sync` maintains two scopes: your machine's agent configuration, from a
+single selection file, and the repository you run it in, from that repository's
+own `.asb.toml`.
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -49,8 +53,8 @@ commands accept these common filters and scopes:
 --source <name>                  filter rows by source
 --app <app>                      filter rows by application
 --type <type>                    filter rows by component type
--p, --profile <name>             merge <ASB_HOME>/<name>.toml
--P, --project <dir>              merge <dir>/.asb.toml and use project paths
+-p, --profile <name>             selection file to use in place of config.toml
+-P, --project <dir>              project root; otherwise the cwd's .asb.toml
 --json                           emit machine-readable output
 ```
 
@@ -131,8 +135,17 @@ home when it already exists. A typical library is:
 └── plugins/
 ```
 
-The user configuration is always loaded. `-p work` adds `work.toml`, and
-`-P /repo` adds `/repo/.asb.toml`. Later layers override earlier layers.
+One selection file is the base of a run: `~/.asb/config.toml`, or
+`~/.asb/work.toml` under `-p work` or `ASB_PROFILE=work`. A profile stands in
+place of the user configuration's selection rather than patching it:
+`[applications]`, the component sections, and `[plugins].enabled` come from it
+alone, and a selection section it omits selects nothing that run. Machine
+infrastructure (`[plugins].sources`, `[plugins].auto_update`, `[targets]`,
+`[extensions]`, `[distribution]`, `[ui]`) always comes from `config.toml`, so a
+profile carries a selection and never a copy of the machine setup. A profile
+that enables no applications reconciles nothing, and the report says so. A
+project's `.asb.toml` layers over the base to say what the repository adds:
+tables merge key by key, and an array replaces the array under it.
 
 ```toml
 [applications]
@@ -220,8 +233,12 @@ alone: they are yours to delete once the `[targets.<id>]` tables replace them.
 
 `asb add` accepts a local directory or Git URL. `--as` sets its namespace,
 `--ref` pins a branch, tag, or commit, and `--subtree` selects subtree mode.
-Managed clones are made ready before inventory. Use `asb sync --update` to
-refresh them or `--no-update` to suppress `plugins.auto_update`.
+`asb add` and `asb remove` edit `config.toml`, which owns sources under every
+profile. A `[plugins.sources]` table in a profile or in a repository's
+`.asb.toml` is inert: one report row, no clone, no refresh, and the selections
+around it resolve against the machine's own library. Managed clones are made
+ready before inventory. Use `asb sync --update` to refresh them or
+`--no-update` to suppress `plugins.auto_update`.
 
 Plugin components are namespaced as `plugin:component`. A plugin reference may
 use `plugin@source` when the same plugin name exists in multiple sources.
@@ -230,13 +247,16 @@ them. The predecessor marketplace cache is read only to retire entries whose
 identity is verified; 0.5 never writes that cache.
 
 `asb remove <source>` retires every id that came from the source, in the
-global lists, the plugin list, and any per-application override, takes the
+top-level lists, the plugin list, and any per-application override, takes the
 slices they distributed, and only then drops the declaration and any managed
 checkout. The order is load-bearing: a component the library can no longer
 render proves nothing, so removing the content first would leave every file it
-distributed behind. If a slice cannot be taken, the source is kept along with
-the named rows, because while it is still declared a later run can still prove
-what it distributed. A local directory you pointed at is never deleted.
+distributed behind. Its sweep covers both scopes of the run, so a project in
+play loses that source's slices in the same pass; a `.asb.toml` that still
+names a retired id afterwards reports it `missing`, like any other selection
+nothing resolves. If a slice cannot be taken, the source is kept along with the
+named rows, because while it is still declared a later run can still prove what
+it distributed. A local directory you pointed at is never deleted.
 
 ## Ownership
 
@@ -287,11 +307,49 @@ Writers preserve unrelated bytes in shared JSON, JSONC, YAML, and TOML hosts.
 They cannot restore comments or formatting already removed by an earlier
 whole-file writer.
 
-## Project scope
+## Project configuration
 
-Run `asb init` in a repository to create a `.asb.toml` scaffold. Project-capable
-rules, commands, agents, skills, hooks, and MCP cells use project destinations
-under `-P`. Source lifecycle and native plugin manager rows remain global.
+Run `asb init` in a repository to write a commented `.asb.toml` scaffold. Every
+`asb sync` reconciles user scope first, from the base selection file, and then
+project scope when `-P <dir>` names a root or the invocation directory holds an
+`.asb.toml`. Detection reads that directory alone: a subdirectory of a
+repository is not the repository, and `-P` overrides whatever the invocation
+directory holds. A root that is or contains the agents home is refused with a
+report row, because one tree cannot be both scopes; nothing under it is written
+or removed for the project. The reconciliation commands `asb`, `sync`,
+`status`, and `explain` detect; an edit never does. `enable` and `disable`
+write to the file `-P` or `-p` names, otherwise to `config.toml`, and
+`asb init` writes its scaffold into the directory you run it in.
+
+A repository receives the increment: per app and per type, what its `.asb.toml`
+selects over the base file, and nothing else. User-level content is already
+visible to every app in every directory, so a copy of it in the repository
+would load twice.
+
+```toml
+# ~/.asb/config.toml
+[skills]
+enabled = ["research"]
+
+# repo/.asb.toml
+[skills]
+enabled = ["repo-conventions"]
+```
+
+`cd repo && asb sync` writes `research` under `~/.claude/skills` and
+`repo-conventions` under `repo/.claude/skills`; the repository holds no copy of
+`research`. Naming a user-scope id in `.asb.toml` adds nothing, because the
+base already selects it. The increment only adds: nothing in a `.asb.toml`
+withholds user-scope content from one repository, and no project file rewrites
+a global target, whatever directory the run happens from.
+
+Rules, commands, agents, skills, hooks, and MCP cells have project
+destinations. An increment for a cell that has none is reported as skipped,
+naming the app, the type, and the ids: nothing lands silently, and nothing
+lands globally. Source lifecycle and native plugin manager rows belong to user
+scope and stay there. The rules region in the repository's `AGENTS.md` composes
+the increment rules, so agent context stops carrying twice what
+`~/.claude/CLAUDE.md` already gives it.
 
 ```toml
 [distribution.project]
@@ -299,18 +357,27 @@ mode = "managed"
 collision = "warn-skip"
 ```
 
-Project modes are `managed`, `exclusive`, and `none`. Managed mode preserves
-foreign content; its collision policies are `warn-skip`, `error`, and
-`takeover`. A project run writes nothing outside the repository, and proves
-what it owns against the same library render a global run compares to.
+Project modes are `managed`, `exclusive`, and `none`; `none` leaves the project
+phase out of the run entirely. Managed mode preserves foreign content; its
+collision policies are `warn-skip`, `error`, and `takeover`.
 
-Because a repository is shared, a target ASB cannot attribute is preserved and
-named rather than swept. The rules region inside `AGENTS.md` is delimited, and
-those delimiters are its proof, so it is rewritten and removed like any other
-marked region while bytes outside it are left alone.
+The project phase proves what it owns against the same library render the user
+phase compares to. Because a repository is shared, a target ASB cannot
+attribute is preserved and named rather than swept. The rules region inside
+`AGENTS.md` is delimited, and those delimiters are its proof, so it is
+rewritten and removed like any other marked region while bytes outside it are
+left alone.
 
-Codex project trust is add-only. ASB preserves an existing trusted value,
-refuses untrusted or malformed values, and provides no trust-removal path.
+Codex project trust is the one thing the project phase writes outside the
+repository, and it is written only when `-P` names the project: a run inside a
+repository you cloned leaves the machine's trusted projects as it found them.
+The write is add-only. ASB preserves an existing trusted value, refuses
+untrusted or malformed values, and provides no trust-removal path.
+
+One lock covers both phases, and the project phase captures the filesystem
+after the user phase has applied, so it plans against what the run just wrote.
+One report covers the run: user rows first, then project rows, `scope` on every
+JSON entry, and one exit code.
 
 ## Hooks
 

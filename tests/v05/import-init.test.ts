@@ -256,6 +256,12 @@ test('init writes a dormant commented scaffold with detected apps only active in
     const scaffold = fs.readFileSync(path.join(project, '.asb.toml'), 'utf-8');
     assert.match(scaffold, /^# ASB project configuration/m);
     assert.match(scaffold, /# Docs: .*README\.md/);
+    assert.match(
+      scaffold,
+      /asb sync/,
+      'the scaffold says what a sync in this directory does with the file'
+    );
+    assert.doesNotMatch(scaffold, /\bM[67]\b/, 'the scaffold names behavior, not a milestone');
     assert.match(scaffold, /# \[applications\]/);
     assert.match(scaffold, /# {3}"claude-code", # detected/);
     assert.match(scaffold, /# {3}"cursor", # detected/);

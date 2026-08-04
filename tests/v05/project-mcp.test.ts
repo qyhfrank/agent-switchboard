@@ -5,6 +5,9 @@ import { test } from 'node:test';
 import { runSync } from '../../src/engine/cli.js';
 import {
   installApps,
+  type McpAppId,
+  mcpHostPath,
+  readMcpHost,
   seedMcpLibrary,
   withScratchHomes,
   writeUserConfig,
@@ -16,6 +19,163 @@ function projectConfig(project: string, mcp: string[]): void {
     `[mcp]\nenabled = [${mcp.map((id) => `"${id}"`).join(', ')}]\n`
   );
 }
+
+/** Project-scope MCP host per app (the ratified project cells of the table). */
+function projectHostPath(project: string, app: McpAppId): string {
+  switch (app) {
+    case 'claude-code':
+      return path.join(project, '.mcp.json');
+    case 'codex':
+      return path.join(project, '.codex', 'config.toml');
+    default:
+      return path.join(project, `.${app}`, 'mcp.json');
+  }
+}
+
+function projectServers(project: string, app: McpAppId): Record<string, unknown> | undefined {
+  const host = projectHostPath(project, app);
+  if (!fs.existsSync(host)) return undefined;
+  return (JSON.parse(fs.readFileSync(host, 'utf-8')) as { mcpServers?: Record<string, unknown> })
+    .mcpServers;
+}
+
+/**
+ * A repository carries only what it adds. The user level is visible to every
+ * app in every directory, so a server both levels select is the user's alone;
+ * the increment is what the overlay selects and the base file does not.
+ */
+test('a server the user level already carries never reaches the repository', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'cursor');
+    seedMcpLibrary(homes, { alpha: { command: 'alpha' }, beta: { command: 'beta' } });
+    writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    projectConfig(project, ['alpha', 'beta']);
+
+    const report = await runSync({ project });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(Object.keys(readMcpHost(homes, 'cursor') ?? {}), ['alpha']);
+    assert.deepEqual(Object.keys(projectServers(project, 'cursor') ?? {}), ['beta']);
+    // Each row names the phase that wrote it.
+    assert.equal(
+      report.entries.find((entry) => entry.path === mcpHostPath(homes, 'cursor'))?.scope,
+      'user'
+    );
+    assert.equal(
+      report.entries.find((entry) => entry.path === projectHostPath(project, 'cursor'))?.scope,
+      'project'
+    );
+  });
+});
+
+test('an app only the project enables contributes its whole selection to the repository', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'cursor', 'claude-code');
+    seedMcpLibrary(homes, { alpha: { command: 'alpha' }, beta: { command: 'beta' } });
+    writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      '[applications]\nenabled = ["cursor", "claude-code"]\n\n[mcp]\nenabled = ["alpha", "beta"]\n'
+    );
+
+    const report = await runSync({ project });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    // The increment is per app: claude-code contributes an empty base side, so
+    // everything the overlay selects for it is an addition.
+    assert.deepEqual(Object.keys(projectServers(project, 'claude-code') ?? {}).sort(), [
+      'alpha',
+      'beta',
+    ]);
+    assert.deepEqual(Object.keys(projectServers(project, 'cursor') ?? {}), ['beta']);
+    assert.equal(
+      fs.existsSync(mcpHostPath(homes, 'claude-code')),
+      false,
+      'the user phase never learns of an app only the project layer enables'
+    );
+  });
+});
+
+test('a user-level server a repository still carries is removed where the render proves it', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'cursor');
+    seedMcpLibrary(homes, { alpha: { command: 'alpha' } });
+    // The repository as an earlier full-render run left it: asb's own render of
+    // a server, beside a server that is not asb's.
+    writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n');
+    projectConfig(project, ['alpha']);
+    await runSync({ project });
+    const host = projectHostPath(project, 'cursor');
+    const seeded = JSON.parse(fs.readFileSync(host, 'utf-8')) as {
+      mcpServers: Record<string, unknown>;
+    };
+    seeded.mcpServers.foreign = { command: 'mine' };
+    fs.writeFileSync(host, `${JSON.stringify(seeded, null, 2)}\n`);
+
+    // The same server at user level: the increment empties, and the copy the
+    // repository still holds is a duplicate of content every directory sees.
+    writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    const report = await runSync({ project });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(Object.keys(projectServers(project, 'cursor') ?? {}), ['foreign']);
+    assert.deepEqual(Object.keys(readMcpHost(homes, 'cursor') ?? {}), ['alpha']);
+  });
+});
+
+test('the project phase splices trust into the config the user phase just wrote', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: { command: 'alpha' }, beta: { command: 'beta' } });
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    projectConfig(project, ['alpha', 'beta']);
+
+    const report = await runSync({ project });
+    const globalConfig = fs.readFileSync(mcpHostPath(homes, 'codex'), 'utf-8');
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    // Both phases edit this one document. The second captures after the first
+    // applied, so the trust key joins the user phase's servers instead of
+    // being spliced into bytes that no longer exist.
+    assert.match(globalConfig, /\[mcp_servers\.alpha\]/);
+    assert.match(globalConfig, /\[projects\."[^"]*project"\]/);
+    assert.match(globalConfig, /trust_level = "trusted"/);
+    assert.match(
+      fs.readFileSync(projectHostPath(project, 'codex'), 'utf-8'),
+      /\[mcp_servers\.beta\]/
+    );
+    assert.equal(globalConfig.includes('beta'), false, 'the increment is the repository’s alone');
+  });
+});
+
+test('an empty MCP increment leaves the repository no host and the machine no trust key', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'codex');
+    seedMcpLibrary(homes, { alpha: { command: 'alpha' } });
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n\n[mcp]\nenabled = ["alpha"]\n');
+    projectConfig(project, ['alpha']);
+
+    const report = await runSync({ project });
+    const globalConfig = mcpHostPath(homes, 'codex');
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.match(fs.readFileSync(globalConfig, 'utf-8'), /\[mcp_servers\.alpha\]/);
+    assert.equal(fs.existsSync(projectHostPath(project, 'codex')), false);
+    // Trust follows the servers the repository actually receives, so an empty
+    // increment writes nothing outside the repository even under explicit -P.
+    assert.equal(fs.readFileSync(globalConfig, 'utf-8').includes('[projects.'), false);
+  });
+});
 
 test('managed project MCP preserves foreign servers and sanitizes the managed key', async () => {
   await withScratchHomes(async (homes) => {
@@ -139,10 +299,10 @@ test('custom keyed-array project MCP keeps @array grammar out of the host docume
     // with; the document keeps the plain keyed-array shape the app reads.
     assert.equal(hostText.includes('@array:'), false);
     assert.match(hostText, /name: alpha/);
-    // A project run derives what it owns from the render, so it writes no
-    // machine state at all.
+    // The project phase derives what it owns from the render and writes nothing
+    // machine-local; the user phase every run carries stamps the one marker.
     assert.equal(fs.existsSync(path.join(homes.stateHome, 'ledger.json')), false);
-    assert.equal(fs.existsSync(path.join(homes.stateHome, 'last-run.json')), false);
+    assert.equal(fs.existsSync(path.join(homes.stateHome, 'last-run.json')), true);
   });
 });
 

@@ -434,6 +434,85 @@ test('add declares a local directory and a remote, and persists no credential', 
   });
 });
 
+test('add and remove edit config.toml whichever selection file the run reads', async () => {
+  await withScratchHomes(async (scratch) => {
+    const local = path.join(scratch.root, 'local-lib');
+    fs.mkdirSync(path.join(local, 'rules'), { recursive: true });
+    fs.writeFileSync(path.join(local, 'rules', 'style.md'), '# Style\n', 'utf-8');
+    writeUserConfig(scratch, '[applications]\nenabled = ["claude-code"]\n');
+    const profilePath = path.join(scratch.asbHome, 'work.toml');
+    fs.writeFileSync(profilePath, '[applications]\nenabled = ["claude-code"]\n', 'utf-8');
+    const profile = (): string => fs.readFileSync(profilePath, 'utf-8');
+    const untouched = profile();
+
+    // `-p` names the selection a run reads. Sources are the machine's in
+    // every run, so both edits land in the file that owns them.
+    assert.equal((await runAddSource(local, { as: 'lib', profile: 'work' })).exitCode, 0);
+    assert.match(userConfig(scratch), /lib = /);
+    assert.equal(profile(), untouched);
+
+    assert.equal((await runRemoveSource('lib', { profile: 'work' })).exitCode, 0);
+    assert.doesNotMatch(userConfig(scratch), /lib = /);
+    assert.equal(profile(), untouched);
+  });
+});
+
+test('a source declared in a profile is reported, never cloned, and never resolved', async () => {
+  await withScratchHomes(async (scratch) => {
+    installApps(scratch, 'claude-code');
+    seedSource(scratch, 'lib', { 'rules/style.md': 'Be brief.\n' });
+    writeUserConfig(
+      scratch,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[plugins.sources]',
+        `lib = ${JSON.stringify(path.join(scratch.asbHome, 'plugins', 'lib'))}`,
+        '',
+      ].join('\n')
+    );
+    const profilePath = path.join(scratch.asbHome, 'work.toml');
+    fs.writeFileSync(
+      profilePath,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[rules]',
+        'enabled = ["lib:style"]',
+        '',
+        '[plugins]',
+        'enabled = ["lib"]',
+        '',
+        '[plugins.sources]',
+        'ghost = { url = "http://127.0.0.1:1/none.git", type = "clone" }',
+        '',
+      ].join('\n'),
+      'utf-8'
+    );
+
+    const report = await runSync({ profile: 'work' });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.deepEqual(
+      report.entries
+        .filter((entry) => entry.detail === 'profile-source')
+        .map((entry) => ({
+          id: entry.id,
+          outcome: entry.outcome,
+          scope: entry.scope,
+          path: entry.path,
+        })),
+      [{ id: 'ghost', outcome: 'skipped', scope: 'user', path: profilePath }],
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.equal(fs.existsSync(path.join(scratch.cacheHome, 'ghost')), false, 'nothing was cloned');
+    // What the profile selects resolves against the library config.toml built.
+    assert.match(fs.readFileSync(ruleFilePath(scratch, 'claude-code'), 'utf-8'), /Be brief\./);
+  });
+});
+
 test('nothing leaving the command boundary carries a credential', async () => {
   await withScratchHomes(async (scratch) => {
     // A malformed declaration: the TOML parser echoes the offending line, which
@@ -556,5 +635,45 @@ test('--update reports one invalid namespace exactly once', async () => {
     assert.equal(report.exitCode, 2);
     assert.equal(failures.length, 1, JSON.stringify(report.entries, null, 2));
     assert.equal(failures[0].outcome, 'failed');
+  });
+});
+
+test('removing a source clears the project copies a .asb.toml still names', async () => {
+  await withScratchHomes(async (scratch) => {
+    const project = path.join(scratch.root, 'project');
+    fs.mkdirSync(project);
+    seedSource(scratch, 'x', { 'skills/foo/SKILL.md': skillDoc('foo') });
+    installApps(scratch, 'claude-code');
+    writeUserConfig(
+      scratch,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[plugins.sources]',
+        `x = ${JSON.stringify(path.join(scratch.asbHome, 'plugins', 'x'))}`,
+        '',
+      ].join('\n')
+    );
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[skills]\nenabled = ["x:foo"]\n');
+    const projectSkills = path.join(project, '.claude', 'skills');
+    const copies = (): string[] =>
+      fs.existsSync(projectSkills) ? fs.readdirSync(projectSkills) : [];
+
+    await runSync({ project });
+    assert.equal(copies().length, 1, 'the repository holds the increment');
+
+    // The repository's own file still names the id, and asb never edits it.
+    // The sweep has to take the copy anyway: once the source is gone, nothing
+    // can render that slice again, so nothing could ever prove it.
+    const report = await runRemoveSource('x', { project });
+
+    assert.deepEqual(copies(), [], JSON.stringify(report.entries, null, 2));
+    assert.ok(
+      report.entries.some((entry) => entry.id === 'x' && entry.outcome === 'removed'),
+      JSON.stringify(report.entries, null, 2)
+    );
+    assert.equal(report.scope.project, project, 'the report names the root the sweep reconciled');
+    assert.doesNotMatch(userConfig(scratch), /\[plugins\.sources\][\s\S]*x =/);
   });
 });
