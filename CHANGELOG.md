@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.3
+
 ### Hooks unproven residuals
 
 - **Unowned hook groups report `left-behind (unproven)` only when they share
