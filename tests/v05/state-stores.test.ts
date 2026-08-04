@@ -160,6 +160,149 @@ test('removing a source takes what it distributed in the same run', async () => 
   });
 });
 
+test('source removal changes nothing when another run holds the lock', async () => {
+  await withScratchHomes(async (homes) => {
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(path.join(homes.asbHome, 'plugins', 'team'))}`,
+        '',
+      ].join('\n')
+    );
+    const configPath = path.join(homes.asbHome, 'config.toml');
+    const before = fs.readFileSync(configPath, 'utf-8');
+    fs.mkdirSync(homes.stateHome, { recursive: true });
+    fs.writeFileSync(path.join(homes.stateHome, 'run.lock'), `${process.pid} held\n`);
+
+    await assert.rejects(runRemoveSource('team'), /appears to be active/);
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+    assert.ok(fs.existsSync(path.join(homes.asbHome, 'plugins', 'team')));
+  });
+});
+
+test('source removal rejects an auto-discovered directory before changing its selections', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code"]\n\n[skills]\nenabled = ["team:deploy"]\n'
+    );
+    await runSync();
+    const bundle = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    const configPath = path.join(homes.asbHome, 'config.toml');
+    const before = fs.readFileSync(configPath, 'utf-8');
+
+    await assert.rejects(runRemoveSource('team'), /Source "team" not found/);
+
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
+    assert.ok(fs.existsSync(bundle));
+  });
+});
+
+test('an aborted sweep keeps the source and the slices it never reached', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    const teamPath = path.join(homes.asbHome, 'plugins', 'team');
+    const config = (broken: boolean) =>
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(teamPath)}`,
+        ...(broken ? [`"../broken" = ${JSON.stringify(path.join(homes.root, 'broken'))}`] : []),
+        '',
+      ].join('\n');
+    writeUserConfig(homes, config(false));
+    await runSync();
+    const bundle = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    writeUserConfig(homes, config(true));
+
+    const report = await runRemoveSource('team');
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.ok(fs.existsSync(bundle));
+    assert.ok(fs.existsSync(teamPath));
+    assert.match(fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'), /\bteam\b/);
+  });
+});
+
+test('a malformed source component keeps its render evidence until it can be swept', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    const teamPath = path.join(homes.asbHome, 'plugins', 'team');
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["claude-code"]',
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(teamPath)}`,
+        '',
+      ].join('\n')
+    );
+    await runSync();
+    const bundle = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    fs.writeFileSync(path.join(teamPath, 'skills', 'deploy', 'SKILL.md'), '---\nname: broken\n');
+
+    const report = await runRemoveSource('team');
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.ok(fs.existsSync(bundle));
+    assert.ok(fs.existsSync(teamPath));
+    assert.match(fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'), /\bteam\b/);
+  });
+});
+
+test('a source stays renderable while an installed target that may hold it is inactive', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code', 'codex');
+    seedSource(homes, 'team', { 'skills/deploy/SKILL.md': skillDoc('deploy') });
+    const teamPath = path.join(homes.asbHome, 'plugins', 'team');
+    const config = (apps: readonly string[]) =>
+      [
+        '[applications]',
+        `enabled = [${apps.map((app) => JSON.stringify(app)).join(', ')}]`,
+        '',
+        '[skills]',
+        'enabled = ["team:deploy"]',
+        '',
+        '[plugins.sources]',
+        `team = ${JSON.stringify(teamPath)}`,
+        '',
+      ].join('\n');
+    writeUserConfig(homes, config(['claude-code']));
+    await runSync();
+    const bundle = path.join(skillsParentDir(homes, 'claude-code'), 'team:deploy');
+    writeUserConfig(homes, config(['codex']));
+
+    const report = await runRemoveSource('team');
+
+    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.ok(fs.existsSync(bundle));
+    assert.ok(fs.existsSync(teamPath));
+    assert.match(fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8'), /\bteam\b/);
+  });
+});
+
 test('removing a source reaches what the plugin list and a per-app override selected', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');

@@ -766,7 +766,7 @@ function extensionCutoverWarning(asbHome: string): Action[] {
   ];
 }
 
-export async function runSync(opts: SyncOptions = {}): Promise<Report> {
+export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promise<Report> {
   const env = opts.env ?? process.env;
   const dryRun = opts.dryRun === true;
 
@@ -811,7 +811,8 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
   // A real run takes the lock before capture: the whole capture → plan →
   // apply sequence executes against serialized state, so a plan built from
   // another run's pre-apply snapshot can never fire.
-  const lock: RunLock | null = dryRun ? null : acquireRunLock(config.homes.stateHome);
+  const lock: RunLock | null = dryRun ? null : (heldLock ?? acquireRunLock(config.homes.stateHome));
+  const ownsLock = !dryRun && heldLock === undefined;
   const scope = {
     profile: config.profile,
     project: config.project,
@@ -1044,7 +1045,7 @@ export async function runSync(opts: SyncOptions = {}): Promise<Report> {
     if (previousLastRun) report.lastRun = previousLastRun;
     return report;
   } finally {
-    lock?.release();
+    if (ownsLock) lock?.release();
   }
 }
 
@@ -1237,103 +1238,157 @@ function retiredEntries(
  */
 export async function runRemoveSource(namespace: string, opts: SyncOptions = {}): Promise<Report> {
   const env = opts.env ?? process.env;
-  const config = loadConfig({ profile: opts.profile, env });
-  const scope = { profile: config.profile, project: config.project, dryRun: false };
+  const lock = acquireRunLock(resolveHomes(env).stateHome);
+  try {
+    const config = loadConfig({ profile: opts.profile, env });
+    const scope = { profile: config.profile, project: config.project, dryRun: false };
+    const catalog = readSourceCatalog(config);
+    const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
+    if (!source?.configured) throw new ConfigError(`Source "${namespace}" not found.`);
 
-  const catalog = readSourceCatalog(config);
-  const source = catalog.sources.find((candidate) => candidate.namespace === namespace);
-  const inventory = scanLibrary({ env, plugins: catalog.plugins });
-  const expansion = buildPluginExpansion(catalog.plugins, inventory);
-  const pluginIds = catalog.plugins
-    .filter((plugin) => plugin.source === namespace)
-    .map((plugin) => plugin.id);
-  const componentIds = pluginIds.flatMap((id) =>
-    Object.values(expansion.byPlugin[id] ?? {}).flat()
-  );
-
-  // Retirement compares canonical ids, so it needs the same expansion the
-  // selection was written against. Every channel goes at once: a component
-  // still selected through the plugin list or a per-app override would
-  // survive the sweep below and outlive the library entry that proves it.
-  const retired = retireSourceSelection(
-    withPluginExpansion(config, expansion),
-    namespace,
-    componentIds,
-    pluginIds,
-    env
-  );
-  // Unfiltered on purpose: a `--source`, `--app`, or `--type` narrowing meant
-  // for the report would otherwise leave part of what this source distributed
-  // behind, and nothing could prove it later.
-  const swept = await runSync({
-    profile: opts.profile,
-    project: opts.project,
-    noUpdate: true,
-    env,
-  });
-
-  // A slice this source distributed that the sweep could not take is the one
-  // state the source has to outlive: while it is still declared the library
-  // can render that slice, so fixing the cause and re-running finishes the
-  // job. `missing` and a hand-edited copy are not that state — neither
-  // resolves on a later run, and holding the source hostage to them would
-  // pin it in the config forever.
-  const distributed = new Set(componentIds);
-  // A rules host, a hooks config, an MCP host: these fail as a whole and name
-  // no component, so what attributes them is the type they cover.
-  const distributedTypes = new Set(
-    pluginIds.flatMap((id) => Object.keys(expansion.byPlugin[id] ?? {}))
-  );
-  const stranded = swept.entries.filter((entry) => {
-    const mine =
-      entry.id !== null
-        ? distributed.has(entry.id)
-        : entry.type !== null && distributedTypes.has(entry.type);
-    if (!mine) return false;
-    if (entry.outcome === 'failed' || entry.outcome === 'blocked' || entry.outcome === 'conflict') {
-      return true;
+    const inventory = scanLibrary({ env, plugins: catalog.plugins });
+    const expansion = buildPluginExpansion(catalog.plugins, inventory);
+    const sourcePlugins = catalog.plugins.filter((plugin) => plugin.source === namespace);
+    const pluginIds = sourcePlugins.map((plugin) => plugin.id);
+    const pluginIdSet = new Set(pluginIds);
+    const failed = inventory.failed.filter((component) => pluginIdSet.has(component.source));
+    const componentIds = [
+      ...new Set([
+        ...pluginIds.flatMap((id) => Object.values(expansion.byPlugin[id] ?? {}).flat()),
+        ...failed.map((component) => component.id),
+      ]),
+    ];
+    const distributedTypes = new Set<ComponentType>([
+      ...pluginIds.flatMap((id) => Object.keys(expansion.byPlugin[id] ?? {}) as ComponentType[]),
+      ...failed.map((component) => component.type),
+    ]);
+    const enabledApps = new Set(config.apps.enabled);
+    const assumeInstalled = new Set(config.apps.assumeInstalled);
+    const hasNative = sourcePlugins.some((plugin) => plugin.native !== undefined);
+    const inactive = appRows(config)
+      .filter((row) => !enabledApps.has(row.id))
+      .filter((row) => assumeInstalled.has(row.id) || fs.existsSync(row.detectDir(config.homes)))
+      .filter(
+        (row) =>
+          [...distributedTypes].some((type) => row[type] !== undefined) ||
+          (hasNative && row.native !== undefined)
+      )
+      .map((row) => row.id);
+    if (inactive.length > 0) {
+      return buildReport(scope, [
+        {
+          app: null,
+          type: null,
+          id: namespace,
+          path: source.path,
+          outcome: 'blocked',
+          reason: `kept: installed but inactive app(s) ${inactive.join(', ')} may still hold content from this source; enable and sync them before re-running asb remove ${namespace}`,
+        },
+      ]);
     }
-    // A deletion the file system refused is the retryable shape of
-    // `left-behind`: the bytes are still the ones the library renders, so
-    // the next run takes them once the cause is fixed.
-    return entry.outcome === 'left-behind' && entry.detail === 'remove-failed';
-  });
-  if (stranded.length > 0) {
-    return buildReport(scope, [
+
+    // Retirement compares canonical ids, so it needs the same expansion the
+    // selection was written against. Every channel goes at once: a component
+    // still selected through the plugin list or a per-app override would
+    // survive the sweep below and outlive the library entry that proves it.
+    const retired = retireSourceSelection(
+      withPluginExpansion(config, expansion),
+      namespace,
+      componentIds,
+      pluginIds,
+      env
+    );
+    // Unfiltered on purpose: a `--source`, `--app`, or `--type` narrowing meant
+    // for the report would otherwise leave part of what this source distributed
+    // behind, and nothing could prove it later.
+    const swept = await runSync(
+      {
+        profile: opts.profile,
+        project: opts.project,
+        noUpdate: true,
+        env,
+      },
+      lock
+    );
+    if (swept.exitCode === 2) {
+      return buildReport(scope, [
+        {
+          app: null,
+          type: null,
+          id: namespace,
+          path: source.path,
+          outcome: 'blocked',
+          reason: `kept: the cleanup run aborted before it could prove every distributed slice was removed; resolve the rows below and re-run asb remove ${namespace}`,
+        },
+        ...retiredEntries(retired, namespace),
+        ...swept.entries,
+      ]);
+    }
+
+    // A slice this source distributed that the sweep could not take is the one
+    // state the source has to outlive: while it is still declared the library
+    // can render that slice, so fixing the cause and re-running finishes the
+    // job. `missing` and a hand-edited copy are not that state — neither
+    // resolves on a later run, and holding the source hostage to them would
+    // pin it in the config forever.
+    const distributed = new Set(componentIds);
+    const stranded = swept.entries.filter((entry) => {
+      const mine =
+        entry.id !== null
+          ? distributed.has(entry.id)
+          : entry.type !== null && distributedTypes.has(entry.type as ComponentType);
+      if (!mine) return false;
+      if (
+        entry.outcome === 'failed' ||
+        entry.outcome === 'blocked' ||
+        entry.outcome === 'conflict'
+      ) {
+        return true;
+      }
+      // A deletion the file system refused is the retryable shape of
+      // `left-behind`: the bytes are still the ones the library renders, so
+      // the next run takes them once the cause is fixed.
+      return entry.outcome === 'left-behind' && entry.detail === 'remove-failed';
+    });
+    if (stranded.length > 0) {
+      return buildReport(scope, [
+        {
+          app: null,
+          type: null,
+          id: namespace,
+          path: source.path,
+          outcome: 'blocked',
+          reason: `kept: ${stranded.length} slice(s) it distributed could not be taken, and removing it now would leave them with nothing able to prove them; resolve the rows below and re-run asb remove ${namespace}`,
+        },
+        ...retiredEntries(retired, namespace),
+        ...swept.entries,
+      ]);
+    }
+
+    const remaining = loadConfig({ profile: opts.profile, env });
+    retired.push(
+      ...removeSource(withPluginExpansion(remaining, expansion), namespace, {
+        componentIds,
+        pluginIds,
+        env,
+      }).retired
+    );
+
+    const entries: ReportEntry[] = [
       {
         app: null,
         type: null,
         id: namespace,
-        path: source?.path ?? null,
-        outcome: 'blocked',
-        reason: `kept: ${stranded.length} slice(s) it distributed could not be taken, and removing it now would leave them with nothing able to prove them; resolve the rows below and re-run asb remove ${namespace}`,
+        path: source.path,
+        outcome: 'removed',
+        reason: 'source removed with everything it distributed',
       },
       ...retiredEntries(retired, namespace),
-      ...swept.entries,
-    ]);
+    ];
+    return buildReport(scope, [...entries, ...swept.entries]);
+  } finally {
+    lock.release();
   }
-
-  const remaining = loadConfig({ profile: opts.profile, env });
-  retired.push(
-    ...removeSource(withPluginExpansion(remaining, expansion), namespace, {
-      componentIds,
-      pluginIds,
-      env,
-    }).retired
-  );
-
-  const entries: ReportEntry[] = [
-    {
-      app: null,
-      type: null,
-      id: namespace,
-      path: source?.path ?? null,
-      outcome: 'removed',
-      reason: 'source removed with everything it distributed',
-    },
-    ...retiredEntries(retired, namespace),
-  ];
-  return buildReport(scope, [...entries, ...swept.entries]);
 }
 
 export async function runImport(
@@ -1788,54 +1843,59 @@ export async function runSelectionCommand(
   ids: readonly string[],
   options: CliOptions
 ): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
-  const config = loadConfig({
-    profile: options.profile,
-    project: options.project,
-    env: options.env,
-  });
-  validateAppIds(config, options.apps ?? []);
-  const catalog = readSourceCatalog(config);
-  const inventory = scanLibrary({ env: options.env, plugins: catalog.plugins });
-  const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
-  const grouped = new Map<SelectableType, string[]>();
-  for (const id of ids) {
-    for (const type of selectionTypes(id, options.types ?? [], resolved, inventory, catalog)) {
-      grouped.set(type, [...(grouped.get(type) ?? []), id]);
+  const lock = acquireRunLock(resolveHomes(options.env ?? process.env).stateHome);
+  try {
+    const config = loadConfig({
+      profile: options.profile,
+      project: options.project,
+      env: options.env,
+    });
+    validateAppIds(config, options.apps ?? []);
+    const catalog = readSourceCatalog(config);
+    const inventory = scanLibrary({ env: options.env, plugins: catalog.plugins });
+    const resolved = withPluginExpansion(config, buildPluginExpansion(catalog.plugins, inventory));
+    const grouped = new Map<SelectableType, string[]>();
+    for (const id of ids) {
+      for (const type of selectionTypes(id, options.types ?? [], resolved, inventory, catalog)) {
+        grouped.set(type, [...(grouped.get(type) ?? []), id]);
+      }
     }
-  }
-  const apps = options.apps?.length ? options.apps : [undefined];
-  const entries: SelectionEntry[] = [];
-  for (const [type, values] of grouped) {
-    for (const app of apps) {
-      editSelection({
-        type,
-        ...(command === 'enable' ? { enable: values } : { disable: values }),
-        ...(app ? { app } : {}),
-        profile: options.profile,
-        project: options.project,
-        env: options.env,
-      });
-    }
-    entries.push(
-      ...values.map((id): SelectionEntry => {
-        const known =
-          type === 'plugins'
-            ? resolved.plugins.expansion?.pluginAliases[id] !== undefined
-            : inventory.components.some(
-                (component) => component.type === type && component.id === id
-              );
-        return {
+    const apps = options.apps?.length ? options.apps : [undefined];
+    const entries: SelectionEntry[] = [];
+    for (const [type, values] of grouped) {
+      for (const app of apps) {
+        editSelection({
           type,
-          id,
-          outcome: 'written',
-          ...(command === 'enable' && !known
-            ? { reason: 'cannot validate this id yet; it will be validated at the next sync' }
-            : {}),
-        };
-      })
-    );
+          ...(command === 'enable' ? { enable: values } : { disable: values }),
+          ...(app ? { app } : {}),
+          profile: options.profile,
+          project: options.project,
+          env: options.env,
+        });
+      }
+      entries.push(
+        ...values.map((id): SelectionEntry => {
+          const known =
+            type === 'plugins'
+              ? resolved.plugins.expansion?.pluginAliases[id] !== undefined
+              : inventory.components.some(
+                  (component) => component.type === type && component.id === id
+                );
+          return {
+            type,
+            id,
+            outcome: 'written',
+            ...(command === 'enable' && !known
+              ? { reason: 'cannot validate this id yet; it will be validated at the next sync' }
+              : {}),
+          };
+        })
+      );
+    }
+    return { entries, exitCode: 0 };
+  } finally {
+    lock.release();
   }
-  return { entries, exitCode: 0 };
 }
 
 async function runSelectionPicker(

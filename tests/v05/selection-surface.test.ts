@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { parse as parseToml } from '@iarna/toml';
-import { parseCliArgs, resolvePickerOrder } from '../../src/engine/cli.js';
+import { parseCliArgs, resolvePickerOrder, runSelectionCommand } from '../../src/engine/cli.js';
 import { editSelection } from '../../src/engine/config.js';
 import { withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
@@ -84,6 +84,25 @@ test('selection edits reject the rule id reserved for the outer region', async (
 
     assert.throws(() => editSelection({ type: 'rules', enable: ['rules'] }), /cannot be a rule id/);
     assert.equal(fs.readFileSync(filePath, 'utf-8'), before);
+  });
+});
+
+test('a selection command changes nothing while another run holds the lock', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[commands]\nenabled = ["old"]\n');
+    const configPath = path.join(homes.asbHome, 'config.toml');
+    const before = fs.readFileSync(configPath, 'utf-8');
+    fs.mkdirSync(homes.stateHome, { recursive: true });
+    fs.writeFileSync(path.join(homes.stateHome, 'run.lock'), `${process.pid} held\n`);
+    const invocation = parseCliArgs(['enable', 'new', '--type', 'commands']);
+    assert.equal(invocation.command, 'enable');
+    if (invocation.command !== 'enable') return;
+
+    await assert.rejects(
+      runSelectionCommand(invocation.command, invocation.ids, invocation.options),
+      /appears to be active/
+    );
+    assert.equal(fs.readFileSync(configPath, 'utf-8'), before);
   });
 });
 
