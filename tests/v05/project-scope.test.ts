@@ -240,6 +240,38 @@ test('malformed shared AGENTS markers fail closed without repair guessing', asyn
   });
 });
 
+test('a byte-proven project rules file moves off the retired dedicated filename', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'cursor');
+    seedRule(homes, 'project.md', '# Project rule\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["cursor"]\n\n[rules]\nenabled = ["project"]\n'
+    );
+    projectConfig(project);
+    await runSync({ project });
+    const current = path.join(project, '.cursor', 'rules', 'rules.mdc');
+    const legacy = path.join(project, '.cursor', 'rules', 'asb-rules.mdc');
+    fs.renameSync(current, legacy);
+
+    const report = await runSync({ project });
+
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.existsSync(current), true);
+    assert.equal(fs.existsSync(legacy), false);
+
+    fs.writeFileSync(legacy, '# User-owned copy\n');
+    const drifted = await runSync({ project });
+    assert.ok(
+      drifted.entries.some((entry) => entry.path === legacy && entry.outcome === 'left-behind'),
+      JSON.stringify(drifted.entries, null, 2)
+    );
+    assert.equal(fs.readFileSync(legacy, 'utf-8'), '# User-owned copy\n');
+  });
+});
+
 test('deselecting the project rules region preserves every byte outside it', () => {
   const existing = [
     '# My instructions',

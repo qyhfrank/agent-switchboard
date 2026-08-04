@@ -682,6 +682,37 @@ export function planRules(input: PlanInput): Action[] {
     const currentHash = current.content !== null ? hashContent(current.content) : null;
     const base = { app: appId, type: 'rules' as const, id: null, path: targetPath };
 
+    if (legacyPath && legacy?.exists && input.project) {
+      if (desired.length > 0 && legacy.content === desired) {
+        staleActions.push({
+          app: appId,
+          type: 'rules',
+          id: null,
+          path: legacyPath,
+          op: 'remove',
+          outcome: 'removed',
+          detail: 'stale-copy',
+          root: row.rules.root(config.homes, legacyPath),
+          expectedHash: hashContent(legacy.content),
+          requiresPaths: [targetPath],
+        });
+      } else {
+        staleActions.push({
+          app: appId,
+          type: 'rules',
+          id: null,
+          path: legacyPath,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'unproven',
+          reason:
+            legacy.content === null
+              ? 'retired project rules path is unreadable; preserved'
+              : 'retired project rules path is not the current render; preserved',
+        });
+      }
+    }
+
     // A shared host belongs to the user; asb owns only the marked region
     // inside it. The markers both locate the slice and prove it, so bytes
     // outside them survive every sync and deselection takes the region away
