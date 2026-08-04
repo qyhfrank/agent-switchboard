@@ -213,8 +213,10 @@ function loadExceptions(fixture, targets) {
     const keys = Object.keys(exception ?? {})
       .sort()
       .join(',');
-    if (keys !== 'anchor,path,reason,slice')
-      throw new Error('Each exception needs exact path, slice, reason, and anchor fields');
+    if (keys !== 'after,anchor,before,path,reason,slice')
+      throw new Error(
+        'Each exception needs exact path, slice, before, after, reason, and anchor fields'
+      );
     if (!targets.includes(exception.path))
       throw new Error(`Exception path is undeclared: ${exception.path}`);
     if (!exception.reason || !exception.anchor)
@@ -256,6 +258,14 @@ function snapshot(root, targets) {
   return result;
 }
 
+function sliceValue(entry, slice) {
+  if (slice === 'file-presence') return entry.kind;
+  if (slice === 'mode' && entry.kind !== 'absent') return entry.mode;
+  if (slice === 'bytes' && entry.kind === 'file') return entry.sha256;
+  if (slice === 'symlink-target' && entry.kind === 'symlink') return entry.target;
+  throw new Error(`Snapshot entry has no ${slice} slice`);
+}
+
 function compareSnapshots(baseline, candidate, exceptions) {
   const expected = new Map(exceptions.map((item) => [`${item.path}\0${item.slice}`, item]));
   const allowed = [];
@@ -264,19 +274,53 @@ function compareSnapshots(baseline, candidate, exceptions) {
   for (const target of Object.keys(baseline)) {
     const before = baseline[target];
     const after = candidate[target];
-    if (before.kind !== after.kind) differences.push({ path: target, slice: 'file-presence' });
-    else if (before.kind === 'file') {
-      if (before.mode !== after.mode) differences.push({ path: target, slice: 'mode' });
-      if (before.sha256 !== after.sha256) differences.push({ path: target, slice: 'bytes' });
+    if (before.kind !== after.kind) {
+      differences.push({
+        path: target,
+        slice: 'file-presence',
+        before: sliceValue(before, 'file-presence'),
+        after: sliceValue(after, 'file-presence'),
+      });
+    } else if (before.kind === 'file') {
+      if (before.mode !== after.mode) {
+        differences.push({
+          path: target,
+          slice: 'mode',
+          before: sliceValue(before, 'mode'),
+          after: sliceValue(after, 'mode'),
+        });
+      }
+      if (before.sha256 !== after.sha256) {
+        differences.push({
+          path: target,
+          slice: 'bytes',
+          before: sliceValue(before, 'bytes'),
+          after: sliceValue(after, 'bytes'),
+        });
+      }
     } else if (before.kind === 'symlink') {
-      if (before.mode !== after.mode) differences.push({ path: target, slice: 'mode' });
-      if (before.target !== after.target)
-        differences.push({ path: target, slice: 'symlink-target' });
+      if (before.mode !== after.mode) {
+        differences.push({
+          path: target,
+          slice: 'mode',
+          before: sliceValue(before, 'mode'),
+          after: sliceValue(after, 'mode'),
+        });
+      }
+      if (before.target !== after.target) {
+        differences.push({
+          path: target,
+          slice: 'symlink-target',
+          before: sliceValue(before, 'symlink-target'),
+          after: sliceValue(after, 'symlink-target'),
+        });
+      }
     }
   }
   for (const difference of differences) {
     const exception = expected.get(`${difference.path}\0${difference.slice}`);
-    if (exception) allowed.push(exception);
+    if (exception?.before === difference.before && exception.after === difference.after)
+      allowed.push(exception);
     else unlisted.push(difference);
   }
   const used = new Set(allowed.map((item) => `${item.path}\0${item.slice}`));
@@ -343,25 +387,33 @@ async function main() {
         !exceptions.some((exception) => exception.path === target && exception.slice === 'bytes')
     );
     if (!probePath) throw new Error('Comparator probe needs one unexcepted shared file target');
-    const probeTarget = path.join(candidateRoot, probePath);
-    const original = fs.readFileSync(probeTarget);
-    let probeDetected = false;
-    try {
-      fs.writeFileSync(probeTarget, Buffer.concat([original, Buffer.from('!')]));
-      const injected = compareSnapshots(
-        baselineSnapshot,
-        snapshot(candidateRoot, targets),
-        exceptions
-      );
-      probeDetected = injected.unlisted.some(
-        (difference) => difference.path === probePath && difference.slice === 'bytes'
-      );
-    } finally {
-      fs.writeFileSync(probeTarget, original);
-    }
+    const exceptedProbePath = exceptions.find(
+      (exception) =>
+        exception.slice === 'bytes' &&
+        candidateSnapshot[exception.path].kind === 'file' &&
+        baselineSnapshot[exception.path].kind === 'file'
+    )?.path;
+    if (!exceptedProbePath)
+      throw new Error('Comparator probe needs one excepted shared file target');
+    const probe = (target) => {
+      const filePath = path.join(candidateRoot, target);
+      const original = fs.readFileSync(filePath);
+      try {
+        fs.writeFileSync(filePath, Buffer.concat([original, Buffer.from('!')]));
+        return compareSnapshots(
+          baselineSnapshot,
+          snapshot(candidateRoot, targets),
+          exceptions
+        ).unlisted.some((difference) => difference.path === target && difference.slice === 'bytes');
+      } finally {
+        fs.writeFileSync(filePath, original);
+      }
+    };
+    const probeDetected = probe(probePath);
+    const exceptedProbeDetected = probe(exceptedProbePath);
     const restoredSnapshot = snapshot(candidateRoot, targets);
     const restored = snapshotHash(restoredSnapshot) === snapshotHash(candidateSnapshot);
-    if (!probeDetected || !restored)
+    if (!probeDetected || !exceptedProbeDetected || !restored)
       throw new Error('Comparator byte probe did not detect and restore');
 
     const output = {
@@ -381,7 +433,13 @@ async function main() {
       targets,
       allowedDifferences: comparison.allowed,
       unlistedDifferences: [],
-      comparatorProbe: { path: probePath, detected: probeDetected, restored },
+      comparatorProbe: {
+        path: probePath,
+        detected: probeDetected,
+        exceptedPath: exceptedProbePath,
+        exceptedDetected: exceptedProbeDetected,
+        restored,
+      },
       ...(options.keep ? { scratch } : {}),
     };
     const json = `${JSON.stringify(output, null, 2)}\n`;

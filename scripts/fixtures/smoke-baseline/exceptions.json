@@ -2,12 +2,16 @@
   {
     "path": "agents-home/.claude.json",
     "slice": "file-presence",
+    "before": "file",
+    "after": "absent",
     "reason": "0.5 omits empty MCP host files",
     "anchor": "CHANGELOG.md:MIG-04"
   },
   {
     "path": "agents-home/.claude/CLAUDE.md",
     "slice": "bytes",
+    "before": "d391fd7645f6090197aa7b3e5e4c80476a2b07da7325ff7a947751b25553e056",
+    "after": "12ed32bb9c7cb6fd152fb7e945fee8baa3493fe24077190479586b3b1ec1595b",
     "reason": "0.5.1 wraps shared rules in the ownership region",
     "anchor": "CHANGELOG.md:rules:start"
   }
