@@ -58,6 +58,61 @@ commands accept these common filters and scopes:
 returns exit code 1 when nothing matches or any matched slice has a failing
 outcome.
 
+## Output
+
+A report answers whether you are in sync rather than logging what ran. In an
+interactive terminal a run with nothing to do is one line:
+
+```text
+✓ asb sync · profile aws · 120 components in sync across 5 apps
+```
+
+A run that did something groups its changes under the app that received them,
+collects what needs a person under `needs attention`, tallies the rest, and
+ends on the verdict:
+
+```text
+asb sync · profile aws
+
+claude-code
+  ✓ updated  ~/.claude/CLAUDE.md
+  − removed  feishu-cli:feishu-cli-docs · lark-cli:lark-doc · lark-cli:lark-shared
+cursor
+  − removed  feishu-cli:feishu-cli-docs · lark-cli:lark-doc · lark-cli:lark-shared
+
+needs attention
+  ✗ rl-harness  library source missing
+    enabled but its source content is not there; expected ~/Documents/Projects/rl-harness
+
+1 updated · 6 removed · 110 in sync
+✗ finished with 1 problem
+```
+
+`asb status` is that layout in the future tense, with the last completed sync
+in its header outside project scope:
+
+```text
+asb status · profile aws · last sync 2026-08-03 17:50
+
+pending
+  → claude-code · CLAUDE.md will be updated
+needs attention
+  ✗ rl-harness · library source missing
+
+110 in sync · 1 pending · 1 problem
+→ asb sync applies 1 change
+```
+
+Severity reads from the glyph alone when there is no color: `✓` applied, `−`
+removed, `→` pending or the next command to run, `⚠` a warning that leaves the
+run passing, `✗` a failure that does not. `sync --dry-run` states itself in one
+banner above the report instead of marking every row. Color follows chalk's
+detection, so `NO_COLOR`, `FORCE_COLOR`, `TERM=dumb`, and CI are honored.
+
+This layout is for interactive terminals. Piped or redirected output keeps the
+plain text of earlier releases, so a wrapper script reading it sees no change,
+and `--json` is unaffected by either.
+
 ## Library and configuration
 
 ASB resolves its home from `ASB_HOME`, then `~/.asb`, then the predecessor

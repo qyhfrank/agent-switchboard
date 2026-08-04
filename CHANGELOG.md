@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+### Reports render as a screen in an interactive terminal
+
+When stdout is a terminal, a report answers "am I in sync?" instead of logging
+what the run did. A run with nothing to do is one line. A run that did
+something groups its changes under the app that received them, collects every
+row that needs a person under a `needs attention` block with the redacted
+reason beneath each one, counts the rest in a one-line tally, and closes on a
+single verdict line that says what the exit code says.
+
+- Severity is carried by a glyph and a color, and by the glyph alone when there
+  is no color: `✓` applied, `−` removed, `→` pending or the next command to
+  run, `⚠` a warning that leaves the run passing, `✗` a failure that does not.
+  Paths under the home directory are shown with `~`.
+- `sync --dry-run` states itself once in a banner above the report rather than
+  prefixing every row with `[dry-run]`. `status` is a preview already and
+  carries no banner.
+- The last run moved from the end of the `sync` report into the `status`
+  header, as `last sync <time>`: it is a fact about the machine, not about the
+  run in front of you. Project scope omits it, and so does the non-terminal
+  layout.
+- Color follows chalk's own detection, so `NO_COLOR`, `FORCE_COLOR`,
+  `TERM=dumb`, and CI are honored. Dropping the color changes no text.
+
+Output that is not going to a terminal is byte-identical to 0.5.1. A pipe, a
+redirect, or a script reads the lines it read before. `--json` structure and
+content, the outcome vocabulary, and the exit codes are untouched.
+
 ## 0.5.1
 
 ### Skills ownership is derived, not recorded

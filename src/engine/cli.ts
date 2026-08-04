@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkbox, confirm, input } from '@inquirer/prompts';
+import chalk from 'chalk';
 import { Command } from 'commander';
 import { AGENTS_SKILLS_UNION, APP_ROWS, type AppRow, appRows, projectAppRows } from './apps.js';
 import {
@@ -55,6 +56,7 @@ import {
   buildJsonEnvelope,
   buildReport,
   FAILING_OUTCOMES,
+  type RenderOptions,
   type Report,
   type ReportEntry,
   redactCredentials,
@@ -2015,6 +2017,21 @@ async function runLockedSelectionPicker(
 }
 
 /**
+ * The one place the surface is decided: a terminal gets the interactive
+ * layout, anything redirected keeps the text scripts already parse, and color
+ * follows chalk's reading of FORCE_COLOR, TERM, CI, and Windows. Chalk 5 has
+ * no NO_COLOR support of its own, so the standard's own rule — set and
+ * non-empty means no color — is applied here rather than assumed.
+ */
+function surface(command?: RenderOptions['command']): RenderOptions {
+  return {
+    layout: process.stdout.isTTY ? 'interactive' : 'plain',
+    color: (process.env.NO_COLOR ?? '') === '' && chalk.level > 0,
+    command,
+  };
+}
+
+/**
  * CLI entry: parse, run, render, set the exit code. Never calls
  * process.exit — the exit code is set on process.exitCode so stdout always
  * flushes before the process ends.
@@ -2125,7 +2142,7 @@ export async function main(argv: readonly string[]): Promise<number> {
       process.stdout.write(
         invocation.options.json
           ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), slices, exitCode), null, 2)}\n`
-          : renderExplain(slices, invocation.target)
+          : renderExplain(slices, invocation.target, surface())
       );
       return exitCode;
     }
@@ -2143,8 +2160,8 @@ export async function main(argv: readonly string[]): Promise<number> {
       invocation.options.json
         ? `${JSON.stringify(report, null, 2)}\n`
         : invocation.command === 'summary'
-          ? renderCompactStatus(report)
-          : renderReport(report)
+          ? renderCompactStatus(report, surface(invocation.command))
+          : renderReport(report, surface(invocation.command))
     );
     return report.exitCode;
   } catch (error) {
