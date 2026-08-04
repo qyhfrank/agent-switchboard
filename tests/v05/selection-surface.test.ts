@@ -57,6 +57,36 @@ test('empty replacement is explicit and app edits share add/remove splice mechan
   });
 });
 
+test('an app enabled override stays authoritative through disable and re-enable', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(
+      homes,
+      '[applications.cursor.commands]\nenabled = ["old"]\nadd = ["ignored"]\nremove = ["also-ignored"]\n'
+    );
+
+    editSelection({ type: 'commands', app: 'cursor', disable: ['old'] });
+    editSelection({ type: 'commands', app: 'cursor', enable: ['new'] });
+
+    const parsed = parseToml(fs.readFileSync(path.join(homes.asbHome, 'config.toml'), 'utf-8')) as {
+      applications?: {
+        cursor?: { commands?: { enabled?: string[]; add?: string[]; remove?: string[] } };
+      };
+    };
+    assert.deepEqual(parsed.applications?.cursor?.commands?.enabled, ['new']);
+  });
+});
+
+test('selection edits reject the rule id reserved for the outer region', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[rules]\nenabled = ["safe"]\n');
+    const filePath = path.join(homes.asbHome, 'config.toml');
+    const before = fs.readFileSync(filePath, 'utf-8');
+
+    assert.throws(() => editSelection({ type: 'rules', enable: ['rules'] }), /cannot be a rule id/);
+    assert.equal(fs.readFileSync(filePath, 'utf-8'), before);
+  });
+});
+
 test('enable/disable parse on the unified surface and picker order rejects bad permutations', () => {
   const parsed = parseCliArgs(['enable', 'alpha', '--type', 'rules', '--app', 'cursor']);
   assert.equal(parsed.command, 'enable');

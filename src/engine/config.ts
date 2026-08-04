@@ -229,9 +229,11 @@ const selectionSection = z.preprocess(
  * boundary, leaving nothing able to tell where asb's slice ends. Namespaced
  * ids are safe: `team:rules` renders `<!-- team:rules:start -->`.
  */
+const RULE_ID_ERROR =
+  '"rules" cannot be a rule id: its block marker would be identical to the marker bounding the whole region';
+
 const ruleIdArray = idArray.refine((ids) => !ids.includes('rules'), {
-  message:
-    '"rules" cannot be a rule id: its block marker would be identical to the marker bounding the whole region',
+  message: RULE_ID_ERROR,
 });
 
 const rulesSection = z.preprocess(
@@ -1248,7 +1250,15 @@ export function editSelection(options: EditSelectionOptions): void {
       : userConfigPath(homes, env);
 
   const additionsInput = normalizeIds(options.enable ?? []);
+  const replacementInput =
+    options.replace === undefined ? undefined : normalizeIds(options.replace);
   const removals = new Set(normalizeIds(options.disable ?? []));
+  if (
+    options.type === 'rules' &&
+    [...additionsInput, ...(replacementInput ?? [])].includes('rules')
+  ) {
+    throw new ConfigError(RULE_ID_ERROR);
+  }
 
   const original = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : '';
   let content = original;
@@ -1301,8 +1311,8 @@ export function editSelection(options: EditSelectionOptions): void {
     }
   };
 
-  if (options.replace !== undefined) {
-    const desired = normalizeIds(options.replace);
+  if (replacementInput !== undefined) {
+    const desired = replacementInput;
     if (!section) {
       const separator =
         content.length === 0 || content.endsWith('\n\n')
@@ -1333,13 +1343,14 @@ export function editSelection(options: EditSelectionOptions): void {
       }
     }
   } else if (options.app && options.type !== 'native_plugins') {
-    mutate('remove', [], new Set(additionsInput));
-    mutate('add', additionsInput, removals);
-    mutate('add', [], removals);
-    mutate('remove', [...removals], new Set());
-    // An override spelled `enabled` replaces the base and ignores `remove`,
-    // so a disable that only wrote `remove` would leave the id selected.
-    mutate('enabled', [], removals);
+    if (section && findArray(content, section, 'enabled')) {
+      mutate('enabled', additionsInput, removals);
+    } else {
+      mutate('remove', [], new Set(additionsInput));
+      mutate('add', additionsInput, removals);
+      mutate('add', [], removals);
+      mutate('remove', [...removals], new Set());
+    }
   } else {
     // Native plugin overrides carry a plain `enabled` array in every scope.
     mutate('enabled', additionsInput, removals);
