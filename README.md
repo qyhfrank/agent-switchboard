@@ -432,14 +432,16 @@ pnpm test
 pnpm run smoke:baseline
 ```
 
-After the final audit and user-journey checks pass, create and push the tag:
+After the final audit and user-journey checks pass, create the tag and push it
+to both the canonical remote and the GitHub release remote:
 
 ```bash
 git tag -a v<version> -m "chore(release): v<version>"
 git push origin main --follow-tags
+git push upstream main --follow-tags
 ```
 
-Do not run `npm publish` locally. Pushing the tag triggers
+Do not run `npm publish` locally. Pushing the tag to GitHub triggers
 `.github/workflows/publish.yml`. After the workflow publishes, install the
 released version with `npm install -g agent-switchboard@<version>` and verify
 `asb --version`.
