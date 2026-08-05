@@ -423,12 +423,11 @@ test('legacy markers, tags, and paths are recognition evidence', async () => {
 });
 
 /**
- * Codex records its trust against a group's array position, so a group that did
- * not change may not move: the merge writes each recognized group back where it
- * already sits instead of taking every one out and appending the new set behind
- * whatever the user wrote.
+ * Machines share Codex trust state but may have different local hooks. ASB's
+ * common groups therefore form the same prefix everywhere; local groups trail
+ * it without changing their relative order.
  */
-test('a hook that did not change keeps its array index when its neighbour does', async () => {
+test('codex canonicalizes managed groups before machine-local groups', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedRunner(homes, 'alpha', '#!/bin/sh\necho alpha\n');
@@ -436,24 +435,37 @@ test('a hook that did not change keeps its array index when its neighbour does',
     writeUserConfig(homes, configFor(['codex'], ['alpha', 'beta']));
     await runSync();
 
-    // A group of the user's own, written after asb's.
+    // Model another machine's historical order: its local group occupies the
+    // shared key 0, while the two ASB groups are reversed behind it.
     const hooksJson = configPath(homes, 'codex');
-    const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] };
+    const mineA = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine-a' }] };
+    const mineB = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine-b' }] };
     const before = eventGroups(hooksJson, 'UserPromptSubmit');
-    writeJson(hooksJson, { hooks: { UserPromptSubmit: [...before, mine] } });
+    writeJson(hooksJson, {
+      hooks: { UserPromptSubmit: [mineA, before[1], mineB, before[0]] },
+    });
 
-    seedRunner(homes, 'alpha', '#!/bin/sh\necho alpha\n', ' --v2');
     const report = await runSync();
 
     const after = eventGroups(hooksJson, 'UserPromptSubmit');
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(after.length, 3, JSON.stringify(after, null, 2));
-    assert.deepEqual(after[1], before[1], 'the untouched hook holds its index');
-    assert.deepEqual(after[2], mine, 'and so does the group the user wrote');
-    assert.match(
-      JSON.stringify(after[0]),
-      /run\.sh --v2/,
-      'the changed hook is rewritten in place'
+    assert.deepEqual(after, [before[0], before[1], mineA, mineB]);
+    assert.equal(
+      hooksRows(report).find((entry) => entry.app === 'codex' && entry.id === null)?.outcome,
+      'written'
+    );
+
+    writeUserConfig(homes, configFor(['codex'], ['beta']));
+    const deselection = await runSync();
+    const shifted = hooksRows(deselection).find(
+      (entry) => entry.app === 'codex' && entry.id === null
+    );
+    assert.deepEqual(eventGroups(hooksJson, 'UserPromptSubmit'), [before[1], mineA, mineB]);
+    assert.equal(shifted?.outcome, 'written');
+    assert.equal(
+      typeof shifted?.reason,
+      'string',
+      'removing an earlier group moves survivors to new trust keys'
     );
   });
 });
@@ -687,8 +699,8 @@ test('a foreign group without a concrete matcher is never reported as left-behin
       'the foreign group stays'
     );
     assert.deepEqual(commandsOf(eventGroups(settings, 'Stop')), [
-      'echo foreign-stop',
       'echo blank',
+      'echo foreign-stop',
     ]);
     assert.deepEqual(commandsOf(eventGroups(settings, 'SessionStart')), ['echo foreign-start']);
   });
@@ -712,7 +724,10 @@ test('a concrete matcher that does not equal any library matcher is not left-beh
       0,
       JSON.stringify(report.entries, null, 2)
     );
-    assert.deepEqual(eventGroups(settings, 'UserPromptSubmit')[0], foreign);
+    assert.deepEqual(commandsOf(eventGroups(settings, 'UserPromptSubmit')), [
+      'echo alpha',
+      'echo foreign',
+    ]);
   });
 });
 

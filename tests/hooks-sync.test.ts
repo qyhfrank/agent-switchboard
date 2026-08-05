@@ -294,14 +294,15 @@ test('deselection removes the groups, the bundle dir, and the emptied hooks key'
   });
 });
 
-test('codex hooks.json appends after user groups and is deleted only when empty', async () => {
+test('codex hooks.json keeps managed groups before user groups and deletes only when empty', async () => {
   const CLEAN = {
     UserPromptSubmit: [{ matcher: '*', hooks: [{ type: 'command', command: 'echo c' }] }],
   };
   const USER = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo user' }] };
 
-  // The same append discipline as claude-code; a surviving user group keeps the
-  // file alive through deselection.
+  // Codex uses a canonical managed prefix so machines with different local
+  // groups share trust keys; a surviving user group keeps the file alive
+  // through deselection.
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedHook(homes, 'clean', CLEAN);
@@ -310,7 +311,7 @@ test('codex hooks.json appends after user groups and is deleted only when empty'
     writeUserConfig(homes, configFor(['codex'], ['clean']));
 
     await runSync();
-    assert.deepEqual(eventGroups(hooksJson, 'UserPromptSubmit'), [USER, CLEAN.UserPromptSubmit[0]]);
+    assert.deepEqual(eventGroups(hooksJson, 'UserPromptSubmit'), [CLEAN.UserPromptSubmit[0], USER]);
 
     writeUserConfig(homes, configFor(['codex'], []));
     await runSync();

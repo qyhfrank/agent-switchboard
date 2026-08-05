@@ -382,10 +382,11 @@ JSON entry, and one exit code.
 ## Hooks
 
 A hook group in an application's configuration is ASB's when its command runs
-a file ASB distributed, or when it equals a group the library renders. A group
-ASB cannot attribute keeps its content and its place: Codex records trust
-against a group's array index, so a group that did not change is rewritten
-where it already sits instead of being moved behind whatever else is there.
+a file ASB distributed, or when it equals a group the library renders. Codex
+records trust against array positions, so its selected ASB groups form a
+canonical prefix in configured order. Groups ASB cannot attribute keep their
+content and relative order after that prefix. Other applications rewrite ASB
+groups where they already sit.
 
 A definition hook owns no directory, so a hand-written group byte-identical to
 its render is taken as ASB's rather than duplicated beside itself. An unowned

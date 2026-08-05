@@ -1960,10 +1960,12 @@ function invalidHooksShape(config: Record<string, unknown>): string | null {
  * and v0.4.28 managed paths say asb without saying which hook, which is enough
  * to take a group out and never enough to hand one back.
  *
- * Each recognized group is rewritten where it already sits: Codex records its
- * trust against a group's array position, so moving one it did not ask about
- * costs the user an approval. Shape validation runs before any write, so an
- * unusable config never gets a partial distribution.
+ * Codex receives the selected ASB groups as a canonical prefix, followed by
+ * foreign groups in their existing relative order. Machines that share trust
+ * state therefore assign the same positional keys to their common hooks while
+ * keeping machine-local hooks at the tail. Other targets rewrite recognized
+ * groups in place. Shape validation runs before any write, so an unusable
+ * config never gets a partial distribution.
  */
 export function planHooks(input: PlanInput): Action[] {
   const { config, inventory, capture, table } = input;
@@ -2262,13 +2264,13 @@ export function planHooks(input: PlanInput): Action[] {
       });
     }
 
-    // The merge, in place. Each group asb can prove is its own is rewritten
-    // where it already sits, so Codex — which records its trust against a
-    // group's position — is asked to review only what actually changed. A
-    // group asb cannot prove keeps its place and its content, and hooks with
-    // nowhere to sit yet go on the end.
+    // The merge rewrites each recognized group where it already sits. Codex
+    // then canonicalizes the selected ASB groups into a shared prefix: its
+    // trust keys are positional, and machines may have different local hooks.
+    // Foreign groups retain their relative order at the tail. Other targets
+    // keep the in-place order. Hooks with nowhere to sit yet go on the end.
     const merged: Record<string, unknown[]> = Object.create(null);
-    let appended = 0;
+    let reviewRequired = false;
     let removedGroups = 0;
     const unproven: { event: string; matcher: string; id: string }[] = [];
     const protectedIds = new Set(unresolved);
@@ -2305,16 +2307,37 @@ export function planHooks(input: PlanInput): Action[] {
         if (pending && pending.length > 0) {
           const next = pending.shift();
           out.push(next);
-          if (!isDeepStrictEqual(next, group)) appended++;
+          if (!isDeepStrictEqual(next, group)) reviewRequired = true;
           continue;
         }
         removedGroups++;
       }
       for (const groups of queue.values()) {
         out.push(...groups);
-        appended += groups.length;
+        if (groups.length > 0) reviewRequired = true;
       }
-      if (out.length > 0) merged[event] = out;
+      let ordered = out;
+      if (app === 'codex') {
+        const residual = [...out];
+        const prefix: unknown[] = [];
+        for (const group of desired[event] ?? []) {
+          const index = residual.findIndex((candidate) => isDeepStrictEqual(candidate, group));
+          if (index >= 0) prefix.push(...residual.splice(index, 1));
+        }
+        ordered = [...prefix, ...residual];
+        if (!isDeepStrictEqual(ordered, out)) reviewRequired = true;
+        const existing = existingHooks[event] ?? [];
+        if (
+          ordered.some(
+            (group, index) =>
+              !isDeepStrictEqual(group, existing[index]) &&
+              existing.some((candidate) => isDeepStrictEqual(candidate, group))
+          )
+        ) {
+          reviewRequired = true;
+        }
+      }
+      if (ordered.length > 0) merged[event] = ordered;
     }
     const removed = removedGroups > 0;
 
@@ -2422,7 +2445,7 @@ export function planHooks(input: PlanInput): Action[] {
       // payload the run never distributed, so the run's skip is named instead.
       const failed = writes.filter((w) => w.outcome === 'conflict').length;
       let reviewReason: string | undefined;
-      if (appended === 0) {
+      if (!reviewRequired) {
         reviewReason = undefined;
       } else if (failed > 0) {
         reviewReason = `${failed} hook bundle(s) could not land; the config still points at them: fix and run asb sync again`;
