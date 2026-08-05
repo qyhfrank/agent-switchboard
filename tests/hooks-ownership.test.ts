@@ -494,6 +494,38 @@ test('codex canonicalizes managed groups before machine-local groups', async () 
   });
 });
 
+test('codex defers new groups until every selected hook can form the shared prefix', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedRunner(homes, 'alpha', '#!/bin/sh\necho alpha\n');
+    const betaSource = seedRunner(homes, 'beta', '#!/bin/sh\necho beta\n');
+    const betaDefinition = fs.readFileSync(path.join(betaSource, 'hook.json'), 'utf-8');
+    fs.writeFileSync(path.join(betaSource, 'hook.json'), '{ "hooks": ');
+
+    const hooksJson = configPath(homes, 'codex');
+    const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] };
+    writeJson(hooksJson, { hooks: { UserPromptSubmit: [mine] } });
+    writeUserConfig(homes, configFor(['codex'], ['alpha', 'beta']));
+
+    const partial = await runSync();
+
+    assert.notEqual(partial.exitCode, 0, 'the malformed selection remains visible');
+    assert.deepEqual(
+      eventGroups(hooksJson, 'UserPromptSubmit'),
+      [mine],
+      'a partial selection cannot assign a healthy hook a machine-local trust key'
+    );
+
+    fs.writeFileSync(path.join(betaSource, 'hook.json'), betaDefinition);
+    const recovered = await runSync();
+    const groups = eventGroups(hooksJson, 'UserPromptSubmit');
+    assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.entries, null, 2));
+    assert.match(commandsOf([groups[0] ?? {}])[0] ?? '', /\/alpha\/run\.sh$/);
+    assert.match(commandsOf([groups[1] ?? {}])[0] ?? '', /\/beta\/run\.sh$/);
+    assert.deepEqual(groups[2], mine, 'recovery canonicalizes once ahead of the local tail');
+  });
+});
+
 /**
  * The same in-place discipline when a legacy id marker is the only evidence:
  * two managed groups with a user group between them each get rewritten at their
