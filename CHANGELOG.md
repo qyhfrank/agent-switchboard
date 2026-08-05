@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Test suite reorganized by feature area
+
+- **`tests/v05/` is gone; the suite lives flat in `tests/`, one file per
+  feature area.** Milestone-era files (`m6-suite-floor`, `audit-final`,
+  `dogfood-final`) dissolved into the domain files that own their behaviors;
+  duplicated and formatting-only assertions were removed. 638 cases became
+  393 with every distinct behavior contract retained. `npm test` no longer
+  needs a prior `npm run build`.
+
 ## 0.5.3
 
 ### Hooks unproven residuals

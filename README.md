@@ -403,9 +403,11 @@ npm test
 npm run build
 ```
 
-`npm test` runs only `tests/v05/*.test.ts`. Five source-management suites spawn
-Git or native-manager subprocesses and may be denied by restricted sandboxes;
-the remaining suites do not need subprocess permission.
+`npm test` runs `tests/*.test.ts`, one file per feature area. The
+sources-checkouts, sources-lifecycle, entries-cache, apply-safety, and
+plugins-native suites spawn Git, node, or native-manager subprocesses and may
+be denied by restricted sandboxes; the remaining suites do not need subprocess
+permission.
 
 ### Releasing
 
