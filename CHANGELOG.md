@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.4
+
+### Cross-machine Codex hook trust
+
+- **Selected ASB hook groups form a canonical configured-order prefix in
+  Codex.** Machines with different local hooks assign the same positional
+  trust keys to their shared ASB hooks, while unowned groups keep their content
+  and relative order at the tail. Writes that shift surviving hooks after a
+  deselection also report the required Codex trust review.
+
 ### Test suite reorganized by feature area
 
 - **`tests/v05/` is gone; the suite lives flat in `tests/`, one file per
