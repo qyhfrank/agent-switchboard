@@ -494,6 +494,52 @@ test('codex canonicalizes managed groups before machine-local groups', async () 
   });
 });
 
+test('codex defers an id-less predecessor while the selected prefix is incomplete', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    const alpha = { matcher: 'alpha', hooks: [{ type: 'command', command: 'echo alpha' }] };
+    const unresolvedBeta = {
+      matcher: 'beta',
+      hooks: [{ type: 'command', command: 'echo unresolved-beta' }],
+    };
+    seedHook(homes, 'alpha', { UserPromptSubmit: [alpha] });
+    const betaSource = seedHook(homes, 'beta', { UserPromptSubmit: [unresolvedBeta] });
+
+    const hooksJson = configPath(homes, 'codex');
+    const legacyGamma = {
+      matcher: 'gamma',
+      hooks: [
+        {
+          type: 'command',
+          command: 'echo legacy-gamma\n# asb-managed-by=agent-switchboard',
+        },
+      ],
+    };
+    const foreign = { matcher: 'foreign', hooks: [{ type: 'command', command: 'echo foreign' }] };
+    writeJson(hooksJson, {
+      hooks: { UserPromptSubmit: [legacyGamma, alpha, unresolvedBeta, foreign] },
+    });
+    writeUserConfig(homes, configFor(['codex'], ['alpha', 'beta']));
+    const stable = fs.readFileSync(hooksJson, 'utf-8');
+    const betaDefinition = fs.readFileSync(betaSource, 'utf-8');
+    fs.writeFileSync(betaSource, '{ "hooks": ');
+
+    const partial = await runSync();
+
+    assert.notEqual(partial.exitCode, 0, 'the malformed selection remains visible');
+    assert.equal(
+      fs.readFileSync(hooksJson, 'utf-8'),
+      stable,
+      'an id-less predecessor cannot consume the sole healthy replacement'
+    );
+
+    fs.writeFileSync(betaSource, betaDefinition);
+    const recovered = await runSync();
+    assert.equal(recovered.exitCode, 0, JSON.stringify(recovered.entries, null, 2));
+    assert.deepEqual(eventGroups(hooksJson, 'UserPromptSubmit'), [alpha, unresolvedBeta, foreign]);
+  });
+});
+
 test('codex defers new groups until every selected hook can form the shared prefix', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');

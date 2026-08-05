@@ -2306,7 +2306,12 @@ export function planHooks(input: PlanInput): Action[] {
         // and rewriting it where it sits leaves every group below at the
         // index Codex recorded its trust against.
         const waiting = [...queue.values()].filter((groups) => groups.length > 0);
-        const pending = id !== null ? queue.get(id) : waiting.length === 1 ? waiting[0] : undefined;
+        const pending =
+          id !== null
+            ? queue.get(id)
+            : !deferCodexReconciliation && waiting.length === 1
+              ? waiting[0]
+              : undefined;
         if (pending && pending.length > 0) {
           const next = pending.shift();
           out.push(next);
