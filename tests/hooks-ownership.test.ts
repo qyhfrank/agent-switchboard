@@ -526,6 +526,42 @@ test('codex defers new groups until every selected hook can form the shared pref
   });
 });
 
+test('codex defers removals until every selected hook can form the shared prefix', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedRunner(homes, 'gamma', '#!/bin/sh\necho gamma\n');
+    seedRunner(homes, 'alpha', '#!/bin/sh\necho alpha\n');
+    const betaSource = seedRunner(homes, 'beta', '#!/bin/sh\necho beta\n');
+    const betaDefinition = fs.readFileSync(path.join(betaSource, 'hook.json'), 'utf-8');
+    writeUserConfig(homes, configFor(['codex'], ['gamma', 'alpha', 'beta']));
+    await runSync();
+
+    const hooksJson = configPath(homes, 'codex');
+    const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] };
+    writeJson(hooksJson, {
+      hooks: { UserPromptSubmit: [...eventGroups(hooksJson, 'UserPromptSubmit'), mine] },
+    });
+    const stable = fs.readFileSync(hooksJson, 'utf-8');
+    fs.writeFileSync(path.join(betaSource, 'hook.json'), '{ "hooks": ');
+    writeUserConfig(homes, configFor(['codex'], ['alpha', 'beta']));
+
+    await runSync();
+
+    assert.equal(
+      fs.readFileSync(hooksJson, 'utf-8'),
+      stable,
+      'a partial selection cannot remove a group and shift the surviving trust keys'
+    );
+
+    fs.writeFileSync(path.join(betaSource, 'hook.json'), betaDefinition);
+    await runSync();
+    const groups = eventGroups(hooksJson, 'UserPromptSubmit');
+    assert.match(commandsOf([groups[0] ?? {}])[0] ?? '', /\/alpha\/run\.sh$/);
+    assert.match(commandsOf([groups[1] ?? {}])[0] ?? '', /\/beta\/run\.sh$/);
+    assert.deepEqual(groups[2], mine, 'recovery applies the deferred removal once');
+  });
+});
+
 /**
  * The same in-place discipline when a legacy id marker is the only evidence:
  * two managed groups with a user group between them each get rewritten at their

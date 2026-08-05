@@ -2109,6 +2109,7 @@ export function planHooks(input: PlanInput): Action[] {
     // reports its cause at library level, and its groups and bundle stay put
     // until the library is whole again.
     const unresolved = selected.filter((id) => byId.get(id)?.hooks === undefined);
+    const deferCodexReconciliation = app === 'codex' && unresolved.length > 0;
 
     // Bundle files land before the config that points at them.
     const writes: Action[] = [];
@@ -2208,6 +2209,7 @@ export function planHooks(input: PlanInput): Action[] {
     const removals: Action[] = [];
     for (const component of byId.values()) {
       const id = component.id;
+      if (deferCodexReconciliation) continue;
       if (owned.includes(id) || !component.files || unresolved.includes(id)) continue;
       const bundlePath = path.join(row.bundleDir(config.homes), id);
       const live = capture.bundles[bundlePath];
@@ -2268,8 +2270,8 @@ export function planHooks(input: PlanInput): Action[] {
     // then canonicalizes the selected ASB groups into a shared prefix: its
     // trust keys are positional, and machines may have different local hooks.
     // Foreign groups retain their relative order at the tail. Other targets
-    // keep the in-place order. An unresolved Codex selection stays in place
-    // and defers additions until every configured prefix group can render.
+    // keep the in-place order. An unresolved Codex selection holds membership
+    // and order until every configured prefix group can render.
     const merged: Record<string, unknown[]> = Object.create(null);
     let reviewRequired = false;
     let removedGroups = 0;
@@ -2311,16 +2313,20 @@ export function planHooks(input: PlanInput): Action[] {
           if (!isDeepStrictEqual(next, group)) reviewRequired = true;
           continue;
         }
+        if (deferCodexReconciliation) {
+          out.push(group);
+          continue;
+        }
         removedGroups++;
       }
-      if (app !== 'codex' || unresolved.length === 0) {
+      if (!deferCodexReconciliation) {
         for (const groups of queue.values()) {
           out.push(...groups);
           if (groups.length > 0) reviewRequired = true;
         }
       }
       let ordered = out;
-      if (app === 'codex' && unresolved.length === 0) {
+      if (app === 'codex' && !deferCodexReconciliation) {
         const residual = [...out];
         const prefix: unknown[] = [];
         for (const group of desired[event] ?? []) {
