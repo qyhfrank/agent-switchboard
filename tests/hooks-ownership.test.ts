@@ -431,8 +431,8 @@ test('codex canonicalizes managed groups before machine-local groups', async () 
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedRunner(homes, 'alpha', '#!/bin/sh\necho alpha\n');
-    seedRunner(homes, 'beta', '#!/bin/sh\necho beta\n');
-    writeUserConfig(homes, configFor(['codex'], ['alpha', 'beta']));
+    const betaSource = seedRunner(homes, 'beta', '#!/bin/sh\necho beta\n');
+    writeUserConfig(homes, configFor(['codex'], ['beta', 'alpha']));
     await runSync();
 
     // Model another machine's historical order: its local group occupies the
@@ -448,25 +448,49 @@ test('codex canonicalizes managed groups before machine-local groups', async () 
     const report = await runSync();
 
     const after = eventGroups(hooksJson, 'UserPromptSubmit');
+    const trustReview =
+      'Codex skips new or changed hooks until they are trusted: run /hooks in Codex to review them, or headless codex exec runs without them';
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.deepEqual(after, [before[0], before[1], mineA, mineB]);
+    assert.match(commandsOf([after[0] ?? {}])[0] ?? '', /\/beta\/run\.sh$/);
+    assert.match(commandsOf([after[1] ?? {}])[0] ?? '', /\/alpha\/run\.sh$/);
+    const canonicalized = hooksRows(report).find(
+      (entry) => entry.app === 'codex' && entry.id === null
+    );
+    assert.equal(canonicalized?.outcome, 'written');
+    assert.equal(canonicalized?.reason, trustReview);
+
+    const stable = fs.readFileSync(hooksJson, 'utf-8');
+    const betaDefinition = fs.readFileSync(path.join(betaSource, 'hook.json'), 'utf-8');
+    fs.writeFileSync(path.join(betaSource, 'hook.json'), '{ "hooks": ');
+    await runSync();
     assert.equal(
-      hooksRows(report).find((entry) => entry.app === 'codex' && entry.id === null)?.outcome,
-      'written'
+      fs.readFileSync(hooksJson, 'utf-8'),
+      stable,
+      'an unresolved selected hook cannot shift a healthy sibling to a new trust key'
+    );
+    fs.writeFileSync(path.join(betaSource, 'hook.json'), betaDefinition);
+    await runSync();
+
+    seedRunner(homes, 'alpha', '#!/bin/sh\necho alpha\n', ' --changed');
+    const update = await runSync();
+    const updated = eventGroups(hooksJson, 'UserPromptSubmit');
+    assert.deepEqual(updated[0], before[0], 'the unchanged managed sibling keeps its trust key');
+    assert.match(commandsOf([updated[1] ?? {}])[0] ?? '', /run\.sh --changed$/);
+    assert.deepEqual(updated.slice(2), [mineA, mineB]);
+    assert.equal(
+      hooksRows(update).find((entry) => entry.app === 'codex' && entry.id === null)?.reason,
+      trustReview
     );
 
-    writeUserConfig(homes, configFor(['codex'], ['beta']));
+    writeUserConfig(homes, configFor(['codex'], ['alpha']));
     const deselection = await runSync();
     const shifted = hooksRows(deselection).find(
       (entry) => entry.app === 'codex' && entry.id === null
     );
-    assert.deepEqual(eventGroups(hooksJson, 'UserPromptSubmit'), [before[1], mineA, mineB]);
+    assert.deepEqual(eventGroups(hooksJson, 'UserPromptSubmit'), [updated[1], mineA, mineB]);
     assert.equal(shifted?.outcome, 'written');
-    assert.equal(
-      typeof shifted?.reason,
-      'string',
-      'removing an earlier group moves survivors to new trust keys'
-    );
+    assert.equal(shifted?.reason, trustReview);
   });
 });
 

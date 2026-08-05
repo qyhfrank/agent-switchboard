@@ -2268,7 +2268,8 @@ export function planHooks(input: PlanInput): Action[] {
     // then canonicalizes the selected ASB groups into a shared prefix: its
     // trust keys are positional, and machines may have different local hooks.
     // Foreign groups retain their relative order at the tail. Other targets
-    // keep the in-place order. Hooks with nowhere to sit yet go on the end.
+    // keep the in-place order. An unresolved selection also stays in place
+    // until every configured prefix group can be rendered.
     const merged: Record<string, unknown[]> = Object.create(null);
     let reviewRequired = false;
     let removedGroups = 0;
@@ -2317,7 +2318,7 @@ export function planHooks(input: PlanInput): Action[] {
         if (groups.length > 0) reviewRequired = true;
       }
       let ordered = out;
-      if (app === 'codex') {
+      if (app === 'codex' && unresolved.length === 0) {
         const residual = [...out];
         const prefix: unknown[] = [];
         for (const group of desired[event] ?? []) {

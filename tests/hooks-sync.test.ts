@@ -352,11 +352,15 @@ test('codex hooks.json keeps managed groups before user groups and deletes only 
 test('an invalid hooks shape aborts that app before any config write', async () => {
   // Validation runs after the bundle copy phase, so the claim is scoped to the
   // config file; a definition hook keeps it exact.
-  const cases: Array<[string, unknown]> = [
-    ['hooks is not an object', { theme: 'dark', hooks: 'nope' }],
-    ['hooks.<event> is not an array', { theme: 'dark', hooks: { UserPromptSubmit: {} } }],
+  const cases: Array<[string, unknown, string]> = [
+    ['hooks is not an object', { theme: 'dark', hooks: 'nope' }, '"hooks" must be an object'],
+    [
+      'hooks.<event> is not an array',
+      { theme: 'dark', hooks: { UserPromptSubmit: {} } },
+      '"hooks.UserPromptSubmit" must be an array',
+    ],
   ];
-  for (const [label, seeded] of cases) {
+  for (const [label, seeded, reason] of cases) {
     await withScratchHomes(async (homes) => {
       installApps(homes, 'claude-code');
       seedHook(homes, 'lint', LINT_LIBRARY);
@@ -371,6 +375,7 @@ test('an invalid hooks shape aborts that app before any config write', async () 
       const row = hooksRows(report).find((entry) => entry.app === 'claude-code');
       assert.equal(row?.outcome, 'failed', `${label}: the refusal is reported`);
       assert.equal(row?.detail, 'invalid-shape', label);
+      assert.ok(row?.reason?.includes(reason), `${label}: the refusal names the invalid key`);
       assert.notEqual(report.exitCode, 0, `${label}: an unusable config fails the run`);
     });
   }
@@ -529,8 +534,10 @@ test('a codex hooks write reports the trust review Codex still requires', async 
 
     const codex = hooksRows(first).find((entry) => entry.app === 'codex' && entry.id === null);
     assert.equal(codex?.outcome, 'written');
-    assert.equal(typeof codex?.reason, 'string', 'the write names the review Codex still wants');
-    assert.notEqual(codex?.reason, '');
+    assert.equal(
+      codex?.reason,
+      'Codex skips new or changed hooks until they are trusted: run /hooks in Codex to review them, or headless codex exec runs without them'
+    );
 
     // The notice is Codex's gate, not a property of distributing hooks.
     const claude = hooksRows(first).find(
