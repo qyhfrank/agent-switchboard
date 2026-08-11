@@ -171,6 +171,30 @@ test('includeDelimiters can be overridden per app', async () => {
   });
 });
 
+test('flipping includeDelimiters rewrites the existing render instead of refusing', async () => {
+  await withScratchHomes(async (homes) => {
+    seedRule(homes, 'alpha.md', 'Alpha body.\n');
+    const base = ['[applications]', 'enabled = ["codex"]', '', '[rules]', 'enabled = ["alpha"]'];
+    writeUserConfig(homes, [...base, 'includeDelimiters = true'].join('\n'));
+    installApps(homes, 'codex');
+    assert.equal((await runSync()).exitCode, 0);
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'codex'), 'utf-8'),
+      renderedRules('codex', '<!-- alpha:start -->\nAlpha body.\n<!-- alpha:end -->\n')
+    );
+
+    writeUserConfig(homes, [...base, 'includeDelimiters = false'].join('\n'));
+    fs.rmSync(homes.stateHome, { recursive: true, force: true });
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'codex'), 'utf-8'),
+      renderedRules('codex', 'Alpha body.\n'),
+      'the marked render is recognized as a render under the old delimiter mode and rewritten'
+    );
+  });
+});
+
 test('a rule missing only from one app effective set blocks only that app', async () => {
   await withScratchHomes(async (homes) => {
     seedRule(homes, 'alpha.md', 'Alpha body.\n');
