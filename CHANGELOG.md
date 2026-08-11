@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.5
+
 ### Content absent from this machine
 
 - **A new `absent` outcome joins the report and JSON vocabulary at warning
