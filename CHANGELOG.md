@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.6
+
+### Delimiter mode flips
+
+- **A regression test locks the `includeDelimiters` flip on existing renders.**
+  Flipping the global or per-app delimiter setting rewrites a previously marked
+  render in place, with or without local sync state: ownership rests on the
+  region wrapper, not the per-rule markers. The test pins the transition a
+  fleet-wide delimiter config change rides on; runtime behavior is unchanged.
+
 ## 0.5.5
 
 ### Content absent from this machine
