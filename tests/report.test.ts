@@ -52,7 +52,7 @@ const UPDATED_CLAUDE: ReportEntry = {
   scope: 'user',
 };
 
-/** The shape `sourceRow` emits for an enabled source whose content is absent. */
+/** The shape `sourceRow` emits for enabled content asb was told to fetch and could not. */
 const MISSING_SOURCE: ReportEntry = {
   app: null,
   type: null,
@@ -334,6 +334,13 @@ const LEFT_BEHIND: ReportEntry = {
   scope: 'user',
 };
 
+/** The same row for a source only this machine lacks: nothing to fetch it from. */
+const ABSENT_SOURCE: ReportEntry = {
+  ...MISSING_SOURCE,
+  outcome: 'absent',
+  reason: `${MISSING_SOURCE.reason}; its components are not distributed until it returns`,
+};
+
 const failingRow = (outcome: 'blocked' | 'conflict'): ReportEntry => ({
   app: 'codex',
   type: 'rules',
@@ -465,6 +472,33 @@ test('a status with nothing pending leaves its own count to the verdict line', (
       '',
     ].join('\n')
   );
+});
+
+test('content only this machine lacks warns, and the tally names each warning', () => {
+  const warned = buildReport(PROFILE_SCOPE, [ABSENT_SOURCE, ...unchangedRows(4, APPS)]);
+  assert.equal(warned.exitCode, 0);
+  assert.equal(
+    renderReport(warned, ui('status')),
+    [
+      'asb status · profile aws',
+      '',
+      'needs attention',
+      '  ⚠ rl-harness · library source absent',
+      '',
+      '4 in sync',
+      '✓ finished with 1 warning',
+      '',
+    ].join('\n')
+  );
+
+  // Two warning outcomes in one run: a tally that reaches for a single label
+  // reports one of them under the other's name.
+  const mixed = buildReport(PROFILE_SCOPE, [ABSENT_SOURCE, LEFT_BEHIND, failingRow('blocked')]);
+  const lines = strip(renderReport(mixed, ui('sync')))
+    .trimEnd()
+    .split('\n');
+  assert.equal(lines.at(-2), '1 absent · 1 left-behind', lines.join('\n'));
+  assert.equal(lines.at(-1), '✗ finished with 1 problem', lines.join('\n'));
 });
 
 test('a clean status still says when it last synced', () => {

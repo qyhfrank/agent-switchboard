@@ -56,7 +56,7 @@ function userConfig(homes: ScratchHomes): string {
 
 const BASE = ['[applications]', 'enabled = ["claude-code"]'];
 
-test('a selected plugin no source provides is a missing row naming what asb looked at', async () => {
+test('a selected plugin this machine lacks is an absent row naming what asb looked at', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedRule(homes, 'core.md', 'Be kind.\n');
@@ -67,19 +67,107 @@ test('a selected plugin no source provides is a missing row naming what asb look
       { harness: JSON.stringify(gone) }
     );
 
+    // Nothing declares a remote to fetch it from, so the content is this
+    // machine's gap, not a run that failed.
     const status = await runSync({ dryRun: true });
-    const missing = status.entries.find((entry) => entry.outcome === 'missing');
-    assert.ok(missing, JSON.stringify(status.entries, null, 2));
-    assert.equal(missing.id, 'harness');
-    assert.equal(missing.path, gone, 'the configured path is named, not just the id');
+    const absent = status.entries.find((entry) => entry.outcome === 'absent');
+    assert.ok(absent, JSON.stringify(status.entries, null, 2));
+    assert.equal(absent.id, 'harness');
+    assert.equal(absent.path, gone, 'the configured path is named, not just the id');
+    assert.match(absent.reason ?? '', /expected /);
+    assert.ok(absent.reason?.includes(gone), absent.reason);
+    assert.equal(status.exitCode, 0, JSON.stringify(status.entries, null, 2));
 
     // One gap row, and the rest of the run still happens.
     const report = await runSync();
-    assert.ok(report.entries.some((entry) => entry.outcome === 'missing'));
+    assert.ok(report.entries.some((entry) => entry.outcome === 'absent'));
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(
       fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'),
       renderedRules('claude-code', 'Be kind.\n')
     );
+  });
+});
+
+test('content a declared remote never fetched is missing, not merely absent', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const fixture = createGitFixture(homes.root, 'src');
+    writeFixtureFile(fixture, 'rules/tone.md', 'Be brief.\n');
+    commitAndPush(fixture, 'seed');
+    writeConfig(homes, [...BASE, '', '[plugins]', 'enabled = ["src"]'], {
+      src: `{ url = ${JSON.stringify(`file://${fixture.bareRepo}`)}, type = "clone" }`,
+    });
+
+    // A status clones nothing, and asb was told where this content comes from:
+    // the run has a fetch to answer for, so it fails rather than warns.
+    const status = await runSync({ dryRun: true });
+    const row = status.entries.find((entry) =>
+      entry.reason?.startsWith('enabled but its source content is not there')
+    );
+    assert.ok(row, JSON.stringify(status.entries, null, 2));
+    assert.equal(row.id, 'src');
+    assert.equal(row.outcome, 'missing', JSON.stringify(status.entries, null, 2));
+    assert.equal(status.exitCode, 1, JSON.stringify(status.entries, null, 2));
+    assert.equal(fs.existsSync(path.join(homes.cacheHome, 'src')), false, 'nothing was cloned');
+
+    // The inventory calls a checkout nobody has run pending, never absent: the
+    // clone row already names the next step.
+    const all = await runSync({ dryRun: true, all: true });
+    const source = all.entries.find((entry) => entry.detail === 'configured-source');
+    assert.ok(source, JSON.stringify(all.entries, null, 2));
+    assert.equal(source.outcome, 'unchanged');
+    const catalogRow = all.entries.find((entry) => entry.detail === 'selected');
+    assert.ok(catalogRow, JSON.stringify(all.entries, null, 2));
+    assert.equal(catalogRow.id, 'src');
+    assert.equal(catalogRow.outcome, 'unchanged', 'the fetch row owns the gap, not the catalog');
+  });
+});
+
+test('a local source nothing selects is silent by default and absent under --all', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const gone = path.join(homes.root, 'gone', 'shelf');
+    writeConfig(homes, BASE, { shelf: JSON.stringify(gone) });
+
+    const status = await runSync({ dryRun: true });
+    assert.equal(status.exitCode, 0, JSON.stringify(status.entries, null, 2));
+    assert.equal(
+      status.entries.some((entry) => entry.id === 'shelf'),
+      false,
+      JSON.stringify(status.entries, null, 2)
+    );
+
+    const all = await runSync({ dryRun: true, all: true });
+    assert.equal(all.exitCode, 0, JSON.stringify(all.entries, null, 2));
+    const source = all.entries.find((entry) => entry.detail === 'configured-source');
+    assert.ok(source, JSON.stringify(all.entries, null, 2));
+    assert.equal(source.outcome, 'absent');
+    assert.ok(source.reason?.includes(gone), source.reason);
+    const plugin = all.entries.find((entry) => entry.detail === 'not-selected');
+    assert.ok(plugin, JSON.stringify(all.entries, null, 2));
+    assert.equal(plugin.outcome, 'skipped');
+  });
+});
+
+test('--all reports an enabled absent plugin as absent in the catalog and the source rows', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const gone = path.join(homes.root, 'gone', 'harness');
+    writeConfig(homes, [...BASE, '', '[plugins]', 'enabled = ["harness"]'], {
+      harness: JSON.stringify(gone),
+    });
+
+    const all = await runSync({ dryRun: true, all: true });
+
+    assert.equal(all.exitCode, 0, JSON.stringify(all.entries, null, 2));
+    const catalogRow = all.entries.find((entry) => entry.detail === 'unavailable');
+    assert.ok(catalogRow, JSON.stringify(all.entries, null, 2));
+    assert.equal(catalogRow.id, 'harness');
+    assert.equal(catalogRow.outcome, 'absent');
+    const sourceRow = all.entries.find((entry) => entry.type === null && entry.id === 'harness');
+    assert.ok(sourceRow, JSON.stringify(all.entries, null, 2));
+    assert.equal(sourceRow.outcome, 'absent');
   });
 });
 

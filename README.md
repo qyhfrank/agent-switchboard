@@ -59,8 +59,8 @@ commands accept these common filters and scopes:
 ```
 
 `status` additionally accepts `--all` and an optional `idGlob`. `explain`
-returns exit code 1 when nothing matches or any matched slice has a failing
-outcome.
+returns exit code 1 when nothing matches or any matched slice is something asb
+declined to act on, whether the run itself passed or not.
 
 ## Output
 
@@ -85,11 +85,11 @@ cursor
   − removed  feishu-cli:feishu-cli-docs · lark-cli:lark-doc · lark-cli:lark-shared
 
 needs attention
-  ✗ rl-harness  library source missing
-    enabled but its source content is not there; expected ~/Documents/Projects/rl-harness
+  ⚠ rl-harness  library source absent
+    enabled but its source content is not there; expected ~/Documents/Projects/rl-harness; its components are not distributed until it returns
 
 1 updated · 6 removed · 110 in sync
-✗ finished with 1 problem
+✓ finished with 1 warning
 ```
 
 `asb status` is that layout in the future tense, with the last completed sync
@@ -101,15 +101,17 @@ asb status · profile aws · last sync 2026-08-03 17:50
 pending
   → claude-code · CLAUDE.md will be updated
 needs attention
-  ✗ rl-harness · library source missing
+  ⚠ rl-harness · library source absent
 
-110 in sync · 1 pending · 1 problem
+110 in sync · 1 pending · 1 warning
 → asb sync applies 1 change
 ```
 
 Severity reads from the glyph alone when there is no color: `✓` applied, `−`
 removed, `→` pending or the next command to run, `⚠` a warning that leaves the
-run passing, `✗` a failure that does not. `sync --dry-run` states itself in one
+run passing, `✗` a failure that does not. `absent` is content this machine does
+not have, which warns; `missing` is a selection that resolves to nothing or a
+fetch that did not happen, which fails. `sync --dry-run` states itself in one
 banner above the report instead of marking every row. Color follows chalk's
 detection, so `NO_COLOR`, `FORCE_COLOR`, `TERM=dumb`, and CI are honored.
 

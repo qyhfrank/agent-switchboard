@@ -283,7 +283,7 @@ export function planCatalogStatus(
   for (const component of inventory.components) {
     componentCounts.set(component.source, (componentCounts.get(component.source) ?? 0) + 1);
   }
-  const absentPaths = new Map(catalog.absent.map((plugin) => [plugin.id, plugin.path]));
+  const absent = new Map(catalog.absent.map((plugin) => [plugin.id, plugin]));
 
   return [
     ...catalog.sources.map((source): Action => {
@@ -292,27 +292,41 @@ export function planCatalogStatus(
         (count, plugin) => count + (componentCounts.get(plugin.id) ?? 0),
         0
       );
+      // A local source directory that is not on this machine contributes
+      // exactly one absent plugin, the namesake standing at the source path:
+      // the stat the catalog already took. A source with a remote is a clone
+      // nobody has run yet, and the row naming that fetch is the one worth
+      // reading.
+      const gone = source.configured && absent.get(source.namespace)?.localSource === true;
       return {
         app: null,
         type: 'plugins',
         id: source.namespace,
         path: source.path,
         op: 'none',
-        outcome: 'unchanged',
+        outcome: gone ? 'absent' : 'unchanged',
         detail: source.configured ? 'configured-source' : 'discovered-source',
-        reason: `source is resolved; ${plugins.length} plugin(s), ${components} component(s)`,
+        reason: gone
+          ? `source directory is not there; expected ${source.path}; ${plugins.length} plugin(s), ${components} component(s)`
+          : `source is resolved; ${plugins.length} plugin(s), ${components} component(s)`,
       };
     }),
     ...catalog.plugins.map((plugin): Action => {
+      const gap = absent.get(plugin.id);
+      // Resolved is content asb can read right now. A gap behind a declared
+      // remote is not this row's story: the checkout that fills it has its
+      // own readiness row.
+      const resolved = plugin.root !== undefined && gap?.localSource !== true;
       const enabled = selected.has(plugin.id);
-      const resolved = plugin.root !== undefined;
+      // Content this machine lacks warns; content asb was told to fetch fails.
+      const gapOutcome: Outcome = gap?.localSource === true ? 'absent' : 'missing';
       return {
         app: null,
         type: 'plugins',
         id: plugin.id,
-        path: plugin.root ?? absentPaths.get(plugin.id) ?? null,
+        path: plugin.root ?? gap?.path ?? null,
         op: 'none',
-        outcome: enabled && !resolved ? 'missing' : enabled ? 'unchanged' : 'skipped',
+        outcome: !enabled ? 'skipped' : resolved ? 'unchanged' : gapOutcome,
         detail: enabled ? (resolved ? 'selected' : 'unavailable') : 'not-selected',
         reason: `${enabled ? 'selected' : 'not selected'}; ${resolved ? 'resolved' : 'not materialized'}; ${componentCounts.get(plugin.id) ?? 0} component(s)`,
       };
@@ -3516,13 +3530,18 @@ export function planSources(input: SourcePlanInput): Action[] {
   for (const absent of catalog.absent) {
     if (reported.has(absent.id) || !enabledPlugins.has(absent.id)) continue;
     const declared = absent.url ? ` (declared as ${absent.url})` : '';
+    const consequence = absent.localSource
+      ? '; its components are not distributed until it returns'
+      : '';
     actions.push(
       sourceRow(
         absent.id,
         absent.path,
-        'missing',
+        // Content only this machine lacks is a warning; content asb was told to
+        // fetch and could not is a problem.
+        absent.localSource ? 'absent' : 'missing',
         undefined,
-        `enabled but its source content is not there${declared}; expected ${absent.path}`
+        `enabled but its source content is not there${declared}; expected ${absent.path}${consequence}`
       )
     );
   }

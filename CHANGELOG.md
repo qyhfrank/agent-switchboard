@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Content absent from this machine
+
+- **A new `absent` outcome joins the report and JSON vocabulary at warning
+  severity.** Enabled content whose source lives on this machine and whose
+  files are not on disk warns and exits 0: the selection and the sources agree,
+  and a laptop that has not pulled the directory yet is not a broken run. The
+  plugin's dedicated slices stay where they are, composed aggregates render
+  from what the machine has, and the row says the components sit out until the
+  content returns. `missing` keeps what a person has to fix: a selection
+  nothing resolves, a retired or mistyped id, a profile that is not there, a
+  fetch that failed, and content under a source declaring a remote asb was
+  told to clone from.
+- **`status --all` reports a configured local source directory that is not on
+  this machine as `absent` instead of resolved.** The inventory used to call
+  every configured source resolved, which read as "asb found it" for a
+  directory that was never restored to this machine. A source declaring a
+  remote keeps its story in the readiness rows, where the pending clone is
+  named.
+- **The tally counts each warning under its own name.** Every warning-severity
+  row was printed as `left-behind`, so any other warning was reported under a
+  name that was not its own.
+
 ## 0.5.4
 
 ### Cross-machine Codex hook trust

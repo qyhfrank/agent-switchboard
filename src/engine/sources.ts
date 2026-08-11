@@ -1463,6 +1463,8 @@ export interface AbsentPlugin {
   id: string;
   source: string;
   path: string;
+  /** Content root belongs to a source on this machine with no remote to fetch from. */
+  localSource: boolean;
   /** Credential-free remote the source declares, when it has one. */
   url?: string;
 }
@@ -1508,12 +1510,14 @@ export function readSourceCatalog(config: ResolvedConfig): SourceCatalog {
           id: plugin.id,
           source: source.namespace,
           path: plugin.request ? credentialFreeGitUrl(plugin.request.url) : source.path,
+          localSource: false,
         });
       } else if (!fs.existsSync(plugin.root)) {
         const row: AbsentPlugin = {
           id: plugin.id,
           source: source.namespace,
           path: plugin.root,
+          localSource: source.remote === undefined,
         };
         if (source.remote) row.url = source.remote.url;
         absent.push(row);
