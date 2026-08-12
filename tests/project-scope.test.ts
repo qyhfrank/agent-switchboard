@@ -354,6 +354,60 @@ test('managed takeover overwrites the named foreign project target and then owns
   });
 });
 
+test('the default collision policy takes a stale project render to the library edit', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'claude-code');
+    seedSkill(homes, 'guide');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    // No [distribution.project] section: the default policy governs the run.
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[skills]\nenabled = ["guide"]\n');
+    const bundle = path.join(project, '.claude', 'skills', 'guide', 'SKILL.md');
+
+    assert.equal((await runSync({ project })).exitCode, 0);
+    const distributed = fs.readFileSync(bundle, 'utf-8');
+
+    // The library moves on between runs (an edit, or a synced ~/.asb catching
+    // up); the repository copy is a stale render, not foreign content.
+    fs.appendFileSync(path.join(homes.asbHome, 'skills', 'guide', 'SKILL.md'), '\nNew guidance.\n');
+    const second = await runSync({ project });
+
+    assert.equal(second.exitCode, 0, JSON.stringify(second.entries, null, 2));
+    const row = second.entries.find((entry) => entry.type === 'skills' && entry.id === 'guide');
+    assert.equal(row?.outcome, 'written');
+    assert.equal(row?.detail, 'takeover');
+    assert.notEqual(fs.readFileSync(bundle, 'utf-8'), distributed);
+    assert.match(fs.readFileSync(bundle, 'utf-8'), /New guidance/);
+  });
+});
+
+test('warn-skip preserves a stale project render and the reason names the repair', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'claude-code');
+    seedSkill(homes, 'guide');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    projectConfig(project, '[skills]\nenabled = ["guide"]\n');
+    const bundle = path.join(project, '.claude', 'skills', 'guide', 'SKILL.md');
+
+    assert.equal((await runSync({ project })).exitCode, 0);
+    const distributed = fs.readFileSync(bundle, 'utf-8');
+    fs.appendFileSync(path.join(homes.asbHome, 'skills', 'guide', 'SKILL.md'), '\nNew guidance.\n');
+
+    const second = await runSync({ project });
+
+    assert.equal(second.exitCode, 1);
+    const row = second.entries.find((entry) => entry.type === 'skills' && entry.id === 'guide');
+    assert.equal(row?.outcome, 'conflict');
+    assert.equal(row?.detail, 'foreign');
+    assert.match(row?.reason ?? '', /does not match the current render/);
+    assert.match(row?.reason ?? '', /collision = "takeover"/);
+    assert.equal(fs.readFileSync(bundle, 'utf-8'), distributed, 'the occupied bundle is preserved');
+  });
+});
+
 test('a shared project AGENTS.md has exactly one marker writer whatever reads it', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');

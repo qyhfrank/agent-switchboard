@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+### Project collision default
+
+- **`[distribution.project] collision` defaults to `takeover`.** A distributed
+  project copy is a mirror of its library entry, and editing the mirror is not
+  supported; when the library moves on, the next sync brings every selected
+  project target to the new render instead of stranding it as
+  `conflict (foreign)` until someone deletes it by hand. The conservative
+  policies are unchanged and now explicit: `warn-skip` preserves an occupied
+  target and reports it, `error` refuses the whole project phase. A repository
+  that relied on the old default sets `collision = "warn-skip"` in its
+  `.asb.toml`.
+- **Collision reasons state the byte proof instead of naming retired
+  machinery.** The preserved rows said "the peer manifest does not own it" and
+  "the hook state does not own it"; 0.5 derives ownership from the render and
+  keeps no such records. The reasons now say the target does not match the
+  current render, and name `collision = "takeover"` as the way to adopt it.
+
 ## 0.5.6
 
 ### Delimiter mode flips

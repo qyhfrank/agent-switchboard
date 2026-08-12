@@ -1245,7 +1245,8 @@ export function planSkills(input: PlanInput): Action[] {
             op: 'none',
             outcome: 'conflict',
             detail: 'foreign',
-            reason: 'project bundle is occupied and the peer manifest does not own it; preserved',
+            reason:
+              'project bundle does not match the current render and asb cannot prove it is its own; preserved (collision = "takeover" adopts it)',
           });
         } else {
           // A distributed bundle mirrors its library directory: the render is
@@ -1303,7 +1304,7 @@ export function planSkills(input: PlanInput): Action[] {
           outcome: 'left-behind',
           detail: 'unproven',
           reason:
-            'project bundle is not the current render and the peer manifest does not own it; preserved',
+            'project bundle is not the current render, so asb cannot prove it is safe to remove; preserved',
         });
         continue;
       }
@@ -2186,7 +2187,8 @@ export function planHooks(input: PlanInput): Action[] {
           op: 'none',
           outcome: 'conflict',
           detail: 'foreign',
-          reason: 'project hook bundle is occupied and the hook state does not own it; preserved',
+          reason:
+            'project hook bundle does not match the current render and asb cannot prove it is its own; preserved (collision = "takeover" adopts it)',
         });
         continue;
       }

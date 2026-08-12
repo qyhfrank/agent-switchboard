@@ -356,12 +356,16 @@ the increment rules, so agent context stops carrying twice what
 ```toml
 [distribution.project]
 mode = "managed"
-collision = "warn-skip"
+collision = "takeover"
 ```
 
 Project modes are `managed`, `exclusive`, and `none`; `none` leaves the project
-phase out of the run entirely. Managed mode preserves foreign content; its
-collision policies are `warn-skip`, `error`, and `takeover`.
+phase out of the run entirely. Managed mode never touches content at ids the
+selection does not name. For a selected target that holds something other than
+the current render, the collision policy decides: `takeover` (the default)
+writes the render, so a copy distributed before a library edit follows the
+edit; `warn-skip` preserves the target and reports it instead; `error` refuses
+the whole project phase when any target would collide.
 
 The project phase proves what it owns against the same library render the user
 phase compares to. Because a repository is shared, a target ASB cannot

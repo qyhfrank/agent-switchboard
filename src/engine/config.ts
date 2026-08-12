@@ -1000,8 +1000,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
       project: {
         mode: (projectValues.mode as 'managed' | 'exclusive' | 'none' | undefined) ?? 'managed',
         collision:
-          (projectValues.collision as 'warn-skip' | 'error' | 'takeover' | undefined) ??
-          'warn-skip',
+          (projectValues.collision as 'warn-skip' | 'error' | 'takeover' | undefined) ?? 'takeover',
         rulesPlacement: (projectRules.placement as 'prepend' | 'append' | undefined) ?? 'prepend',
       },
     },
