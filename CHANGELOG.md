@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.7
+
 ### Project collision default
 
 - **`[distribution.project] collision` defaults to `takeover`.** A distributed
