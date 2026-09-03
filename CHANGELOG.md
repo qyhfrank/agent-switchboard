@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.8
+
 ### Hook bundle cleanup
 
 - **A deselected hook bundle is removed even when the application config
