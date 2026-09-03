@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Hook bundle cleanup
+
+- **A deselected hook bundle is removed even when the application config
+  has nothing left to rewrite.** `asb sync` computed the removal of a
+  bundle directory under `hooks/managed/` that it could prove its own,
+  then dropped it whenever the app had no hook selected and its config
+  already carried no ASB group, so a bundle stranded by an earlier
+  version stayed on disk on every later run. The removal is now reported
+  and executed on the same byte proof as before; the config file is still
+  not rewritten.
+
 ## 0.5.7
 
 ### Project collision default

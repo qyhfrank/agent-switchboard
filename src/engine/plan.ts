@@ -2388,8 +2388,13 @@ export function planHooks(input: PlanInput): Action[] {
     }
 
     // Nothing selected and nothing of asb's in the config: the run has no
-    // business rewriting a file it does not own.
-    if (distributed === 0 && !removed && !hadLegacyManagedKey) continue;
+    // business rewriting a file it does not own. The bundle directories it
+    // proved its own above come out regardless; nothing gates them here,
+    // since with nothing selected there is no owned bundle to wait on.
+    if (distributed === 0 && !removed && !hadLegacyManagedKey) {
+      actions.push(...removals);
+      continue;
+    }
     const next = { ...captured.config };
     delete next._asb_managed_hooks;
     if (Object.keys(merged).length === 0) delete next.hooks;

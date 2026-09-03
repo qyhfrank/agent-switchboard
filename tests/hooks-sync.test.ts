@@ -294,6 +294,71 @@ test('deselection removes the groups, the bundle dir, and the emptied hooks key'
   });
 });
 
+test('a bundle left behind by a config that already lost its groups is still removed on deselection', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedHookBundle(
+      homes,
+      'bt',
+      { PreToolUse: [{ hooks: [{ type: 'command', command: `${HOOK_DIR}/run.sh` }] }] },
+      { 'run.sh': '#!/bin/sh\necho bt\n' }
+    );
+    seedHookBundle(
+      homes,
+      'lint',
+      { UserPromptSubmit: [{ hooks: [{ type: 'command', command: `${HOOK_DIR}/lint.sh` }] }] },
+      { 'lint.sh': '#!/bin/sh\necho lint\n' }
+    );
+    const settings = configPath(homes, 'claude-code');
+    writeJson(settings, { theme: 'dark' });
+    writeUserConfig(homes, configFor(['claude-code'], ['bt', 'lint']));
+
+    await runSync();
+    assert.equal(fs.existsSync(managedDir(homes, 'claude-code', 'bt')), true);
+    assert.equal(fs.existsSync(managedDir(homes, 'claude-code', 'lint')), true);
+
+    // Groups gone from the config, bundles still on disk: an older asb, or a
+    // hand edit. The next deselection still reclaims the directories.
+    writeJson(settings, { theme: 'dark' });
+    const before = fs.readFileSync(settings, 'utf-8');
+    fs.writeFileSync(
+      path.join(managedDir(homes, 'claude-code', 'lint'), 'lint.sh'),
+      '#!/bin/sh\necho old\n'
+    );
+
+    writeUserConfig(homes, configFor(['claude-code'], []));
+    const second = await runSync();
+
+    assert.equal(
+      fs.existsSync(managedDir(homes, 'claude-code', 'bt')),
+      false,
+      'the bt bundle dir is removed'
+    );
+    assert.equal(
+      fs.existsSync(managedDir(homes, 'claude-code', 'lint')),
+      false,
+      'the lint bundle dir is removed'
+    );
+    assert.equal(
+      fs.readFileSync(settings, 'utf-8'),
+      before,
+      'a config asb does not own is not rewritten'
+    );
+    const rows = hooksRows(second);
+    const bt = rows.find((entry) => entry.id === 'bt');
+    assert.equal(bt?.outcome, 'removed');
+    assert.equal(bt?.detail, undefined);
+    const lint = rows.find((entry) => entry.id === 'lint');
+    assert.equal(lint?.outcome, 'removed');
+    assert.equal(lint?.detail, 'stale-copy');
+    assert.equal(
+      rows.some((entry) => entry.id === null && entry.outcome === 'written'),
+      false,
+      'the config row is not written'
+    );
+  });
+});
+
 test('codex hooks.json keeps managed groups before user groups and deletes only when empty', async () => {
   const CLEAN = {
     UserPromptSubmit: [{ matcher: '*', hooks: [{ type: 'command', command: 'echo c' }] }],

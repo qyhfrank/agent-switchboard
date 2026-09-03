@@ -31,7 +31,8 @@ import {
 /**
  * Ownership honesty for the hooks cell: what asb may remove, what it may claim,
  * and what it must say when it cannot do either. Removal is authorized by
- * deselection alone, convention grants adoption-for-update but never deletion,
+ * deselection alone; a bundle directory carrying a library id under the managed
+ * parent is swept under the home directory and preserved inside a repository;
  * and a group asb cannot prove is named rather than swept. Every claim is a
  * file assertion on the app config and the distributed bundle, with the report
  * row asserted beside it.
@@ -84,7 +85,7 @@ test('a still-selected hook whose library entry goes malformed keeps everything 
   });
 });
 
-test('a bundle that fails to distribute holds back that app config and earns no deletion authority', async () => {
+test('a bundle that fails to distribute holds back that app config', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedRunner(homes, 'bt');
@@ -110,21 +111,24 @@ test('a bundle that fails to distribute holds back that app config and earns no 
     assert.match(config?.reason ?? '', /\bbt\b/, 'and names the bundle that held it back');
     assert.equal(report.exitCode, 1);
 
-    // The harm the gate prevents: user content later placed at that path must
-    // not be deletable by a deselection asb never earned authority over.
+    // A later deselection still uses the byte proof. User-scope contents
+    // under a library id that do not match the render are a stale copy.
     fs.rmSync(parent);
     const userDir = managedDir(homes, 'claude-code', 'bt');
     fs.mkdirSync(userDir, { recursive: true });
     fs.writeFileSync(path.join(userDir, 'user-secret.txt'), 'mine', 'utf-8');
     writeUserConfig(homes, configFor(['claude-code'], []));
 
-    await runSync();
+    const second = await runSync();
 
     assert.equal(
       fs.existsSync(path.join(userDir, 'user-secret.txt')),
-      true,
-      'asb never wrote this directory, so no later run deletes it'
+      false,
+      'a later deselection still sweeps a stale copy under a library id'
     );
+    const removal = hooksRows(second).find((entry) => entry.id === 'bt');
+    assert.equal(removal?.outcome, 'removed');
+    assert.equal(removal?.detail, 'stale-copy');
   });
 });
 
