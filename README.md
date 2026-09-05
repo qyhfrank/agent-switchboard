@@ -41,6 +41,8 @@ asb add <git-url|path>           add a plugin source
 asb remove <name>                remove a source and retire its enabled ids
 asb import <app> [path]          copy app-side content into the library
 asb init                         create a project .asb.toml scaffold
+asb profile default [name]       show or save the machine default profile
+asb profile default --clear      remove the saved default
 ```
 
 Use `asb <subcommand> --help` for the complete option set. The reconciliation
@@ -138,7 +140,7 @@ home when it already exists. A typical library is:
 ```
 
 One selection file is the base of a run: `~/.asb/config.toml`, or
-`~/.asb/work.toml` under `-p work` or `ASB_PROFILE=work`. A profile stands in
+`~/.asb/work.toml` when the selected profile is `work`. A profile stands in
 place of the user configuration's selection rather than patching it:
 `[applications]`, the component sections, and `[plugins].enabled` come from it
 alone, and a selection section it omits selects nothing that run. Machine
@@ -148,6 +150,44 @@ profile carries a selection and never a copy of the machine setup. A profile
 that enables no applications reconciles nothing, and the report says so. A
 project's `.asb.toml` layers over the base to say what the repository adds:
 tables merge key by key, and an array replaces the array under it.
+
+Use an existing profile as this machine's default:
+
+```bash
+asb profile default work
+asb profile default
+asb profile default --clear
+```
+
+The selector stores `work` followed by a newline in `$XDG_CONFIG_HOME/asb/profile`,
+or `~/.config/asb/profile` when `XDG_CONFIG_HOME` is empty or relative.
+The name resolves against the active `ASB_HOME`, so the library can be shared
+while each machine keeps its own default. Surrounding whitespace is accepted;
+spaces within one name are allowed, but multiple lines and unsafe names are rejected.
+A missing or empty selector uses the user configuration. A saved name whose
+profile file is missing fails until the default is replaced or cleared.
+
+| Priority | Selection source |
+| --- | --- |
+| 1 | Explicit `-p <name>` |
+| 2 | `ASB_PROFILE` |
+| 3 | Saved machine default |
+| 4 | User configuration (`ASB_CONFIG`, otherwise `<ASB_HOME>/config.toml`) |
+
+The explicit and environment overrides leave the saved default unchanged and
+bypass an invalid saved selection. `asb`, `sync`, `status`, and `explain` read
+the effective selection. `enable` and `disable`, including their interactive
+pickers, edit that selection file. Explicit `-P` edits only the project's
+`.asb.toml`; combining explicit `-p` and `-P` for an edit is rejected.
+Infrastructure and source declarations belong to the user configuration,
+including when `ASB_CONFIG` redirects it.
+
+Default management does not synchronize applications or initialize a project.
+It accepts `--json` and `--clear`, with a name and `--clear` mutually exclusive;
+scope and reconciliation flags are unavailable. Query output includes `saved`,
+`effective`, and `source` fields in the JSON report entry. The source is `env`,
+`default`, or `user`. Clearing also works when the saved value is malformed or
+its profile file has been removed.
 
 ```toml
 [applications]

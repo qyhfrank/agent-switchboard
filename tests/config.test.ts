@@ -1,9 +1,18 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
 import { parse } from '@iarna/toml';
-import { editSelection, loadConfig } from '../src/engine/config.js';
+import {
+  clearDefaultProfile,
+  defaultProfilePath,
+  editSelection,
+  loadConfig,
+  readDefaultProfile,
+  resolveProfile,
+  setDefaultProfile,
+} from '../src/engine/config.js';
 import { type ScratchHomes, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
 
 /**
@@ -29,6 +38,78 @@ function parsedRules(filePath: string): unknown {
 function parsedRulesEnabled(asbHome: string): unknown {
   return parsedRules(path.join(asbHome, 'config.toml'));
 }
+
+test('the selector path uses an absolute XDG configuration root or the OS home', () => {
+  const fallback = path.join(os.homedir(), '.config', 'asb', 'profile');
+  for (const value of [undefined, '', '   ', 'relative/config']) {
+    assert.equal(defaultProfilePath({ XDG_CONFIG_HOME: value }), fallback);
+  }
+  assert.equal(
+    defaultProfilePath({ XDG_CONFIG_HOME: '/tmp/asb-config' }),
+    '/tmp/asb-config/asb/profile'
+  );
+});
+
+test('profile resolution follows precedence and bypasses an invalid lower-priority selector', async () => {
+  await withScratchHomes(async (homes) => {
+    for (const name of ['work', 'personal']) writeProfile(homes, name, '[rules]\nenabled = []\n');
+    assert.deepEqual(resolveProfile(), { name: null, source: 'user' });
+    setDefaultProfile('work');
+    assert.equal(fs.readFileSync(defaultProfilePath(), 'utf-8'), 'work\n');
+    assert.deepEqual(resolveProfile(), { name: 'work', source: 'default' });
+    process.env.ASB_PROFILE = 'personal';
+    assert.deepEqual(resolveProfile(), { name: 'personal', source: 'env' });
+    assert.deepEqual(resolveProfile('work'), { name: 'work', source: 'cli' });
+    assert.equal(readDefaultProfile(), 'work');
+    for (const invalid of ['work\npersonal\n', '../work', 'absent']) {
+      fs.writeFileSync(defaultProfilePath(), invalid);
+      assert.equal(loadConfig().profile, 'personal');
+      assert.equal(loadConfig({ profile: 'work' }).profile, 'work');
+      delete process.env.ASB_PROFILE;
+      assert.throws(() => loadConfig());
+      clearDefaultProfile();
+      clearDefaultProfile();
+      assert.equal(resolveProfile().name, null);
+      process.env.ASB_PROFILE = 'personal';
+    }
+  });
+});
+
+test('a saved profile accepts spaces within one name and rejects multiple lines or unsafe names', async () => {
+  await withScratchHomes(async (homes) => {
+    writeProfile(homes, 'work laptop', '[rules]\nenabled = []\n');
+    setDefaultProfile('work laptop');
+    fs.writeFileSync(defaultProfilePath(), ' \twork laptop\r\n');
+    assert.equal(loadConfig().profile, 'work laptop');
+    for (const name of ['work\nlaptop', '../work', 'config', 'absent', '']) {
+      assert.throws(() => setDefaultProfile(name));
+      assert.equal(readDefaultProfile(), 'work laptop');
+    }
+    fs.writeFileSync(defaultProfilePath(), ' \t\n');
+    assert.equal(loadConfig().profile, null);
+  });
+});
+
+test('ASB_CONFIG owns fallback selection edits and infrastructure under a saved profile', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[rules]\nenabled = ["base"]\n');
+    const user = path.join(homes.asbHome, 'config.toml');
+    const original = fs.readFileSync(user, 'utf-8');
+    const redirected = path.join(homes.root, 'redirected.toml');
+    fs.writeFileSync(redirected, '[rules]\nenabled = []\n[ui]\npage_size = 31\n');
+    process.env.ASB_CONFIG = redirected;
+    editSelection({ type: 'rules', enable: ['redirected'] });
+    assert.deepEqual(loadConfig().selection.rules, ['redirected']);
+    writeProfile(homes, 'work', '[rules]\nenabled = ["work"]\n[ui]\npage_size = 12\n');
+    setDefaultProfile('work');
+    assert.deepEqual(loadConfig().selection.rules, ['work']);
+    assert.equal(loadConfig().ui.pageSize, 31);
+    editSelection({ type: 'rules', enable: ['extra'] });
+    assert.deepEqual(loadConfig().selection.rules, ['work', 'extra']);
+    assert.deepEqual(parsedRules(redirected), ['redirected']);
+    assert.equal(fs.readFileSync(user, 'utf-8'), original);
+  });
+});
 
 test('a missing config file yields an empty selection and writes nothing', async () => {
   await withScratchHomes(async ({ asbHome }) => {

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- `asb profile default [name]` saves or reports a machine-specific default in the XDG configuration directory; `--clear` removes it. Configuration reads and selection edits use `-p`, then `ASB_PROFILE`, then the saved default. Explicit project edits target `.asb.toml`.
+
 ## 0.5.8
 
 ### Hook bundle cleanup

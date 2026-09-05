@@ -7,6 +7,8 @@ import { AGENTS_SKILLS_UNION, APP_ROWS, type AppRow, appRows, projectAppRows } f
 import {
   type ComponentType,
   ConfigError,
+  clearDefaultProfile,
+  defaultProfilePath,
   editSelection,
   effectiveSelection,
   loadConfig,
@@ -14,9 +16,12 @@ import {
   nearestKey,
   projectConfigPath,
   type ResolvedConfig,
+  readDefaultProfile,
   resolveHomes,
+  resolveProfile,
   SELECTION_TYPES,
   selectionDelta,
+  setDefaultProfile,
   withPluginExpansion,
 } from './config.js';
 import { expandHome, type RemoteSource } from './git.js';
@@ -2080,6 +2085,7 @@ export type CliOptions = SyncOptions & {
 };
 
 export type CliInvocation =
+  | { command: 'profile-default'; name?: string; options: { clear: boolean; json: boolean } }
   | { command: 'summary' | 'sync' | 'status'; options: CliOptions }
   | { command: 'explain'; target: string; options: CliOptions }
   | { command: 'add'; location: string; options: CliOptions & AddSourceOptions }
@@ -2164,6 +2170,27 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     writeErr: () => {},
   });
   registerScopeFlags(program);
+
+  const profileCommand = program
+    .command('profile')
+    .description('manage the machine default profile')
+    .option('--json', 'machine-readable output');
+  profileCommand
+    .command('default')
+    .description('show, save, or clear the machine default profile')
+    .argument('[name]', 'existing profile name to save')
+    .option('--clear', 'remove the saved default')
+    .option('--json', 'machine-readable output')
+    .action((name: string | undefined, args: { clear?: boolean }, cmd: Command) => {
+      if (name !== undefined && args.clear) {
+        throw new ConfigErrorLike('Use a profile name or --clear, not both.');
+      }
+      parsed = {
+        command: 'profile-default',
+        name,
+        options: { clear: args.clear === true, json: cmd.optsWithGlobals().json === true },
+      };
+    });
 
   // Merge by hand: optsWithGlobals lets a subcommand's [] defaults shadow
   // values collected before the subcommand name. Arrays concatenate in argv
@@ -2338,6 +2365,7 @@ export function parseCliArgs(argv: readonly string[]): CliInvocation {
     ['remove', new Set()],
     ['import', new Set(['types'])],
     ['init', new Set()],
+    ['profile-default', new Set()],
   ]);
   const root = program.opts();
   const options = 'options' in invocation ? invocation.options : {};
@@ -2392,6 +2420,12 @@ interface SelectionEntry {
   id: string;
   outcome: 'written';
   reason?: string;
+}
+
+interface SelectionResult {
+  entries: SelectionEntry[];
+  scope: Report['scope'];
+  exitCode: 0;
 }
 
 function validateAppIds(config: ResolvedConfig, ids: readonly string[]): void {
@@ -2462,7 +2496,7 @@ export async function runSelectionCommand(
   command: 'enable' | 'disable',
   ids: readonly string[],
   options: CliOptions
-): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
+): Promise<SelectionResult> {
   const lock = acquireRunLock(resolveHomes(options.env ?? process.env).stateHome);
   try {
     const config = loadConfig({
@@ -2488,7 +2522,7 @@ export async function runSelectionCommand(
           type,
           ...(command === 'enable' ? { enable: values } : { disable: values }),
           ...(app ? { app } : {}),
-          profile: options.profile,
+          profile: options.project ? options.profile : config.profile,
           project: options.project,
           env: options.env,
         });
@@ -2512,15 +2546,17 @@ export async function runSelectionCommand(
         })
       );
     }
-    return { entries, exitCode: 0 };
+    return {
+      entries,
+      scope: { profile: config.profile, project: config.project, dryRun: false },
+      exitCode: 0,
+    };
   } finally {
     lock.release();
   }
 }
 
-async function runSelectionPicker(
-  options: CliOptions
-): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
+async function runSelectionPicker(options: CliOptions): Promise<SelectionResult> {
   const lock = acquireRunLock(resolveHomes(options.env ?? process.env).stateHome);
   try {
     return await runLockedSelectionPicker(options);
@@ -2529,9 +2565,7 @@ async function runSelectionPicker(
   }
 }
 
-async function runLockedSelectionPicker(
-  options: CliOptions
-): Promise<{ entries: SelectionEntry[]; exitCode: 0 }> {
+async function runLockedSelectionPicker(options: CliOptions): Promise<SelectionResult> {
   if ((options.apps?.length ?? 0) > 1) {
     throw new ConfigError('The interactive picker accepts at most one --app.');
   }
@@ -2598,7 +2632,7 @@ async function runLockedSelectionPicker(
         app,
         enable: order.filter((id) => !current.includes(id)),
         disable: current.filter((id) => !order.includes(id)),
-        profile: options.profile,
+        profile: options.project ? options.profile : config.profile,
         project: options.project,
         env: options.env,
       });
@@ -2606,14 +2640,18 @@ async function runLockedSelectionPicker(
       editSelection({
         type,
         replace: order,
-        profile: options.profile,
+        profile: options.project ? options.profile : config.profile,
         project: options.project,
         env: options.env,
       });
     }
     entries.push(...order.map((id) => ({ type, id, outcome: 'written' as const })));
   }
-  return { entries, exitCode: 0 };
+  return {
+    entries,
+    scope: { profile: config.profile, project: config.project, dryRun: false },
+    exitCode: 0,
+  };
 }
 
 /**
@@ -2648,11 +2686,37 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
 
   try {
-    const jsonScope = (options?: SyncOptions): Report['scope'] => ({
-      profile: options?.profile ?? process.env.ASB_PROFILE?.trim() ?? null,
-      project: options?.project ? path.resolve(options.project) : null,
-      dryRun: options?.dryRun === true,
+    const jsonScope = (): Report['scope'] => ({
+      profile: process.env.ASB_PROFILE?.trim() ?? null,
+      project: null,
+      dryRun: false,
     });
+    if (invocation.command === 'profile-default') {
+      const environment = process.env.ASB_PROFILE?.trim() ? resolveProfile() : null;
+      let outcome: 'written' | 'removed' | 'unchanged' = 'unchanged';
+      if (invocation.options.clear) {
+        clearDefaultProfile();
+        outcome = 'removed';
+      } else if (invocation.name !== undefined) {
+        setDefaultProfile(invocation.name);
+        outcome = 'written';
+      }
+      const saved = readDefaultProfile();
+      const effective = environment ?? resolveProfile();
+      const entry = {
+        path: defaultProfilePath(),
+        saved,
+        effective: effective.name,
+        source: effective.source,
+        outcome,
+      };
+      process.stdout.write(
+        invocation.options.json
+          ? `${JSON.stringify(buildJsonEnvelope({ profile: effective.name, project: null, dryRun: false }, [entry]), null, 2)}\n`
+          : `Saved default: ${saved ?? '(none)'}\nEffective profile: ${effective.name ?? '(none)'}\nSource: ${effective.source}\n`
+      );
+      return 0;
+    }
     if (invocation.command === 'enable' || invocation.command === 'disable') {
       const result =
         invocation.ids.length > 0
@@ -2660,7 +2724,7 @@ export async function main(argv: readonly string[]): Promise<number> {
           : await runSelectionPicker(invocation.options);
       process.stdout.write(
         invocation.options.json
-          ? `${JSON.stringify(buildJsonEnvelope(jsonScope(invocation.options), result.entries, result.exitCode), null, 2)}\n`
+          ? `${JSON.stringify(buildJsonEnvelope(result.scope, result.entries, result.exitCode), null, 2)}\n`
           : `${result.entries.map((entry) => `written ${entry.type}:${entry.id}${entry.reason ? ` (${entry.reason})` : ''}`).join('\n')}\n`
       );
       return 0;

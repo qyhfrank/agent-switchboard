@@ -107,6 +107,69 @@ export function profileConfigPath(homes: Homes, profileName: string): string {
   return path.join(homes.asbHome, `${trimmed}.toml`);
 }
 
+export function defaultProfilePath(env: NodeJS.ProcessEnv = process.env): string {
+  const xdg = env.XDG_CONFIG_HOME?.trim();
+  const root = xdg && path.isAbsolute(xdg) ? xdg : path.join(os.homedir(), '.config');
+  return path.join(root, 'asb', 'profile');
+}
+
+/** Read the saved value separately so an override can bypass a stale selector. */
+export function readDefaultProfile(env: NodeJS.ProcessEnv = process.env): string | null {
+  const filePath = defaultProfilePath(env);
+  try {
+    return (
+      new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(filePath)).trim() || null
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new ConfigError(`Cannot read default profile at ${filePath}: ${String(error)}`);
+  }
+}
+
+function validateDefaultProfile(name: string, env: NodeJS.ProcessEnv): void {
+  if (/[\r\n]/.test(name)) {
+    throw new ConfigError('Default profile must contain one name on one line.');
+  }
+  const filePath = profileConfigPath(resolveHomes(env), name);
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    throw new ConfigError(`Default profile selection file does not exist: ${filePath}`);
+  }
+}
+
+export function setDefaultProfile(name: string, env: NodeJS.ProcessEnv = process.env): void {
+  const trimmed = name.trim();
+  validateDefaultProfile(trimmed, env);
+  const filePath = defaultProfilePath(env);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${trimmed}\n`, 'utf-8');
+}
+
+export function clearDefaultProfile(env: NodeJS.ProcessEnv = process.env): void {
+  fs.rmSync(defaultProfilePath(env), { force: true });
+}
+
+export interface ProfileSelection {
+  name: string | null;
+  source: 'cli' | 'env' | 'default' | 'user';
+}
+
+export function resolveProfile(
+  profile?: string,
+  env: NodeJS.ProcessEnv = process.env
+): ProfileSelection {
+  const explicit = profile?.trim();
+  const environment = env.ASB_PROFILE?.trim();
+  const name = explicit || environment;
+  if (name) {
+    profileConfigPath(resolveHomes(env), name);
+    return { name, source: explicit ? 'cli' : 'env' };
+  }
+  const saved = readDefaultProfile(env);
+  if (saved === null) return { name: null, source: 'user' };
+  validateDefaultProfile(saved, env);
+  return { name: saved, source: 'default' };
+}
+
 export function projectConfigPath(projectRoot: string): string {
   return path.join(path.resolve(projectRoot), '.asb.toml');
 }
@@ -906,7 +969,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
 
   // A profile is a whole selection file, not an overlay: it stands in for the
   // user config's selection for the run instead of merging over it.
-  const profileName = opts.profile?.trim() || env.ASB_PROFILE?.trim() || null;
+  const profileName = resolveProfile(opts.profile, env).name;
   const userLayer = readLayer('user', userConfigPath(homes, env));
   const profileLayer = profileName
     ? readLayer('profile', profileConfigPath(homes, profileName))
@@ -1321,13 +1384,14 @@ export interface EditSelectionOptions {
   disable?: readonly string[];
   replace?: readonly string[];
   app?: string;
-  profile?: string;
+  /** Undefined resolves the active profile; null pins the user configuration. */
+  profile?: string | null;
   project?: string;
   env?: NodeJS.ProcessEnv;
 }
 
 /**
- * Comment-preserving enable/disable edit of the user config's per-type
+ * Comment-preserving enable/disable edit of the active selection's per-type
  * `enabled` array. The file is spliced, never re-serialized; the result is
  * re-parsed as a safety check before it replaces the original.
  */
@@ -1337,10 +1401,12 @@ export function editSelection(options: EditSelectionOptions): void {
   if (options.profile && options.project) {
     throw new ConfigError('Selection edit accepts either profile or project scope, not both.');
   }
+  const profile =
+    options.project || options.profile === null ? null : resolveProfile(options.profile, env).name;
   const filePath = options.project
     ? projectConfigPath(options.project)
-    : options.profile
-      ? profileConfigPath(homes, options.profile)
+    : profile
+      ? profileConfigPath(homes, profile)
       : userConfigPath(homes, env);
 
   const additionsInput = normalizeIds(options.enable ?? []);

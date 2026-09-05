@@ -1,14 +1,23 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { parse as parseToml } from '@iarna/toml';
 import { parseCliArgs, resolvePickerOrder, runSelectionCommand } from '../src/engine/cli.js';
-import { editSelection } from '../src/engine/config.js';
 import {
+  clearDefaultProfile,
+  defaultProfilePath,
+  editSelection,
+  setDefaultProfile,
+} from '../src/engine/config.js';
+import {
+  inCwd,
   runMain,
   type ScratchHomes,
   seedMarketplace,
+  seedRule,
   withScratchHomes,
   writeUserConfig,
 } from './helpers/scratch.js';
@@ -36,6 +45,262 @@ function holdRunLock(homes: ScratchHomes): void {
   fs.mkdirSync(homes.stateHome, { recursive: true });
   fs.writeFileSync(path.join(homes.stateHome, 'run.lock'), `${process.pid} held\n`);
 }
+
+test('default management reports saved and effective selections without editing shared files', async () => {
+  await withScratchHomes(async (homes) => {
+    const original = '[applications]\nenabled = []\n';
+    for (const name of ['config', 'work', 'personal']) {
+      fs.writeFileSync(configPath(homes, `${name}.toml`), original);
+    }
+    const set = await runMain(['profile', 'default', 'work']);
+    assert.equal(set.code, 0, set.err);
+    assert.equal(fs.readFileSync(defaultProfilePath(), 'utf-8'), 'work\n');
+    assert.match(set.out, /Saved default: work\nEffective profile: work\nSource: default/);
+    process.env.ASB_PROFILE = 'personal';
+    for (const argv of [
+      ['--json', 'profile', 'default'],
+      ['profile', '--json', 'default'],
+      ['profile', 'default', '--json'],
+    ]) {
+      const result = await runMain(argv);
+      assert.equal(result.code, 0, result.err);
+      const envelope = JSON.parse(result.out);
+      assert.equal(envelope.version, 1);
+      assert.equal(envelope.scope.profile, 'personal');
+      assert.deepEqual(envelope.entries, [
+        {
+          path: defaultProfilePath(),
+          saved: 'work',
+          effective: 'personal',
+          source: 'env',
+          outcome: 'unchanged',
+        },
+      ]);
+    }
+    delete process.env.ASB_PROFILE;
+    for (const invalid of ['work\npersonal', 'absent']) {
+      fs.writeFileSync(defaultProfilePath(), invalid);
+      assert.notEqual((await runMain(['profile', 'default'])).code, 0);
+      assert.equal((await runMain(['profile', 'default', '--clear'])).code, 0);
+      assert.equal((await runMain(['profile', 'default', '--clear'])).code, 0);
+      assert.equal(fs.existsSync(defaultProfilePath()), false);
+    }
+    for (const name of ['config', 'work', 'personal'])
+      assert.equal(readConfig(homes, `${name}.toml`), original);
+    assert.deepEqual(fs.readdirSync(homes.agentsHome), []);
+    assert.equal(fs.existsSync(path.join(homes.stateHome, 'last-run.json')), false);
+  });
+});
+
+test('invalid environment profiles reject default mutations before changing the selector', async () => {
+  await withScratchHomes(async (homes) => {
+    for (const name of ['work', 'personal']) {
+      fs.writeFileSync(configPath(homes, `${name}.toml`), '[rules]\nenabled = []\n');
+    }
+    for (const saved of ['work', null]) {
+      if (saved === null) clearDefaultProfile();
+      else setDefaultProfile(saved);
+      process.env.ASB_PROFILE = 'config';
+      for (const args of [['personal'], ['--clear']]) {
+        const result = await runMain(['profile', 'default', ...args, '--json']);
+        assert.equal(result.code, 2, result.err);
+        assert.equal(result.out, '');
+        if (saved === null) assert.equal(fs.existsSync(defaultProfilePath()), false);
+        else assert.equal(fs.readFileSync(defaultProfilePath(), 'utf-8'), `${saved}\n`);
+      }
+      delete process.env.ASB_PROFILE;
+    }
+  });
+});
+
+test('default management rejects conflicting arguments and unrelated scope flags', () => {
+  for (const argv of [
+    ['profile', 'default', 'work', '--clear'],
+    ['profile', 'default', 'work', 'personal'],
+    ['-p', 'work', 'profile', 'default'],
+    ['-P', '/tmp/repo', 'profile', 'default'],
+    ['--dry-run', 'profile', 'default'],
+    ['--app', 'codex', 'profile', 'default'],
+    ['profile', 'default', '--update'],
+  ])
+    assert.throws(() => parseCliArgs(argv), argv.join(' '));
+});
+
+test('selection commands edit the effective profile or the explicitly requested project', async () => {
+  await withScratchHomes(async (homes) => {
+    const original = '[rules]\nenabled = []\n';
+    for (const name of ['config', 'work', 'personal'])
+      fs.writeFileSync(configPath(homes, `${name}.toml`), original);
+    setDefaultProfile('work');
+    for (const [profile, args, environment] of [
+      ['work', [], undefined],
+      ['personal', [], 'personal'],
+      ['work', ['-p', 'work'], 'personal'],
+    ] as const) {
+      if (environment) process.env.ASB_PROFILE = environment;
+      else delete process.env.ASB_PROFILE;
+      for (const command of ['enable', 'disable']) {
+        const result = await runMain([command, 'extra', '--type', 'rules', ...args, '--json']);
+        assert.equal(result.code, 0, result.err);
+        assert.equal(JSON.parse(result.out).scope.profile, profile);
+        assert.deepEqual(
+          (selectionOf(homes, `${profile}.toml`).rules as { enabled: string[] }).enabled,
+          command === 'enable' ? ['extra'] : []
+        );
+        assert.equal(readConfig(homes), original);
+        assert.equal(
+          readConfig(homes, `${profile === 'work' ? 'personal' : 'work'}.toml`),
+          original
+        );
+      }
+    }
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    const projectFile = path.join(project, '.asb.toml');
+    fs.writeFileSync(projectFile, original);
+    for (const environment of [undefined, 'personal']) {
+      if (environment) process.env.ASB_PROFILE = environment;
+      else delete process.env.ASB_PROFILE;
+      for (const command of ['enable', 'disable']) {
+        const result = await runMain([command, 'extra', '--type', 'rules', '-P', project]);
+        assert.equal(result.code, 0, result.err);
+        assert.deepEqual(
+          (parseToml(fs.readFileSync(projectFile, 'utf-8')).rules as { enabled: string[] }).enabled,
+          command === 'enable' ? ['extra'] : []
+        );
+      }
+    }
+    const rejected = await runMain([
+      'enable',
+      'extra',
+      '--type',
+      'rules',
+      '-p',
+      'work',
+      '-P',
+      project,
+    ]);
+    assert.equal(rejected.code, 2);
+    for (const name of ['config', 'work', 'personal'])
+      assert.equal(readConfig(homes, `${name}.toml`), original);
+  });
+});
+
+test('the real picker retains its selection and report when the saved default changes', async () => {
+  await withScratchHomes(async (homes) => {
+    seedRule(homes, 'extra.md', 'Extra rule body.\n');
+    const original = '[rules]\nenabled = ["extra"]\n';
+    for (const name of ['config', 'work', 'personal']) {
+      fs.writeFileSync(configPath(homes, `${name}.toml`), original);
+    }
+    setDefaultProfile('work');
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    const projectFile = path.join(project, '.asb.toml');
+    fs.writeFileSync(projectFile, original);
+    const entry = fileURLToPath(new URL('../src/index.ts', import.meta.url));
+    for (const [target, args, environment, initial, next] of [
+      [configPath(homes, 'work.toml'), [], '', 'work', 'personal'],
+      [configPath(homes, 'personal.toml'), [], 'personal', 'work', null],
+      [projectFile, ['-P', project], 'personal', 'work', 'personal'],
+      [configPath(homes, 'work.toml'), ['--app', 'cursor'], '', 'work', 'personal'],
+      [configPath(homes, 'work.toml'), [], '', 'work', null],
+      [configPath(homes), [], '', null, 'work'],
+    ] as const) {
+      fs.writeFileSync(target, original);
+      if (initial === null) clearDefaultProfile();
+      else setDefaultProfile(initial);
+      if (args.includes('--app')) {
+        fs.writeFileSync(target, '[applications.cursor.rules]\nadd = ["extra"]\n');
+      }
+      const files = ['config.toml', 'work.toml', 'personal.toml'].map((name) =>
+        configPath(homes, name)
+      );
+      files.push(projectFile);
+      const before = new Map(files.map((file) => [file, fs.readFileSync(file, 'utf-8')]));
+      const output = await new Promise<string>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          [
+            '--import',
+            import.meta.resolve('tsx'),
+            entry,
+            'enable',
+            '--type',
+            'rules',
+            '--json',
+            ...args,
+          ],
+          {
+            cwd: homes.root,
+            env: {
+              ...process.env,
+              ASB_PROFILE: environment,
+              XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+              NO_COLOR: '1',
+            },
+            stdio: ['pipe', 'pipe', 'pipe'],
+          }
+        );
+        let output = '';
+        let answered = false;
+        const timer = setTimeout(() => {
+          child.kill();
+          reject(new Error(`Picker did not finish: ${output}`));
+        }, 10000);
+        child.on('error', (error) => {
+          clearTimeout(timer);
+          reject(error);
+        });
+        child.stderr.on('data', (chunk) => {
+          output += chunk;
+        });
+        child.stdout.on('data', (chunk) => {
+          output += chunk;
+          if (!answered && output.includes('Select components to enable')) {
+            answered = true;
+            if (next === null) clearDefaultProfile();
+            else setDefaultProfile(next);
+            child.stdin.write(' \r');
+          }
+        });
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          if (code !== 0) reject(new Error(`Picker exited ${code}: ${output}`));
+          else resolve(output);
+        });
+      });
+      const envelopeStart = output.lastIndexOf('{\n  "version": 1,');
+      assert.ok(envelopeStart >= 0, output);
+      const envelope = JSON.parse(output.slice(envelopeStart));
+      assert.equal(envelope.scope.profile, environment || initial);
+      assert.equal(envelope.scope.project, target === projectFile ? project : null);
+      assert.notEqual(fs.readFileSync(target, 'utf-8'), before.get(target));
+      for (const file of files.filter((file) => file !== target)) {
+        assert.equal(fs.readFileSync(file, 'utf-8'), before.get(file));
+      }
+      if (next === null) assert.equal(fs.existsSync(defaultProfilePath()), false);
+      else assert.equal(fs.readFileSync(defaultProfilePath(), 'utf-8'), `${next}\n`);
+    }
+  });
+});
+
+test('init JSON completes with a stale saved selector', async () => {
+  await withScratchHomes(async (homes) => {
+    fs.mkdirSync(path.dirname(defaultProfilePath()), { recursive: true });
+    fs.writeFileSync(defaultProfilePath(), 'absent\n');
+    await inCwd(homes.root, async () => {
+      const result = await runMain(['init', '--json']);
+      assert.equal(result.code, 0, result.err);
+      const envelope = JSON.parse(result.out);
+      assert.equal(envelope.exitCode, 0);
+      assert.deepEqual(envelope.scope, { profile: null, project: null, dryRun: false });
+      assert.equal(envelope.entries[0].outcome, 'written');
+      assert.ok(fs.existsSync(path.join(homes.root, '.asb.toml')));
+      assert.equal(fs.readFileSync(defaultProfilePath(), 'utf-8'), 'absent\n');
+    });
+  });
+});
 
 // Every entry is one logical invocation written several ways; all spellings
 // must parse to the same thing, because a dropped filter is a wrong-scope run.

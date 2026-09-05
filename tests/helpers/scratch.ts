@@ -9,7 +9,7 @@ import type { Report, ReportEntry } from '../../src/engine/report.js';
 
 /**
  * Scratch homes for engine tests. Every environment root the engine resolves
- * (library, agents home, cache, state) points into one disposable temp tree;
+ * (library, agents home, configuration, cache, state) points into one disposable temp tree;
  * the real user homes are never read or written. Git fixtures are real
  * repositories built under the same scratch root and reached over file:// or
  * plain paths, so no test needs the network.
@@ -22,6 +22,7 @@ const MANAGED_ENV = [
   'ASB_STATE_HOME',
   'ASB_CONFIG',
   'ASB_PROFILE',
+  'XDG_CONFIG_HOME',
   'XDG_CACHE_HOME',
   'XDG_STATE_HOME',
 ] as const;
@@ -63,6 +64,7 @@ export async function withScratchHomes<T>(fn: (homes: ScratchHomes) => T | Promi
   process.env.ASB_AGENTS_HOME = homes.agentsHome;
   process.env.ASB_CACHE_HOME = homes.cacheHome;
   process.env.ASB_STATE_HOME = homes.stateHome;
+  process.env.XDG_CONFIG_HOME = path.join(root, 'config');
   delete process.env.ASB_CONFIG;
   delete process.env.ASB_PROFILE;
   delete process.env.XDG_CACHE_HOME;

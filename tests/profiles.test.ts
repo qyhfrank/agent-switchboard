@@ -4,12 +4,13 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { parse as parseToml } from '@iarna/toml';
 import { runSync, selectedFor } from '../src/engine/cli.js';
-import { editSelection, loadConfig } from '../src/engine/config.js';
+import { editSelection, loadConfig, setDefaultProfile } from '../src/engine/config.js';
 import type { Report, ReportEntry } from '../src/engine/report.js';
 import {
   installApps,
   renderedRules,
   ruleFilePath,
+  runMain,
   type ScratchHomes,
   seedRule,
   withScratchHomes,
@@ -17,8 +18,8 @@ import {
 } from './helpers/scratch.js';
 
 /**
- * A profile is which selection file a run reads, never a state it records and
- * never a layer stacked on config.toml. Every claim here is made on the
+ * A profile is the selection file a run reads, not a layer stacked on
+ * config.toml. Every claim here is made on the
  * rendered target bytes or on the row the run reports, so "the profile is the
  * whole selection" is proven by what reaches disk.
  */
@@ -28,6 +29,28 @@ function configFor(rules: readonly string[]): string {
     .map((id) => `"${id}"`)
     .join(', ')}]\n`;
 }
+
+test('summary, status, explain, and sync use the saved default profile', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedTwoRules(homes);
+    writeUserConfig(homes, configFor(['alpha']));
+    writeProfile(homes, 'work', configFor(['beta']));
+    setDefaultProfile('work');
+    const summary = await runMain([]);
+    assert.equal(summary.code, 0, summary.err);
+    assert.match(summary.out, /work/);
+    for (const args of [['status'], ['explain', 'beta'], ['sync', '--no-update']]) {
+      const result = await runMain([...args, '--json']);
+      assert.equal(result.code, 0, result.err);
+      assert.equal(JSON.parse(result.out).scope.profile, 'work');
+    }
+    assert.equal(
+      fs.readFileSync(ruleFilePath(homes, 'claude-code'), 'utf-8'),
+      renderedRules('claude-code', 'Beta body\n')
+    );
+  });
+});
 
 function writeProfile(homes: ScratchHomes, name: string, toml: string): void {
   fs.writeFileSync(path.join(homes.asbHome, `${name}.toml`), toml, 'utf-8');
