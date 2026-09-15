@@ -62,6 +62,8 @@ export interface CapturedTarget {
   escapes?: boolean;
   /** Literal leaf symlink destination, including dangling links. */
   linkTarget?: string;
+  /** Backing path after resolving the parent chain and leaf aliases. */
+  resolvedPath?: string | null;
 }
 
 export interface CapturedBundle {
@@ -157,6 +159,8 @@ export interface Action {
   symlink?: { target: string; expectedTarget: string | null; hostHash: string };
   /** Required leaf identity for cleanup that must not follow a new symlink. */
   expectedLinkTarget?: string | null;
+  /** Backing paths whose identities must hold for a shared-host mutation. */
+  expectedPaths?: { path: string; resolvedPath: string | null }[];
   /**
    * Component ids in this app whose own actions must land before this one may
    * run: a config may not point at payload the run failed to distribute.
@@ -588,7 +592,34 @@ function planSharedProjectRules(
   const claude = members.includes('claude-code');
   const linkPath = path.join(project.root, 'CLAUDE.md');
   const link = capture.targets[linkPath];
-  const keepHost = claude && link?.linkTarget === 'AGENTS.md';
+  const keepHost = link?.linkTarget === 'AGENTS.md';
+  const hostIdentity = { path: targetPath, resolvedPath: current.resolvedPath ?? targetPath };
+  const linkIdentity = { path: linkPath, resolvedPath: link?.resolvedPath ?? linkPath };
+  const linkBase = { app: 'claude-code', type: 'rules', id: null, path: linkPath };
+  const linkCollision: Action | null =
+    link?.exists && !keepHost
+      ? {
+          ...linkBase,
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'foreign',
+          reason:
+            'CLAUDE.md is occupied by an independent file or link; preserve it and align it with AGENTS.md before syncing',
+        }
+      : null;
+  if (linkCollision && hostIdentity.resolvedPath === linkIdentity.resolvedPath) {
+    return [
+      {
+        ...base,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'foreign',
+        reason:
+          'AGENTS.md resolves to the independent CLAUDE.md destination; both paths are preserved',
+      },
+      linkCollision,
+    ];
+  }
   const actions: Action[] = [];
   if (desiredHost === existing) {
     if (desiredSlice !== null) actions.push({ ...base, op: 'none', outcome: 'unchanged' });
@@ -601,20 +632,13 @@ function planSharedProjectRules(
       content: desiredHost,
       root: project.root,
       expectedHash: current.content === null ? null : hashContent(current.content),
+      expectedPaths: [hostIdentity, linkIdentity],
     });
   }
   if (!claude || (desiredSlice === null && (!keepHost || !current.exists))) return actions;
 
-  const linkBase = { app: 'claude-code', type: 'rules', id: null, path: linkPath };
-  if (link?.exists && link.linkTarget !== 'AGENTS.md') {
-    actions.push({
-      ...linkBase,
-      op: 'none',
-      outcome: 'conflict',
-      detail: 'foreign',
-      reason:
-        'CLAUDE.md is occupied by an independent file or link; preserve it and align it with AGENTS.md before syncing',
-    });
+  if (linkCollision) {
+    actions.push(linkCollision);
     return actions;
   }
   actions.push({
@@ -624,6 +648,7 @@ function planSharedProjectRules(
     detail: link?.exists ? undefined : 'created',
     root: project.root,
     requiresPaths: [targetPath],
+    expectedPaths: [hostIdentity],
     symlink: {
       target: 'AGENTS.md',
       expectedTarget: link?.linkTarget ?? null,
@@ -641,6 +666,16 @@ function planSharedProjectRules(
     path: previousPath,
     requiresPaths: [targetPath, linkPath],
   };
+  if (previous.resolvedPath === hostIdentity.resolvedPath) {
+    actions.push({
+      ...cleanupBase,
+      op: 'none',
+      outcome: 'unchanged',
+      detail: 'shared-host',
+      reason: 'this file backs AGENTS.md and retains the active project rules',
+    });
+    return actions;
+  }
   if (previous.content === null || previous.linkTarget !== undefined) {
     actions.push({
       ...cleanupBase,
@@ -663,6 +698,11 @@ function planSharedProjectRules(
       root: project.root,
       expectedHash: hashContent(previous.content),
       expectedLinkTarget: null,
+      expectedPaths: [
+        hostIdentity,
+        { path: linkPath, resolvedPath: hostIdentity.resolvedPath },
+        { path: previousPath, resolvedPath: previous.resolvedPath ?? previousPath },
+      ],
     });
   } catch (error) {
     actions.push({

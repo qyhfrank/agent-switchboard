@@ -203,6 +203,7 @@ function captureFor(
       capture.targets[targetPath] = { exists: fs.existsSync(targetPath), content: null, escapes };
     }
     if (!leafIdentity) return;
+    capture.targets[targetPath].resolvedPath = locateWrite(targetPath);
     try {
       const stat = fs.lstatSync(targetPath);
       capture.targets[targetPath].exists = true;
@@ -213,6 +214,18 @@ function captureFor(
       // The content capture already describes an absent or unreadable path.
     }
   };
+  if (project) {
+    const hostPath = path.join(project.root, 'AGENTS.md');
+    if (
+      table.some(
+        (row) => config.apps.enabled.includes(row.id) && row.rules?.path(config.homes) === hostPath
+      )
+    ) {
+      captureFile(project.root, hostPath);
+      capture.targets[hostPath].resolvedPath = locateWrite(hostPath);
+      captureFile(project.root, path.join(project.root, 'CLAUDE.md'), true);
+    }
+  }
   if (allApps) {
     for (const row of table) capture.installed[row.id] = fs.existsSync(row.detectDir(config.homes));
   }
@@ -225,7 +238,6 @@ function captureFor(
     capture.rulePaths[appId] = targetPath;
     captureFile(row.rules.root(config.homes, targetPath), targetPath);
     if (project && appId === 'claude-code') {
-      captureFile(project.root, path.join(project.root, 'CLAUDE.md'), true);
       captureFile(project.root, path.join(project.root, '.claude', 'CLAUDE.md'), true);
     }
     if (row.rules.dedicated) {
@@ -576,6 +588,18 @@ export function executeAction(action: Action, project?: ProjectGuard): ActionEnt
         'blocked',
         'path-escape',
         `parent directory of ${action.path} resolves outside the app root; not touching it`
+      );
+    }
+    if (
+      action.expectedPaths?.some(
+        (expected) =>
+          expected.resolvedPath === null || locateWrite(expected.path) !== expected.resolvedPath
+      )
+    ) {
+      return failure(
+        'conflict',
+        'path-changed',
+        'backing path changed between planning and apply; re-run asb sync'
       );
     }
 

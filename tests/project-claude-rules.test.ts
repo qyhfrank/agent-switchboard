@@ -268,3 +268,130 @@ test('an escaping shared host blocks the Claude link and previous-host cleanup',
     }
   });
 });
+
+test('a previous Claude host that backs AGENTS.md retains its active rules', async () => {
+  for (const userText of ['', 'Personal instructions\n']) {
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, 'project');
+      const content = mergeProjectRegion(userText, 'Selected rule\n');
+      seedTree(project, {
+        '.asb.toml': '[rules]\nenabled = ["base"]\n',
+        '.claude/CLAUDE.md': content,
+      });
+      fs.symlinkSync('.claude/CLAUDE.md', path.join(project, 'AGENTS.md'));
+      installApps(homes, 'claude-code');
+      seedRule(homes, 'base.md', 'Selected rule\n');
+      writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+      for (const dryRun of [true, false, false]) {
+        await runSync({ project, dryRun });
+        assert.equal(fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'), content);
+        assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), content);
+        if (!dryRun) {
+          assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
+          assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), content);
+        }
+      }
+    });
+  }
+});
+
+test('a shared host linked to an independent root Claude file preserves that file', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    const independent = 'Independent instructions\n';
+    seedTree(project, {
+      '.asb.toml': '[rules]\nenabled = ["base"]\n',
+      'CLAUDE.md': independent,
+    });
+    fs.symlinkSync('CLAUDE.md', path.join(project, 'AGENTS.md'));
+    installApps(homes, 'claude-code');
+    seedRule(homes, 'base.md', 'Selected rule\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    for (const dryRun of [true, false]) {
+      const report = await runSync({ project, dryRun });
+      assert.equal(report.exitCode, 1);
+      assert.ok(report.entries.some((entry) => entry.outcome === 'conflict'));
+      assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), independent);
+      assert.equal(fs.readlinkSync(path.join(project, 'AGENTS.md')), 'CLAUDE.md');
+    }
+  });
+});
+
+test('deselection retains the canonical link target after Claude leaves enabled applications', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    seedTree(project, { '.asb.toml': '[rules]\nenabled = ["base"]\n' });
+    installApps(homes, 'claude-code', 'codex');
+    seedRule(homes, 'base.md', 'Selected rule\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
+    assert.equal((await runSync({ project })).exitCode, 0);
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n');
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[rules]\nenabled = []\n');
+    assert.equal((await runSync({ project })).exitCode, 0);
+    assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
+    assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), '');
+    assert.equal((await runSync({ project })).exitCode, 0);
+    assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), '');
+  });
+});
+
+test('shared host apply refuses a same-content alias change into a protected file', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    const content = 'Independent instructions\n';
+    seedTree(project, { 'AGENTS.md': content, 'CLAUDE.md': content });
+    const agents = path.join(project, 'AGENTS.md');
+    const claude = path.join(project, 'CLAUDE.md');
+    const action: Action = {
+      app: 'project',
+      type: 'rules',
+      id: null,
+      path: agents,
+      root: project,
+      op: 'write',
+      outcome: 'written',
+      content: mergeProjectRegion(content, 'New rule'),
+      expectedHash: hashContent(content),
+      expectedPaths: [
+        { path: agents, resolvedPath: agents },
+        { path: claude, resolvedPath: claude },
+      ],
+    };
+    fs.unlinkSync(agents);
+    fs.symlinkSync('CLAUDE.md', agents);
+    const result = executeAction(action);
+    assert.equal(result.outcome, 'conflict');
+    assert.equal(result.detail, 'path-changed');
+    assert.equal(fs.readFileSync(claude, 'utf-8'), content);
+  });
+});
+
+test('cleanup refuses a shared host retargeted to the previous host after link creation', async (context) => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    const content = mergeProjectRegion('', 'Selected rule\n');
+    seedTree(project, {
+      '.asb.toml': '[rules]\nenabled = ["base"]\n',
+      '.claude/CLAUDE.md': content,
+    });
+    installApps(homes, 'claude-code');
+    seedRule(homes, 'base.md', 'Selected rule\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    const agents = path.join(project, 'AGENTS.md');
+    const claude = path.join(project, 'CLAUDE.md');
+    const previous = path.join(project, '.claude', 'CLAUDE.md');
+    const symlink = fs.symlinkSync;
+    context.mock.method(fs, 'symlinkSync', (...args: Parameters<typeof fs.symlinkSync>) => {
+      symlink(...args);
+      if (args[1] === claude) {
+        fs.unlinkSync(agents);
+        symlink('.claude/CLAUDE.md', agents);
+      }
+    });
+    const report = await runSync({ project });
+    assert.equal(report.exitCode, 1);
+    assert.equal(report.entries.find((entry) => entry.path === previous)?.detail, 'path-changed');
+    assert.equal(fs.readFileSync(previous, 'utf-8'), content);
+    assert.equal(fs.readFileSync(claude, 'utf-8'), content);
+  });
+});
