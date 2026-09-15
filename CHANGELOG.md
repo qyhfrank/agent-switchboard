@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.10
+
 - Claude Code project rules share the root `AGENTS.md` managed region through a relative `CLAUDE.md -> AGENTS.md` link. Independent root files and other links remain intact and report conflicts. Shared contributors must select the same project rules, and deselection preserves repository content and the canonical link.
 
 ## 0.5.9
