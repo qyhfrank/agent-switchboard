@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Claude Code project rules share the root `AGENTS.md` managed region through a relative `CLAUDE.md -> AGENTS.md` link. Independent root files and other links remain intact and report conflicts. Shared contributors must select the same project rules, and deselection preserves repository content and the canonical link.
+
 ## 0.5.9
 
 - `asb profile default [name]` saves or reports a machine-specific default in the XDG configuration directory; `--clear` removes it. Configuration reads and selection edits use `-p`, then `ASB_PROFILE`, then the saved default. Explicit project edits target `.asb.toml`.

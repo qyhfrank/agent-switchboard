@@ -254,7 +254,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.claude'),
       path: (homes) => path.join(homes.agentsHome, '.claude', 'CLAUDE.md'),
-      projectPath: (root) => path.join(root, '.claude', 'CLAUDE.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
       render: rawBody,
       dedicated: false,
     },

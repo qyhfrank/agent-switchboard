@@ -243,11 +243,7 @@ test('the project registry exposes only ratified destinations and keeps global-o
     // Per-app dialect in one place: the cells with a project destination, and
     // the cells that have none because the app reads them from the machine.
     const cells: Array<[string, string | undefined, string | undefined]> = [
-      [
-        'claude-code rules',
-        file('claude-code', 'rules'),
-        path.join(projectReal, '.claude', 'CLAUDE.md'),
-      ],
+      ['claude-code rules', file('claude-code', 'rules'), path.join(projectReal, 'AGENTS.md')],
       ['codex commands', dir('codex', 'commands'), undefined],
       ['gemini agents', dir('gemini', 'agents'), undefined],
       [

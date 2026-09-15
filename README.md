@@ -393,6 +393,14 @@ scope and stay there. The rules region in the repository's `AGENTS.md` composes
 the increment rules, so agent context stops carrying twice what
 `~/.claude/CLAUDE.md` already gives it.
 
+Claude Code reads project rules through the relative root link
+`CLAUDE.md -> AGENTS.md`. Claude Code and other applications that read
+`AGENTS.md` share one managed region and must select the same project rules.
+An independent root `CLAUDE.md` file or a different link is preserved and
+reported as a conflict, including under `collision = "takeover"`.
+Deselection removes the managed region while preserving repository content
+and the canonical link; its `AGENTS.md` target remains present even when empty.
+
 ```toml
 [distribution.project]
 mode = "managed"

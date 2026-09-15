@@ -60,6 +60,8 @@ export interface CapturedTarget {
   content: string | null;
   /** Parent chain of the declared path resolves outside the app root. */
   escapes?: boolean;
+  /** Literal leaf symlink destination, including dangling links. */
+  linkTarget?: string;
 }
 
 export interface CapturedBundle {
@@ -151,6 +153,10 @@ export interface Action {
    * empty document, the form written through a symlinked target.
    */
   content?: string;
+  /** Relative project alias with its captured identity and required host bytes. */
+  symlink?: { target: string; expectedTarget: string | null; hostHash: string };
+  /** Required leaf identity for cleanup that must not follow a new symlink. */
+  expectedLinkTarget?: string | null;
   /**
    * Component ids in this app whose own actions must land before this one may
    * run: a config may not point at payload the run failed to distribute.
@@ -579,22 +585,95 @@ function planSharedProjectRules(
     ];
   }
   const desiredSlice = projectRegion(desiredHost);
-
+  const claude = members.includes('claude-code');
+  const linkPath = path.join(project.root, 'CLAUDE.md');
+  const link = capture.targets[linkPath];
+  const keepHost = claude && link?.linkTarget === 'AGENTS.md';
+  const actions: Action[] = [];
   if (desiredHost === existing) {
-    return desiredSlice === null ? [] : [{ ...base, op: 'none', outcome: 'unchanged' }];
-  }
-
-  return [
-    {
+    if (desiredSlice !== null) actions.push({ ...base, op: 'none', outcome: 'unchanged' });
+  } else {
+    actions.push({
       ...base,
-      op: desiredSlice === null && desiredHost.length === 0 ? 'remove' : 'write',
+      op: desiredSlice === null && desiredHost.length === 0 && !keepHost ? 'remove' : 'write',
       outcome: desiredSlice === null ? 'removed' : 'written',
       detail: current.exists ? 'updated' : 'created',
       content: desiredHost,
       root: project.root,
       expectedHash: current.content === null ? null : hashContent(current.content),
+    });
+  }
+  if (!claude || (desiredSlice === null && (!keepHost || !current.exists))) return actions;
+
+  const linkBase = { app: 'claude-code', type: 'rules', id: null, path: linkPath };
+  if (link?.exists && link.linkTarget !== 'AGENTS.md') {
+    actions.push({
+      ...linkBase,
+      op: 'none',
+      outcome: 'conflict',
+      detail: 'foreign',
+      reason:
+        'CLAUDE.md is occupied by an independent file or link; preserve it and align it with AGENTS.md before syncing',
+    });
+    return actions;
+  }
+  actions.push({
+    ...linkBase,
+    op: 'write',
+    outcome: link?.exists ? 'unchanged' : 'written',
+    detail: link?.exists ? undefined : 'created',
+    root: project.root,
+    requiresPaths: [targetPath],
+    symlink: {
+      target: 'AGENTS.md',
+      expectedTarget: link?.linkTarget ?? null,
+      hostHash: hashContent(desiredHost),
     },
-  ];
+  });
+
+  const previousPath = path.join(project.root, '.claude', 'CLAUDE.md');
+  const previous = capture.targets[previousPath];
+  if (!previous?.exists) return actions;
+  const cleanupBase = {
+    app: 'claude-code',
+    type: 'rules',
+    id: null,
+    path: previousPath,
+    requiresPaths: [targetPath, linkPath],
+  };
+  if (previous.content === null || previous.linkTarget !== undefined) {
+    actions.push({
+      ...cleanupBase,
+      op: 'none',
+      outcome: 'left-behind',
+      detail: 'unproven',
+      reason: 'previous Claude rules host is unreadable or a symlink; preserved',
+    });
+    return actions;
+  }
+  try {
+    if (projectRegion(previous.content) === null) return actions;
+    const remaining = mergeProjectRegion(previous.content, '');
+    actions.push({
+      ...cleanupBase,
+      op: remaining.length === 0 ? 'remove' : 'write',
+      outcome: 'removed',
+      detail: 'stale-copy',
+      content: remaining,
+      root: project.root,
+      expectedHash: hashContent(previous.content),
+      expectedLinkTarget: null,
+    });
+  } catch (error) {
+    actions.push({
+      ...cleanupBase,
+      op: 'none',
+      outcome: 'left-behind',
+      detail: 'malformed-marker',
+      reason: `${error instanceof Error ? error.message : String(error)}; previous Claude rules host preserved`,
+    });
+  }
+  return actions;
 }
 
 export function planRules(input: PlanInput): Action[] {
