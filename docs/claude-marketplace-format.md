@@ -335,6 +335,14 @@ ASB reads and adapts the Claude Code plugin format for cross-agent distribution.
 
 Hook bundle scripts are copied under each target's managed hook root, one directory per hook id: `~/.claude/hooks/managed/<hook-id>/` or `<project>/.claude/hooks/managed/<hook-id>/` for Claude Code, and `~/.codex/hooks/managed/<hook-id>/` or `<project>/.codex/hooks/managed/<hook-id>/` for Codex. Codex project hooks also require project trust in `~/.codex/config.toml`; ASB reports the trust gap instead of writing trust state.
 
+### Native Plugin Deselection
+
+`[applications.claude-code.native_plugins].enabled` selects Claude Code native plugins. ASB records each plugin it installs, including its install ref, catalog plugin id, and marketplace name, in `<ASB_HOME>/state/native-plugins/claude-code.json`. Marketplace registrations have separate ownership records containing their sources.
+
+Removing a recorded plugin from the selection makes the next sync uninstall it. ASB also removes a marketplace it registered when no selected plugin needs it and no unrecorded installed plugin remains in it. A marketplace registered outside ASB is preserved. Plugins and marketplaces that predate these ownership records are not automatically adopted, even when selected. ASB leaves unrecorded installations unchanged.
+
+`asb sync --dry-run` reports planned plugin and marketplace removals as `removed` rows without changing the manager or ownership records. A registered marketplace whose source differs from ASB's record produces a conflict. Successful operations retain enough state for the next sync to finish a partial removal. Selecting a removed plugin again registers its marketplace as needed and installs the plugin again.
+
 ### ASB Source and Materialization Lifecycle
 
 Each immediate non-dotfile directory under `~/.asb/plugins/` is a first-class ASB source. A source can be a standalone plugin or a marketplace. `[plugins.sources]` registers user-owned sources elsewhere on disk or lets ASB manage a remote checkout at `<cache>/<source>/`. The cache root resolves from `ASB_CACHE_HOME`, then `XDG_CACHE_HOME/asb`, then `~/.cache/asb`. Keep the resolved cache root outside `ASB_HOME` to avoid synchronizing managed checkouts.

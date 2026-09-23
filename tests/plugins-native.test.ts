@@ -44,6 +44,7 @@ const fail = (message) => { process.stderr.write(message + '\\n'); process.exit(
 
 if (args[0] !== 'plugin') fail('unknown command');
 const verb = args[1];
+if (state.failCommand === args.slice(0, 3).join(' ')) fail('simulated failure');
 
 if (verb === 'validate') {
   if ((state.invalid || []).includes(args[2])) fail('marketplace manifest is not valid');
@@ -70,6 +71,12 @@ if (verb === 'marketplace' && args[2] === 'remove') {
   state.marketplaces = state.marketplaces.filter((entry) => entry.name !== name);
   // Removing a marketplace takes its plugins with it.
   state.plugins = state.plugins.filter((entry) => entry.marketplaceName !== name);
+  save();
+  process.exit(0);
+}
+if (verb === 'uninstall') {
+  const ref = scoped(args.slice(2))[0];
+  state.plugins = state.plugins.filter((entry) => entry.id !== ref);
   save();
   process.exit(0);
 }
@@ -192,12 +199,274 @@ function managedConfig(): string {
 const REGISTRATION = { source: 'github', repo: 'openai/codex', ref: 'main' };
 const REMOTE_ARGUMENT = { 'openai/codex@main': { name: 'openai-codex', source: REGISTRATION } };
 
+test('Claude deselection previews and removes recorded plugins and marketplaces', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      assert.equal((await runSync()).exitCode, 0);
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      manager.reset();
+      const preview = await runSync({ dryRun: true });
+      assert.equal(
+        preview.entries.find((entry) => entry.id === 'codex@openai-codex')?.outcome,
+        'removed'
+      );
+      assert.equal(manager.state().plugins.length, 1);
+      assert.ok(
+        !manager.calls().some((args) => args.includes('remove') || args.includes('uninstall'))
+      );
+      const report = await runSync();
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      assert.equal(manager.state().plugins.length, 0);
+      assert.equal(manager.state().marketplaces.length, 0);
+      assert.equal(settingsOf(homes).extraKnownMarketplaces, undefined);
+    });
+  });
+});
+
 function settingsOf(homes: ScratchHomes): Record<string, unknown> {
   const filePath = path.join(homes.agentsHome, '.claude', 'settings.json');
   return fs.existsSync(filePath)
     ? (JSON.parse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>)
     : {};
 }
+
+function claudeOwnership(homes: ScratchHomes) {
+  const file = path.join(homes.asbHome, 'state', 'native-plugins', 'claude-code.json');
+  return fs.existsSync(file)
+    ? JSON.parse(fs.readFileSync(file, 'utf-8'))
+    : { plugins: [], marketplaces: [] };
+}
+
+test('Claude records only successful installs and registrations with their identities', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      manager.setState({ failCommand: 'plugin install --scope' });
+      assert.equal((await runSync()).exitCode, 1);
+      assert.deepEqual(claudeOwnership(homes), {
+        plugins: [],
+        marketplaces: [{ name: 'openai-codex', source: REGISTRATION }],
+      });
+      manager.setState({ failCommand: null });
+      assert.equal((await runSync()).exitCode, 0);
+      assert.deepEqual(claudeOwnership(homes).plugins, [
+        {
+          ref: 'codex@openai-codex',
+          pluginId: 'codex@openai-codex',
+          pluginName: 'codex',
+          marketplaceName: 'openai-codex',
+        },
+      ]);
+    });
+  });
+});
+
+test('Claude re-selection after removal performs a clean install', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      await runSync();
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      await runSync();
+      assert.deepEqual(claudeOwnership(homes), { plugins: [], marketplaces: [] });
+      manager.reset();
+      writeUserConfig(homes, managedConfig());
+      assert.equal((await runSync()).exitCode, 0);
+      assert.deepEqual(manager.calls().slice(3), [
+        ['plugin', 'marketplace', 'add', '--scope', 'user', 'openai/codex@main'],
+        ['plugin', 'install', '--scope', 'user', 'codex@openai-codex'],
+      ]);
+      assert.equal(manager.state().plugins.length, 1);
+    });
+  });
+});
+
+test('Claude retries the remaining marketplace after removal fails partway', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      await runSync();
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      manager.setState({ failCommand: 'plugin marketplace remove' });
+      const failure = await runSync();
+      assert.equal(failure.exitCode, 1);
+      assert.ok(
+        failure.entries.some(
+          (entry) => entry.outcome === 'failed' && entry.reason?.includes('simulated failure')
+        )
+      );
+      assert.equal(manager.state().plugins.length, 0);
+      assert.equal(claudeOwnership(homes).marketplaces.length, 1);
+      manager.setState({ failCommand: null });
+      manager.reset();
+      assert.equal((await runSync()).exitCode, 0);
+      assert.ok(!manager.calls().some((args) => args[1] === 'uninstall'));
+      assert.equal(manager.state().marketplaces.length, 0);
+      assert.deepEqual(claudeOwnership(homes), { plugins: [], marketplaces: [] });
+    });
+  });
+});
+
+test('Claude leaves pre-existing plugins and marketplaces unowned even when selected', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      const existing = {
+        marketplaces: [{ name: 'openai-codex', source: REGISTRATION }],
+        plugins: [{ id: 'codex@openai-codex', enabled: false }],
+      };
+      manager.setState(existing);
+      writeUserConfig(homes, managedConfig());
+      assert.equal((await runSync()).exitCode, 0);
+      assert.deepEqual(claudeOwnership(homes), { plugins: [], marketplaces: [] });
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      assert.equal((await runSync()).exitCode, 0);
+      assert.deepEqual(manager.state().plugins, existing.plugins);
+      assert.deepEqual(manager.state().marketplaces, existing.marketplaces);
+      assert.equal(settingsOf(homes).extraKnownMarketplaces, undefined);
+      assert.ok(
+        !manager.calls().some((args) => ['install', 'enable', 'uninstall'].includes(args[1]))
+      );
+    });
+  });
+});
+
+test('Claude removes an owned plugin but preserves a pre-existing marketplace', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      manager.setState({ marketplaces: [{ name: 'openai-codex', source: REGISTRATION }] });
+      writeUserConfig(homes, managedConfig());
+      await runSync();
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      assert.equal((await runSync()).exitCode, 0);
+      assert.equal(manager.state().plugins.length, 0);
+      assert.equal(manager.state().marketplaces.length, 1);
+    });
+  });
+});
+
+test('Claude reports changed recorded marketplace sources as conflicts', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      await runSync();
+      manager.setState({
+        marketplaces: [
+          { name: 'openai-codex', source: { source: 'github', repo: 'another/catalog' } },
+        ],
+      });
+      for (const selected of [true, false]) {
+        if (!selected) writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+        manager.reset();
+        const report = await runSync();
+        assert.equal(report.exitCode, 1);
+        assert.equal(
+          report.entries.find((entry) => entry.id === 'codex@openai-codex')?.outcome,
+          'conflict'
+        );
+        assert.ok(
+          manager.calls().every((args) => args.includes('list') || args.includes('validate'))
+        );
+      }
+      assert.equal(claudeOwnership(homes).plugins.length, 1);
+    });
+  });
+});
+
+test('Claude retains a shared marketplace until its last selected plugin is removed', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const root = seedManagedSource(homes);
+    seedSource(homes, 'openai-codex', {
+      '.claude-plugin/marketplace.json': JSON.stringify({
+        name: 'openai-codex',
+        plugins: [
+          { name: 'codex', source: './codex' },
+          { name: 'review', source: './review' },
+        ],
+      }),
+      'review/.claude-plugin/plugin.json': JSON.stringify({ name: 'review' }),
+    });
+    assert.ok(fs.existsSync(root));
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(
+        homes,
+        managedConfig().replace(
+          '"codex@openai-codex"',
+          '"codex@openai-codex", "review@openai-codex"'
+        )
+      );
+      assert.equal((await runSync()).exitCode, 0);
+      assert.equal(manager.state().marketplaces.length, 1);
+      writeUserConfig(homes, managedConfig().replace('codex@openai-codex', 'review@openai-codex'));
+      assert.equal((await runSync()).exitCode, 0);
+      assert.deepEqual(
+        manager.state().plugins.map((entry) => entry.id),
+        ['review@openai-codex']
+      );
+      assert.equal(manager.state().marketplaces.length, 1);
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      assert.equal((await runSync()).exitCode, 0);
+      assert.equal(manager.state().marketplaces.length, 0);
+    });
+  });
+});
+
+test('Claude preserves unrecorded plugins inside a marketplace ASB registered', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      await runSync();
+      const foreign = {
+        id: 'personal@openai-codex',
+        marketplaceName: 'openai-codex',
+        enabled: true,
+      };
+      manager.setState({ plugins: [...manager.state().plugins, foreign] });
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      assert.equal((await runSync()).exitCode, 0);
+      assert.deepEqual(manager.state().plugins, [foreign]);
+      assert.equal(manager.state().marketplaces.length, 1);
+      assert.equal(claudeOwnership(homes).marketplaces.length, 1);
+    });
+  });
+});
+
+test('Claude does not remove a marketplace after its plugin uninstall fails', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      await runSync();
+      writeUserConfig(homes, managedConfig().replace('"codex@openai-codex"', ''));
+      manager.setState({ failCommand: 'plugin uninstall --scope' });
+      manager.reset();
+      assert.equal((await runSync()).exitCode, 1);
+      assert.ok(!manager.calls().some((args) => args[2] === 'remove'));
+      assert.equal(claudeOwnership(homes).plugins.length, 1);
+      manager.setState({ failCommand: null });
+      assert.equal((await runSync()).exitCode, 0);
+      assert.equal(manager.state().marketplaces.length, 0);
+    });
+  });
+});
 
 test('a native plugin registers through the manager by a portable reference', async () => {
   await withScratchHomes(async (homes) => {

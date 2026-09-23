@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { z } from 'zod';
 import type { AppRow, NativeManagerRow } from './apps.js';
 import { effectivePlugins, type Homes, type ResolvedConfig } from './config.js';
 import type { Action } from './plan.js';
@@ -9,8 +10,8 @@ import type { NativeMeta, PluginDescriptor, SourceCatalog } from './sources.js';
 
 /**
  * The `native` apply kind: apps that ship their own plugin manager. There is
- * no file to own here — the manager owns its installs — so ownership is
- * replaced by the manager's reported state. Every run probes that state, plans
+ * no install file to own here. ASB records its manager operations separately
+ * from the manager's reported state. Every run probes that state, plans
  * against it, and applies through the manager's own verbs.
  *
  * The probe is a capture like any other: read once, plan purely, execute the
@@ -42,6 +43,68 @@ interface CodexWrapper {
   version?: string;
 }
 
+const claudeOwnershipSchema = z.object({
+  plugins: z.array(
+    z.object({
+      ref: z.string(),
+      pluginId: z.string(),
+      pluginName: z.string(),
+      marketplaceName: z.string(),
+    })
+  ),
+  marketplaces: z.array(
+    z.object({
+      name: z.string(),
+      source: z.discriminatedUnion('source', [
+        z.object({ source: z.literal('github'), repo: z.string(), ref: z.string().optional() }),
+        z.object({ source: z.literal('git'), url: z.string(), ref: z.string().optional() }),
+        z.object({ source: z.literal('directory'), path: z.string() }),
+      ]),
+    })
+  ),
+});
+type ClaudeOwnership = z.infer<typeof claudeOwnershipSchema>;
+type OwnershipChange =
+  | { plugin: ClaudeOwnership['plugins'][number] }
+  | { marketplace: ClaudeOwnership['marketplaces'][number] }
+  | { removePlugin: string }
+  | { removeMarketplace: string };
+
+function claudeStatePath(homes: Homes): string {
+  return path.join(homes.asbHome, 'state', 'native-plugins', 'claude-code.json');
+}
+
+function readClaudeOwnership(file: string): ClaudeOwnership {
+  return fs.existsSync(file)
+    ? claudeOwnershipSchema.parse(JSON.parse(fs.readFileSync(file, 'utf-8')))
+    : { plugins: [], marketplaces: [] };
+}
+
+function updateClaudeOwnership(file: string, change: OwnershipChange): void {
+  const state = readClaudeOwnership(file);
+  if ('plugin' in change) {
+    state.plugins = state.plugins.filter((entry) => entry.ref !== change.plugin.ref);
+    state.plugins.push(change.plugin);
+  } else if ('marketplace' in change) {
+    state.marketplaces = state.marketplaces.filter(
+      (entry) => entry.name !== change.marketplace.name
+    );
+    state.marketplaces.push(change.marketplace);
+  } else if ('removePlugin' in change) {
+    state.plugins = state.plugins.filter((entry) => entry.ref !== change.removePlugin);
+  } else {
+    state.marketplaces = state.marketplaces.filter(
+      (entry) => entry.name !== change.removeMarketplace
+    );
+  }
+  if (state.plugins.length === 0 && state.marketplaces.length === 0) {
+    fs.rmSync(file, { force: true });
+    return;
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  writeFileAtomic(file, `${JSON.stringify(state, null, 2)}\n`);
+}
+
 export interface NativeAppState {
   /** Parsed marketplace inventory JSON. */
   marketplaces: unknown;
@@ -53,6 +116,7 @@ export interface NativeAppState {
   invalid: Record<string, string>;
   /** Owned bare marketplaces reconstructed from wrapper manifests. */
   managed: CodexWrapper[];
+  claude?: ClaudeOwnership;
   /** Per-directory wrapper state that could not be recognized safely. */
   wrapperErrors: { root: string; error: string }[];
   /** Why the manager could not be probed at all. */
@@ -83,6 +147,13 @@ export interface NativeWork {
   prepare?: CodexWrapper;
   /** ASB-owned wrapper root to remove after manager verbs. */
   cleanup?: { root: string; stateRoot: string };
+  /** Persist successful manager operations so a later sync can recover partial work. */
+  ownership?: {
+    path: string;
+    afterCommand: Record<number, OwnershipChange>;
+    finish?: OwnershipChange;
+    removeMarketplace?: string;
+  };
 }
 
 export type NativeCommandRunner = (
@@ -487,7 +558,8 @@ function activeManagers(
     if (installed[appId] !== true && !assumed.has(appId)) continue;
     const enabled = config.apps.overrides[appId]?.native_plugins?.enabled ?? [];
     const hasManagedCodexState = row.target === 'codex' && hasCodexWrapperState(config.homes);
-    if (enabled.length > 0 || hasManagedCodexState) {
+    const hasClaudeState = row.target !== 'codex' && fs.existsSync(claudeStatePath(config.homes));
+    if (enabled.length > 0 || hasManagedCodexState || hasClaudeState) {
       active.push({ app: appId, row, enabled: [...new Set(enabled)] });
     }
   }
@@ -526,6 +598,12 @@ export function captureNative(
       state.wrapperErrors = wrappers.errors;
       if (dryRun) continue;
     } else {
+      try {
+        state.claude = readClaudeOwnership(claudeStatePath(config.homes));
+      } catch (error) {
+        state.error = `cannot read Claude Code ownership: ${error instanceof Error ? error.message : String(error)}`;
+        continue;
+      }
       for (const resolved of resolveNativeRefs(catalog, row, enabled, config.homes)) {
         const marketplacePath = resolved.install?.marketplacePath;
         if (marketplacePath === undefined || marketplacePath in state.invalid) continue;
@@ -912,7 +990,18 @@ export function planNative(input: NativePlanInput): Action[] {
       continue;
     }
 
-    for (const resolved of resolveNativeRefs(catalog, row, enabled, config.homes)) {
+    const resolvedRows = resolveNativeRefs(catalog, row, enabled, config.homes);
+    const ownershipPath = claudeStatePath(config.homes);
+    const owned = state?.claude ?? { plugins: [], marketplaces: [] };
+    const plannedMarketplaces = new Set<string>();
+    const plannedPlugins = new Set<string>();
+    if (state?.error && enabled.length === 0) {
+      actions.push(
+        nativeRow(app, 'native-plugins', ownershipPath, 'failed', state.error, 'source-error')
+      );
+      continue;
+    }
+    for (const resolved of resolvedRows) {
       const { ref, plugin, install } = resolved;
       if (!install) {
         actions.push(
@@ -959,6 +1048,13 @@ export function planNative(input: NativePlanInput): Action[] {
       }
 
       const registration = registrationFor(install);
+      if (plannedPlugins.has(install.ref)) continue;
+      plannedPlugins.add(install.ref);
+      const ownedPlugin = owned.plugins.find((entry) => entry.ref === install.ref);
+      const ownedMarketplace = owned.marketplaces.find(
+        (entry) => entry.name === install.marketplaceName
+      );
+      const afterCommand: Record<number, OwnershipChange> = {};
       const commands: string[][] = [];
       const compensate: string[][] = [];
       const notes: string[] = [];
@@ -967,17 +1063,45 @@ export function planNative(input: NativePlanInput): Action[] {
       const marketplace = findMarketplace(state?.marketplaces, install.marketplaceName);
       let blocked: string | undefined;
       let migrated = false;
-      if (!marketplace) {
+      if (
+        marketplace &&
+        ownedMarketplace &&
+        !sourceMatches(declaredSource(marketplace), ownedMarketplace.source)
+      ) {
+        blocked = `marketplace "${install.marketplaceName}" is registered from a different source; remove it from ${row.bin} first`;
+      } else if (!marketplace && !plannedMarketplaces.has(install.marketplaceName)) {
         commands.push(['plugin', 'marketplace', 'add', '--scope', scope, registration.argument]);
+        afterCommand[commands.length - 1] = {
+          marketplace: { name: install.marketplaceName, source: registration.source },
+        };
         notes.push('marketplace added');
-      } else {
+      } else if (marketplace) {
         const actual = declaredSource(marketplace);
         if (!sourceMatches(actual, registration.source)) {
           const managedLocal = sourceMatches(actual, {
             source: 'directory',
             path: install.marketplacePath,
           });
-          if (registration.portable && managedLocal) {
+          const otherInstalls = collectObjects(state?.plugins).some((entry) => {
+            const id = entry.pluginId ?? entry.id ?? entry.ref;
+            const name =
+              entry.marketplaceName ??
+              entry.marketplace ??
+              entry.marketplaceId ??
+              entry.sourceMarketplace;
+            return (
+              (name === install.marketplaceName ||
+                (typeof id === 'string' && id.endsWith(`@${install.marketplaceName}`))) &&
+              !findPlugin([entry], install)
+            );
+          });
+          if (
+            registration.portable &&
+            managedLocal &&
+            ownedMarketplace &&
+            ownedPlugin &&
+            !otherInstalls
+          ) {
             // asb registered the local path itself, so replacing it with the
             // portable declaration is a migration, not a takeover. Failing
             // half-way puts the local registration and its install back.
@@ -985,6 +1109,9 @@ export function planNative(input: NativePlanInput): Action[] {
               ['plugin', 'marketplace', 'remove', '--scope', scope, install.marketplaceName],
               ['plugin', 'marketplace', 'add', '--scope', scope, registration.argument]
             );
+            afterCommand[commands.length - 1] = {
+              marketplace: { name: install.marketplaceName, source: registration.source },
+            };
             compensate.push(
               ['plugin', 'marketplace', 'remove', '--scope', scope, install.marketplaceName],
               ['plugin', 'marketplace', 'add', '--scope', scope, install.marketplacePath]
@@ -1010,16 +1137,25 @@ export function planNative(input: NativePlanInput): Action[] {
         );
         continue;
       }
+      plannedMarketplaces.add(install.marketplaceName);
 
       // The probe reads the manager's state once, before any of this run's own
       // commands. That reading only describes an install that survives them: a
       // marketplace this run registers or re-registers takes its plugins with
       // it, so what was reported for the old one says nothing about the new.
-      const installed = marketplace && !migrated ? findPlugin(state?.plugins, install) : undefined;
+      const installed = !migrated ? findPlugin(state?.plugins, install) : undefined;
       if (!installed) {
         commands.push(['plugin', 'install', '--scope', scope, install.ref]);
+        afterCommand[commands.length - 1] = {
+          plugin: {
+            ref: install.ref,
+            pluginId: plugin?.id ?? ref,
+            pluginName: install.pluginName,
+            marketplaceName: install.marketplaceName,
+          },
+        };
         notes.push('installed');
-      } else if (isDisabled(installed)) {
+      } else if (ownedPlugin && isDisabled(installed)) {
         // Design: a plugin disabled behind asb's back reports stale rather
         // than up-to-date, and the sync re-enables it.
         commands.push(['plugin', 'enable', '--scope', scope, install.ref]);
@@ -1028,11 +1164,10 @@ export function planNative(input: NativePlanInput): Action[] {
       }
 
       const settingSource = registration.portable ? registration.source : null;
-      const settingWrite = settingNeedsWrite(
-        state?.settings ?? null,
-        install.marketplaceName,
-        settingSource
-      );
+      const managesMarketplace = ownedMarketplace !== undefined || !marketplace;
+      const settingWrite =
+        managesMarketplace &&
+        settingNeedsWrite(state?.settings ?? null, install.marketplaceName, settingSource);
       if (settingWrite) notes.push('settings reconciled');
 
       if (notes.length === 0) {
@@ -1067,6 +1202,7 @@ export function planNative(input: NativePlanInput): Action[] {
           env,
           commands,
           compensate,
+          ownership: { path: ownershipPath, afterCommand },
           setting: settingWrite
             ? {
                 path: settingsPath,
@@ -1074,6 +1210,101 @@ export function planNative(input: NativePlanInput): Action[] {
                 source: settingSource,
               }
             : null,
+        };
+      }
+      actions.push(action);
+    }
+
+    const selected = new Set(
+      resolvedRows.flatMap((entry) => (entry.install ? [entry.install.ref] : [entry.ref]))
+    );
+    const keptPlugins = owned.plugins.filter(
+      (entry) => selected.has(entry.ref) || enabled.includes(entry.pluginId)
+    );
+    const neededMarketplaces = new Set([
+      ...resolvedRows.flatMap((entry) => (entry.install ? [entry.install.marketplaceName] : [])),
+      ...keptPlugins.map((entry) => entry.marketplaceName),
+    ]);
+    const conflict = (name: string): string | undefined => {
+      const recorded = owned.marketplaces.find((entry) => entry.name === name);
+      const actual = findMarketplace(state?.marketplaces, name);
+      return recorded && actual && !sourceMatches(declaredSource(actual), recorded.source)
+        ? `marketplace "${name}" is registered from a different source; remove it from ${row.bin} first`
+        : undefined;
+    };
+    for (const plugin of owned.plugins) {
+      if (keptPlugins.includes(plugin)) continue;
+      const blocked = conflict(plugin.marketplaceName);
+      const action = nativeRow(
+        app,
+        plugin.ref,
+        ownershipPath,
+        state?.error ? 'failed' : blocked ? 'conflict' : 'removed',
+        state?.error ??
+          blocked ??
+          (dryRun ? 'would uninstall native plugin' : 'native plugin uninstalled')
+      );
+      if (!dryRun && !state?.error && !blocked) {
+        action.native = {
+          bin: row.bin,
+          env,
+          commands: findPlugin(state?.plugins, plugin)
+            ? [['plugin', 'uninstall', '--scope', scope, plugin.ref]]
+            : [],
+          compensate: [],
+          setting: null,
+          ownership: {
+            path: ownershipPath,
+            afterCommand: {},
+            finish: { removePlugin: plugin.ref },
+          },
+        };
+      }
+      actions.push(action);
+    }
+    for (const marketplace of owned.marketplaces) {
+      if (neededMarketplaces.has(marketplace.name)) continue;
+      // Removing a marketplace can remove all its plugins, including foreign installs.
+      const foreignPlugins = collectObjects(state?.plugins).some((entry) => {
+        const ref = entry.pluginId ?? entry.id ?? entry.ref;
+        const name =
+          entry.marketplaceName ??
+          entry.marketplace ??
+          entry.marketplaceId ??
+          entry.sourceMarketplace;
+        const belongs =
+          name === marketplace.name ||
+          (typeof ref === 'string' && ref.endsWith(`@${marketplace.name}`));
+        return belongs && !owned.plugins.some((plugin) => findPlugin([entry], plugin));
+      });
+      if (foreignPlugins) continue;
+      const blocked = conflict(marketplace.name);
+      const action = nativeRow(
+        app,
+        marketplace.name,
+        ownershipPath,
+        state?.error ? 'failed' : blocked ? 'conflict' : 'removed',
+        state?.error ??
+          blocked ??
+          (dryRun
+            ? 'would remove ASB-registered marketplace'
+            : 'ASB-registered marketplace removed')
+      );
+      if (!dryRun && !state?.error && !blocked) {
+        action.native = {
+          bin: row.bin,
+          env,
+          commands: findMarketplace(state?.marketplaces, marketplace.name)
+            ? [['plugin', 'marketplace', 'remove', '--scope', scope, marketplace.name]]
+            : [],
+          compensate: [],
+          setting: { path: settingsPath, marketplace: marketplace.name, source: null },
+          ownership: {
+            path: ownershipPath,
+            afterCommand: {},
+            removeMarketplace: marketplace.name,
+            finish: { removeMarketplace: marketplace.name },
+          },
         };
       }
       actions.push(action);
@@ -1096,6 +1327,22 @@ export function applyNative(
   work: NativeWork,
   runner: NativeCommandRunner = run
 ): string | undefined {
+  let previousOwnership: ClaudeOwnership | undefined;
+  if (work.ownership) {
+    try {
+      previousOwnership = readClaudeOwnership(work.ownership.path);
+      if (
+        work.ownership.removeMarketplace &&
+        previousOwnership.plugins.some(
+          (plugin) => plugin.marketplaceName === work.ownership?.removeMarketplace
+        )
+      ) {
+        return 'cannot remove marketplace while recorded plugins still require removal';
+      }
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
   const preparedNew = work.prepare !== undefined && !fs.existsSync(work.prepare.root);
   let snapshot: CodexWrapperSnapshot | null = null;
   if (work.prepare && !preparedNew) {
@@ -1128,7 +1375,17 @@ export function applyNative(
   }
   for (const [index, args] of work.commands.entries()) {
     const result = runner(work.bin, args, work.env);
-    if (result.status === 0) continue;
+    if (result.status === 0) {
+      const change = work.ownership?.afterCommand[index];
+      if (change && work.ownership) {
+        try {
+          updateClaudeOwnership(work.ownership.path, change);
+        } catch (error) {
+          return error instanceof Error ? error.message : String(error);
+        }
+      }
+      continue;
+    }
     const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
     const failure = `${work.bin} ${args.join(' ')} failed: ${detail}`;
     const restoreFailure = restorePrepared();
@@ -1141,6 +1398,13 @@ export function applyNative(
       if (restored.status !== 0) {
         const why = restored.stderr.trim() || restored.stdout.trim() || `exit ${restored.status}`;
         return `${failed}; restoring the previous registration failed: ${work.bin} ${undo.join(' ')}: ${why}`;
+      }
+    }
+    if (work.ownership && previousOwnership) {
+      try {
+        writeFileAtomic(work.ownership.path, `${JSON.stringify(previousOwnership, null, 2)}\n`);
+      } catch (error) {
+        return `${failed}; restoring ownership failed: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
     return failed;
@@ -1159,6 +1423,13 @@ export function applyNative(
     }
     try {
       fs.rmSync(work.cleanup.root, { recursive: true, force: true });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (work.ownership?.finish) {
+    try {
+      updateClaudeOwnership(work.ownership.path, work.ownership.finish);
     } catch (error) {
       return error instanceof Error ? error.message : String(error);
     }
