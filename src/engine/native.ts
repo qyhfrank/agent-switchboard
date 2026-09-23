@@ -97,6 +97,10 @@ function updateClaudeOwnership(file: string, change: OwnershipChange): void {
       (entry) => entry.name !== change.removeMarketplace
     );
   }
+  writeClaudeOwnership(file, state);
+}
+
+function writeClaudeOwnership(file: string, state: ClaudeOwnership): void {
   if (state.plugins.length === 0 && state.marketplaces.length === 0) {
     fs.rmSync(file, { force: true });
     return;
@@ -147,10 +151,10 @@ export interface NativeWork {
   prepare?: CodexWrapper;
   /** ASB-owned wrapper root to remove after manager verbs. */
   cleanup?: { root: string; stateRoot: string };
-  /** Persist successful manager operations so a later sync can recover partial work. */
+  /** Record ownership before manager mutations; undo the record when a verb fails. */
   ownership?: {
     path: string;
-    afterCommand: Record<number, OwnershipChange>;
+    beforeCommand: Record<number, OwnershipChange>;
     finish?: OwnershipChange;
     removeMarketplace?: string;
   };
@@ -456,6 +460,18 @@ function findPlugin(
   });
 }
 
+/** Claude installations at project or local scope are never owned by ASB. */
+function findClaudePlugin(
+  state: unknown,
+  install: Pick<Install, 'marketplaceName' | 'pluginName' | 'ref'>
+): Record<string, unknown> | undefined {
+  return collectObjects(state).find(
+    (entry) =>
+      (entry.scope === undefined || entry.scope === 'user') &&
+      findPlugin([entry], install) === entry
+  );
+}
+
 function declaredSource(entry: Record<string, unknown>): Record<string, unknown> | undefined {
   if (entry.marketplaceSource && typeof entry.marketplaceSource === 'object') {
     return entry.marketplaceSource as Record<string, unknown>;
@@ -558,7 +574,8 @@ function activeManagers(
     if (installed[appId] !== true && !assumed.has(appId)) continue;
     const enabled = config.apps.overrides[appId]?.native_plugins?.enabled ?? [];
     const hasManagedCodexState = row.target === 'codex' && hasCodexWrapperState(config.homes);
-    const hasClaudeState = row.target !== 'codex' && fs.existsSync(claudeStatePath(config.homes));
+    const hasClaudeState =
+      row.target === 'claude-code' && fs.existsSync(claudeStatePath(config.homes));
     if (enabled.length > 0 || hasManagedCodexState || hasClaudeState) {
       active.push({ app: appId, row, enabled: [...new Set(enabled)] });
     }
@@ -1054,7 +1071,7 @@ export function planNative(input: NativePlanInput): Action[] {
       const ownedMarketplace = owned.marketplaces.find(
         (entry) => entry.name === install.marketplaceName
       );
-      const afterCommand: Record<number, OwnershipChange> = {};
+      const beforeCommand: Record<number, OwnershipChange> = {};
       const commands: string[][] = [];
       const compensate: string[][] = [];
       const notes: string[] = [];
@@ -1071,7 +1088,7 @@ export function planNative(input: NativePlanInput): Action[] {
         blocked = `marketplace "${install.marketplaceName}" is registered from a different source; remove it from ${row.bin} first`;
       } else if (!marketplace && !plannedMarketplaces.has(install.marketplaceName)) {
         commands.push(['plugin', 'marketplace', 'add', '--scope', scope, registration.argument]);
-        afterCommand[commands.length - 1] = {
+        beforeCommand[commands.length - 1] = {
           marketplace: { name: install.marketplaceName, source: registration.source },
         };
         notes.push('marketplace added');
@@ -1092,7 +1109,7 @@ export function planNative(input: NativePlanInput): Action[] {
             return (
               (name === install.marketplaceName ||
                 (typeof id === 'string' && id.endsWith(`@${install.marketplaceName}`))) &&
-              !findPlugin([entry], install)
+              !findClaudePlugin([entry], install)
             );
           });
           if (
@@ -1109,14 +1126,14 @@ export function planNative(input: NativePlanInput): Action[] {
               ['plugin', 'marketplace', 'remove', '--scope', scope, install.marketplaceName],
               ['plugin', 'marketplace', 'add', '--scope', scope, registration.argument]
             );
-            afterCommand[commands.length - 1] = {
+            beforeCommand[commands.length - 1] = {
               marketplace: { name: install.marketplaceName, source: registration.source },
             };
             compensate.push(
               ['plugin', 'marketplace', 'remove', '--scope', scope, install.marketplaceName],
               ['plugin', 'marketplace', 'add', '--scope', scope, install.marketplacePath]
             );
-            const previous = findPlugin(state?.plugins, install);
+            const previous = findClaudePlugin(state?.plugins, install);
             if (previous) {
               compensate.push(['plugin', 'install', '--scope', scope, install.ref]);
               if (isDisabled(previous)) {
@@ -1143,10 +1160,10 @@ export function planNative(input: NativePlanInput): Action[] {
       // commands. That reading only describes an install that survives them: a
       // marketplace this run registers or re-registers takes its plugins with
       // it, so what was reported for the old one says nothing about the new.
-      const installed = !migrated ? findPlugin(state?.plugins, install) : undefined;
+      const installed = !migrated ? findClaudePlugin(state?.plugins, install) : undefined;
       if (!installed) {
         commands.push(['plugin', 'install', '--scope', scope, install.ref]);
-        afterCommand[commands.length - 1] = {
+        beforeCommand[commands.length - 1] = {
           plugin: {
             ref: install.ref,
             pluginId: plugin?.id ?? ref,
@@ -1202,7 +1219,7 @@ export function planNative(input: NativePlanInput): Action[] {
           env,
           commands,
           compensate,
-          ownership: { path: ownershipPath, afterCommand },
+          ownership: { path: ownershipPath, beforeCommand },
           setting: settingWrite
             ? {
                 path: settingsPath,
@@ -1248,14 +1265,14 @@ export function planNative(input: NativePlanInput): Action[] {
         action.native = {
           bin: row.bin,
           env,
-          commands: findPlugin(state?.plugins, plugin)
+          commands: findClaudePlugin(state?.plugins, plugin)
             ? [['plugin', 'uninstall', '--scope', scope, plugin.ref]]
             : [],
           compensate: [],
           setting: null,
           ownership: {
             path: ownershipPath,
-            afterCommand: {},
+            beforeCommand: {},
             finish: { removePlugin: plugin.ref },
           },
         };
@@ -1263,6 +1280,8 @@ export function planNative(input: NativePlanInput): Action[] {
       actions.push(action);
     }
     for (const marketplace of owned.marketplaces) {
+      // An unresolved selection cannot prove that its marketplace is unused.
+      if (resolvedRows.some((entry) => !entry.install)) continue;
       if (neededMarketplaces.has(marketplace.name)) continue;
       // Removing a marketplace can remove all its plugins, including foreign installs.
       const foreignPlugins = collectObjects(state?.plugins).some((entry) => {
@@ -1275,7 +1294,7 @@ export function planNative(input: NativePlanInput): Action[] {
         const belongs =
           name === marketplace.name ||
           (typeof ref === 'string' && ref.endsWith(`@${marketplace.name}`));
-        return belongs && !owned.plugins.some((plugin) => findPlugin([entry], plugin));
+        return belongs && !owned.plugins.some((plugin) => findClaudePlugin([entry], plugin));
       });
       if (foreignPlugins) continue;
       const blocked = conflict(marketplace.name);
@@ -1301,7 +1320,7 @@ export function planNative(input: NativePlanInput): Action[] {
           setting: { path: settingsPath, marketplace: marketplace.name, source: null },
           ownership: {
             path: ownershipPath,
-            afterCommand: {},
+            beforeCommand: {},
             removeMarketplace: marketplace.name,
             finish: { removeMarketplace: marketplace.name },
           },
@@ -1374,24 +1393,31 @@ export function applyNative(
     }
   }
   for (const [index, args] of work.commands.entries()) {
-    const result = runner(work.bin, args, work.env);
-    if (result.status === 0) {
-      const change = work.ownership?.afterCommand[index];
-      if (change && work.ownership) {
-        try {
-          updateClaudeOwnership(work.ownership.path, change);
-        } catch (error) {
-          return error instanceof Error ? error.message : String(error);
-        }
+    const change = work.ownership?.beforeCommand[index];
+    let commandOwnership: ClaudeOwnership | undefined;
+    if (change && work.ownership) {
+      try {
+        commandOwnership = readClaudeOwnership(work.ownership.path);
+        updateClaudeOwnership(work.ownership.path, change);
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
       }
-      continue;
     }
+    const result = runner(work.bin, args, work.env);
+    if (result.status === 0) continue;
     const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
     const failure = `${work.bin} ${args.join(' ')} failed: ${detail}`;
     const restoreFailure = restorePrepared();
-    const failed = restoreFailure
+    let failed = restoreFailure
       ? `${failure}; restoring Codex wrapper failed: ${restoreFailure}`
       : failure;
+    if (commandOwnership && work.ownership) {
+      try {
+        writeClaudeOwnership(work.ownership.path, commandOwnership);
+      } catch (error) {
+        failed += `; restoring ownership failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     if (index === 0 || work.compensate.length === 0) return failed;
     for (const undo of work.compensate) {
       const restored = runner(work.bin, undo, work.env);
@@ -1402,7 +1428,7 @@ export function applyNative(
     }
     if (work.ownership && previousOwnership) {
       try {
-        writeFileAtomic(work.ownership.path, `${JSON.stringify(previousOwnership, null, 2)}\n`);
+        writeClaudeOwnership(work.ownership.path, previousOwnership);
       } catch (error) {
         return `${failed}; restoring ownership failed: ${error instanceof Error ? error.message : String(error)}`;
       }
