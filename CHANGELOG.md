@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.11
+
+- Claude Code native plugin deselection uninstalls ASB-recorded user installations and removes unused ASB-registered marketplaces. Dry runs report removal rows. Pre-existing plugins, other installation scopes, and externally registered marketplaces remain untouched. Source conflicts block cleanup, unresolved selections retain marketplaces, and partial failures preserve recovery state and migration compensation.
+
 ## 0.5.10
 
 - Claude Code project rules share the root `AGENTS.md` managed region through a relative `CLAUDE.md -> AGENTS.md` link. Independent root files and other links remain intact and report conflicts. Shared contributors must select the same project rules, and deselection preserves repository content and the canonical link.
