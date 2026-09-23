@@ -1392,33 +1392,14 @@ export function applyNative(
         : failure;
     }
   }
-  for (const [index, args] of work.commands.entries()) {
-    const change = work.ownership?.beforeCommand[index];
-    let commandOwnership: ClaudeOwnership | undefined;
-    if (change && work.ownership) {
-      try {
-        commandOwnership = readClaudeOwnership(work.ownership.path);
-        updateClaudeOwnership(work.ownership.path, change);
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }
-    const result = runner(work.bin, args, work.env);
-    if (result.status === 0) continue;
-    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
-    const failure = `${work.bin} ${args.join(' ')} failed: ${detail}`;
+  // Every failure after manager work starts uses the same compensation path,
+  // including failures to persist ownership between migration commands.
+  const failWork = (failure: string, completedCommands: number): string => {
     const restoreFailure = restorePrepared();
-    let failed = restoreFailure
+    const failed = restoreFailure
       ? `${failure}; restoring Codex wrapper failed: ${restoreFailure}`
       : failure;
-    if (commandOwnership && work.ownership) {
-      try {
-        writeClaudeOwnership(work.ownership.path, commandOwnership);
-      } catch (error) {
-        failed += `; restoring ownership failed: ${error instanceof Error ? error.message : String(error)}`;
-      }
-    }
-    if (index === 0 || work.compensate.length === 0) return failed;
+    if (completedCommands === 0 || work.compensate.length === 0) return failed;
     for (const undo of work.compensate) {
       const restored = runner(work.bin, undo, work.env);
       if (restored.status !== 0) {
@@ -1434,6 +1415,30 @@ export function applyNative(
       }
     }
     return failed;
+  };
+  for (const [index, args] of work.commands.entries()) {
+    const change = work.ownership?.beforeCommand[index];
+    let commandOwnership: ClaudeOwnership | undefined;
+    if (change && work.ownership) {
+      try {
+        commandOwnership = readClaudeOwnership(work.ownership.path);
+        updateClaudeOwnership(work.ownership.path, change);
+      } catch (error) {
+        return failWork(error instanceof Error ? error.message : String(error), index);
+      }
+    }
+    const result = runner(work.bin, args, work.env);
+    if (result.status === 0) continue;
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit ${result.status}`;
+    let failure = `${work.bin} ${args.join(' ')} failed: ${detail}`;
+    if (commandOwnership && work.ownership) {
+      try {
+        writeClaudeOwnership(work.ownership.path, commandOwnership);
+      } catch (error) {
+        failure += `; restoring ownership failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    return failWork(failure, index);
   }
 
   if (work.setting) {

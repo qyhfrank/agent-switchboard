@@ -557,6 +557,74 @@ test('Claude finishes settings cleanup after a removal settings error is repaire
   });
 });
 
+test('Claude compensates ownership write failures at each migration step', async (t) => {
+  await withScratchHomes(async (homes) => {
+    const file = path.join(homes.asbHome, 'state', 'native-plugins', 'claude-code.json');
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const plugin = {
+      ref: 'codex@openai-codex',
+      pluginId: 'codex@openai-codex',
+      pluginName: 'codex',
+      marketplaceName: 'openai-codex',
+    };
+    const previous = {
+      plugins: [plugin],
+      marketplaces: [
+        { name: 'openai-codex', source: { source: 'directory', path: '/local/catalog' } },
+      ],
+    };
+    const work: NativeWork = {
+      bin: 'claude',
+      env: process.env,
+      commands: [
+        ['plugin', 'marketplace', 'remove', '--scope', 'user', 'openai-codex'],
+        ['plugin', 'marketplace', 'add', '--scope', 'user', 'openai/codex@main'],
+        ['plugin', 'install', '--scope', 'user', plugin.ref],
+      ],
+      compensate: [
+        ['plugin', 'marketplace', 'remove', '--scope', 'user', 'openai-codex'],
+        ['plugin', 'marketplace', 'add', '--scope', 'user', '/local/catalog'],
+        ['plugin', 'install', '--scope', 'user', plugin.ref],
+      ],
+      setting: null,
+      ownership: {
+        path: file,
+        beforeCommand: {
+          1: {
+            marketplace: {
+              name: 'openai-codex',
+              source: { source: 'github', repo: 'openai/codex', ref: 'main' },
+            },
+          },
+          2: { plugin },
+        },
+      },
+    };
+    const rename = fs.renameSync;
+    for (const failedWrite of [1, 2]) {
+      fs.writeFileSync(file, JSON.stringify(previous));
+      let writes = 0;
+      const injected = t.mock.method(fs, 'renameSync', (source, destination) => {
+        if (destination === file && ++writes === failedWrite)
+          throw new Error('injected ownership write failure');
+        return rename(source, destination);
+      });
+      const calls: string[][] = [];
+      try {
+        const failure = applyNative(work, (_bin, args) => {
+          calls.push([...args]);
+          return { status: 0, stdout: '', stderr: '' };
+        });
+        assert.match(failure ?? '', /injected ownership write failure/);
+        assert.deepEqual(calls, [...work.commands.slice(0, failedWrite), ...work.compensate]);
+        assert.deepEqual(claudeOwnership(homes), previous);
+      } finally {
+        injected.mock.restore();
+      }
+    }
+  });
+});
+
 test('Claude does not remove a marketplace after its plugin uninstall fails', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
