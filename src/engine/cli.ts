@@ -29,6 +29,13 @@ import { type ImportOptions, type ImportResult, importFromApp } from './importer
 import { buildPluginExpansion, type LibraryInventory, scanLibrary } from './library.js';
 import { applyNative, captureNative, planNative } from './native.js';
 import {
+  applyWithOwnership,
+  DistributionOwnership,
+  desiredSlices,
+  ownershipSelection,
+  reconcileOwnership,
+} from './ownership.js';
+import {
   type Action,
   type CapturedHookApp,
   type CapturedMcpHost,
@@ -802,6 +809,7 @@ function sourceAttribution(catalog: SourceCatalog): (action: Action) => string |
     if (plugin.native?.install) owners.set(plugin.native.install.ref, plugin.source);
   }
   return (action) => {
+    if (action.source !== undefined) return action.source;
     if (action.id === null) return null;
     const direct = owners.get(action.id);
     if (direct !== undefined) return direct;
@@ -966,10 +974,7 @@ function missingProfile(config: ResolvedConfig): Action[] {
 }
 
 /**
- * A profile that exists and enables no applications reconciles nothing.
- * Without the row that is indistinguishable from a run with nothing left to
- * do, and a profile is a file the run was told to read. `config.toml` enabling
- * nothing is that same empty run, and has always reported as one.
+ * An empty profile selects no new distributions; recorded output still retires.
  */
 function idleSelection(config: ResolvedConfig): Action[] {
   if (config.profile === null || config.apps.enabled.length > 0) return [];
@@ -985,7 +990,7 @@ function idleSelection(config: ResolvedConfig): Action[] {
       outcome: 'skipped',
       detail: 'no-applications',
       reason:
-        'this selection file enables no applications, so the run reconciles nothing; list them under [applications] enabled',
+        'this selection file enables no applications; only previously recorded output is reconciled',
     },
   ];
 }
@@ -1484,15 +1489,28 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
       project?: ProjectPlanPolicy
     ): ReportEntry[] => {
       const userPhase = project === undefined;
+      const selectionReadable = config.layers.some(
+        (layer) =>
+          (layer.kind === (config.profile ? 'profile' : 'user') ||
+            (project && layer.kind === 'project')) &&
+          layer.exists
+      );
       const guard = project ? projectGuard(resolvedBase, userTable, project.root) : undefined;
       const capture = captureFor(config, table, inventory, selection, opts.all === true, guard);
-      const planInput = {
+      const initialInput = {
         config,
         inventory,
         capture,
         table,
         selection,
         ...(project ? { project } : {}),
+      };
+      const ownership = new DistributionOwnership(initialInput);
+      const planInput = {
+        ...initialInput,
+        selection: ownershipSelection(initialInput, ownership, catalog),
+        owns: (targetPath: string, keyPath?: readonly string[]) =>
+          ownership.owns(targetPath, keyPath),
       };
       const mcpActions = planMcp(planInput);
       let actions = [
@@ -1521,7 +1539,7 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
         // Native rows run last: their registration setting shares a document
         // with the hooks target, and this one re-reads it after that write. A
         // plugin manager is the machine's, so only the user phase speaks to it.
-        ...(userPhase
+        ...(userPhase && selectionReadable
           ? planNative({
               config,
               catalog,
@@ -1592,6 +1610,10 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
             ))
       );
 
+      const desired = desiredSlices(planInput, actions);
+      if (selectionReadable)
+        actions = reconcileOwnership(planInput, ownership, catalog, actions, desired);
+
       // Filters select which actions execute, never which inputs the planner saw.
       if (opts.apps && opts.apps.length > 0) {
         const wanted = new Set(opts.apps);
@@ -1621,16 +1643,55 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
             statusActionMatchesId(action, opts.idGlob as string, selection)
         );
       }
+      // Recorded targets include disabled apps and paths no longer present in
+      // the table. Apply the same containment check to preview and execution.
+      actions = actions.map((action): Action => {
+        if (
+          action.native ||
+          action.op === 'none' ||
+          !action.path ||
+          !action.root ||
+          !escapesRoot(action.root, action.path, guard)
+        )
+          return action;
+        return {
+          ...action,
+          op: 'none',
+          outcome: 'blocked',
+          detail: 'path-escape',
+          reason: `parent directory of ${action.path} resolves outside the app root; not touching it`,
+          keyEdits: undefined,
+        };
+      });
       actions = groupKeyActions(actions);
       if (project) actions = preflightProjectActions(actions, project);
 
       const phaseScope: ReportEntry['scope'] = userPhase ? 'user' : 'project';
-      return reconcile(actions, dryRun ? toEntry : (action) => executeAction(action, guard)).map(
-        (entry) => ({
-          ...entry,
-          scope: phaseScope,
-        })
-      );
+      let reconciled: ActionEntry[] = [];
+      if (dryRun) reconciled = reconcile(actions, toEntry);
+      else
+        applyWithOwnership(
+          ownership,
+          desired,
+          actions,
+          () => {
+            reconciled = reconcile(actions, (action) => executeAction(action, guard));
+          },
+          (slice) =>
+            config.apps.enabled.some((app) =>
+              slice.refs.some(
+                (ref) =>
+                  selection(app, slice.type).includes(ref.id) &&
+                  !inventory.components.some(
+                    (component) => component.type === slice.type && component.id === ref.id
+                  )
+              )
+            )
+        );
+      return reconciled.map((entry) => ({
+        ...entry,
+        scope: phaseScope,
+      }));
     };
 
     // Strictly in order: the project phase captures after the user phase has
@@ -1647,10 +1708,8 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
       entries.push(...runPhase(overlayConfig, projectTable, projectSelection, projectPolicy));
     }
 
-    // Every real run stamps the last-run fact and `status` (dry) reports it:
-    // the one thing a run leaves behind that the next one does not re-derive.
-    // It is the user phase's, like every other machine-local file — the
-    // project phase writes nothing outside the repository.
+    // The last-run marker summarizes the machine phase independently of the
+    // distribution records, which each phase persists in machine-local state.
     if (!dryRun) {
       const counts = new Map<string, number>();
       for (const entry of entries) {
@@ -1945,32 +2004,6 @@ export async function runRemoveSource(namespace: string, opts: SyncOptions = {})
       ...pluginIds.flatMap((id) => Object.keys(expansion.byPlugin[id] ?? {}) as ComponentType[]),
       ...failed.map((component) => component.type),
     ]);
-    const enabledApps = new Set(config.apps.enabled);
-    const assumeInstalled = new Set(config.apps.assumeInstalled);
-    const hasNative = sourcePlugins.some((plugin) => plugin.native !== undefined);
-    const inactive = appRows(config)
-      .filter((row) => !enabledApps.has(row.id))
-      .filter((row) => assumeInstalled.has(row.id) || fs.existsSync(row.detectDir(config.homes)))
-      .filter(
-        (row) =>
-          [...distributedTypes].some((type) => row[type] !== undefined) ||
-          (hasNative && row.native !== undefined)
-      )
-      .map((row) => row.id);
-    if (inactive.length > 0) {
-      return buildReport(scope, [
-        {
-          app: null,
-          type: null,
-          id: namespace,
-          path: source.path,
-          outcome: 'blocked',
-          reason: `kept: installed but inactive app(s) ${inactive.join(', ')} may still hold content from this source; enable and sync them before re-running asb remove ${namespace}`,
-          scope: 'user',
-        },
-      ]);
-    }
-
     // Retirement compares canonical ids, so it needs the same expansion the
     // selection was written against. Every channel goes at once: a component
     // still selected through the plugin list or a per-app override would

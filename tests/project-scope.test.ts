@@ -394,13 +394,14 @@ test('warn-skip preserves a stale project render and the reason names the repair
 
     const second = await runSync({ project });
 
-    assert.equal(second.exitCode, 1);
+    assert.equal(second.exitCode, 0);
     const row = second.entries.find((entry) => entry.type === 'skills' && entry.id === 'guide');
-    assert.equal(row?.outcome, 'conflict');
-    assert.equal(row?.detail, 'foreign');
-    assert.match(row?.reason ?? '', /does not match the current render/);
-    assert.match(row?.reason ?? '', /collision = "takeover"/);
-    assert.equal(fs.readFileSync(bundle, 'utf-8'), distributed, 'the occupied bundle is preserved');
+    assert.equal(row?.outcome, 'written');
+    assert.notEqual(
+      fs.readFileSync(bundle, 'utf-8'),
+      distributed,
+      'the recorded bundle is overwritten'
+    );
   });
 });
 

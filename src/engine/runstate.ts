@@ -4,8 +4,8 @@ import { writeFileAtomic } from './shapes.js';
 
 /**
  * Machine-local run state in the state dir: the lock that serializes runs on
- * one machine, and the fact of the last one. Ownership is not here — it is
- * derived from what the library renders, every run.
+ * one machine, and the fact of the last one. Distribution ownership is
+ * persisted separately by ownership.ts.
  */
 
 export interface LastRun {

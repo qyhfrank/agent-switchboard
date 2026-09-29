@@ -90,8 +90,8 @@ test('a sync clears the stores an earlier version wrote and leaves only run stat
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.deepEqual(
       fs.readdirSync(homes.stateHome).sort(),
-      ['last-run.json'],
-      'the state dir carries the last run and, while one is in flight, run.lock'
+      ['distribution', 'last-run.json'],
+      'the state dir carries distribution ownership and the last run'
     );
     assert.deepEqual(fs.readdirSync(path.join(homes.asbHome, 'state')), ['native-plugins']);
     assert.ok(fs.existsSync(path.join(native, 'keep.json')));
@@ -115,7 +115,7 @@ test('a sync clears the stores an earlier version wrote and leaves only run stat
       '[distribution.project]\nmode = "managed"\n\n[applications]\nenabled = ["claude-code"]\n\n[rules]\nenabled = ["alpha"]\n'
     );
     assert.equal((await runSync({ project })).exitCode, 0);
-    assert.deepEqual(fs.readdirSync(homes.stateHome).sort(), ['last-run.json']);
+    assert.deepEqual(fs.readdirSync(homes.stateHome).sort(), ['distribution', 'last-run.json']);
     assert.deepEqual(fs.readdirSync(path.join(homes.asbHome, 'state')), ['native-plugins']);
   });
 });

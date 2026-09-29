@@ -215,6 +215,26 @@ test('a file dropped from the source is deleted and its emptied dir pruned', asy
   });
 });
 
+test('a selected skill deleted from the library removes its stale distributed bundle', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const source = seedSkill(homes, 'alpha');
+    writeUserConfig(homes, config(['claude-code'], ['alpha']));
+
+    await runSync();
+    const target = bundlePath(homes, 'claude-code', 'alpha');
+    assert.equal(fs.existsSync(target), true);
+
+    fs.rmSync(source, { recursive: true });
+    const report = await runSync();
+
+    const entry = skillsEntry(report, 'claude-code', 'alpha');
+    assert.equal(entry?.outcome, 'removed', JSON.stringify(report.entries, null, 2));
+    assert.equal(entry?.detail, 'retired-distribution');
+    assert.equal(fs.existsSync(target), false);
+  });
+});
+
 test('a dry run reports the bundle actions the real run performs and writes nothing', async () => {
   await withScratchHomes(async (homes) => {
     const apps = ['claude-code', 'codex'] as const;

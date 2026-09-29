@@ -1318,7 +1318,7 @@ function removeSourceDeclaration(content: string, namespace: string): string {
     // file terminates without a newline.
     const trailing = /(?:^|(?<=\n))(?:[ \t]*(?:#[^\n]*)?\n)*(?:[ \t]*#[^\n]*)?$/.exec(body);
     let cut = body.length;
-    if (trailing && trailing[0].includes('#')) {
+    if (trailing?.[0].includes('#')) {
       const firstComment = trailing[0].indexOf('#');
       cut = trailing.index + trailing[0].lastIndexOf('\n', firstComment) + 1;
     }

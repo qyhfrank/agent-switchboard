@@ -226,6 +226,22 @@ test('Claude deselection previews and removes recorded plugins and marketplaces'
   });
 });
 
+test('disabling Claude retires its recorded native installations', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedManagedSource(homes);
+    await withFakeManager(homes, REMOTE_ARGUMENT, async (manager) => {
+      writeUserConfig(homes, managedConfig());
+      assert.equal((await runSync()).exitCode, 0);
+      writeUserConfig(homes, managedConfig().replace('enabled = ["claude-code"]', 'enabled = []'));
+      const report = await runSync();
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      assert.equal(manager.state().plugins.length, 0);
+      assert.equal(manager.state().marketplaces.length, 0);
+    });
+  });
+});
+
 function settingsOf(homes: ScratchHomes): Record<string, unknown> {
   const filePath = path.join(homes.agentsHome, '.claude', 'settings.json');
   return fs.existsSync(filePath)

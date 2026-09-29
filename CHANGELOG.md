@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.5.12
+
+- Distribution reconciliation now persists machine-local ownership records for files, bundles, rule regions, hook groups, and structured keys. Sync removes stale output after a component is deleted, deselected, or its application is disabled, and directly overwrites recorded output that drifted from the managed render. Unavailable sources, path escapes, and unrecorded foreign content remain protected.
+
 ## 0.5.11
 
 - Claude Code native plugin deselection uninstalls ASB-recorded user installations and removes unused ASB-registered marketplaces. Dry runs report removal rows. Pre-existing plugins, other installation scopes, and externally registered marketplaces remain untouched. Source conflicts block cleanup, unresolved selections retain marketplaces, and partial failures preserve recovery state and migration compensation.

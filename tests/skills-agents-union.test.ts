@@ -165,7 +165,6 @@ test('turning use_agents_dir off restores the per-app copies before the union on
     assert.equal(skillEntry(second, 'agents', 'alpha')?.outcome, 'removed');
     assert.equal(skillEntry(second, 'agents', 'alpha')?.detail, undefined, 'removed on byte proof');
     assert.equal(skillEntry(second, 'agents', 'beta')?.outcome, 'removed');
-    assert.equal(skillEntry(second, 'agents', 'beta')?.detail, 'stale-copy');
     for (const id of ['alpha', 'beta'] as const) {
       assert.equal(fs.existsSync(unionBundle(homes, id)), false, id);
       assert.equal(skillEntry(second, 'codex', id)?.outcome, 'unchanged', id);
@@ -235,7 +234,7 @@ test('a failing union destination leaves the per-app copy in place', async () =>
   });
 });
 
-test('the union stays dormant while no member is active and wakes with proof intact', async () => {
+test('the union retires when disabled but survives an enabled member being undetected', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex', 'claude-code');
     seedSkill(homes, 'alpha');
@@ -246,16 +245,15 @@ test('the union stays dormant while no member is active and wakes with proof int
     const unionCopy = path.join(unionBundle(homes, 'alpha'), 'SKILL.md');
     assert.equal(fs.existsSync(unionCopy), true);
 
-    // Two ways to leave the union without an active member: no member enabled
-    // at all, and a member that is enabled but not installed. Neither wakes
-    // union cleanup — the shared files and the ownership record survive.
-    for (const apps of [['claude-code'], ['traecli']]) {
-      writeUserConfig(homes, config({ apps, skills: ['alpha'], agentsDir: true }));
-      const dormant = await runSync();
-      assert.equal(skillEntry(dormant, 'agents', 'alpha'), undefined, `${apps[0]}: no agents row`);
-      assert.equal(fs.existsSync(unionCopy), true, `${apps[0]}: union copy untouched`);
-      assert.equal(dormant.exitCode, 0);
-    }
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: ['alpha'], agentsDir: true }));
+    assert.equal(skillEntry(await runSync(), 'agents', 'alpha')?.outcome, 'removed');
+    assert.equal(fs.existsSync(unionCopy), false);
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    await runSync();
+    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['alpha'], agentsDir: true }));
+    const dormant = await runSync();
+    assert.equal(skillEntry(dormant, 'agents', 'alpha'), undefined);
+    assert.equal(fs.existsSync(unionCopy), true);
 
     // A returning member finds the record intact: deselection still removes
     // with proof instead of rediscovering an unproven foreign tree.

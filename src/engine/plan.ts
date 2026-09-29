@@ -142,6 +142,8 @@ export interface SyncCapture {
 }
 
 export interface Action {
+  /** Retired components retain their source even after it leaves the catalog. */
+  source?: string;
   app: string | null;
   type: string | null;
   id: string | null;
@@ -202,6 +204,8 @@ export interface ProjectPlanPolicy {
 }
 
 export interface PlanInput {
+  /** Recorded slices remain managed when their destination content is edited. */
+  owns?(targetPath: string, keyPath?: readonly string[]): boolean;
   config: ResolvedConfig;
   inventory: LibraryInventory;
   capture: SyncCapture;
@@ -1041,7 +1045,12 @@ export function planRules(input: PlanInput): Action[] {
     // carries the signal without failing the run. `collision = "error"` is the
     // setting that asks for a failure instead; takeover overwrites.
     const stale = rendersRuleBlocks(row.rules, targetPath, current.content, ruleBlocksFor(appId));
-    if (input.project && input.project.collision !== 'takeover' && !stale) {
+    if (
+      input.project &&
+      input.project.collision !== 'takeover' &&
+      !stale &&
+      !input.owns?.(targetPath)
+    ) {
       const errors = input.project.collision === 'error';
       actions.push({
         ...base,
@@ -1358,7 +1367,11 @@ export function planSkills(input: PlanInput): Action[] {
           });
         } else if (identicalToDesired()) {
           actions.push({ ...base, op: 'none', outcome: 'unchanged' });
-        } else if (input.project && input.project.collision !== 'takeover') {
+        } else if (
+          input.project &&
+          input.project.collision !== 'takeover' &&
+          !input.owns?.(bundlePath)
+        ) {
           actions.push({
             ...base,
             op: 'none',
@@ -1390,17 +1403,8 @@ export function planSkills(input: PlanInput): Action[] {
         continue;
       }
 
-      // Deselected. A tree that is byte-for-byte the render is provably asb's
-      // and comes out on that proof alone. A tree that is not carries either
-      // edits or an older render, and is swept on the weaker claim that an id
-      // matching a library skill, sitting under a skills parent the app table
-      // declares, is asb's layout rather than something the user put there.
-      //
-      // ponytail: a name is weaker evidence than bytes, so a directory you
-      // wrote by hand under a library skill's id is destroyed here. Removing
-      // only on byte proof is the safer rule, and it is what stranded every
-      // copy distributed before ownership was derived. To go back to it,
-      // report this branch as `left-behind (unproven)` instead of removing.
+      // The current render proves legacy copies. ownership.ts also recognizes
+      // previously recorded renders after their sources change or disappear.
       if (captured.files === null || captured.fingerprint === null) {
         actions.push({
           ...base,
@@ -1414,16 +1418,14 @@ export function planSkills(input: PlanInput): Action[] {
       }
 
       const proven = identicalToDesired();
-      // A project tree is shared with the repository, so the name sweep stays
-      // out of it: at project scope only a proven copy is removed.
-      if (!proven && input.project) {
+      if (!proven) {
         actions.push({
           ...base,
           op: 'none',
           outcome: 'left-behind',
           detail: 'unproven',
           reason:
-            'project bundle is not the current render, so asb cannot prove it is safe to remove; preserved',
+            'bundle is not the current render; preserved unless a distribution record proves its contents',
         });
         continue;
       }
@@ -1457,10 +1459,9 @@ export function planSkills(input: PlanInput): Action[] {
         ...base,
         op: 'remove',
         outcome: 'removed',
-        ...(proven ? {} : { detail: 'stale-copy' }),
         bundle: {
           files: [],
-          stale: proven ? desired.map((file) => file.rel) : captured.files.map((file) => file.rel),
+          stale: desired.map((file) => file.rel),
         },
         root: row.root,
         expectedHash: captured.fingerprint,
@@ -1798,7 +1799,11 @@ function planEntries(input: PlanInput, type: EntryType): Action[] {
       } else if (current.content === desired) {
         roleReady = true;
         actions.push({ ...base, op: 'none', outcome: 'unchanged' });
-      } else if (input.project && input.project.collision !== 'takeover') {
+      } else if (
+        input.project &&
+        input.project.collision !== 'takeover' &&
+        !input.owns?.(targetPath)
+      ) {
         // A project tree is shared with the repository, so an occupied target
         // that is not the render stays the repository's until takeover.
         actions.push({
@@ -2297,7 +2302,11 @@ export function planHooks(input: PlanInput): Action[] {
           );
         });
       const projectCollision = input.project && live.exists && !clean;
-      if (projectCollision && input.project?.collision !== 'takeover') {
+      if (
+        projectCollision &&
+        input.project?.collision !== 'takeover' &&
+        !input.owns?.(bundlePath)
+      ) {
         writes.push({
           app,
           type: 'hooks',
@@ -2374,7 +2383,7 @@ export function planHooks(input: PlanInput): Action[] {
             targetModeMatchesSourceExecutableBits(file.mode, target.mode)
           );
         });
-      if (!proven && input.project) {
+      if (!proven) {
         removals.push({
           app,
           type: 'hooks',
@@ -2383,7 +2392,8 @@ export function planHooks(input: PlanInput): Action[] {
           op: 'none',
           outcome: 'left-behind',
           detail: 'unproven',
-          reason: 'project hook bundle is not the current render; preserved',
+          reason:
+            'hook bundle is not the current render; preserved unless a distribution record proves its contents',
         });
         continue;
       }
@@ -2394,7 +2404,6 @@ export function planHooks(input: PlanInput): Action[] {
         path: bundlePath,
         op: 'remove',
         outcome: 'removed',
-        ...(proven ? {} : { detail: 'stale-copy' }),
         bundle: { files: [], stale: live.files.map((file) => file.rel) },
         root,
         expectedHash: live.fingerprint,
@@ -2696,7 +2705,8 @@ function planMcpHost(
   selected: readonly string[],
   byId: ReadonlyMap<string, Component>,
   wanted: ReadonlySet<string>,
-  project?: ProjectPlanPolicy
+  project?: ProjectPlanPolicy,
+  owns?: PlanInput['owns']
 ): McpHostPlan {
   const slices: McpSlice[] = [];
   const diskIdFor = (id: string): string => (row.sanitize ? sanitizeMcpName(id) : id);
@@ -2842,7 +2852,7 @@ function planMcpHost(
     // render lands in one pass however the key got there. A project run
     // without takeover keeps the repository's own value instead.
     slices.push(
-      project && project.collision !== 'takeover'
+      project && project.collision !== 'takeover' && !owns?.(captured.path, keyPath)
         ? {
             ...base,
             outcome: 'conflict',
@@ -3060,7 +3070,8 @@ export function planMcp(input: PlanInput): Action[] {
       selected,
       byId,
       wanted,
-      input.project
+      input.project,
+      input.owns
     );
     if (failure) {
       actions.push({ ...base, op: 'none', ...failure });

@@ -100,14 +100,13 @@ test('a profile syncs from its own file and retires what config.toml distributed
   });
 });
 
-test('a selection enabling no applications reconciles nothing and only a profile says so', async () => {
+test('a selection enabling no applications retires previously recorded output', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedTwoRules(homes);
     writeUserConfig(homes, configFor(['alpha']));
     await runSync();
     const target = ruleFilePath(homes, 'claude-code');
-    const distributed = fs.readFileSync(target, 'utf-8');
 
     // A selection with no applications has no reconciliation universe. The run
     // is a no-op, and without the row that reads as "nothing to do".
@@ -115,12 +114,12 @@ test('a selection enabling no applications reconciles nothing and only a profile
     const profiled = await runSync({ profile: 'aws' });
 
     assert.equal(profiled.exitCode, 0, JSON.stringify(profiled.entries, null, 2));
-    assert.deepEqual(rulesRows(profiled), []);
+    assert.equal(rulesRows(profiled)[0]?.outcome, 'removed');
     const idle = profiled.entries.find((entry) => entry.detail === 'no-applications');
     assert.ok(idle, JSON.stringify(profiled.entries, null, 2));
     assert.equal(idle.outcome, 'skipped');
     assert.equal(idle.path, path.join(homes.asbHome, 'aws.toml'), 'the row names the file read');
-    assert.equal(fs.readFileSync(target, 'utf-8'), distributed);
+    assert.equal(fs.existsSync(target), false);
 
     // The row belongs to a file the run was told to read. A machine whose own
     // configuration enables nothing has always had nothing to do.
@@ -132,7 +131,7 @@ test('a selection enabling no applications reconciles nothing and only a profile
       plain.entries.filter((entry) => entry.detail === 'no-applications'),
       []
     );
-    assert.equal(fs.readFileSync(target, 'utf-8'), distributed);
+    assert.equal(fs.existsSync(target), false);
   });
 });
 

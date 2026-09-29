@@ -515,7 +515,15 @@ test('a project run never reaches a machine host aliased into the repository', a
       const report = await runSync({ project: path.join(homes.root, 'project') });
       const content = fs.readFileSync(host, 'utf-8');
 
-      assert.match(content, /alpha/, `${scenario.name}: the machine keeps its own server`);
+      if (scenario.name === 'the repository layer disables every app') {
+        assert.match(content, /alpha/, `${scenario.name}: user scope still selects its server`);
+      } else {
+        assert.doesNotMatch(
+          content,
+          /alpha/,
+          `${scenario.name}: user scope retires the disabled app`
+        );
+      }
       assert.doesNotMatch(content, /beta/, scenario.name);
       assert.deepEqual(
         mutations(report),

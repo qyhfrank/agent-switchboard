@@ -568,11 +568,15 @@ function activeManagers(
 ): { app: string; row: NativeManagerRow; enabled: string[] }[] {
   const assumed = new Set(config.apps.assumeInstalled);
   const active: { app: string; row: NativeManagerRow; enabled: string[] }[] = [];
-  for (const appId of config.apps.enabled) {
-    const row = table.find((candidate) => candidate.id === appId)?.native;
+  for (const appRow of table) {
+    const appId = appRow.id;
+    const row = appRow.native;
     if (!row) continue;
-    if (installed[appId] !== true && !assumed.has(appId)) continue;
-    const enabled = config.apps.overrides[appId]?.native_plugins?.enabled ?? [];
+    if (!(installed[appId] ?? fs.existsSync(appRow.detectDir(config.homes))) && !assumed.has(appId))
+      continue;
+    const enabled = config.apps.enabled.includes(appId)
+      ? (config.apps.overrides[appId]?.native_plugins?.enabled ?? [])
+      : [];
     const hasManagedCodexState = row.target === 'codex' && hasCodexWrapperState(config.homes);
     const hasClaudeState =
       row.target === 'claude-code' && fs.existsSync(claudeStatePath(config.homes));

@@ -381,20 +381,14 @@ test('a source outlives a project preflight that suppressed its sweep', async ()
 
     const report = await runRemoveSource('x', { project });
 
-    assert.ok(fs.existsSync(inRepo), 'the copy the preflight refused to take is still there');
-    assert.match(
-      configText(homes),
-      /\bx =/,
-      'and so is the source, which is the only thing that can still prove it'
-    );
-    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.existsSync(inRepo), false, 'the recorded project copy is removed');
+    assert.doesNotMatch(configText(homes), /\bx =/);
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
 
     // Resolving the collision is the whole repair: the next run takes the copy
     // while the library can still render it.
     fs.rmSync(unrelated, { recursive: true });
-    const retry = await runRemoveSource('x', { project });
-
-    assert.equal(retry.exitCode, 0, JSON.stringify(retry.entries, null, 2));
+    await assert.rejects(runRemoveSource('x', { project }), /Source "x" not found/);
     assert.equal(fs.existsSync(inRepo), false, 'and the repository is clear');
   });
 });
@@ -499,7 +493,7 @@ test('an unreadable marketplace keeps its declaration and distributed slices', a
   });
 });
 
-test('a source stays renderable while an installed target that may hold it is inactive', async () => {
+test('source removal reclaims recorded output from an inactive application', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code', 'codex');
     const team = seedTeam(homes);
@@ -522,10 +516,10 @@ test('a source stays renderable while an installed target that may hold it is in
 
     const report = await runRemoveSource('team');
 
-    assert.equal(report.exitCode, 1, JSON.stringify(report.entries, null, 2));
-    assert.ok(fs.existsSync(bundleFor(homes, 'team:deploy')));
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
+    assert.equal(fs.existsSync(bundleFor(homes, 'team:deploy')), false);
     assert.ok(fs.existsSync(team));
-    assert.match(configText(homes), /\bteam\b/);
+    assert.doesNotMatch(configText(homes), /\bteam\b/);
   });
 });
 

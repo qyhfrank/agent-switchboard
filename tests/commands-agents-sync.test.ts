@@ -109,7 +109,7 @@ test('encoded filename collisions fail closed before either component writes', a
   });
 });
 
-test('a deselected command edited by hand is reported once and left in place', async () => {
+test('a deselected recorded command is removed after a hand edit', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
     seedTree(homes.asbHome, { 'commands/foo.md': '---\ndescription: Foo\n---\nFoo body.\n' });
@@ -124,9 +124,8 @@ test('a deselected command edited by hand is reported once and left in place', a
     const report = await runSync();
 
     const entry = entryFor(report, { type: 'commands', id: 'foo' });
-    assert.equal(entry?.outcome, 'left-behind');
-    assert.equal(entry?.detail, 'unproven');
-    assert.equal(fs.readFileSync(target, 'utf-8'), mine);
+    assert.equal(entry?.outcome, 'removed');
+    assert.equal(fs.existsSync(target), false);
     assert.equal(report.exitCode, 0);
   });
 });
@@ -286,8 +285,8 @@ test('a hand-edited codex role key survives deselection and its neighbour is rem
     const parsed = parseToml(fs.readFileSync(configPath, 'utf-8')) as {
       agents?: Record<string, unknown>;
     };
-    assert.ok(parsed.agents?.reviewer, 'the edited role key is the user’s now');
-    assert.equal(parsed.agents?.planner, undefined, 'the untouched one is provably asb’s');
+    assert.equal(parsed.agents?.reviewer, undefined, 'recorded edited role is removed');
+    assert.equal(parsed.agents?.planner, undefined, 'the untouched one is removed');
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
   });
 });

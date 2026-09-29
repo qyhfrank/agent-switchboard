@@ -444,7 +444,7 @@ test('a server secret never reaches a report line, on any path through the run',
     );
 
     await runSync({});
-    // Then customize one server and drop it, so the left-behind reason runs too.
+    // Then customize one server and drop it, so recorded ownership removes it.
     const gemini = mcpHostPath(homes, 'gemini');
     const root = JSON.parse(fs.readFileSync(gemini, 'utf-8')) as {
       mcpServers: Record<string, Record<string, unknown>>;
@@ -455,7 +455,7 @@ test('a server secret never reaches a report line, on any path through the run',
     const report = await runSync({});
 
     const outcomes = new Set(report.entries.map((entry) => entry.outcome));
-    assert.ok(outcomes.has('written') && outcomes.has('left-behind'), 'both reason paths ran');
+    assert.ok(outcomes.has('written') && outcomes.has('removed'), 'both reason paths ran');
     const text = report.entries
       .map((entry) => `${entry.reason ?? ''} ${entry.detail ?? ''} ${entry.id ?? ''}`)
       .join('\n');
@@ -762,7 +762,7 @@ test('an update replaces the owned value wholesale, so a stale sub-key goes', as
   });
 });
 
-test('a deselected slice whose command was changed is left alone and not named', async () => {
+test('a deselected recorded slice whose command was changed is removed', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     seedMcpLibrary(homes, { alpha: ALPHA, beta: { command: 'beta' }, gamma: { command: 'gamma' } });
@@ -784,9 +784,12 @@ test('a deselected slice whose command was changed is left alone and not named',
     selection(homes, ['cursor'], []);
     const report = await runSync({});
 
-    assert.deepEqual(mcpRows(report), [], JSON.stringify(report.entries, null, 2));
+    assert.equal(
+      mcpRows(report).some((row) => row.id === 'alpha' && row.outcome === 'removed'),
+      true
+    );
     assert.equal(report.exitCode, 0);
-    assert.equal(fs.readFileSync(host, 'utf-8'), bytes, 'not a byte of the host is touched');
+    assert.doesNotMatch(fs.readFileSync(host, 'utf-8'), /user-edited/);
   });
 });
 
@@ -1014,7 +1017,7 @@ test('a deselected key with a descendant table is left behind, not reported reti
   });
 });
 
-test('a still-selected server whose definition disappeared is missing, not retired', async () => {
+test('a recorded server retires when its definition disappears, even while selected', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedMcpLibrary(homes, { gone: { command: 'npx', args: ['gone'] } });
@@ -1023,14 +1026,9 @@ test('a still-selected server whose definition disappeared is missing, not retir
 
     seedMcpLibrary(homes, {});
     for (const report of [await runSync({ dryRun: true }), await runSync({})]) {
-      assert.equal(entryFor(report, { type: 'mcp', id: 'gone' })?.outcome, 'missing');
-      assert.equal(
-        report.entries.some((entry) => entry.reason?.includes('retired gone')),
-        false,
-        JSON.stringify(report.entries, null, 2)
-      );
+      assert.equal(entryFor(report, { type: 'mcp', id: 'gone' })?.outcome, 'removed');
     }
-    assert.ok(readMcpHost(homes, 'codex')?.gone, 'the key that was written stays written');
+    assert.equal(readMcpHost(homes, 'codex')?.gone, undefined);
   });
 });
 

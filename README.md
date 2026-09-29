@@ -291,36 +291,55 @@ identity is verified; 0.5 never writes that cache.
 `asb remove <source>` retires every id that came from the source, in the
 top-level lists, the plugin list, and any per-application override, takes the
 slices they distributed, and only then drops the declaration and any managed
-checkout. The order is load-bearing: a component the library can no longer
-render proves nothing, so removing the content first would leave every file it
-distributed behind. Its sweep covers both scopes of the run, so a project in
+checkout. Distribution records let the sweep reach previously managed output
+even when an application has been disabled. Its sweep covers both scopes of the run, so a project in
 play loses that source's slices in the same pass; a `.asb.toml` that still
 names a retired id afterwards reports it `missing`, like any other selection
-nothing resolves. If a slice cannot be taken, the source is kept along with the
-named rows, because while it is still declared a later run can still prove what
-it distributed. A local directory you pointed at is never deleted.
+nothing resolves. If a filesystem error prevents removal, the source and its
+distribution records remain available for retry. A local directory you pointed
+at is never deleted.
 
 ## Ownership
 
-A slice is ASB's when it holds what the library renders for it. That
-comparison is made fresh on every run and nothing is written down, so there is
-no ownership record to lose, migrate, or disagree with a second machine about.
+ASB records the slices it distributes in machine-local state. Records contain
+component and source identities, destination paths, containment roots, and
+content hashes. They never contain rule bodies, scripts, hook commands, or MCP
+credentials. A slice can therefore be reclaimed after its library entry has
+been deleted, its selection has been removed, or its application has been
+disabled.
 
-Four shapes carry the comparison. A dedicated file compares by its bytes; a
+Five shapes carry the comparison. A dedicated file compares by its bytes; a
 distributed bundle by its file set, contents, and executable bits; a key
 inside a structured host by the serialized value at that key, never by the
 key's name; and a region between ASB's delimiters inside a file it shares is
 proven by the delimiters themselves, so bytes outside them survive every sync.
+Each hook group compares by its structured value independently of its neighbors.
 
-Deselecting a component removes its slice while that slice still holds the
-render. One that says something else is a target ASB cannot attribute, and
-what happens next depends on how strong the remaining claim is. A bundle
-directory carries a library id under a parent the application table declares,
-which is claim enough: under your home directory it is swept as a stale copy,
-and inside a repository it is preserved and named, because the repository is
-shared. A single file carries no such id in its contents, so a drifted command
-or agent is preserved and named in either scope; it is yours to delete or to
-re-enable. A key inside a shared document is never removed at all.
+Cleanup uses the recorded slice as ownership authority. Files and bundles are
+removed even when their contents changed; structured hosts lose only the
+recorded keys or hook groups, and rule hosts lose only their managed region.
+A partly removed bundle remains retryable. Existing
+rule markers continue to authorize removal of their enclosed region.
+
+An unavailable source, malformed component, missing selection file, or
+enabled application that cannot be detected does not authorize cleanup.
+Disabling an application explicitly does. A project run cleans only that
+project; ASB does not search other repositories. `--app`, `--type`, and
+`--source` restrict cleanup as well as writes. `--dry-run` changes neither
+targets nor distribution records.
+
+Records are written before applying output changes, and retained if an action
+fails. State errors stop distribution instead of silently forgetting what was
+managed. Profiles share the same destination records, while different library
+homes, application homes, and project roots have separate records. A deleted
+component still named by selection retains its identity until that reference
+is removed, so subsequent syncs do not recreate its output.
+
+Outputs from older installations can be adopted when a normal sync recognizes
+their current render. Run a sync before removing their sources. If both the
+source and all ownership evidence are already gone, ASB cannot safely identify
+unknown historical copies; those need manual removal. It never clears an
+entire shared application directory merely because a source disappeared.
 
 `asb explain <target>` names what proves a slice right now: `identity` for a
 target holding the render, `marker` for a delimited region, `native-manager`
@@ -328,8 +347,9 @@ for work an application's own plugin manager owns, and `unproven` when nothing
 does.
 
 The state directory (`XDG_STATE_HOME/asb`, else `~/.local/state/asb`) holds
-`run.lock` while a run is in flight and `last-run.json` afterwards. Neither
-decides what ASB owns.
+`run.lock`, `last-run.json`, and `distribution/*.json`. Keep the distribution
+records on the machine that owns the targets; they are not a shared library
+cache and should not be deleted to refresh library content.
 
 ## MCP ownership
 
@@ -337,7 +357,7 @@ MCP definitions live in `ASB_HOME/mcp.json` under `mcpServers`. ASB masks
 credential values in `explain` and report output while preserving environment
 variable names.
 
-A server is ASB's while the value at its key equals the render, so a
+A recorded server is reclaimed while its value equals the last managed value. A
 hand-written server sharing a library id you have not selected is never read,
 written, or removed. Selecting that id is the instruction to put the library's
 definition at that key, and the value there is replaced. ASB does not create

@@ -123,12 +123,12 @@ test('a bundle that fails to distribute holds back that app config', async () =>
 
     assert.equal(
       fs.existsSync(path.join(userDir, 'user-secret.txt')),
-      false,
-      'a later deselection still sweeps a stale copy under a library id'
+      true,
+      'a failed distribution cannot claim unrelated files at the same path'
     );
     const removal = hooksRows(second).find((entry) => entry.id === 'bt');
-    assert.equal(removal?.outcome, 'removed');
-    assert.equal(removal?.detail, 'stale-copy');
+    assert.equal(removal?.outcome, 'left-behind');
+    assert.equal(removal?.detail, 'unproven');
   });
 });
 
@@ -899,10 +899,9 @@ test('an edited project hook bundle is preserved and reported, never swept', asy
     // the tree no longer matches the render, so in a repository it stays and is
     // named instead.
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-    assert.equal(fs.readFileSync(target, 'utf-8'), '#!/bin/sh\necho edited\n');
+    assert.equal(fs.existsSync(target), false);
     const row = hooksRows(report).find((entry) => entry.id === 'tool');
-    assert.equal(row?.outcome, 'left-behind');
-    assert.equal(row?.detail, 'unproven');
+    assert.equal(row?.outcome, 'removed');
     const local = readJson(path.join(project, '.claude', 'settings.local.json'));
     assert.equal(Object.hasOwn(local, 'hooks'), false, 'the emptied hooks key still goes');
   });

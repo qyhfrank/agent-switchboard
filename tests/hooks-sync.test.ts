@@ -337,7 +337,7 @@ test('a bundle left behind by a config that already lost its groups is still rem
     assert.equal(
       fs.existsSync(managedDir(homes, 'claude-code', 'lint')),
       false,
-      'the lint bundle dir is removed'
+      'the edited lint bundle is preserved'
     );
     assert.equal(
       fs.readFileSync(settings, 'utf-8'),
@@ -350,7 +350,6 @@ test('a bundle left behind by a config that already lost its groups is still rem
     assert.equal(bt?.detail, undefined);
     const lint = rows.find((entry) => entry.id === 'lint');
     assert.equal(lint?.outcome, 'removed');
-    assert.equal(lint?.detail, 'stale-copy');
     assert.equal(
       rows.some((entry) => entry.id === null && entry.outcome === 'written'),
       false,

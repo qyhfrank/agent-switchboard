@@ -222,7 +222,7 @@ test('a name-matching bundle holding a symlink is left behind unproven and untou
   });
 });
 
-test('deselecting a bundle that matches no render sweeps it as a stale copy', async () => {
+test('deselection removes a recorded bundle after local edits', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedLibrarySkill(homes, 'hand-edited');
@@ -246,12 +246,10 @@ test('deselecting a bundle that matches no render sweeps it as a stale copy', as
     const report = await runSync();
 
     assert.equal(report.exitCode, 0);
-    for (const id of ['hand-edited', 'moved-on'] as const) {
-      const entry = skillEntry(report, 'codex', id);
-      assert.equal(entry?.outcome, 'removed', id);
-      assert.equal(entry?.detail, 'stale-copy', id);
-      assert.equal(fs.existsSync(bundlePath(homes, 'codex', id)), false);
-    }
+    assert.equal(skillEntry(report, 'codex', 'hand-edited')?.outcome, 'removed');
+    assert.equal(fs.existsSync(bundlePath(homes, 'codex', 'hand-edited')), false);
+    assert.equal(skillEntry(report, 'codex', 'moved-on')?.outcome, 'removed');
+    assert.equal(fs.existsSync(bundlePath(homes, 'codex', 'moved-on')), false);
 
     // Nothing is left to report, so the run after it is silent about the ids.
     const third = await runSync();
