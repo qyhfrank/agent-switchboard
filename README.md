@@ -2,7 +2,7 @@
 
 Agent Switchboard (ASB) keeps one library of rules, commands, agents, skills,
 hooks, MCP servers, and plugins synchronized across supported coding agents.
-The 0.5 engine plans from a captured filesystem state, writes only what it can
+The engine plans from a captured filesystem state, writes only what it can
 prove is its own, and reports the same outcome vocabulary in text and JSON.
 
 One `asb sync` maintains two scopes: your machine's agent configuration, from a
@@ -233,13 +233,71 @@ Configuration is strict. Unknown keys, invalid target shapes and type errors fai
 
 | Application | Rules | Commands | Agents | Skills | Hooks | MCP |
 |---|---:|---:|---:|---:|---:|---:|
-| Claude Code | yes | yes | yes | yes | yes | yes |
-| Claude Desktop |  |  |  |  |  | yes |
-| Codex | yes |  | yes | yes | yes | yes |
-| OpenCode | yes | yes | yes | yes |  | yes |
-| Cursor | yes | yes | yes | yes |  | yes |
-| Trae | yes |  |  | yes |  | yes |
-| Trae CN | yes |  |  | yes |  | yes |
+| Claude Code (`claude-code`) | yes | yes | yes | yes | yes | yes |
+| Claude Desktop (`claude-desktop`) |  |  |  |  |  | yes |
+| Codex (`codex`) | yes |  | yes | yes | yes | yes |
+| OpenCode (`opencode`) | yes | yes | yes | yes |  | yes |
+| Cursor (`cursor`) | yes | yes | yes | yes |  | yes |
+| Trae (`trae`) | yes |  |  | yes |  | yes |
+| Trae CN (`trae-cn`) | yes |  |  | yes |  | yes |
+| TRAE CLI (`traecli`) | yes | yes | yes | yes |  | yes |
+| Pi (`pi`) | yes | yes |  | yes |  | yes |
+| DeepSeek Harness (`dsh`) | yes |  |  | yes |  |  |
+
+The table shows user-scope support. Claude Desktop, Codex agents, and TRAE CLI
+commands, agents and MCP have no project destination. `asb status --all`
+reports unsupported cells as `app-lacks-type`.
+
+Pi uses `~/.pi/agent/AGENTS.md` for global rules and
+`~/.pi/agent/prompts/<id>.md` for commands. Project commands go to `.pi/prompts/`.
+Command output preserves `description`, `argument-hint` and body parameters
+such as `$ARGUMENTS`. Pi MCP writes `mcpServers` in `~/.pi/agent/mcp.json` or
+`.pi/mcp.json`; stdio and HTTP servers are supported, while SSE servers are
+reported as skipped.
+
+DeepSeek Harness uses `~/.dsh/AGENTS.md` for global rules. Skills are copied
+unchanged: for dsh, use a kebab-case `name`, a `description`, and hyphenated
+invocation fields such as `disable-model-invocation` and `user-invocable`.
+
+### Shared destinations
+
+Codex, OpenCode, Cursor, TRAE CLI, Pi and dsh read skills from
+`~/.agents/skills` and project `.agents/skills`. ASB uses these shared locations
+by default. In each scope, the shared directory holds the intersection of
+selections from enabled, detected readers using the shared destination. Each
+reader receives its remaining selected skills in its own directory. An `add`
+therefore reaches that app, and a `remove` withholds the skill from that app.
+TRAE CLI has no own skills directory: any remainder is reported as skipped
+with a warning naming the app and skill, while the rest of the run continues.
+Claude Code and the Trae IDE applications keep their own skills directories.
+
+Choose an app's own directory explicitly with:
+
+```toml
+[applications.cursor.skills]
+destination = "own"
+```
+
+`destination = "shared"` is the default for shared readers. The option is
+invalid on apps without a shared reader, and `"own"` is invalid for TRAE CLI.
+An app set to `"own"` still reads skills placed in the shared directory for
+other apps, so this setting can expose two copies and does not isolate that
+app's selection from the shared directory. Cursor and OpenCode can also read
+Claude's skills through their native compatibility paths.
+
+Own skill destinations include `.codex/skills`, `.cursor/skills`,
+`.config/opencode/skills`, `.pi/agent/skills` and `.dsh/skills` under the user
+home; OpenCode uses its platform configuration directory on Windows. Their
+project destinations are `.codex/skills`, `.cursor/skills`, `.opencode/skills`,
+`.pi/skills` and `.dsh/skills`. When a destination changes, ASB writes the new
+copy first. A later sync removes copies whose recorded contents or current
+render prove they are unchanged; edited copies are preserved and reported.
+
+Global rules stay in each application's own file. Project rules for Claude
+Code, Codex, OpenCode, Cursor, TRAE CLI, Pi and dsh share the managed region in
+`AGENTS.md`; Claude Code reads it through `CLAUDE.md -> AGENTS.md`.
+
+### Custom targets
 
 Configuration-defined targets can add other applications without runtime
 code. Define one or more cells under `[targets.<id>]`, for example:
