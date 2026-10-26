@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { appRows, projectAppRows } from '../src/engine/apps.js';
+import { APP_ROWS, appRows, projectAppRows } from '../src/engine/apps.js';
 import { runSync } from '../src/engine/cli.js';
 import { effectiveSelection, loadConfig, selectionDelta } from '../src/engine/config.js';
 import { mergeProjectRegion, projectRegion } from '../src/engine/shapes.js';
@@ -36,6 +36,76 @@ function projectConfig(
     `[distribution.project]\nmode = "${mode}"\ncollision = "${collision}"\n\n${adds}`
   );
 }
+
+test('project readers share one rules region and skills directory while Claude keeps its skills directory', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'claude-code', 'codex', 'cursor');
+    seedRule(homes, 'review.md', 'Review carefully.\n');
+    seedSkill(homes, 'review');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex", "cursor"]\n');
+    projectConfig(project, '[rules]\nenabled = ["review"]\n[skills]\nenabled = ["review"]\n');
+    fs.writeFileSync(path.join(project, 'AGENTS.md'), '# User instructions\n');
+    const report = await runSync({ project });
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+    const rules = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8');
+    assert.equal(rules.match(/<!-- rules:start -->/g)?.length, 1);
+    assert.match(rules, /Review carefully/);
+    assert.match(rules, /# User instructions/);
+    assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
+    for (const app of ['.agents', '.claude'])
+      assert.ok(fs.existsSync(path.join(project, app, 'skills', 'review', 'SKILL.md')));
+    assert.equal(fs.existsSync(path.join(project, '.cursor', 'rules', 'rules.mdc')), false);
+    assert.equal(fs.existsSync(path.join(project, '.cursor', 'skills')), false);
+    assert.equal(
+      report.entries.filter(
+        (entry) =>
+          entry.scope === 'project' && entry.type === 'skills' && entry.outcome === 'written'
+      ).length,
+      2
+    );
+    assert.equal(
+      (await runSync({ project })).entries.filter((entry) => entry.outcome === 'written').length,
+      0
+    );
+  });
+});
+
+test('a recorded project rules file retires after its shared region replacement is proven', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'cursor');
+    seedRule(homes, 'review.md', 'Review carefully.\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n');
+    projectConfig(project, '[rules]\nenabled = ["review"]\n');
+    const rules = APP_ROWS.find((row) => row.id === 'cursor')?.rules;
+    assert.ok(rules);
+    const current = rules.projectPath;
+    const previous = path.join(project, '.cursor', 'rules', 'rules.mdc');
+    try {
+      rules.projectPath = () => previous;
+      assert.equal((await runSync({ project })).exitCode, 0);
+    } finally {
+      rules.projectPath = current;
+    }
+    fs.writeFileSync(path.join(path.dirname(previous), 'foreign.mdc'), 'Keep\n');
+    const first = await runSync({ project });
+    assert.ok(fs.existsSync(previous));
+    assert.ok(
+      first.entries.some((entry) => entry.path === previous && entry.outcome === 'skipped')
+    );
+    const second = await runSync({ project });
+    assert.equal(second.exitCode, 0);
+    assert.equal(fs.existsSync(previous), false);
+    assert.match(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf8'), /Review carefully/);
+    assert.equal(
+      fs.readFileSync(path.join(path.dirname(previous), 'foreign.mdc'), 'utf8'),
+      'Keep\n'
+    );
+  });
+});
 
 test('project root canonicalizes once and the increment is the overlay minus the base', async () => {
   await withScratchHomes(async (homes) => {
@@ -553,33 +623,30 @@ test('a dedicated project rules file follows the increment because its bytes pro
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
-    installApps(homes, 'cursor');
+    installApps(homes, 'trae');
     seedRule(homes, 'alpha.md', 'Alpha body\n');
     seedRule(homes, 'beta.md', 'Beta body\n');
-    writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["trae"]\n');
     projectConfig(project, '[rules]\nenabled = ["alpha", "beta"]\n');
-    const target = path.join(project, '.cursor', 'rules', 'rules.mdc');
+    const target = path.join(project, '.trae', 'rules', 'rules.md');
 
     const first = await runSync({ project });
     assert.equal(first.exitCode, 0, JSON.stringify(first.entries, null, 2));
     assert.equal(
       fs.readFileSync(target, 'utf-8'),
-      renderedRules('cursor', 'Alpha body\n\nBeta body\n')
+      renderedRules('trae', 'Alpha body\n\nBeta body\n')
     );
 
     // The machine takes alpha over, so the increment shrinks to beta. What
     // sits in the repository is a render of library blocks — stale, but still
     // asb's — and it is rewritten rather than preserved as foreign content.
-    writeUserConfig(
-      homes,
-      '[applications]\nenabled = ["cursor"]\n\n[rules]\nenabled = ["alpha"]\n'
-    );
+    writeUserConfig(homes, '[applications]\nenabled = ["trae"]\n\n[rules]\nenabled = ["alpha"]\n');
     const shrunk = await runSync({ project });
     assert.equal(shrunk.exitCode, 0, JSON.stringify(shrunk.entries, null, 2));
-    assert.equal(fs.readFileSync(target, 'utf-8'), renderedRules('cursor', 'Beta body\n'));
+    assert.equal(fs.readFileSync(target, 'utf-8'), renderedRules('trae', 'Beta body\n'));
 
     // Nothing left to add: the file goes instead of double-loading a rule the
-    // machine already carries in ~/.cursor.
+    // machine already carries in ~/.trae.
     projectConfig(project, '[rules]\nenabled = ["alpha"]\n');
     const emptied = await runSync({ project });
     assert.equal(emptied.exitCode, 0, JSON.stringify(emptied.entries, null, 2));
@@ -953,7 +1020,7 @@ test('a repository [plugins] sub-table adds to the base selection instead of cle
     const teamSource = path.join(homes.root, 'team-plugin');
     fs.mkdirSync(project);
     seedTree(teamSource, { 'rules/style.md': 'Team style\n' });
-    installApps(homes, 'claude-code', 'cursor');
+    installApps(homes, 'claude-code', 'trae');
     writeUserConfig(
       homes,
       [
@@ -969,13 +1036,13 @@ test('a repository [plugins] sub-table adds to the base selection instead of cle
       ].join('\n')
     );
     // The repository writes no `enabled` array, so the `[plugins]` object
-    // deep-merges: cursor's whole selection, the plugin's expansion included,
+    // deep-merges: trae's whole selection, the plugin's expansion included,
     // is the increment.
     fs.writeFileSync(
       path.join(project, '.asb.toml'),
       [
         '[applications]',
-        'enabled = ["claude-code", "cursor"]',
+        'enabled = ["claude-code", "trae"]',
         '',
         '[plugins.sources]',
         `team = ${JSON.stringify(teamSource)}`,
@@ -988,7 +1055,7 @@ test('a repository [plugins] sub-table adds to the base selection instead of cle
 
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.match(
-      fs.readFileSync(path.join(project, '.cursor', 'rules', 'rules.mdc'), 'utf-8'),
+      fs.readFileSync(path.join(project, '.trae', 'rules', 'rules.md'), 'utf-8'),
       /Team style/
     );
 

@@ -449,7 +449,7 @@ export const APP_ROWS: readonly AppRow[] = [
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
       path: (homes) => path.join(homes.agentsHome, '.cursor', 'rules', 'rules.mdc'),
-      projectPath: (root) => path.join(root, '.cursor', 'rules', 'rules.mdc'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
       render: wrapMdcFrontmatter,
       dedicated: true,
       ownsName: true,
@@ -722,8 +722,10 @@ export function projectAppRows(table: readonly AppRow[], projectRoot: string): r
     const project: AppRow = { id: row.id, detectDir: row.detectDir };
     if (row.rules?.projectPath) {
       const rules = row.rules;
+      const shared = rules.projectPath?.(root) === path.join(root, 'AGENTS.md');
       project.rules = {
         ...rules,
+        ...(shared ? { dedicated: false, ownsName: false, render: rawBody } : {}),
         root: () => root,
         path: () => rules.projectPath?.(root) as string,
       };

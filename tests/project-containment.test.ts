@@ -291,7 +291,7 @@ test('a project leaf symlinked out of the repository is blocked, not written thr
       const userTarget = ruleFilePath(homes, 'cursor');
       const outside = shape.outside === null ? userTarget : path.join(homes.root, shape.outside);
       if (shape.outside !== null) fs.mkdirSync(path.dirname(outside), { recursive: true });
-      const projectTarget = path.join(project, '.cursor', 'rules', 'rules.mdc');
+      const projectTarget = path.join(project, 'AGENTS.md');
       fs.mkdirSync(path.dirname(projectTarget), { recursive: true });
       fs.symlinkSync(outside, projectTarget);
 
