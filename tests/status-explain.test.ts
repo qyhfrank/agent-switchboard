@@ -372,6 +372,34 @@ test('explain matches app ids and path basenames to single slices', async () => 
   });
 });
 
+test('explain includes shared skills for app filters and app-id targets', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex', 'cursor', 'claude-code');
+    seedSkill(homes, 'review');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex", "cursor", "claude-code"]\n[skills]\nenabled = ["review"]\n'
+    );
+    await runSync();
+    const normal = (await runExplain('review', { types: ['skills'] })).slices;
+    const shared = normal.find((slice) => slice.app === 'agents');
+    assert.ok(shared);
+    assert.deepEqual(shared.members, ['codex', 'cursor']);
+    assert.equal(shared.outcome, 'unchanged');
+    assert.equal(shared.path, path.join(homes.agentsHome, '.agents', 'skills', 'review'));
+    for (const app of ['codex', 'cursor']) {
+      assert.deepEqual((await runExplain('review', { types: ['skills'], apps: [app] })).slices, [
+        shared,
+      ]);
+      assert.deepEqual((await runExplain(app, { types: ['skills'] })).slices, [shared]);
+    }
+    assert.deepEqual(
+      (await runExplain('review', { types: ['skills'], apps: ['claude-code'] })).slices,
+      normal.filter((slice) => slice.app === 'claude-code')
+    );
+  });
+});
+
 test('explain shows an enabled-but-undetected app as skipped, never invents a plan', async () => {
   await withScratchHomes(async (homes) => {
     seedRule(homes, 'base.md', 'Always be kind.\n');

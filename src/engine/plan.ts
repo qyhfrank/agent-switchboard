@@ -3562,6 +3562,7 @@ export type Ownership = 'identity' | 'marker' | 'native-manager';
 export interface ExplainSlice {
   /** Owning app, or null for library-level rows (missing, parse failures). */
   app: string | null;
+  members?: string[];
   path: string | null;
   outcome: Outcome;
   detail?: string;
@@ -3761,12 +3762,19 @@ export function explainSkills(input: PlanInput, target: string): ExplainSlice[] 
     }
     if (action.id === null || action.path === null) continue;
     const pathMatch = action.path === target || action.path.endsWith(`${path.sep}${target}`);
-    if (action.id !== target && action.app !== target && !pathMatch) continue;
+    if (
+      action.id !== target &&
+      action.app !== target &&
+      !action.members?.includes(target) &&
+      !pathMatch
+    )
+      continue;
 
     const component = byId.get(action.id);
 
     const slice: ExplainSlice = {
       app: action.app,
+      ...(action.members ? { members: action.members } : {}),
       path: action.path,
       outcome: action.outcome,
       // A tree the planner found equal to the render is asb's; one it is

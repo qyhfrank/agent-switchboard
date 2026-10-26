@@ -1729,7 +1729,10 @@ export async function runExplain(
   ];
   if (opts.apps && opts.apps.length > 0) {
     const wanted = new Set(opts.apps);
-    slices = slices.filter((slice) => slice.app === null || wanted.has(slice.app));
+    slices = slices.filter(
+      (slice) =>
+        slice.app === null || wanted.has(slice.app) || slice.members?.some((app) => wanted.has(app))
+    );
   }
   // A source row carries its configured location, which can carry a token.
   return {
