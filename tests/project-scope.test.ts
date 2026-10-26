@@ -244,7 +244,6 @@ test('the project registry exposes only ratified destinations and keeps global-o
     // the cells that have none because the app reads them from the machine.
     const cells: Array<[string, string | undefined, string | undefined]> = [
       ['claude-code rules', file('claude-code', 'rules'), path.join(projectReal, 'AGENTS.md')],
-      ['codex commands', dir('codex', 'commands'), undefined],
       [
         'opencode mcp',
         file('opencode', 'mcp'),

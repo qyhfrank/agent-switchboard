@@ -177,7 +177,6 @@ test('every built-in command and agent importer round-trips through its AppRow d
   await withScratchHomes(async (homes) => {
     const commandSources = new Map<string, string>([
       ['claude-code', '---\ndescription: Claude command\nmodel: opus\n---\nBODY-claude-code\n'],
-      ['codex', 'BODY-codex\n'],
       ['cursor', 'BODY-cursor\n'],
       ['opencode', '---\ndescription: OpenCode command\nmodel: test-model\n---\nBODY-opencode\n'],
     ]);

@@ -18,7 +18,6 @@ import {
   renderClaudeCommand,
   renderCodexAgent,
   renderCodexAgentConfigTable,
-  renderCodexCommand,
   renderCodexTable,
   renderCursorAgent,
   renderCursorCommand,
@@ -329,16 +328,6 @@ export const APP_ROWS: readonly AppRow[] = [
       projectPath: (root) => path.join(root, 'AGENTS.md'),
       render: rawBody,
       dedicated: false,
-    },
-    commands: {
-      root: (homes) => path.join(homes.agentsHome, '.codex'),
-      dir: (homes) => path.join(homes.agentsHome, '.codex', 'prompts'),
-      filename: (id) => `${encodeComponentId(id)}.md`,
-      render: renderCodexCommand,
-      importer: {
-        extensions: ['.md', '.markdown'],
-        read: (filePath) => importPlainEntry(filePath, 'codex'),
-      },
     },
     agents: {
       root: (homes) => path.join(homes.agentsHome, '.codex'),

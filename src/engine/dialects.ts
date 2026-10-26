@@ -157,16 +157,6 @@ export function renderOpencodeAgent(component: Component): string {
   return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
 }
 
-export function renderCodexCommand(component: Component): string {
-  const description = component.metadata.description?.trim();
-  const header = description ? `<!-- ${description} -->\n\n` : '';
-  return (
-    '<!-- [deprecated] Codex custom prompts are deprecated. ' +
-    'Consider migrating to skills: https://developers.openai.com/codex/skills -->\n\n' +
-    `${header}${component.content.trimStart()}`
-  );
-}
-
 const CODEX_ROLE_FIELDS = [
   'model',
   'model_reasoning_effort',
