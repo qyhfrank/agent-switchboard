@@ -709,7 +709,7 @@ test('the project union directory holds the increment, never the machine copies'
     seedSkill(homes, 'repo');
     writeUserConfig(
       homes,
-      '[applications]\nenabled = ["codex", "opencode"]\n\n[skills]\nenabled = ["alpha"]\n\n[distribution]\nuse_agents_dir = true\n'
+      '[applications]\nenabled = ["codex", "opencode"]\n\n[skills]\nenabled = ["alpha"]\n'
     );
     projectConfig(project, '[skills]\nenabled = ["alpha", "repo"]\n');
 
@@ -887,7 +887,7 @@ test('a repository layer adds, hides, and flips nothing at user scope', async ()
     }
     assert.ok(
       withRepo.entries.some(
-        (entry) => entry.scope === 'project' && entry.id === 'repo-only' && entry.app === 'cursor'
+        (entry) => entry.scope === 'project' && entry.id === 'repo-only' && entry.app === 'agents'
       ),
       JSON.stringify(withRepo.entries, null, 2)
     );

@@ -365,7 +365,7 @@ test('explain matches app ids and path basenames to single slices', async () => 
       `${ruleConfig(['claude-code', 'codex'])}\n[skills]\nenabled = ["review-pr"]\n`
     );
     const { slices: byBundle } = await runExplain('skills/review-pr');
-    assert.deepEqual(byBundle.map((slice) => slice.app).sort(), ['claude-code', 'codex']);
+    assert.deepEqual(byBundle.map((slice) => slice.app).sort(), ['agents', 'claude-code']);
     for (const slice of byBundle) {
       assert.equal(path.basename(slice.path as string), 'review-pr');
     }

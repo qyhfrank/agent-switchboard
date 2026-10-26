@@ -193,6 +193,10 @@ const incrementalSelection = z
   .object({ enabled: idArray.optional(), add: idArray.optional(), remove: idArray.optional() })
   .strict();
 
+const incrementalSkills = incrementalSelection.extend({
+  destination: z.enum(['shared', 'own']).optional(),
+});
+
 const incrementalRules = z
   .object({
     enabled: ruleIdArray.optional(),
@@ -213,7 +217,7 @@ const applicationOverride = z
     mcp: incrementalSelection.optional(),
     commands: incrementalSelection.optional(),
     agents: incrementalSelection.optional(),
-    skills: incrementalSelection.optional(),
+    skills: incrementalSkills.optional(),
     hooks: incrementalSelection.optional(),
     rules: incrementalRules.optional(),
   })
@@ -266,9 +270,7 @@ const projectDistribution = z
   })
   .strict();
 
-const distributionSection = z
-  .object({ use_agents_dir: z.boolean().optional(), project: projectDistribution.optional() })
-  .strict();
+const distributionSection = z.object({ project: projectDistribution.optional() }).strict();
 
 const uiSection = z.object({ page_size: z.number().int().min(5).max(50).optional() }).strict();
 
@@ -462,13 +464,16 @@ function knownKeysFor(pathParts: readonly (string | number)[]): readonly string[
       if (pathParts.length === 3 && third === 'rules') {
         return ['enabled', 'add', 'remove', 'includeDelimiters'];
       }
+      if (pathParts.length === 3 && third === 'skills') {
+        return ['enabled', 'add', 'remove', 'destination'];
+      }
       return ['enabled', 'add', 'remove'];
     case 'plugins':
       if (pathParts.length === 1) return ['sources', 'enabled', 'exclude', 'auto_update'];
       if (second === 'exclude') return ['commands', 'agents', 'skills', 'hooks', 'rules', 'mcp'];
       return [];
     case 'distribution':
-      if (pathParts.length === 1) return ['use_agents_dir', 'project'];
+      if (pathParts.length === 1) return ['project'];
       if (second === 'project' && pathParts.length === 2) return ['mode', 'collision', 'rules'];
       if (second === 'project' && third === 'rules') return ['placement'];
       return [];
@@ -621,7 +626,7 @@ export interface AppOverride {
   mcp?: z.infer<typeof incrementalSelection>;
   commands?: z.infer<typeof incrementalSelection>;
   agents?: z.infer<typeof incrementalSelection>;
-  skills?: z.infer<typeof incrementalSelection>;
+  skills?: z.infer<typeof incrementalSkills>;
   hooks?: z.infer<typeof incrementalSelection>;
   rules?: z.infer<typeof incrementalRules>;
 }
@@ -798,7 +803,6 @@ export interface ResolvedConfig {
   };
   rules: { includeDelimiters: boolean };
   distribution: {
-    useAgentsDir: boolean;
     project: {
       mode: 'managed' | 'exclusive' | 'none';
       collision: 'warn-skip' | 'error' | 'takeover';
@@ -913,7 +917,6 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
     },
     rules: { includeDelimiters: rulesValues.includeDelimiters === true },
     distribution: {
-      useAgentsDir: distributionValues.use_agents_dir === true,
       project: {
         mode: (projectValues.mode as 'managed' | 'exclusive' | 'none' | undefined) ?? 'managed',
         collision:

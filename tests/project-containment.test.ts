@@ -159,7 +159,7 @@ const HELD_ROOTS: readonly HeldRoot[] = [
       seedSkill(homes, 'review');
       writeUserConfig(
         homes,
-        '[applications]\nenabled = ["codex"]\n\n[skills]\nenabled = ["review"]\n\n[distribution]\nuse_agents_dir = true\n'
+        '[applications]\nenabled = ["codex"]\n\n[skills]\nenabled = ["review"]\n'
       );
       projectConfig(project);
       return {
@@ -547,7 +547,7 @@ test('a failed exclusive cleanup fails the run and preserves the escaping link',
     const outside = path.join(homes.root, 'outside-skill');
     fs.mkdirSync(outside);
     fs.writeFileSync(path.join(outside, 'keep.md'), 'outside\n');
-    const link = path.join(project, '.cursor', 'skills', 'escape');
+    const link = path.join(project, '.agents', 'skills', 'escape');
     fs.symlinkSync(outside, link, 'dir');
 
     // Removal-side containment: a sweep that would delete through a link out of

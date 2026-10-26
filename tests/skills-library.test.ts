@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { APP_ROWS, appRow } from '../src/engine/apps.js';
+import { APP_ROWS, appRow, ownSkills } from '../src/engine/apps.js';
 import { scanLibrary } from '../src/engine/library.js';
 import { bundleFingerprint, executableBits, listBundleFiles } from '../src/engine/shapes.js';
 import { seedSkill, seedTree, withScratchHomes } from './helpers/scratch.js';
@@ -212,17 +212,17 @@ test('each skills-carrying app declares its parent directory inside its containm
     for (const [id, dir] of Object.entries(expected)) {
       const row = appRow(id);
       assert.ok(row?.skills, `${id} carries a skills row`);
-      assert.equal(row.skills.dir(homes), dir);
-      const relative = path.relative(row.skills.root(homes), dir);
+      assert.equal(ownSkills(row)?.dir(homes), dir);
+      const relative = path.relative(ownSkills(row)?.root(homes), dir);
       assert.ok(!relative.startsWith('..'), `${id} skills dir sits inside its containment root`);
     }
     assert.deepEqual(
-      APP_ROWS.filter((row) => row.skills).map((row) => row.id),
+      APP_ROWS.filter((row) => ownSkills(row)).map((row) => row.id),
       Object.keys(expected),
       'no other app receives skill bundles'
     );
     assert.equal(appRow('claude-desktop')?.skills, undefined, 'claude-desktop is detect-only');
-    assert.deepEqual(appRow('codex')?.skills?.reserved, ['.system']);
-    assert.deepEqual(appRow('claude-code')?.skills?.reserved, []);
+    assert.deepEqual(ownSkills(appRow('codex'))?.reserved, ['.system']);
+    assert.deepEqual(ownSkills(appRow('claude-code'))?.reserved, []);
   });
 });

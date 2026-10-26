@@ -3,7 +3,14 @@ import path from 'node:path';
 import { checkbox, confirm, input } from '@inquirer/prompts';
 import chalk from 'chalk';
 import { Command } from 'commander';
-import { AGENTS_SKILLS_UNION, APP_ROWS, type AppRow, appRows, projectAppRows } from './apps.js';
+import {
+  AGENTS_SKILLS_UNION,
+  APP_ROWS,
+  type AppRow,
+  appRows,
+  ownSkills,
+  projectAppRows,
+} from './apps.js';
 import {
   type ComponentType,
   ConfigError,
@@ -270,12 +277,13 @@ function captureFor(
   const skillRows: { app: string; dir: string; root: string; reserved: readonly string[] }[] = [];
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId);
-    if (!row?.skills) continue;
+    const skills = ownSkills(row);
+    if (!skills) continue;
     skillRows.push({
       app: appId,
-      dir: row.skills.dir(config.homes),
-      root: row.skills.root(config.homes),
-      reserved: row.skills.reserved,
+      dir: skills.dir(config.homes),
+      root: skills.root(config.homes),
+      reserved: skills.reserved,
     });
   }
   if (AGENTS_SKILLS_UNION.participates(config.apps.enabled)) {
@@ -966,8 +974,9 @@ function userSurfaces(
       paths.push(...children(dir));
       if (entry.config) paths.push(entry.config.path(base.homes));
     }
-    if (row.skills) {
-      const dir = row.skills.dir(base.homes);
+    const skills = ownSkills(row);
+    if (skills) {
+      const dir = skills.dir(base.homes);
       dirs.push(dir);
       paths.push(...children(dir));
     }
@@ -1063,7 +1072,8 @@ function userLeafOnProjectCell(
       const dir = row[type]?.projectDir?.(root);
       if (dir) cells.push(dir);
     }
-    if (row.skills?.projectDir) cells.push(row.skills.projectDir(root));
+    const skills = ownSkills(row);
+    if (skills?.projectDir) cells.push(skills.projectDir(root));
     if (row.hooks?.projectPath) cells.push(row.hooks.projectPath(root));
     if (row.hooks?.projectBundleDir) cells.push(row.hooks.projectBundleDir(root));
     if (row.mcp?.projectPath) cells.push(row.mcp.projectPath(root));
@@ -1168,7 +1178,7 @@ function resolveScopes(
             // containment root counts, not the detection heuristic alone.
             row.detectDir(base.homes),
             ...(['rules', 'commands', 'agents', 'skills', 'hooks', 'mcp'] as const).flatMap(
-              (type) => row[type]?.root(base.homes) ?? []
+              (type) => (type === 'skills' ? ownSkills(row) : row[type])?.root(base.homes) ?? []
             ),
           ].map((dir) => ({ what: `${row.id}'s own directory`, dir }))
         ),
@@ -1236,7 +1246,15 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
   }
   const appIds = supersetTable.map((row) => row.id);
   const knownApps = new Set(appIds);
-  for (const app of opts.apps ?? []) {
+  for (const app of [
+    ...(opts.apps ?? []),
+    ...base.apps.enabled,
+    ...base.apps.assumeInstalled,
+    ...Object.keys(base.apps.overrides),
+    ...(overlay?.apps.enabled ?? []),
+    ...(overlay?.apps.assumeInstalled ?? []),
+    ...Object.keys(overlay?.apps.overrides ?? {}),
+  ]) {
     if (knownApps.has(app)) continue;
     const suggestion = nearestKey(app, appIds);
     throw new ConfigError(

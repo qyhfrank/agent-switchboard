@@ -31,7 +31,10 @@ function bundlePath(homes: ScratchHomes, app: RuleAppId, id: string): string {
 
 function config(apps: readonly string[], skills: readonly string[]): string {
   const list = (ids: readonly string[]) => ids.map((id) => `"${id}"`).join(', ');
-  return `[applications]\nenabled = [${list(apps)}]\n\n[skills]\nenabled = [${list(skills)}]\n`;
+  return `[applications]\nenabled = [${list(apps)}]\n\n[skills]\nenabled = [${list(skills)}]\n${apps
+    .filter((app) => ['codex', 'opencode', 'cursor'].includes(app))
+    .map((app) => `\n[applications.${app}.skills]\ndestination = "own"\n`)
+    .join('')}`;
 }
 
 function skillsEntry(report: Report, app: string, id: string) {

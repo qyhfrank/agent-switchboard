@@ -5,7 +5,7 @@ import { AGENTS_SKILLS_UNION } from './apps.js';
 import { type ComponentType, ConfigError } from './config.js';
 import { sanitizeMcpName } from './dialects.js';
 import type { Component } from './library.js';
-import { type Action, type PlanInput, renderHookGroups } from './plan.js';
+import { type Action, type PlanInput, renderHookGroups, skillDestinations } from './plan.js';
 import {
   applyKeysEdits,
   bundleFingerprint,
@@ -181,13 +181,6 @@ export function desiredSlices(input: PlanInput, actions: readonly Action[]): Own
         }
       }
     }
-    if (
-      row.skills &&
-      !(config.distribution.useAgentsDir && AGENTS_SKILLS_UNION.members.includes(app))
-    ) {
-      for (const component of components(app, 'skills'))
-        addBundle(app, component, row.skills.dir(config.homes), row.skills.root(config.homes));
-    }
     if (row.hooks) {
       const target = row.hooks;
       for (const component of components(app, 'hooks')) {
@@ -241,18 +234,11 @@ export function desiredSlices(input: PlanInput, actions: readonly Action[]): Own
       }
     }
   }
-  const members = active.filter((app) => AGENTS_SKILLS_UNION.members.includes(app));
-  if (config.distribution.useAgentsDir && members.length) {
-    for (const app of members)
-      for (const component of components(app, 'skills')) {
-        addBundle(
-          'agents',
-          component,
-          AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined),
-          AGENTS_SKILLS_UNION.root(config.homes, config.project ?? undefined),
-          members
-        );
-      }
+  for (const destination of skillDestinations(input)) {
+    for (const component of inventory.components) {
+      if (component.type !== 'skills' || !destination.selected.includes(component.id)) continue;
+      addBundle(destination.app, component, destination.dir, destination.root, destination.members);
+    }
   }
   return [...new Map(result.map((slice) => [slot(slice), slice])).values()];
 }
@@ -549,15 +535,15 @@ export function reconcileOwnership(
       members: slice.members,
       source,
     };
+    const readers = slice.members ?? [slice.app];
     const replacements = desired.filter(
       (candidate) =>
         candidate.type === slice.type &&
         candidate.id === slice.id &&
-        candidate.shape === slice.shape &&
+        (candidate.shape === slice.shape ||
+          (slice.type === 'rules' && ['file', 'region'].includes(candidate.shape))) &&
         candidate.path !== slice.path &&
-        (candidate.app === slice.app ||
-          (candidate.app === 'agents' && AGENTS_SKILLS_UNION.members.includes(slice.app)) ||
-          (slice.app === 'agents' && AGENTS_SKILLS_UNION.members.includes(candidate.app)))
+        (candidate.members ?? [candidate.app]).some((app) => readers.includes(app))
     );
     if (replacements.some((replacement) => !matches(replacement))) {
       const waiting =
@@ -579,6 +565,20 @@ export function reconcileOwnership(
           detail: 'replacement-pending',
           reason: 'kept until the replacement distribution is present',
         });
+      continue;
+    }
+    if (slice.shape === 'bundle' && replacements.length && !removable(slice)) {
+      if (
+        !result.some((action) => action.path === slice.path && action.outcome === 'left-behind')
+      ) {
+        result.push({
+          ...base,
+          op: 'none',
+          outcome: 'left-behind',
+          detail: 'modified',
+          reason: 'moved bundle differs from its recorded contents; preserved',
+        });
+      }
       continue;
     }
     let content: string | undefined;

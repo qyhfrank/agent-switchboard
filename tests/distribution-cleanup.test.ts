@@ -48,6 +48,47 @@ function stateFiles(homes: ScratchHomes): string[] {
   return fs.readdirSync(dir).map((name) => path.join(dir, name));
 }
 
+test('records for an app absent from the table retire proven files and keys while preserving foreign content', async () => {
+  await withScratchHomes(async (homes) => {
+    seedTree(homes.asbHome, { 'commands/review.md': 'Review the patch.\n' });
+    seedMcpLibrary(homes, { review: { command: 'review-server' } });
+    const root = path.join(homes.agentsHome, '.sample-tool');
+    seedTree(root, {
+      'mcp.json': '{"theme":"dark","mcpServers":{"foreign":{"command":"keep"}}}\n',
+      'foreign.md': 'Keep this file.\n',
+    });
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["sample-tool"]\n[commands]\nenabled = ["review"]\n[mcp]\nenabled = ["review"]\n[targets.sample-tool]\ndetect = "~/.sample-tool"\n[targets.sample-tool.commands]\ntarget_dir = "~/.sample-tool/commands"\n[targets.sample-tool.mcp]\nconfig_path = "~/.sample-tool/mcp.json"\nformat = "json"\n'
+    );
+    assert.equal((await runSync()).exitCode, 0);
+    const command = path.join(root, 'commands', 'review.md');
+    assert.ok(fs.existsSync(command));
+    assert.ok(
+      stateFiles(homes).some((file) => fs.readFileSync(file, 'utf8').includes('sample-tool'))
+    );
+    writeUserConfig(homes, '[applications]\nenabled = []\n');
+    const retired = await runSync();
+    assert.equal(retired.exitCode, 0);
+    assert.ok(
+      retired.entries.some((entry) => entry.app === 'sample-tool' && entry.outcome === 'removed')
+    );
+    assert.equal(fs.existsSync(command), false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'mcp.json'), 'utf8')), {
+      theme: 'dark',
+      mcpServers: { foreign: { command: 'keep' } },
+    });
+    assert.equal(fs.readFileSync(path.join(root, 'foreign.md'), 'utf8'), 'Keep this file.\n');
+  });
+});
+
+test('an unknown configured app id fails generic application validation', async () => {
+  await withScratchHomes(async (homes) => {
+    writeUserConfig(homes, '[applications]\nenabled = ["unknown-tool"]\n');
+    await assert.rejects(runSync(), /Unknown app "unknown-tool"/);
+  });
+});
+
 for (const retire of ['delete', 'delete-and-deselect', 'disable-applications'] as const) {
   test(`recorded distributions retire after ${retire}, including shared host slices`, async () => {
     await withScratchHomes(async (homes) => {
@@ -159,13 +200,13 @@ test('type and application filters leave excluded ownership available for a late
     deleteSources(homes);
     await runSync({ apps: ['claude-code'], types: ['skills'] });
     assert.equal(fs.existsSync(path.join(homes.agentsHome, '.claude', 'skills', 'alpha')), false);
-    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.codex', 'skills', 'alpha')), true);
+    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.agents', 'skills', 'alpha')), true);
     assert.equal(
       fs.existsSync(path.join(homes.agentsHome, '.claude', 'commands', 'alpha.md')),
       true
     );
     await runSync();
-    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.codex', 'skills', 'alpha')), false);
+    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.agents', 'skills', 'alpha')), false);
   });
 });
 

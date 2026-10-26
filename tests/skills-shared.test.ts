@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { runSync } from '../src/engine/cli.js';
-import type { Report } from '../src/engine/report.js';
+import { type Report, renderReport } from '../src/engine/report.js';
 import {
   entryFor,
   installApps,
@@ -14,17 +14,10 @@ import {
   writeUserConfig,
 } from './helpers/scratch.js';
 
-/**
- * use_agents_dir: codex/opencode/traecli read skills from the shared
- * ~/.agents/skills directory. The union row distributes the union of the
- * ACTIVE members' effective selections; the members' own rows deselect, so
- * their stale copies leave through the proof-gated removal path.
- */
-
 function config(opts: {
   apps: readonly string[];
   skills: readonly string[];
-  agentsDir?: boolean;
+  shared?: boolean;
   extra?: string;
 }): string {
   const list = (ids: readonly string[]) => ids.map((id) => `"${id}"`).join(', ');
@@ -35,8 +28,10 @@ function config(opts: {
     '[skills]',
     `enabled = [${list(opts.skills)}]`,
   ];
-  if (opts.agentsDir !== undefined) {
-    lines.push('', '[distribution]', `use_agents_dir = ${opts.agentsDir}`);
+  if (!opts.shared) {
+    for (const app of opts.apps.filter((app) => ['codex', 'opencode', 'cursor'].includes(app))) {
+      lines.push('', `[applications.${app}.skills]`, 'destination = "own"');
+    }
   }
   if (opts.extra) lines.push('', opts.extra);
   return `${lines.join('\n')}\n`;
@@ -54,7 +49,147 @@ function exists(...segments: string[]): boolean {
   return fs.existsSync(path.join(...segments));
 }
 
-test('the agents row writes the union of active member selections to the shared directory', async () => {
+test('default skills destinations share native readers and keep Claude in its own directory', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor');
+    seedSkill(homes, 'review');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code", "codex", "opencode", "cursor"]\n[skills]\nenabled = ["review"]\n'
+    );
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+    assert.ok(exists(unionBundle(homes, 'review'), 'SKILL.md'));
+    assert.ok(exists(skillsParentDir(homes, 'claude-code'), 'review', 'SKILL.md'));
+    for (const app of ['codex', 'opencode', 'cursor'] as const) {
+      assert.equal(exists(skillsParentDir(homes, app)), false, app);
+    }
+    assert.equal(report.entries.filter((entry) => entry.outcome === 'written').length, 2);
+    const states = fs
+      .readdirSync(path.join(homes.stateHome, 'distribution'))
+      .map((name) =>
+        JSON.parse(fs.readFileSync(path.join(homes.stateHome, 'distribution', name), 'utf8'))
+      );
+    assert.ok(states.every((state) => state.version === 1));
+    assert.deepEqual(
+      states.flatMap((state) => state.slices).find((slice) => slice.app === 'agents').members,
+      ['codex', 'opencode', 'cursor']
+    );
+  });
+});
+
+test('an own destination writes Cursor separately while other readers keep the shared copy', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor');
+    seedSkill(homes, 'review');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code", "codex", "opencode", "cursor"]\n[skills]\nenabled = ["review"]\n[applications.cursor.skills]\ndestination = "own"\n'
+    );
+    assert.equal((await runSync()).exitCode, 0);
+    for (const app of ['agents', 'claude-code', 'cursor'] as const)
+      assert.ok(exists(skillsParentDir(homes, app), 'review', 'SKILL.md'));
+    for (const app of ['codex', 'opencode'] as const)
+      assert.equal(exists(skillsParentDir(homes, app)), false);
+  });
+});
+
+test('a per-app remove moves a shared skill only to the readers still selecting it', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex', 'cursor');
+    for (const id of ['alpha', 'beta']) seedSkill(homes, id);
+    const base =
+      '[applications]\nenabled = ["codex", "cursor"]\n[skills]\nenabled = ["alpha", "beta"]\n';
+    writeUserConfig(homes, base);
+    await runSync();
+    writeUserConfig(homes, `${base}[applications.cursor.skills]\nremove = ["beta"]\n`);
+    await runSync();
+    const settled = await runSync();
+    assert.equal(settled.exitCode, 0);
+    assert.ok(exists(unionBundle(homes, 'alpha'), 'SKILL.md'));
+    assert.equal(exists(unionBundle(homes, 'beta')), false);
+    assert.ok(exists(skillsParentDir(homes, 'codex'), 'beta', 'SKILL.md'));
+    assert.equal(exists(skillsParentDir(homes, 'cursor'), 'beta'), false);
+  });
+});
+
+test('a reader without an own directory warns about its remainder and continues', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
+    for (const id of ['common', 'extra']) seedSkill(homes, id);
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["codex", "traecli"]\n[skills]\nenabled = ["common"]\n[applications.traecli.skills]\nadd = ["extra"]\n'
+    );
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+    const warning = skillEntry(report, 'traecli', 'extra');
+    assert.equal(warning?.outcome, 'skipped');
+    assert.equal(warning?.detail, 'no-own-destination');
+    assert.match(warning?.reason ?? '', /traecli.*extra.*no own skills directory/);
+    assert.ok(exists(unionBundle(homes, 'common'), 'SKILL.md'));
+    assert.equal(exists(unionBundle(homes, 'extra')), false);
+    assert.match(
+      renderReport(report, { layout: 'interactive', color: false, command: 'sync' }),
+      /needs attention/
+    );
+    assert.match(renderReport(report), /traecli[\s\S]*extra/);
+  });
+});
+
+test('destination validation rejects unsupported readers and an own directory that does not exist', async () => {
+  await withScratchHomes(async (homes) => {
+    for (const app of ['claude-code', 'trae', 'claude-desktop', 'traecli']) {
+      writeUserConfig(
+        homes,
+        `[applications]\nenabled = ["${app}"]\n[applications.${app}.skills]\ndestination = "own"\n`
+      );
+      await assert.rejects(runSync(), /skills do not support destination/);
+    }
+    writeUserConfig(homes, '[applications.claude-code.skills]\ndestination = "shared"\n');
+    await assert.rejects(runSync(), /skills do not support destination/);
+  });
+});
+
+test('moving own copies preserves edits and unrecorded neighbours after the shared copy lands', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'cursor', 'opencode');
+    for (const id of ['clean', 'edited']) seedSkill(homes, id);
+    writeUserConfig(homes, config({ apps: ['cursor', 'opencode'], skills: ['clean', 'edited'] }));
+    await runSync();
+    for (const app of ['cursor', 'opencode'] as const) {
+      fs.writeFileSync(
+        path.join(skillsParentDir(homes, app), 'edited', 'SKILL.md'),
+        'User changes\n'
+      );
+      fs.mkdirSync(path.join(skillsParentDir(homes, app), 'foreign'));
+      fs.writeFileSync(path.join(skillsParentDir(homes, app), 'foreign', 'notes.md'), 'Keep\n');
+    }
+    writeUserConfig(
+      homes,
+      config({ apps: ['cursor', 'opencode'], skills: ['clean', 'edited'], shared: true })
+    );
+    await runSync();
+    const settled = await runSync();
+    assert.equal(settled.exitCode, 0);
+    for (const app of ['cursor', 'opencode'] as const) {
+      assert.equal(exists(skillsParentDir(homes, app), 'clean'), false);
+      assert.equal(
+        fs.readFileSync(path.join(skillsParentDir(homes, app), 'edited', 'SKILL.md'), 'utf8'),
+        'User changes\n'
+      );
+      assert.equal(skillEntry(settled, app, 'edited')?.outcome, 'left-behind');
+      assert.equal(
+        fs.readFileSync(path.join(skillsParentDir(homes, app), 'foreign', 'notes.md'), 'utf8'),
+        'Keep\n'
+      );
+    }
+    for (const id of ['clean', 'edited']) assert.ok(exists(unionBundle(homes, id), 'SKILL.md'));
+  });
+});
+
+test('the shared directory holds the intersection and each own directory holds its remainder', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex', 'opencode', 'claude-code');
     for (const id of ['alpha', 'beta', 'gamma']) seedSkill(homes, id);
@@ -63,7 +198,7 @@ test('the agents row writes the union of active member selections to the shared 
       config({
         apps: ['codex', 'opencode', 'claude-code'],
         skills: ['alpha'],
-        agentsDir: true,
+        shared: true,
         extra:
           '[applications.codex.skills]\nadd = ["beta"]\n\n[applications.opencode.skills]\nadd = ["gamma"]',
       })
@@ -72,7 +207,7 @@ test('the agents row writes the union of active member selections to the shared 
     const report = await runSync();
 
     // One copy per selected skill, in the one directory every member reads.
-    for (const id of ['alpha', 'beta', 'gamma'] as const) {
+    for (const id of ['alpha'] as const) {
       const entry = skillEntry(report, 'agents', id);
       assert.equal(entry?.outcome, 'written', id);
       assert.equal(entry?.detail, 'created', id);
@@ -80,9 +215,13 @@ test('the agents row writes the union of active member selections to the shared 
       assert.equal(exists(unionBundle(homes, id), 'SKILL.md'), true);
     }
 
-    // The members' own parents get no copies; the non-member keeps its own.
-    for (const member of ['codex', 'opencode'] as const) {
-      assert.equal(fs.existsSync(skillsParentDir(homes, member)), false, member);
+    for (const [member, id] of [
+      ['codex', 'beta'],
+      ['opencode', 'gamma'],
+    ] as const) {
+      assert.equal(exists(skillsParentDir(homes, member), id, 'SKILL.md'), true);
+      assert.equal(exists(skillsParentDir(homes, member), 'alpha'), false);
+      assert.equal(exists(unionBundle(homes, id)), false);
     }
     assert.equal(skillEntry(report, 'claude-code', 'alpha')?.outcome, 'written');
     assert.equal(exists(skillsParentDir(homes, 'claude-code'), 'alpha', 'SKILL.md'), true);
@@ -91,7 +230,7 @@ test('the agents row writes the union of active member selections to the shared 
   });
 });
 
-test('turning use_agents_dir on removes the per-app copies once the union copy is proven', async () => {
+test('switching to shared destinations removes the per-app copies once the union copy is proven', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedSkill(homes, 'alpha');
@@ -102,7 +241,7 @@ test('turning use_agents_dir on removes the per-app copies once the union copy i
     assert.equal(skillEntry(first, 'codex', 'alpha')?.outcome, 'written');
     assert.equal(fs.existsSync(codexCopy), true);
 
-    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], shared: true }));
     const second = await runSync();
 
     // The old copy leaves only after the union copy is proven on disk, so
@@ -127,25 +266,22 @@ test('turning use_agents_dir on removes the per-app copies once the union copy i
   });
 });
 
-test('turning use_agents_dir off restores the per-app copies before the union ones leave', async () => {
+test('switching to own destinations restores the per-app copies before the union ones leave', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     seedSkill(homes, 'alpha');
     seedSkill(homes, 'beta');
-    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha', 'beta'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha', 'beta'], shared: true }));
 
     await runSync();
     assert.equal(fs.existsSync(unionBundle(homes, 'alpha')), true);
     // A union copy edited by hand can no longer be removed on byte proof.
     fs.writeFileSync(path.join(unionBundle(homes, 'beta'), 'SKILL.md'), 'hand-edited\n');
 
-    writeUserConfig(
-      homes,
-      config({ apps: ['codex'], skills: ['alpha', 'beta'], agentsDir: false })
-    );
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha', 'beta'], shared: false }));
     const report = await runSync();
 
-    // Mirror image of toggle-on: the per-app copy is written first, and the
+    // Moving back to own directories: the per-app copy is written first, and the
     // union copy leaves on the following run once that copy is proven.
     for (const id of ['alpha', 'beta'] as const) {
       assert.equal(skillEntry(report, 'agents', id)?.outcome, 'skipped', id);
@@ -164,9 +300,9 @@ test('turning use_agents_dir off restores the per-app copies before the union on
 
     assert.equal(skillEntry(second, 'agents', 'alpha')?.outcome, 'removed');
     assert.equal(skillEntry(second, 'agents', 'alpha')?.detail, undefined, 'removed on byte proof');
-    assert.equal(skillEntry(second, 'agents', 'beta')?.outcome, 'removed');
+    assert.equal(skillEntry(second, 'agents', 'beta')?.outcome, 'left-behind');
     for (const id of ['alpha', 'beta'] as const) {
-      assert.equal(fs.existsSync(unionBundle(homes, id)), false, id);
+      assert.equal(fs.existsSync(unionBundle(homes, id)), id === 'beta', id);
       assert.equal(skillEntry(second, 'codex', id)?.outcome, 'unchanged', id);
     }
     assert.equal(second.exitCode, 0);
@@ -181,22 +317,22 @@ test('an app filter mid-migration never orphans the skill', async () => {
 
     await runSync();
     const codexCopy = path.join(skillsParentDir(homes, 'codex'), 'alpha');
-    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], shared: true }));
 
-    // The filter drops the union write; the deferred removal must not fire.
+    // The filter includes the shared destination through its reader membership.
     const filtered = await runSync({ apps: ['codex'] });
 
     const entry = skillEntry(filtered, 'codex', 'alpha');
     assert.equal(entry?.outcome, 'skipped');
     assert.equal(entry?.detail, 'not-selected');
     assert.equal(exists(codexCopy, 'SKILL.md'), true, 'copy intact');
-    assert.equal(skillEntry(filtered, 'agents', 'alpha'), undefined, 'union write filtered out');
+    assert.equal(skillEntry(filtered, 'agents', 'alpha')?.outcome, 'written');
     assert.equal(filtered.exitCode, 0);
 
     const full = await runSync();
-    assert.equal(skillEntry(full, 'agents', 'alpha')?.outcome, 'written');
+    assert.equal(skillEntry(full, 'agents', 'alpha')?.outcome, 'unchanged');
     const converged = await runSync();
-    assert.equal(skillEntry(converged, 'codex', 'alpha')?.outcome, 'removed');
+    assert.equal(skillEntry(converged, 'codex', 'alpha'), undefined);
     assert.equal(exists(unionBundle(homes, 'alpha'), 'SKILL.md'), true);
   });
 });
@@ -212,7 +348,7 @@ test('a failing union destination leaves the per-app copy in place', async () =>
 
     // ~/.agents already exists as a file: the union parent cannot be created.
     fs.writeFileSync(path.join(homes.agentsHome, '.agents'), 'not a directory\n');
-    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], shared: true }));
 
     const report = await runSync();
 
@@ -238,26 +374,26 @@ test('the union retires when disabled but survives an enabled member being undet
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex', 'claude-code');
     seedSkill(homes, 'alpha');
-    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], shared: true }));
 
     const first = await runSync();
     assert.equal(skillEntry(first, 'agents', 'alpha')?.outcome, 'written');
     const unionCopy = path.join(unionBundle(homes, 'alpha'), 'SKILL.md');
     assert.equal(fs.existsSync(unionCopy), true);
 
-    writeUserConfig(homes, config({ apps: ['claude-code'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: ['alpha'], shared: true }));
     assert.equal(skillEntry(await runSync(), 'agents', 'alpha')?.outcome, 'removed');
     assert.equal(fs.existsSync(unionCopy), false);
-    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: ['alpha'], shared: true }));
     await runSync();
-    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['alpha'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['alpha'], shared: true }));
     const dormant = await runSync();
     assert.equal(skillEntry(dormant, 'agents', 'alpha'), undefined);
     assert.equal(fs.existsSync(unionCopy), true);
 
     // A returning member finds the record intact: deselection still removes
     // with proof instead of rediscovering an unproven foreign tree.
-    writeUserConfig(homes, config({ apps: ['codex'], skills: [], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['codex'], skills: [], shared: true }));
     const cleanup = await runSync();
     assert.equal(skillEntry(cleanup, 'agents', 'alpha')?.outcome, 'removed');
     assert.equal(fs.existsSync(unionBundle(homes, 'alpha')), false, 'removed with proof');
@@ -268,17 +404,7 @@ test('a member with no skills cell of its own reports missing skills only throug
   await withScratchHomes(async (homes) => {
     fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
 
-    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['ghost'], agentsDir: false }));
-    const nowhere = await runSync();
-
-    assert.equal(nowhere.exitCode, 0);
-    assert.equal(
-      nowhere.entries.some((entry) => entry.type === 'skills' && entry.id === 'ghost'),
-      false,
-      'a selection with no destination must not false-fail the run'
-    );
-
-    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['ghost'], agentsDir: true }));
+    writeUserConfig(homes, config({ apps: ['traecli'], skills: ['ghost'], shared: true }));
     const routed = await runSync();
 
     assert.equal(routed.exitCode, 1);

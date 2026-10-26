@@ -6,6 +6,7 @@ import {
   type EntryTargetRow,
   type HooksTargetRow,
   type McpTargetRow,
+  ownSkills,
   type RulesTargetRow,
 } from './apps.js';
 import {
@@ -1088,16 +1089,69 @@ interface SkillRowPlan {
   selected: string[];
 }
 
+/** One destination calculation shared by planning and ownership recording. */
+export function skillDestinations(input: PlanInput): SkillRowPlan[] {
+  const { config, table, capture } = input;
+  const active = table.filter(
+    (row) =>
+      config.apps.enabled.includes(row.id) &&
+      (capture.installed[row.id] || config.apps.assumeInstalled.includes(row.id))
+  );
+  const readers = active.filter((row) => row.skills?.shared);
+  const sharedReaders = readers.filter(
+    (row) => config.apps.overrides[row.id]?.skills?.destination !== 'own'
+  );
+  const common = sharedReaders.length
+    ? input
+        .selection(sharedReaders[0].id, 'skills')
+        .filter((id) =>
+          sharedReaders.every((row) => input.selection(row.id, 'skills').includes(id))
+        )
+    : [];
+  const rows: SkillRowPlan[] = [];
+  if (readers.length)
+    rows.push({
+      app: 'agents',
+      members: readers.map((row) => row.id),
+      dir: AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined),
+      root: AGENTS_SKILLS_UNION.root(config.homes, config.project ?? undefined),
+      reserved: AGENTS_SKILLS_UNION.reserved,
+      selected: common,
+    });
+  for (const row of active) {
+    const skills = ownSkills(row);
+    if (!skills) continue;
+    const shared = sharedReaders.some((reader) => reader.id === row.id);
+    rows.push({
+      app: row.id,
+      members: [row.id],
+      dir: skills.dir(config.homes),
+      root: skills.root(config.homes),
+      reserved: skills.reserved,
+      selected: input.selection(row.id, 'skills').filter((id) => !shared || !common.includes(id)),
+    });
+  }
+  const physical: SkillRowPlan[] = [];
+  for (const row of rows) {
+    const existing = physical.find((candidate) => candidate.dir === row.dir);
+    if (!existing) physical.push(row);
+    else {
+      existing.members = [...new Set([...existing.members, ...row.members])];
+      existing.selected = [...new Set([...existing.selected, ...row.selected])];
+      existing.reserved = [...new Set([...existing.reserved, ...row.reserved])];
+    }
+  }
+  return physical;
+}
+
 /**
- * Own-dir planner for skills. Emits per-bundle slices only; app-detection
+ * Skills planner. Emits per-bundle slices only; app-detection
  * skip rows and library-level parse failures are planRules' single voice
  * (both planners always run together through runSync).
  *
- * Ownership of an own-dir slice is derived from the library, not recorded.
- * A selected skill is brought to its render in one pass, leaving files the
- * render does not name untouched. Deletion needs the stronger claim that the
- * whole tree is byte-for-byte that render, so an edited or stale bundle is
- * reported and preserved rather than removed.
+ * Selected bundles mirror the library. The current render proves unrecorded
+ * copies for cleanup; ownership.ts reconciles recorded output and preserves
+ * edited bundles when they move between destinations.
  */
 export function planSkills(input: PlanInput): Action[] {
   const { config, inventory, capture, table } = input;
@@ -1119,58 +1173,33 @@ export function planSkills(input: PlanInput): Action[] {
   // lacks; skills aggregate nothing, so a missing id blocks no other slice.
   const missingUnion = new Set<string>();
 
-  const rows: SkillRowPlan[] = [];
-  const useAgentsDir = config.distribution.useAgentsDir;
-  const unionMembers = new Set(AGENTS_SKILLS_UNION.members);
-  const activeMembers = AGENTS_SKILLS_UNION.members.filter(
-    (member) => config.apps.enabled.includes(member) && detected(member)
-  );
-
-  const memberEffective = new Map<string, Set<string>>();
-  const memberDirs = new Map<string, string>();
-
-  for (const appId of config.apps.enabled) {
-    const row = table.find((candidate) => candidate.id === appId);
-    if (!row?.skills || !detected(appId)) continue;
-    const effective = input.selection(appId, 'skills');
-    for (const id of effective) {
+  const rows = skillDestinations(input);
+  for (const app of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === app);
+    if (!row?.skills || !detected(app)) continue;
+    for (const id of input.selection(app, 'skills')) {
       if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
-    }
-    if (unionMembers.has(appId)) {
-      memberEffective.set(appId, new Set(effective));
-      memberDirs.set(appId, row.skills.dir(config.homes));
-    }
-    rows.push({
-      app: appId,
-      members: [appId],
-      dir: row.skills.dir(config.homes),
-      root: row.skills.root(config.homes),
-      reserved: row.skills.reserved,
-      // In agents mode the union members' own rows deselect everything:
-      // their copies are stale by design and leave through the proof-gated
-      // removal path.
-      selected: useAgentsDir && unionMembers.has(appId) ? [] : effective,
-    });
-  }
-
-  // A union member without a skills cell (traecli) drives union writes only
-  // in agents-dir mode, so only then do its missing selections reach the
-  // library-level report; with the mode off it has no skills destination at
-  // all, and reporting would false-fail an otherwise complete run.
-  if (useAgentsDir) {
-    for (const member of activeMembers) {
-      if (table.find((candidate) => candidate.id === member)?.skills) continue;
-      for (const id of input.selection(member, 'skills')) {
-        if (!byId.has(id) && !failedIds.has(id)) missingUnion.add(id);
+      if (
+        !ownSkills(row) &&
+        !rows.some(
+          (destination) => destination.members.includes(app) && destination.selected.includes(id)
+        )
+      ) {
+        actions.push({
+          app,
+          type: 'skills',
+          id,
+          path: null,
+          op: 'none',
+          outcome: 'skipped',
+          detail: 'no-own-destination',
+          reason: `${app}: skill "${id}" is outside the shared selection and this app has no own skills directory`,
+        });
       }
     }
   }
 
-  // A copy that only moved (agents-dir toggle) is removed strictly after its
-  // replacement is proven on disk: every desired file present, byte- and
-  // mode-clean, at the destination this same capture saw. Until then the
-  // remove defers, so a failed destination write or an `--app` filter can
-  // never leave the user with no copy at all.
+  // Keep a moving copy until every selected replacement is proven on disk.
   const bundleCleanAt = (bundlePath: string, component: Component | undefined): boolean => {
     if (!component?.files || component.files.length === 0) return false;
     const capturedThere = capture.bundles[bundlePath];
@@ -1186,27 +1215,6 @@ export function planSkills(input: PlanInput): Action[] {
     });
   };
 
-  const unionSelected =
-    useAgentsDir && activeMembers.length > 0
-      ? [...new Set(activeMembers.flatMap((member) => input.selection(member, 'skills')))]
-      : [];
-  const unionDir = AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined);
-  // Dormant unless a member is enabled AND detected: an enabled but
-  // uninstalled member must not wake cleanup of union-written state.
-  const unionRowActive =
-    activeMembers.length > 0 &&
-    ((capture.bundleDirs[unionDir]?.length ?? 0) > 0 || unionSelected.length > 0);
-  if (unionRowActive) {
-    rows.push({
-      app: 'agents',
-      members: activeMembers,
-      dir: unionDir,
-      root: AGENTS_SKILLS_UNION.root(config.homes, config.project ?? undefined),
-      reserved: AGENTS_SKILLS_UNION.reserved,
-      selected: unionSelected,
-    });
-  }
-
   for (const id of missingUnion) {
     actions.push({
       app: null,
@@ -1219,21 +1227,7 @@ export function planSkills(input: PlanInput): Action[] {
     });
   }
 
-  const physicalRows: SkillRowPlan[] = [];
   for (const row of rows) {
-    const shared = input.project
-      ? physicalRows.find((candidate) => candidate.dir === row.dir)
-      : undefined;
-    if (!shared) {
-      physicalRows.push({ ...row, members: [...row.members], selected: [...row.selected] });
-      continue;
-    }
-    shared.members = [...new Set([...shared.members, ...row.members])];
-    shared.selected = [...new Set([...shared.selected, ...row.selected])];
-    shared.reserved = [...new Set([...shared.reserved, ...row.reserved])];
-  }
-
-  for (const row of physicalRows) {
     const present = capture.bundleDirs[row.dir] ?? [];
     const candidates = [
       ...new Set([
@@ -1291,7 +1285,7 @@ export function planSkills(input: PlanInput): Action[] {
         type: 'skills',
         id,
         path: bundlePath,
-        ...(row.members.length > 1 ? { members: row.members } : {}),
+        ...(row.app === 'agents' || row.members.length > 1 ? { members: row.members } : {}),
       };
 
       if (!captured.exists) {
@@ -1412,20 +1406,15 @@ export function planSkills(input: PlanInput): Action[] {
         continue;
       }
 
-      // Held back while an agents-dir toggle still needs this copy at its
-      // counterpart location.
-      const waitingOn: string[] = [];
-      if (useAgentsDir && unionMembers.has(row.app) && memberEffective.get(row.app)?.has(id)) {
-        const unionPath = path.join(unionDir, id);
-        if (!bundleCleanAt(unionPath, component)) waitingOn.push(unionPath);
-      }
-      if (row.app === 'agents') {
-        for (const [member, dir] of memberDirs) {
-          if (!memberEffective.get(member)?.has(id)) continue;
-          const memberPath = path.join(dir, id);
-          if (!bundleCleanAt(memberPath, component)) waitingOn.push(memberPath);
-        }
-      }
+      const waitingOn = rows
+        .filter(
+          (candidate) =>
+            candidate.dir !== row.dir &&
+            candidate.selected.includes(id) &&
+            candidate.members.some((member) => row.members.includes(member))
+        )
+        .map((candidate) => path.join(candidate.dir, id))
+        .filter((target) => !bundleCleanAt(target, component));
       if (waitingOn.length > 0) {
         actions.push({
           ...base,

@@ -77,6 +77,8 @@ export interface RulesTargetRow {
 }
 
 export interface SkillsTargetRow {
+  /** Reads the vendor-neutral skills directory in user and project scope. */
+  shared?: true;
   /** Directory whose resolved tree contains the skills parent; the containment root. */
   root(homes: Homes): string;
   /** Managed parent directory: each distributed skill is a child bundle of this. */
@@ -85,7 +87,7 @@ export interface SkillsTargetRow {
   projectDir?(projectRoot: string): string;
   /** Child directory names that belong to the app itself, never scanned or claimed. */
   reserved: readonly string[];
-  /** The predecessor exposed a library-ward importer for this app path. */
+  /** Supports importing this app's skills into the library. */
   importable?: boolean;
 }
 
@@ -200,10 +202,14 @@ export interface AppRow {
   rules?: RulesTargetRow;
   commands?: EntryTargetRow;
   agents?: EntryTargetRow;
-  skills?: SkillsTargetRow;
+  skills?: SkillsTargetRow | { shared: true };
   hooks?: HooksTargetRow;
   mcp?: McpTargetRow;
   native?: NativeManagerRow;
+}
+
+export function ownSkills(row: AppRow | undefined): SkillsTargetRow | undefined {
+  return row?.skills && 'dir' in row.skills ? row.skills : undefined;
 }
 
 /** probe: a commented opencode.jsonc wins over opencode.json. */
@@ -222,14 +228,11 @@ const JSON_MCP_ROW = {
   create: true,
 } as const;
 
-/**
- * With `distribution.use_agents_dir`, codex/opencode/traecli read
- * skills from the shared open-agent standard directory instead of their own
- * rows; the union row distributes the union of the active members' effective
- * selections.
- */
+/** Shared skills destination and its native readers. */
 export const AGENTS_SKILLS_UNION = {
-  members: ['codex', 'opencode', 'traecli'] as readonly string[],
+  get members(): readonly string[] {
+    return APP_ROWS.filter((row) => row.skills?.shared).map((row) => row.id);
+  },
   root: (homes: Homes, projectRoot?: string): string =>
     path.join(projectRoot ?? homes.agentsHome, '.agents'),
   dir: (homes: Homes, projectRoot?: string): string =>
@@ -237,8 +240,7 @@ export const AGENTS_SKILLS_UNION = {
   reserved: ['.system'] as readonly string[],
   // Capture scans on this predicate (an enabled-member superset); the
   // planner additionally requires detection, so an enabled but uninstalled
-  // member leaves union state untouched. With no member enabled the union
-  // is dormant: records and files stay untouched until a member returns.
+  // member leaves its state protected. Recorded outputs reconcile separately.
   participates: (enabled: readonly string[]): boolean =>
     AGENTS_SKILLS_UNION.members.some((member) => enabled.includes(member)),
 };
@@ -348,6 +350,7 @@ export const APP_ROWS: readonly AppRow[] = [
       },
     },
     skills: {
+      shared: true,
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       dir: (homes) => path.join(homes.agentsHome, '.codex', 'skills'),
       projectDir: (root) => path.join(root, '.agents', 'skills'),
@@ -419,6 +422,7 @@ export const APP_ROWS: readonly AppRow[] = [
       },
     },
     skills: {
+      shared: true,
       root: (homes) => opencodeRoot(homes.agentsHome),
       dir: (homes) => path.join(opencodeRoot(homes.agentsHome), 'skills'),
       projectDir: (root) => path.join(root, '.opencode', 'skills'),
@@ -473,6 +477,7 @@ export const APP_ROWS: readonly AppRow[] = [
       },
     },
     skills: {
+      shared: true,
       root: (homes) => path.join(homes.agentsHome, '.cursor'),
       dir: (homes) => path.join(homes.agentsHome, '.cursor', 'skills'),
       projectDir: (root) => path.join(root, '.cursor', 'skills'),
@@ -543,9 +548,10 @@ export const APP_ROWS: readonly AppRow[] = [
   },
   {
     // TRAE CLI 2.0: a codex fork sharing ~/.trae with the Trae IDE rows.
-    // ~/.trae/skills stays owned by the trae row, so no skills cell here.
+    // ~/.trae/skills stays owned by the trae row; this reader uses shared skills.
     id: 'traecli',
     detectDir: (homes) => path.join(homes.agentsHome, '.trae', 'cli'),
+    skills: { shared: true },
     rules: {
       root: (homes) => path.join(homes.agentsHome, '.trae'),
       path: (homes) => path.join(homes.agentsHome, '.trae', 'AGENTS.md'),
@@ -680,7 +686,7 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
 }
 
 /** Builtins plus strict config-defined rows; a custom row never overrides data. */
-export function appRows(config: Pick<ResolvedConfig, 'targets'>): readonly AppRow[] {
+export function appRows(config: Pick<ResolvedConfig, 'targets' | 'apps'>): readonly AppRow[] {
   const builtin = new Set(APP_ROWS.map((row) => row.id));
   const custom: AppRow[] = [];
   for (const [id, spec] of Object.entries(config.targets)) {
@@ -691,7 +697,18 @@ export function appRows(config: Pick<ResolvedConfig, 'targets'>): readonly AppRo
     }
     custom.push(compileCustomRow(id, spec));
   }
-  return [...APP_ROWS, ...custom];
+  const rows = [...APP_ROWS, ...custom];
+  for (const [id, override] of Object.entries(config.apps.overrides)) {
+    const destination = override.skills?.destination;
+    if (destination === undefined) continue;
+    const row = rows.find((candidate) => candidate.id === id);
+    if (!row?.skills?.shared || (destination === 'own' && !ownSkills(row))) {
+      throw new ConfigError(
+        `Invalid configuration: ${id} skills do not support destination = "${destination}"`
+      );
+    }
+  }
+  return rows;
 }
 
 /**
@@ -721,8 +738,9 @@ export function projectAppRows(table: readonly AppRow[], projectRoot: string): r
         config: undefined,
       };
     }
-    if (row.skills?.projectDir) {
-      const skills = row.skills;
+    if (row.skills?.shared) project.skills = { shared: true };
+    const skills = ownSkills(row);
+    if (skills?.projectDir) {
       project.skills = {
         ...skills,
         root: () => root,

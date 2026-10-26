@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import type { AppRow } from './apps.js';
+import { ownSkills } from './apps.js';
 import { ConfigError, effectiveSelection, type Homes, type ResolvedConfig } from './config.js';
 import { hookGroupOwner } from './hooks.js';
 import type { LibraryInventory } from './library.js';
@@ -48,7 +49,7 @@ function importableTypes(row: AppRow): ImportType[] {
   const result: ImportType[] = [];
   if (row.commands?.importer) result.push('commands');
   if (row.agents?.importer) result.push('agents');
-  if (row.skills?.importable) result.push('skills');
+  if (ownSkills(row)?.importable) result.push('skills');
   if (row.hooks?.importable) result.push('hooks');
   return result;
 }
@@ -170,8 +171,9 @@ async function importSkills(
   sourceOverride: string | undefined,
   options: ImportOptions
 ): Promise<ImportEntry[]> {
-  if (!row.skills?.importable) return [];
-  const source = path.resolve(sourceOverride ?? row.skills.dir(homes));
+  const skills = ownSkills(row);
+  if (!skills?.importable) return [];
+  const source = path.resolve(sourceOverride ?? skills.dir(homes));
   if (!fs.existsSync(source)) {
     return sourceOverride
       ? [

@@ -52,7 +52,11 @@ test('traecli is one builtin data row with its own detect dir and dialects', asy
     assert.equal(row.mcp?.format, 'toml');
     assert.equal(row.mcp?.rootKey, 'mcp_servers');
     assert.equal(row.mcp?.create, true);
-    assert.equal(row.skills, undefined, 'the trae row owns ~/.trae/skills, never traecli');
+    assert.deepEqual(
+      row.skills,
+      { shared: true },
+      'traecli reads shared skills without owning the IDE directory'
+    );
     assert.equal(row.hooks, undefined);
 
     // The row renames the fields its own frontmatter dialect spells
@@ -127,8 +131,6 @@ test('one sync fills every declared cell of an app row and skills flow through t
         '[skills]',
         'enabled = ["seeded"]',
         '',
-        '[distribution]',
-        'use_agents_dir = true',
         '',
       ].join('\n')
     );
@@ -158,7 +160,7 @@ test('one sync fills every declared cell of an app row and skills flow through t
       /name: reviewer/
     );
 
-    // A row without a skills cell still drives the shared writer, and never
+    // A row without an own skills directory still drives the shared writer, and never
     // claims the directory the IDE row owns.
     assert.equal(
       fs.existsSync(path.join(homes.agentsHome, '.agents', 'skills', 'seeded', 'SKILL.md')),

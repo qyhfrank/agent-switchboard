@@ -42,7 +42,7 @@ function seedLibrarySkill(homes: ScratchHomes, id = 'review-pr'): string {
 function config(opts: {
   apps: readonly string[];
   skills: readonly string[];
-  agentsDir?: boolean;
+  shared?: boolean;
 }): string {
   const list = (ids: readonly string[]) => ids.map((id) => `"${id}"`).join(', ');
   const lines = [
@@ -52,8 +52,10 @@ function config(opts: {
     '[skills]',
     `enabled = [${list(opts.skills)}]`,
   ];
-  if (opts.agentsDir !== undefined) {
-    lines.push('', '[distribution]', `use_agents_dir = ${opts.agentsDir}`);
+  if (!opts.shared) {
+    for (const app of opts.apps.filter((app) => ['codex', 'opencode', 'cursor'].includes(app))) {
+      lines.push('', `[applications.${app}.skills]`, 'destination = "own"');
+    }
   }
   return `${lines.join('\n')}\n`;
 }
@@ -388,8 +390,8 @@ test('a malformed library SKILL.md fails alone while healthy skills deploy', asy
 
 test('a reserved child of a managed skills parent is never reported, claimed, or touched', async () => {
   const rows = [
-    { app: 'codex' as const, agentsDir: false },
-    { app: 'agents' as const, agentsDir: true },
+    { app: 'codex' as const, shared: false },
+    { app: 'agents' as const, shared: true },
   ];
 
   for (const row of rows) {
@@ -398,7 +400,7 @@ test('a reserved child of a managed skills parent is never reported, claimed, or
       seedLibrarySkill(homes);
       writeUserConfig(
         homes,
-        config({ apps: ['codex'], skills: ['review-pr'], agentsDir: row.agentsDir })
+        config({ apps: ['codex'], skills: ['review-pr'], shared: row.shared })
       );
 
       const reserved = path.join(skillsParentDir(homes, row.app), '.system');
@@ -420,7 +422,7 @@ test('a reserved child of a managed skills parent is never reported, claimed, or
       assert.deepEqual(mtimesOf(reserved), mtimes, 'not even rewritten with identical bytes');
 
       // Deselection walks the same parent and still stays out of the app's own dir.
-      writeUserConfig(homes, config({ apps: ['codex'], skills: [], agentsDir: row.agentsDir }));
+      writeUserConfig(homes, config({ apps: ['codex'], skills: [], shared: row.shared }));
       const second = await runSync();
       assert.equal(
         second.entries.some((entry) => entry.path === reserved),
