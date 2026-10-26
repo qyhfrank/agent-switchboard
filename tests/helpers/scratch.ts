@@ -122,6 +122,7 @@ export type RuleAppId = 'claude-code' | 'codex' | 'opencode' | 'cursor' | 'trae'
 export const RULE_APPS: readonly RuleAppId[] = [
   'claude-code',
   'codex',
+  'pi',
   'opencode',
   'cursor',
   'trae',
@@ -156,6 +157,8 @@ export function detectDir(homes: ScratchHomes, app: DetectableAppId): string {
   switch (app) {
     case 'claude-code':
       return path.join(home, '.claude');
+    case 'pi':
+      return path.join(home, '.pi', 'agent');
     case 'codex':
       return path.join(home, '.codex');
     case 'cursor':
@@ -184,6 +187,8 @@ export function ruleFilePath(homes: ScratchHomes, app: RuleAppId): string {
   switch (app) {
     case 'claude-code':
       return path.join(home, '.claude', 'CLAUDE.md');
+    case 'pi':
+      return path.join(home, '.pi', 'agent', 'AGENTS.md');
     case 'codex':
       return path.join(home, '.codex', 'AGENTS.md');
     case 'opencode':
@@ -232,6 +237,8 @@ export function skillsParentDir(homes: ScratchHomes, app: RuleAppId | 'agents'):
   switch (app) {
     case 'claude-code':
       return path.join(home, '.claude', 'skills');
+    case 'pi':
+      return path.join(home, '.pi', 'agent', 'skills');
     case 'codex':
       return path.join(home, '.codex', 'skills');
     case 'opencode':
@@ -253,6 +260,7 @@ export const MCP_APPS: readonly McpAppId[] = [
   'claude-code',
   'claude-desktop',
   'codex',
+  'pi',
   'cursor',
   'opencode',
   'trae',
@@ -267,6 +275,8 @@ export function mcpHostPath(homes: ScratchHomes, app: McpAppId): string {
       return path.join(home, '.claude.json');
     case 'claude-desktop':
       return path.join(vendorDataDir(home, 'Claude'), 'claude_desktop_config.json');
+    case 'pi':
+      return path.join(home, '.pi', 'agent', 'mcp.json');
     case 'codex':
       return path.join(home, '.codex', 'config.toml');
     case 'cursor':

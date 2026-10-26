@@ -119,7 +119,7 @@ test('one selected server reaches every app in its own dialect', async () => {
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
 
     // Verbatim apps write the definition as authored, inferred type included.
-    for (const app of ['claude-code', 'claude-desktop', 'cursor'] as McpAppId[]) {
+    for (const app of ['claude-code', 'claude-desktop', 'cursor', 'pi'] as McpAppId[]) {
       assert.deepEqual(readMcpHost(homes, app)?.alpha, {
         command: 'npx',
         args: ['-y', 'alpha'],

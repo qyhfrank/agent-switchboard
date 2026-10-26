@@ -153,6 +153,16 @@ export function renderOpencodeCommand(component: Component): string {
   return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
 }
 
+export function renderPiCommand(component: Component): string {
+  const fields = platformFrontmatter(component, 'pi', ['argument-hint']);
+  return wrapFrontmatter(
+    Object.fromEntries(
+      Object.entries(fields).filter(([key]) => key === 'description' || key === 'argument-hint')
+    ),
+    component.content
+  );
+}
+
 export function renderOpencodeAgent(component: Component): string {
   return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
 }
@@ -453,6 +463,10 @@ export function inferServerType(server: McpServerValue): McpServerValue {
 /** Verbatim apps (claude-code, claude-desktop, cursor) write the definition as authored. */
 export function verbatimServer(server: McpServerValue): McpServerValue {
   return server;
+}
+
+export function piServer(server: McpServerValue): McpServerValue | null {
+  return server.type === 'sse' ? null : server;
 }
 
 /**

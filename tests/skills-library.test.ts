@@ -207,6 +207,7 @@ test('each skills-carrying app declares its parent directory inside its containm
       cursor: path.join(home, '.cursor', 'skills'),
       trae: path.join(home, '.trae', 'skills'),
       'trae-cn': path.join(home, '.trae-cn', 'skills'),
+      pi: path.join(home, '.pi', 'agent', 'skills'),
     } as const;
 
     for (const [id, dir] of Object.entries(expected)) {
