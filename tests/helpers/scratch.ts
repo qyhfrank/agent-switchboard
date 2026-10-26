@@ -57,9 +57,13 @@ export async function withScratchHomes<T>(fn: (homes: ScratchHomes) => T | Promi
   };
   fs.mkdirSync(homes.asbHome, { recursive: true });
   fs.mkdirSync(homes.agentsHome, { recursive: true });
+  // A caller such as `git rebase --exec` exports GIT_DIR and friends; fixture
+  // and engine git subprocesses would then act on the caller's repository.
+  const inheritedGit = Object.keys(process.env).filter((key) => key.startsWith('GIT_'));
   const previous = new Map<string, string | undefined>(
-    MANAGED_ENV.map((key) => [key, process.env[key]])
+    [...MANAGED_ENV, ...inheritedGit].map((key) => [key, process.env[key]])
   );
+  for (const key of inheritedGit) delete process.env[key];
   process.env.ASB_HOME = homes.asbHome;
   process.env.ASB_AGENTS_HOME = homes.agentsHome;
   process.env.ASB_CACHE_HOME = homes.cacheHome;
