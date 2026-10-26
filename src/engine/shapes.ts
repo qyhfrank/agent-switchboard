@@ -440,12 +440,29 @@ export function removeBundleSlice(bundleRoot: string, slice: readonly string[]):
     }
     pruneEmptyParents(root, rel);
   }
+  // A copied library tree can carry empty directories no rel names; left in
+  // place they keep the bundle directory alive and every later sync retires
+  // it again.
+  if (leftBehind.length === 0) removeEmptyDirs(root);
+  return leftBehind;
+}
+
+/** Remove a directory tree bottom-up wherever it holds nothing but empty directories. */
+function removeEmptyDirs(dirPath: string): void {
+  let entries: fs.Dirent[];
   try {
-    if (fs.readdirSync(root).length === 0) fs.rmdirSync(root);
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) removeEmptyDirs(path.join(dirPath, entry.name));
+  }
+  try {
+    if (fs.readdirSync(dirPath).length === 0) fs.rmdirSync(dirPath);
   } catch {
     // Gone already, or holding files the render never named.
   }
-  return leftBehind;
 }
 
 // ---------------------------------------------------------------------------

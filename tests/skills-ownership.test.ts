@@ -467,3 +467,22 @@ test('explain joins a live bundle to its library source and follows it out of pr
     assert.equal(edited?.provenance, null, 'an edited tree stops being provably asb’s');
   });
 });
+
+test('deselecting a bundle whose copy holds empty directories removes it and converges', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    seedLibrarySkill(homes);
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: ['review-pr'] }));
+    await runSync();
+    const bundle = bundlePath(homes, 'claude-code', 'review-pr');
+    // A directory copy of a library tree carries its empty directories along.
+    fs.mkdirSync(path.join(bundle, 'scripts', 'nested'), { recursive: true });
+
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: [] }));
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+    assert.equal(skillEntry(report, 'claude-code', 'review-pr')?.outcome, 'removed');
+    assert.equal(fs.existsSync(bundle), false);
+    assert.equal(skillEntry(await runSync(), 'claude-code', 'review-pr'), undefined);
+  });
+});
