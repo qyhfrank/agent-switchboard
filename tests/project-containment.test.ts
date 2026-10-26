@@ -534,64 +534,6 @@ test('a project run never reaches a machine host aliased into the repository', a
   }
 });
 
-test('a project run that cannot enumerate a machine surface fails closed and touches nothing', async () => {
-  // A legacy OpenCode skill directory links into the repository, so an
-  // exclusive sweep would reach the machine's copy unless the guard sees it.
-  // Under a privileged user these modes grant access anyway and the case
-  // passes without exercising the flag; the suite runs unprivileged.
-  for (const variant of ['an unreadable directory', 'an unresolvable link chain'] as const) {
-    await withScratchHomes(async (homes) => {
-      const project = path.join(homes.root, 'project');
-      fs.mkdirSync(project);
-      installApps(homes, 'opencode', 'claude-code');
-      const librarySkill = seedSkill(homes, 'check');
-      const sharedSkill = path.join(project, 'shared-skills', 'check');
-      fs.mkdirSync(path.dirname(sharedSkill), { recursive: true });
-      fs.cpSync(librarySkill, sharedSkill, { recursive: true });
-      const legacyDir = path.join(detectDir(homes, 'opencode'), 'skill');
-      fs.mkdirSync(legacyDir);
-
-      let restricted = legacyDir;
-      let mode = 0o111;
-      if (variant === 'an unreadable directory') {
-        fs.symlinkSync(sharedSkill, path.join(legacyDir, 'check'), 'dir');
-      } else {
-        const blocked = path.join(homes.root, 'blocked');
-        fs.mkdirSync(blocked);
-        fs.symlinkSync(path.join(project, 'shared-skills'), path.join(blocked, 'jump'), 'dir');
-        fs.symlinkSync(path.join(blocked, 'jump', 'check'), path.join(legacyDir, 'check'), 'dir');
-        restricted = blocked;
-        mode = 0o000;
-      }
-
-      writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
-      fs.mkdirSync(path.join(project, '.opencode'));
-      fs.symlinkSync(
-        path.join(project, 'shared-skills'),
-        path.join(project, '.opencode', 'skills'),
-        'dir'
-      );
-      projectConfig(project, '[applications]\nenabled = ["opencode"]\n\n[skills]\nenabled = []\n', {
-        mode: 'exclusive',
-      });
-
-      fs.chmodSync(restricted, mode);
-      try {
-        const report = await runSync({ project });
-
-        assert.equal(
-          fs.readFileSync(path.join(sharedSkill, 'SKILL.md'), 'utf-8'),
-          fs.readFileSync(path.join(librarySkill, 'SKILL.md'), 'utf-8'),
-          `${variant}: the machine keeps what the run cannot enumerate`
-        );
-        assert.deepEqual(mutations(report), [], JSON.stringify(report.entries, null, 2));
-      } finally {
-        fs.chmodSync(restricted, 0o755);
-      }
-    });
-  }
-});
-
 test('a failed exclusive cleanup fails the run and preserves the escaping link', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');

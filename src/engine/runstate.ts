@@ -44,25 +44,6 @@ export function saveLastRun(stateHome: string, lastRun: LastRun): void {
   writeFileAtomic(lastRunPath(stateHome), `${JSON.stringify(lastRun, null, 2)}\n`);
 }
 
-/**
- * The ownership stores a 0.4 install left behind: the entry ledger, the
- * per-project manifests, and the hook peer records. Nothing reads them, and a
- * stale record of who owns what is worse than none, so a real run clears them.
- */
-export function clearOwnershipStores(stateHome: string, asbHome: string): void {
-  for (const store of [
-    path.join(stateHome, 'ledger.json'),
-    path.join(asbHome, 'state', 'hooks'),
-    path.join(asbHome, 'state', 'manifests'),
-  ]) {
-    try {
-      fs.rmSync(store, { force: true, recursive: true });
-    } catch {
-      // A store that will not go changes nothing about what this run derives.
-    }
-  }
-}
-
 const LOCK_STALE_MS = 10 * 60 * 1000;
 
 export interface RunLock {

@@ -4,20 +4,7 @@ import path from 'node:path';
 import { parse as parseToml } from '@iarna/toml';
 import { z } from 'zod';
 
-/**
- * Configuration: environment roots, the base selection file (`config.toml`, or
- * a profile in its place) over the machine infrastructure `config.toml` always
- * owns, with an optional project layer above them, strict validation with a
- * legacy-input whitelist, and the comment-preserving selection editor.
- *
- * Frozen 0.4.35 contracts: file locations and env overrides (ASB_HOME,
- * ASB_CONFIG, ASB_AGENTS_HOME, ASB_CACHE_HOME, legacy ~/.agent-switchboard),
- * every documented config key, layer merge semantics (objects deep-merge,
- * arrays replace wholesale), and the legacy spellings 0.4 migrated
- * (`active` → `enabled`, `[agents]`+`[subagents]` → `[applications]`+`[agents]`,
- * legacy plugins formats). New in 0.5: ASB_STATE_HOME for machine-local state
- * and run-fatal unknown-key validation with a nearest-key suggestion.
- */
+/** Configuration paths, strict schemas, layering and selection editing. */
 
 export type ComponentType = 'rules' | 'commands' | 'agents' | 'skills' | 'hooks' | 'mcp';
 
@@ -49,9 +36,7 @@ export function resolveHomes(env: NodeJS.ProcessEnv = process.env): Homes {
   if (asbOverride) {
     asbHome = asbOverride;
   } else {
-    const shortDir = path.join(home, '.asb');
-    const legacyDir = path.join(home, '.agent-switchboard');
-    asbHome = fs.existsSync(shortDir) ? shortDir : fs.existsSync(legacyDir) ? legacyDir : shortDir;
+    asbHome = path.join(home, '.asb');
   }
 
   const agentsHome = env.ASB_AGENTS_HOME?.trim() || home;
@@ -175,7 +160,7 @@ export function projectConfigPath(projectRoot: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Schema (strict, with the 0.4 legacy whitelist applied before validation)
+// Strict schema
 // ---------------------------------------------------------------------------
 
 const idArray = z.array(z.string().trim().min(1));
@@ -184,120 +169,7 @@ export function isPlainObject(value: unknown): value is Record<string, unknown> 
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Legacy `active` spelling for a selection table becomes `enabled`. */
-function migrateActive(value: unknown): unknown {
-  if (!isPlainObject(value)) return value;
-  if (!('active' in value)) return value;
-  const migrated = { ...value };
-  if (!('enabled' in migrated)) migrated.enabled = migrated.active;
-  delete migrated.active;
-  return migrated;
-}
-
-/** Legacy plugins formats (flat boolean map, record-shaped enabled) → current shape. */
-function migratePluginsSection(input: unknown): unknown {
-  if (!isPlainObject(input)) return input;
-  const obj = input;
-
-  if (Array.isArray(obj.enabled)) return input;
-
-  const enabledRecord = obj.enabled;
-  if (isPlainObject(enabledRecord)) {
-    return {
-      ...obj,
-      enabled: Object.entries(enabledRecord)
-        .filter(([, v]) => v === true)
-        .map(([k]) => k),
-    };
-  }
-
-  // Only a table this recognizes as 0.3 is rewritten: a modern partial
-  // `[plugins]` keeps exactly the keys its file wrote, so a layer that
-  // declares one sub-table deep-merges instead of replacing the list a lower
-  // layer selected. `sources` is the modern map itself — a member named
-  // `source` is a location entry, never a 0.3 plugin sub-table.
-  const legacy = Object.entries(obj).some(
-    ([key, value]) =>
-      (key !== 'auto_update' && typeof value === 'boolean') ||
-      (key !== 'sources' && isPlainObject(value) && 'source' in value)
-  );
-  if (!legacy) return input;
-
-  const migratedSources: Record<string, unknown> = {};
-  const enabled: string[] = [];
-  const preserved: Record<string, unknown> = {};
-  let exclude: unknown;
-
-  for (const [key, value] of Object.entries(obj)) {
-    if (key === 'auto_update' && typeof value === 'boolean') {
-      preserved[key] = value;
-      continue;
-    }
-    if (key === 'exclude' && isPlainObject(value) && !('source' in value)) {
-      exclude = value;
-      continue;
-    }
-    if (key === 'sources' && isPlainObject(value)) {
-      preserved[key] = value;
-      continue;
-    }
-    if (typeof value === 'boolean') {
-      if (value) enabled.push(key);
-      continue;
-    }
-    if (isPlainObject(value) && 'source' in value) {
-      migratedSources[key] = value.source;
-      if (value.enabled === true) enabled.push(key);
-      continue;
-    }
-    preserved[key] = value;
-  }
-
-  if (isPlainObject(preserved.sources)) {
-    preserved.sources = { ...migratedSources, ...preserved.sources };
-  }
-  const result: Record<string, unknown> = { sources: migratedSources, enabled, ...preserved };
-  if (exclude !== undefined) result.exclude = exclude;
-  return result;
-}
-
-/** Legacy top-level `[agents]`(apps)+`[subagents]`(library) spelling. */
-function migrateLegacyTopLevel(raw: Record<string, unknown>): Record<string, unknown> {
-  const migrated = { ...raw };
-  const hasOldSubagents = 'subagents' in migrated;
-
-  if (hasOldSubagents && 'agents' in migrated && !('applications' in migrated)) {
-    migrated.applications = migrated.agents;
-    delete migrated.agents;
-
-    const apps = migrated.applications;
-    if (isPlainObject(apps)) {
-      for (const [key, value] of Object.entries(apps)) {
-        if (key === 'active' || key === 'enabled' || key === 'assume_installed') continue;
-        if (isPlainObject(value)) {
-          const override = { ...value };
-          if ('subagents' in override && !('agents' in override)) {
-            override.agents = override.subagents;
-            delete override.subagents;
-          }
-          apps[key] = override;
-        }
-      }
-    }
-  }
-
-  if ('subagents' in migrated && !('agents' in migrated)) {
-    migrated.agents = migrated.subagents;
-    delete migrated.subagents;
-  }
-
-  return migrated;
-}
-
-const selectionSection = z.preprocess(
-  migrateActive,
-  z.object({ enabled: idArray.optional() }).strict()
-);
+const selectionSection = z.object({ enabled: idArray.optional() }).strict();
 
 /**
  * A rule delimits its block with `<!-- <id>:start -->`, and the region around
@@ -313,10 +185,9 @@ const ruleIdArray = idArray.refine((ids) => !ids.includes('rules'), {
   message: RULE_ID_ERROR,
 });
 
-const rulesSection = z.preprocess(
-  migrateActive,
-  z.object({ enabled: ruleIdArray.optional(), includeDelimiters: z.boolean().optional() }).strict()
-);
+const rulesSection = z
+  .object({ enabled: ruleIdArray.optional(), includeDelimiters: z.boolean().optional() })
+  .strict();
 
 const incrementalSelection = z
   .object({ enabled: idArray.optional(), add: idArray.optional(), remove: idArray.optional() })
@@ -348,12 +219,9 @@ const applicationOverride = z
   })
   .strict();
 
-const applicationsSection = z.preprocess(
-  migrateActive,
-  z
-    .object({ enabled: idArray.optional(), assume_installed: idArray.optional() })
-    .catchall(applicationOverride)
-);
+const applicationsSection = z
+  .object({ enabled: idArray.optional(), assume_installed: idArray.optional() })
+  .catchall(applicationOverride);
 
 const remoteSource = z
   .object({
@@ -377,17 +245,14 @@ const pluginExclude = z
   })
   .strict();
 
-const pluginsSection = z.preprocess(
-  migratePluginsSection,
-  z
-    .object({
-      sources: z.record(z.string().trim().min(1), sourceValue).optional(),
-      enabled: idArray.optional(),
-      exclude: pluginExclude.optional(),
-      auto_update: z.boolean().optional(),
-    })
-    .strict()
-);
+const pluginsSection = z
+  .object({
+    sources: z.record(z.string().trim().min(1), sourceValue).optional(),
+    enabled: idArray.optional(),
+    exclude: pluginExclude.optional(),
+    auto_update: z.boolean().optional(),
+  })
+  .strict();
 
 const projectRulesDistribution = z
   .object({ placement: z.enum(['prepend', 'append']).optional() })
@@ -406,8 +271,6 @@ const distributionSection = z
   .strict();
 
 const uiSection = z.object({ page_size: z.number().int().min(5).max(50).optional() }).strict();
-
-const extensionsSection = z.record(z.string(), z.boolean());
 
 const targetPath = z.string().trim().min(1);
 const stringRecord = z.record(z.string(), z.string());
@@ -507,7 +370,6 @@ const layerSchema = z
   .object({
     applications: applicationsSection.optional(),
     plugins: pluginsSection.optional(),
-    extensions: extensionsSection.optional(),
     targets: z.record(z.string().trim().min(1), targetSpec).optional(),
     mcp: selectionSection.optional(),
     commands: selectionSection.optional(),
@@ -560,7 +422,6 @@ export function nearestKey(candidate: string, known: readonly string[]): string 
 const TOP_LEVEL_KEYS = [
   'applications',
   'plugins',
-  'extensions',
   'targets',
   'mcp',
   'commands',
@@ -696,19 +557,13 @@ function readLayer(kind: ConfigLayer['kind'], filePath: string): ConfigLayer {
     const message = error instanceof Error ? error.message : String(error);
     throw new ConfigError(`Failed to parse ${filePath}: ${message}`);
   }
-  const migrated = migrateLegacyTopLevel(isPlainObject(raw) ? raw : {});
-  const result = layerSchema.safeParse(migrated);
+  const result = layerSchema.safeParse(raw);
   if (!result.success) throw describeZodError(filePath, result.error);
   return { kind, path: filePath, exists: true, values: result.data };
 }
 
 /** Machine setup: what a selection file runs on rather than what it selects. */
-const INFRASTRUCTURE_SECTIONS: ReadonlySet<string> = new Set([
-  'targets',
-  'extensions',
-  'distribution',
-  'ui',
-]);
+const INFRASTRUCTURE_SECTIONS: ReadonlySet<string> = new Set(['targets', 'distribution', 'ui']);
 const INFRASTRUCTURE_PLUGIN_KEYS: ReadonlySet<string> = new Set(['sources', 'auto_update']);
 
 /**
@@ -778,7 +633,7 @@ export interface IncrementalOverride {
 }
 
 /**
- * Frozen 0.4 semantics: `enabled` replaces the base outright — even when it
+ * Selection semantics: `enabled` replaces the base outright — even when it
  * is an empty array — and short-circuits add/remove; otherwise the base
  * minus `remove` plus `add`, first occurrence wins.
  */
@@ -950,7 +805,6 @@ export interface ResolvedConfig {
       rulesPlacement: 'prepend' | 'append';
     };
   };
-  extensions: Record<string, boolean>;
   targets: Record<string, CustomTargetSpec>;
   ui: { pageSize: number };
   project: string | null;
@@ -990,7 +844,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
 
   // Selection from the active file alone, infrastructure from `config.toml`
   // always: a profile stays a selection file instead of a copy of the machine
-  // setup. The project layer then stacks over that base with the frozen 0.4
+  // setup. The project layer then stacks over that base with the same
   // merge, and the two views one run reconciles are this call with and
   // without a project root.
   const merged: Record<string, unknown> = {};
@@ -998,7 +852,7 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
   mergeDeep(merged, splitLayer(userLayer.values).infrastructure);
   if (projectLayer) {
     const { selection, infrastructure } = splitLayer(projectLayer.values);
-    // `[targets]`, `[extensions]`, `[distribution]` and `[ui]` are a
+    // `[targets]`, `[distribution]` and `[ui]` are a
     // repository's to set; plugin sources are not, so `plugins.sources` names
     // the machine's own in every scope and no repository declaration reaches
     // the catalog a selection resolves against.
@@ -1067,9 +921,6 @@ export function loadConfig(opts: LoadConfigOptions = {}): ResolvedConfig {
         rulesPlacement: (projectRules.placement as 'prepend' | 'append' | undefined) ?? 'prepend',
       },
     },
-    extensions: isPlainObject(merged.extensions)
-      ? (merged.extensions as Record<string, boolean>)
-      : {},
     targets: isPlainObject(merged.targets)
       ? (merged.targets as Record<string, CustomTargetSpec>)
       : {},

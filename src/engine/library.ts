@@ -96,7 +96,7 @@ const entryMetadataSchema = z
   })
   .passthrough();
 
-/** Frozen 0.4.35 hook grammar: an app-native event map with per-type required fields. */
+/** hook grammar: an app-native event map with per-type required fields. */
 const REQUIRED_HANDLER_FIELD = {
   command: 'command',
   http: 'url',
@@ -134,7 +134,7 @@ export type HookHandler = z.infer<typeof hookHandlerSchema>;
 export type HookGroup = z.infer<typeof hookGroupSchema>;
 export type HookEventMap = Record<string, HookGroup[]>;
 
-// Frozen 0.4.35 frontmatter grammar: ---\n...\n---\n(optional newline)
+// frontmatter grammar: ---\n...\n---\n(optional newline)
 const FRONTMATTER_PATTERN = /^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/;
 
 /** Shared frontmatter parse with per-kind schema and frozen error strings. */
@@ -162,7 +162,6 @@ function parseFrontmatterMarkdown(
       throw new Error(`Failed to parse ${label.toLowerCase()} frontmatter: ${message}`);
     }
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      // 0.4 funnels this through the same parse-error prefix as YAML failures.
       throw new Error(
         `Failed to parse ${label.toLowerCase()} frontmatter: ${label} frontmatter must evaluate to an object`
       );
@@ -298,7 +297,7 @@ const SKILL_FILE = 'SKILL.md';
  * SKILL.md is one component whose id is the directory name; the component
  * path is the bundle directory. Directories without a SKILL.md are not
  * skills and are skipped silently. A malformed SKILL.md fails that entry
- * with the frozen 0.4.35 error string (0.4 aborted the whole run instead).
+ * with a parse error.
  *
  * A plugin's custom skills path may name the bundle itself rather than a
  * parent of bundles, so such a root is read as one skill when it holds a
@@ -366,8 +365,7 @@ const HOOK_FILE = 'hook.json';
  * handlers directly, where an ASB event maps to groups that nest their own
  * `hooks` array.
  *
- * ponytail: a shape probe, not 0.4's full Copilot validator (event allow-list,
- * https-only handlers, prompt-only-on-sessionStart). Ceiling: an invalid ASB
+ * This shape probe does not validate Copilot event names or handlers: an invalid ASB
  * file carrying `version: 1` and handler-shaped events is skipped silently
  * instead of reported. Upgrade path is validating the events against Copilot's
  * own list, which only ever narrows what this skips.
@@ -399,8 +397,7 @@ function isForeignHookFile(value: unknown): boolean {
 /**
  * Hooks scan: `<root>/hooks/<id>.json` is a definition entry, and a child
  * directory holding `hook.json` is a bundle entry whose files are distributed
- * beside the app config. A malformed entry fails alone (0.4 threw and aborted
- * the whole load, and for a plugin's single-file hooks only warned).
+ * beside the app config. A malformed entry fails alone.
  */
 function scanHooksDirectory(directory: string, owner: Owner, inventory: LibraryInventory): void {
   if (!fs.existsSync(directory)) return;
@@ -432,7 +429,7 @@ function scanHooksDirectory(directory: string, owner: Owner, inventory: LibraryI
         hooks: parsed.hooks,
         // A plugin's flat hook references sibling scripts through the
         // plugin-root placeholder, so the whole hooks directory distributes
-        // as its bundle — the 0.4.35 layout.
+        // as its bundle.
         ...(isBundle
           ? { files: listBundleFiles(entryPath) }
           : owner.source !== LIBRARY.source
@@ -452,7 +449,7 @@ function scanHooksDirectory(directory: string, owner: Owner, inventory: LibraryI
   }
 }
 
-/** Frozen 0.4.35 MCP server grammar: unknown fields reach the target verbatim. */
+/** MCP server grammar: unknown fields reach the target verbatim. */
 const mcpServerSchema = z
   .object({
     command: z.string().optional(),

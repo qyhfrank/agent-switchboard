@@ -9,7 +9,6 @@ import {
   installApps,
   type ScratchHomes,
   seedMcpLibrary,
-  seedSkill,
   seedTree,
   withScratchHomes,
   writeUserConfig,
@@ -40,7 +39,7 @@ function codexConfig(homes: ScratchHomes): string {
   return path.join(homes.agentsHome, '.codex', 'config.toml');
 }
 
-function opencodeRoot(homes: ScratchHomes): string {
+function _opencodeRoot(homes: ScratchHomes): string {
   return path.join(homes.agentsHome, '.config', 'opencode');
 }
 
@@ -288,72 +287,5 @@ test('a hand-edited codex role key survives deselection and its neighbour is rem
     assert.equal(parsed.agents?.reviewer, undefined, 'recorded edited role is removed');
     assert.equal(parsed.agents?.planner, undefined, 'the untouched one is removed');
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-  });
-});
-
-test('legacy opencode singular copies are removed only while they still hold the render', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'opencode');
-    seedTree(homes.asbHome, {
-      'commands/build.md': 'Build.\n',
-      'agents/reviewer.md': 'Review.\n',
-    });
-    seedSkill(homes, 'check');
-    seedSkill(homes, 'notes');
-    selectionConfig(homes, ['opencode'], {
-      commands: ['build'],
-      agents: ['reviewer'],
-      skills: ['check', 'notes'],
-    });
-    await runSync();
-
-    const root = opencodeRoot(homes);
-    const legacyCommand = path.join(root, 'command', 'build.md');
-    seedTree(root, {
-      'command/build.md': fs.readFileSync(path.join(root, 'commands', 'build.md'), 'utf-8'),
-    });
-    const legacySkill = path.join(root, 'skill', 'check');
-    fs.mkdirSync(path.dirname(legacySkill), { recursive: true });
-    fs.cpSync(path.join(root, 'skills', 'check'), legacySkill, { recursive: true });
-
-    const cleaned = await runSync();
-    assert.equal(cleaned.exitCode, 0, JSON.stringify(cleaned.entries, null, 2));
-    assert.equal(fs.existsSync(legacyCommand), false);
-    assert.equal(fs.existsSync(legacySkill), false);
-
-    const legacyAgent = path.join(root, 'agent', 'reviewer.md');
-    seedTree(root, { 'agent/reviewer.md': 'User-edited review.\n' });
-    const dirtySkill = path.join(root, 'skill', 'notes');
-    fs.cpSync(path.join(root, 'skills', 'notes'), dirtySkill, { recursive: true });
-    seedTree(dirtySkill, { 'data.txt': 'user data\n' });
-
-    const unproven = await runSync();
-    assert.equal(unproven.exitCode, 0, JSON.stringify(unproven.entries, null, 2));
-    assert.equal(fs.existsSync(legacyAgent), true);
-    assert.equal(fs.existsSync(path.join(dirtySkill, 'SKILL.md')), true);
-    assert.equal(fs.existsSync(path.join(dirtySkill, 'data.txt')), true);
-    assert.equal(
-      unproven.entries.filter((row) => row.detail === 'unproven').length,
-      2,
-      JSON.stringify(unproven.entries, null, 2)
-    );
-  });
-});
-
-test('an unscannable legacy opencode directory fails its app', async () => {
-  await withScratchHomes(async (homes) => {
-    installApps(homes, 'opencode');
-    seedTree(homes.asbHome, { 'commands/build.md': 'Build.\n' });
-    selectionConfig(homes, ['opencode'], { commands: ['build'] });
-    seedTree(opencodeRoot(homes), { command: 'not a directory' });
-
-    const report = await runSync({ dryRun: true });
-
-    const scan = report.entries.find(
-      (row) => row.app === 'opencode' && row.detail === 'scan-error'
-    );
-    assert.equal(scan?.outcome, 'failed');
-    assert.match(scan?.reason ?? '', /cannot scan legacy command directory/);
-    assert.equal(report.exitCode, 1);
   });
 });

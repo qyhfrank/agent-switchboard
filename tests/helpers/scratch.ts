@@ -158,7 +158,7 @@ function vendorDataDir(agentsHome: string, appName: string): string {
 
 type DetectableAppId = RuleAppId | 'claude-desktop';
 
-/** The directory whose existence marks an app as installed (frozen 0.4.35 probes). */
+/** The directory whose existence marks an app as installed (probes). */
 export function detectDir(homes: ScratchHomes, app: DetectableAppId): string {
   const home = homes.agentsHome;
   switch (app) {
@@ -188,7 +188,7 @@ export function installApps(homes: ScratchHomes, ...apps: DetectableAppId[]): vo
   }
 }
 
-/** Global-scope rules target path per app (frozen 0.4.35 table values). */
+/** Global-scope rules target path per app (table values). */
 export function ruleFilePath(homes: ScratchHomes, app: RuleAppId): string {
   const home = homes.agentsHome;
   switch (app) {
@@ -238,7 +238,7 @@ export function seedRule(homes: ScratchHomes, fileName: string, body: string): s
   return filePath;
 }
 
-/** Global-scope skills parent directory per app (frozen 0.4.35 table values). */
+/** Global-scope skills parent directory per app (table values). */
 export function skillsParentDir(homes: ScratchHomes, app: RuleAppId | 'agents'): string {
   const home = homes.agentsHome;
   switch (app) {
@@ -274,7 +274,7 @@ export const MCP_APPS: readonly McpAppId[] = [
   'trae-cn',
 ];
 
-/** Global-scope MCP host document per app (frozen 0.4.35 table values). */
+/** Global-scope MCP host document per app (table values). */
 export function mcpHostPath(homes: ScratchHomes, app: McpAppId): string {
   const home = homes.agentsHome;
   switch (app) {

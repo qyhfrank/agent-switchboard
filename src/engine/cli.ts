@@ -56,7 +56,6 @@ import {
   planCodexProjectTrust,
   planCommands,
   planHooks,
-  planLegacyOpencode,
   planMcp,
   planRules,
   planSelectedPluginGaps,
@@ -80,14 +79,7 @@ import {
   renderExplain,
   renderReport,
 } from './report.js';
-import {
-  acquireRunLock,
-  clearOwnershipStores,
-  lastRunPath,
-  loadLastRun,
-  type RunLock,
-  saveLastRun,
-} from './runstate.js';
+import { acquireRunLock, lastRunPath, loadLastRun, type RunLock, saveLastRun } from './runstate.js';
 import {
   applyBundleFiles,
   bundleFingerprint,
@@ -194,7 +186,6 @@ function captureFor(
     bundleDirs: {},
     hooks: {},
     mcp: {},
-    legacy: [],
   };
 
   const captureFile = (root: string, targetPath: string, leafIdentity = false): void => {
@@ -331,86 +322,6 @@ function captureFor(
         fingerprint: exists ? (bundleFingerprint(bundlePath) ?? null) : null,
         escapes,
       };
-    }
-  }
-
-  // OpenCode 0.4 wrote singular command/agent/skill directories. Recognition
-  // comes from the current library ids and row filename function, never from
-  // parsing arbitrary user filenames. A present but unreadable singular dir
-  // is captured as a failure instead of silently disabling cleanup.
-  const opencode = table.find((row) => row.id === 'opencode');
-  if (config.apps.enabled.includes('opencode') && opencode) {
-    for (const type of ['commands', 'agents'] as const) {
-      const row = opencode[type];
-      if (!row) continue;
-      const currentDir = row.dir(config.homes);
-      const legacyDir = path.join(
-        path.dirname(currentDir),
-        type === 'commands' ? 'command' : 'agent'
-      );
-      const scan: SyncCapture['legacy'][number] = { type, path: legacyDir, entries: [] };
-      if (fs.existsSync(legacyDir)) {
-        try {
-          const names = new Map<string, string[]>();
-          for (const component of inventory.components.filter((item) => item.type === type)) {
-            const filename = row.filename(component.id);
-            names.set(filename, [...(names.get(filename) ?? []), component.id]);
-          }
-          for (const entry of fs.readdirSync(legacyDir, { withFileTypes: true })) {
-            if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-            const ids = names.get(entry.name);
-            if (ids?.length !== 1) continue;
-            const legacyPath = path.join(legacyDir, entry.name);
-            captureFile(row.root(config.homes), legacyPath);
-            scan.entries.push({
-              type,
-              id: ids[0],
-              path: legacyPath,
-              currentPath: path.join(currentDir, entry.name),
-              root: row.root(config.homes),
-              bundle: false,
-            });
-          }
-        } catch (error) {
-          scan.error = error instanceof Error ? error.message : String(error);
-        }
-      }
-      capture.legacy.push(scan);
-    }
-
-    if (opencode.skills) {
-      const currentDir = opencode.skills.dir(config.homes);
-      const legacyDir = path.join(path.dirname(currentDir), 'skill');
-      const scan: SyncCapture['legacy'][number] = { type: 'skills', path: legacyDir, entries: [] };
-      if (fs.existsSync(legacyDir)) {
-        try {
-          const ids = new Set(
-            inventory.components.filter((item) => item.type === 'skills').map((item) => item.id)
-          );
-          for (const entry of fs.readdirSync(legacyDir, { withFileTypes: true })) {
-            if ((!entry.isDirectory() && !entry.isSymbolicLink()) || !ids.has(entry.name)) continue;
-            const legacyPath = path.join(legacyDir, entry.name);
-            const exists = fs.existsSync(legacyPath);
-            capture.bundles[legacyPath] = {
-              exists,
-              files: exists ? listTargetFiles(legacyPath) : null,
-              fingerprint: exists ? (bundleFingerprint(legacyPath) ?? null) : null,
-              escapes: escapesRoot(opencode.skills.root(config.homes), legacyPath, project),
-            };
-            scan.entries.push({
-              type: 'skills',
-              id: entry.name,
-              path: legacyPath,
-              currentPath: path.join(currentDir, entry.name),
-              root: opencode.skills.root(config.homes),
-              bundle: true,
-            });
-          }
-        } catch (error) {
-          scan.error = error instanceof Error ? error.message : String(error);
-        }
-      }
-      capture.legacy.push(scan);
     }
   }
 
@@ -889,32 +800,6 @@ function runSourcesPhase(
   return { readiness, updates: updateSources(config, only ? { only } : {}), pendingRefresh: [] };
 }
 
-function extensionCutoverWarning(asbHome: string): Action[] {
-  const extensions = path.join(asbHome, 'extensions');
-  let found = false;
-  try {
-    found = fs
-      .readdirSync(extensions, { withFileTypes: true })
-      .some((entry) => entry.isFile() && /\.(?:mjs|js)$/i.test(entry.name));
-  } catch {
-    return [];
-  }
-  if (!found) return [];
-  return [
-    {
-      app: null,
-      type: null,
-      id: null,
-      path: extensions,
-      op: 'none',
-      outcome: 'skipped',
-      detail: 'extensions-removed',
-      reason:
-        'executable .mjs/.js extensions were removed in 0.5; replace them with [targets.<id>]. These files still serve a 0.4 peer sharing the library and are not deleted at cut-over',
-    },
-  ];
-}
-
 /** Resolve through symlinks where possible; an absent path is its own answer. */
 function canonical(target: string): string {
   try {
@@ -1079,22 +964,12 @@ function userSurfaces(
       const dir = entry.dir(base.homes);
       dirs.push(dir);
       paths.push(...children(dir));
-      if (row.id === 'opencode') {
-        const legacyDir = path.join(path.dirname(dir), type === 'commands' ? 'command' : 'agent');
-        dirs.push(legacyDir);
-        paths.push(...children(legacyDir));
-      }
       if (entry.config) paths.push(entry.config.path(base.homes));
     }
     if (row.skills) {
       const dir = row.skills.dir(base.homes);
       dirs.push(dir);
       paths.push(...children(dir));
-      if (row.id === 'opencode') {
-        const legacyDir = path.join(path.dirname(dir), 'skill');
-        dirs.push(legacyDir);
-        paths.push(...children(legacyDir));
-      }
     }
     for (const leaf of paths) leaves.push({ what: `a ${row.id} user file`, dir: leaf });
   }
@@ -1350,12 +1225,7 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
     project: projectPolicy,
     notices,
   } = resolveScopes(opts, env);
-  const preludeRows = [
-    ...notices,
-    ...missingProfile(base),
-    ...idleSelection(base),
-    ...extensionCutoverWarning(base.homes.asbHome),
-  ];
+  const preludeRows = [...notices, ...missingProfile(base), ...idleSelection(base)];
   const knownTypes = new Set<string>(STATUS_TYPES);
   for (const type of opts.types ?? []) {
     if (knownTypes.has(type)) continue;
@@ -1390,7 +1260,6 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
 
   try {
     const previousLastRun = loadLastRun(base.homes.stateHome);
-    if (!dryRun) clearOwnershipStores(base.homes.stateHome, base.homes.asbHome);
     // Sources, catalog, inventory and expansion describe the one library both
     // phases read, and it is the machine's: they materialize once, from the
     // base infrastructure alone, so no clone, fetch, or namespace resolution
@@ -1530,7 +1399,6 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
         ...planCommands(planInput),
         ...planAgents(planInput),
         ...planSkills(planInput),
-        ...(userPhase ? planLegacyOpencode(planInput) : []),
         ...planHooks(planInput),
         ...mcpActions,
         // Project trust is written for a repository, from an explicit root:
@@ -1637,10 +1505,8 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
         });
       }
       if (opts.idGlob) {
-        actions = actions.filter(
-          (action) =>
-            action.detail === 'extensions-removed' ||
-            statusActionMatchesId(action, opts.idGlob as string, selection)
+        actions = actions.filter((action) =>
+          statusActionMatchesId(action, opts.idGlob as string, selection)
         );
       }
       // Recorded targets include disabled apps and paths no longer present in

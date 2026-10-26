@@ -123,8 +123,7 @@ and `--json` is unaffected by either.
 
 ## Library and configuration
 
-ASB resolves its home from `ASB_HOME`, then `~/.asb`, then the predecessor
-home when it already exists. A typical library is:
+ASB resolves its home from `ASB_HOME`, then `~/.asb`. A typical library is:
 
 ```text
 ~/.asb/
@@ -145,7 +144,7 @@ place of the user configuration's selection rather than patching it:
 `[applications]`, the component sections, and `[plugins].enabled` come from it
 alone, and a selection section it omits selects nothing that run. Machine
 infrastructure (`[plugins].sources`, `[plugins].auto_update`, `[targets]`,
-`[extensions]`, `[distribution]`, `[ui]`) always comes from `config.toml`, so a
+`[distribution]`, `[ui]`) always comes from `config.toml`, so a
 profile carries a selection and never a copy of the machine setup. A profile
 that enables no applications reconciles nothing, and the report says so. A
 project's `.asb.toml` layers over the base to say what the repository adds:
@@ -228,11 +227,7 @@ remove = ["research"]
 enabled = ["cursor-policy"]
 ```
 
-Configuration is strict after the supported 0.4 compatibility spellings are
-migrated in memory. Unknown keys, invalid target shapes, and type errors fail
-before planning. Supported compatibility inputs include `active`, the former
-agents/subagents split, legacy plugin forms, and `[extensions]` parser
-tolerance.
+Configuration is strict. Unknown keys, invalid target shapes and type errors fail before planning.
 
 ## Supported applications
 
@@ -266,11 +261,6 @@ so nothing at it is ever removed for sitting there. A `rules.file_path` whose
 component selection is empty is reported and left, and no sibling of it is
 touched.
 
-Executable `.mjs` and `.js` target extensions are not loaded by 0.5. When
-files remain directly under `ASB_HOME/extensions`, every reconciliation emits
-one non-failing warning pointing to `[targets.<id>]`. ASB leaves those files
-alone: they are yours to delete once the `[targets.<id>]` tables replace them.
-
 ## Sources and plugins
 
 `asb add` accepts a local directory or Git URL. `--as` sets its namespace,
@@ -285,8 +275,7 @@ ready before inventory. Use `asb sync --update` to refresh them or
 Plugin components are namespaced as `plugin:component`. A plugin reference may
 use `plugin@source` when the same plugin name exists in multiple sources.
 External marketplace entries are materialized only when selected content needs
-them. The predecessor marketplace cache is read only to retire entries whose
-identity is verified; 0.5 never writes that cache.
+them.
 
 `asb remove <source>` retires every id that came from the source, in the
 top-level lists, the plugin list, and any per-application override, takes the
@@ -503,7 +492,6 @@ pnpm lint
 pnpm typecheck
 pnpm run build
 pnpm test
-pnpm run smoke:baseline
 ```
 
 After the final audit and user-journey checks pass, create the tag and push it

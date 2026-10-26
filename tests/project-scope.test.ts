@@ -995,8 +995,7 @@ test('a repository [plugins] sub-table adds to the base selection instead of cle
     );
 
     // Every other `[plugins]` spelling merges the same way, and `source` is a
-    // name like any other in the modern map: reading it as a legacy plugin
-    // sub-table would fabricate an empty `enabled` that clears the inheritance.
+    // name like any other in the sources map.
     for (const body of [
       '[plugins.exclude]\nrules = ["team:none"]\n',
       '[plugins.sources]\nsource = "/vendor/x"\n',

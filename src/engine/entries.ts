@@ -10,7 +10,7 @@ import { authenticatedGitEnv, credentialFreeGitUrl, runGit } from './git.js';
  * rebuildable machine-local state, so they live under the cache root asb owns
  * exclusively and never in the synchronized home.
  *
- * Layout (frozen 0.4.35):
+ * Layout:
  *   <cacheHome>/.entries/<source>-<10 hex>/<plugin>-<16 hex>/{entry.json, repo/}
  * The hashes are identities, not shortenings: the source hash covers the
  * source name and the canonical marketplace path, the entry hash additionally
@@ -372,68 +372,6 @@ function removeSupersededPluginEntries(
   }
 }
 
-/**
- * The predecessor cache inside the synchronized home. asb 0.5 never writes
- * here; it consumes what a 0.4 peer left, and only once the replacement is
- * verified usable, so a mid-migration user does not keep a stale tree forever.
- */
-function legacyCacheRoot(homes: Homes): string {
-  return path.join(homes.asbHome, 'state', 'marketplace-plugins');
-}
-
-/** The marketplace paths a legacy entry could have been recorded under. */
-function legacyOwnerPaths(homes: Homes, request: EntryRequest): string[] {
-  const owners = [request.marketplacePath];
-  const managedDir = canonicalMissingPath(path.join(homes.cacheHome, request.sourceName));
-  const relative = path.relative(managedDir, request.marketplacePath);
-  if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
-    owners.push(
-      canonicalMissingPath(path.join(homes.asbHome, 'plugins', request.sourceName, relative))
-    );
-  }
-  return owners;
-}
-
-function retireLegacyEntries(homes: Homes, request: EntryRequest): void {
-  const cacheRoot = legacyCacheRoot(homes);
-  const rootStat = fs.lstatSync(cacheRoot, { throwIfNoEntry: false });
-  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) return;
-
-  for (const owner of new Set(legacyOwnerPaths(homes, request))) {
-    const sourcePath = sourceCachePath(request.sourceName, owner, cacheRoot);
-    const sourceStat = fs.lstatSync(sourcePath, { throwIfNoEntry: false });
-    if (!sourceStat?.isDirectory() || sourceStat.isSymbolicLink()) continue;
-    assertNoCacheSymlinks(cacheRoot, sourcePath);
-
-    for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-      const entryPath = path.join(sourcePath, entry.name);
-      const metadata = readMetadata(entryPath);
-      if (
-        metadata?.sourceName !== request.sourceName ||
-        metadata.pluginName !== request.pluginName ||
-        metadata.marketplacePath !== owner
-      ) {
-        continue;
-      }
-      // Retire only a predecessor that still verifies as itself: an
-      // unverifiable one may hold something asb did not put there.
-      const legacyRequest: EntryRequest = {
-        ...request,
-        marketplacePath: metadata.marketplacePath,
-        ref: metadata.ref,
-        sha: metadata.sha,
-        subdir: metadata.subdir,
-      };
-      const identity = requestIdentity(legacyRequest);
-      if (cachedMaterialization(legacyRequest, identity, entryPath, cacheRoot) === null) continue;
-      fs.rmSync(entryPath, { recursive: true, force: true });
-    }
-
-    if (fs.readdirSync(sourcePath).length === 0) fs.rmdirSync(sourcePath);
-  }
-}
-
 export function materializeEntry(
   homes: Homes,
   input: EntryRequest,
@@ -452,7 +390,6 @@ export function materializeEntry(
   // identity is reused even when the caller asked for a refresh.
   const cached = cachedMaterialization(request, identity, entryPath, cacheRoot);
   if (cached && (!options.refresh || request.sha)) {
-    retireLegacyEntries(homes, request);
     return cached;
   }
 
@@ -477,7 +414,6 @@ export function materializeEntry(
     // Verify what actually landed, not what was intended.
     const materialized = cachedMaterialization(request, identity, entryPath, cacheRoot);
     if (!materialized) throw new Error(`Marketplace cache verification failed: ${entryPath}`);
-    retireLegacyEntries(homes, request);
     return materialized;
   } finally {
     if (fs.existsSync(tempPath)) fs.rmSync(tempPath, { recursive: true, force: true });

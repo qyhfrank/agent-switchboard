@@ -12,7 +12,7 @@ import path from 'node:path';
  * directory exactly the generation asb cloned, with nothing of the user's in
  * it" and nothing else may authorize a delete.
  *
- * Frozen 0.4.35 contracts: the credential-free URL form, the GIT_CONFIG
+ * contracts: the credential-free URL form, the GIT_CONFIG
  * insteadOf injection, the 120s command cap, the `.git/asb-source.json`
  * marker schema, and every check `verifyClone` performs — including
  * `status --porcelain --ignored --untracked-files=all`, where ignored files

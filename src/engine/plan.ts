@@ -70,7 +70,7 @@ export interface CapturedBundle {
   exists: boolean;
   /** Live file inventory; null when the tree is unprovable (symlinks etc.). */
   files: TargetFile[] | null;
-  /** 0.4 `tree:` fingerprint of the live directory; null when unprovable. */
+  /** `tree:` fingerprint of the live directory; null when unprovable. */
   fingerprint: string | null;
   /** Parent chain of the bundle directory resolves outside the app root. */
   escapes?: boolean;
@@ -104,22 +104,6 @@ export interface CapturedMcpHost {
   escapes?: boolean;
 }
 
-export interface CapturedLegacyEntry {
-  type: 'commands' | 'agents' | 'skills';
-  id: string;
-  path: string;
-  currentPath: string;
-  root: string;
-  bundle: boolean;
-}
-
-export interface CapturedLegacyScan {
-  type: CapturedLegacyEntry['type'];
-  path: string;
-  entries: CapturedLegacyEntry[];
-  error?: string;
-}
-
 export interface SyncCapture {
   /** Detection probe results per app id. */
   installed: Record<string, boolean>;
@@ -137,8 +121,6 @@ export interface SyncCapture {
   mcp: Record<string, CapturedMcpHost>;
   /** Global Codex TOML captured separately from the project MCP host. */
   projectTrust?: CapturedMcpHost;
-  /** Recognized OpenCode singular-layout entries and any scan failure. */
-  legacy: CapturedLegacyScan[];
 }
 
 export interface Action {
@@ -1901,108 +1883,6 @@ export function planAgents(input: PlanInput): Action[] {
   return planEntries(input, 'agents');
 }
 
-/** Retire recognized OpenCode singular-layout entries after replacements land. */
-export function planLegacyOpencode(input: PlanInput): Action[] {
-  const { capture, inventory, table } = input;
-  const actions: Action[] = [];
-  const opencode = table.find((row) => row.id === 'opencode');
-  const components = new Map(
-    inventory.components.map((component) => [`${component.type}\0${component.id}`, component])
-  );
-  for (const scan of capture.legacy) {
-    if (scan.error) {
-      actions.push({
-        app: 'opencode',
-        type: scan.type,
-        id: null,
-        path: scan.path,
-        op: 'none',
-        outcome: 'failed',
-        detail: 'scan-error',
-        reason: `cannot scan legacy ${scan.type === 'commands' ? 'command' : scan.type === 'agents' ? 'agent' : 'skill'} directory: ${scan.error}`,
-      });
-      continue;
-    }
-    const selected = new Set(input.selection('opencode', scan.type));
-    for (const entry of scan.entries) {
-      const replacement = selected.has(entry.id);
-      const base = { app: 'opencode', type: entry.type, id: entry.id, path: entry.path };
-      const component = components.get(`${entry.type}\0${entry.id}`);
-      const leaveUnproven = (): void => {
-        actions.push({
-          ...base,
-          op: 'none',
-          outcome: 'left-behind',
-          detail: 'unproven',
-          reason:
-            'filename matches a library component but the file is not what the library renders; delete it yourself or enable it to have it written',
-        });
-      };
-      if (entry.bundle) {
-        const captured = capture.bundles[entry.path];
-        if (!captured?.exists || captured.files === null || captured.fingerprint === null) {
-          leaveUnproven();
-          continue;
-        }
-        const desired = component?.files;
-        const liveByRel = new Map(captured.files.map((file) => [file.rel, file]));
-        if (
-          !desired ||
-          desired.length !== captured.files.length ||
-          !desired.every((file) => {
-            const live = liveByRel.get(file.rel);
-            return (
-              live !== undefined &&
-              live.hash === hashContent(file.bytes) &&
-              targetModeMatchesSourceExecutableBits(file.mode, live.mode)
-            );
-          })
-        ) {
-          leaveUnproven();
-          continue;
-        }
-        actions.push({
-          ...base,
-          op: 'remove',
-          outcome: 'removed',
-          detail: replacement ? 'legacy-duplicate' : 'legacy-orphan',
-          root: entry.root,
-          expectedHash: captured.fingerprint,
-          bundle: { files: [], stale: captured.files.map((file) => file.rel) },
-          ...(replacement ? { requiresPaths: [entry.currentPath] } : {}),
-        });
-      } else {
-        const captured = capture.targets[entry.path];
-        if (!captured?.exists || captured.content === null) {
-          leaveUnproven();
-          continue;
-        }
-        const target = entry.type === 'commands' ? opencode?.commands : opencode?.agents;
-        let desired: string | null = null;
-        try {
-          if (component && target) desired = target.render(component);
-        } catch {
-          // A component that cannot render cannot prove ownership of user bytes.
-        }
-        if (desired === null || hashContent(captured.content) !== hashContent(desired)) {
-          leaveUnproven();
-          continue;
-        }
-        actions.push({
-          ...base,
-          op: 'remove',
-          outcome: 'removed',
-          detail: replacement ? 'legacy-duplicate' : 'legacy-orphan',
-          root: entry.root,
-          expectedHash: hashContent(captured.content),
-          ...(replacement ? { requiresPaths: [entry.currentPath] } : {}),
-        });
-      }
-    }
-  }
-  return actions;
-}
-
 // ---------------------------------------------------------------------------
 // Hooks: a JSON slice inside a config the app and the user also write
 // ---------------------------------------------------------------------------
@@ -2719,7 +2599,7 @@ function planMcpHost(
   };
 
   // Two ids that sanitize to one key would take turns owning it and silently
-  // erase each other; 0.4 threw, and the run reports it as this app's failure.
+  // erase each other; the run reports it as this app's failure.
   const claimed = new Map<string, string>();
   for (const id of selected) {
     if (!byId.has(id)) continue;
@@ -2962,7 +2842,7 @@ function planMcpHost(
  * outside the owned key paths round-trips byte for byte.
  *
  * Zero selected servers plan no MCP file anywhere — an empty desired set never
- * creates a host, which is where 0.4 wrote an empty server map instead.
+ * creates a host.
  */
 export function planMcp(input: PlanInput): Action[] {
   const { config, inventory, capture, table } = input;

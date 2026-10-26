@@ -42,7 +42,7 @@ import type { NativeTarget } from './sources.js';
 /**
  * The app × type table. Variation that fits a column is a column: detect
  * probe, per-type target rows (shape, path, create, render, containment
- * root), reserved names. Paths and formats are frozen 0.4.35 values.
+ * root), reserved names. Paths and formats are values.
  */
 
 function opencodeRoot(agentsHome: string): string {
@@ -210,7 +210,7 @@ export interface AppRow {
   native?: NativeManagerRow;
 }
 
-/** Frozen 0.4.35 probe: a commented opencode.jsonc wins over opencode.json. */
+/** probe: a commented opencode.jsonc wins over opencode.json. */
 function opencodeConfigPath(root: string): string {
   const jsonc = path.join(root, 'opencode.jsonc');
   return fs.existsSync(jsonc) ? jsonc : path.join(root, 'opencode.json');

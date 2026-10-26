@@ -25,7 +25,7 @@ export function hashContent(content: string | Buffer): string {
 }
 
 // ---------------------------------------------------------------------------
-// Rules aggregate render (frozen 0.4.35 compose semantics)
+// Rules aggregate render (compose semantics)
 // ---------------------------------------------------------------------------
 
 export interface ComposableRule {
@@ -250,10 +250,10 @@ export function listBundleFiles(root: string): BundleFile[] {
 }
 
 /**
- * Frozen 0.4.35 tree hash over a target bundle: `tree:<sha256>` covering
+ * tree hash over a target bundle: `tree:<sha256>` covering
  * every entry (dot files included), its rel path, and its permission bits.
  * Any symlink, non-regular entry, or non-directory root makes the tree
- * unprovable → undefined. Byte-compatible with 0.4 per-device manifests.
+ * unprovable → undefined.
  */
 export function bundleFingerprint(dir: string): string | undefined {
   let root: fs.Stats;
@@ -293,7 +293,7 @@ export function executableBits(mode: number): number {
 }
 
 /**
- * Frozen 0.4 mode contract: an executable source demands the exact source
+ * mode contract: an executable source demands the exact source
  * mode on the target; a non-executable source only demands no exec bits.
  */
 export function targetModeMatchesSourceExecutableBits(srcMode: number, dstMode: number): boolean {
@@ -303,7 +303,7 @@ export function targetModeMatchesSourceExecutableBits(srcMode: number, dstMode: 
   return executableBits(dstMode) === 0;
 }
 
-/** The mode a written target file should end up with (frozen 0.4 repair rule). */
+/** The mode a written target file should end up with (repair rule). */
 export function desiredTargetMode(srcMode: number, currentMode: number): number {
   if (executableBits(srcMode) !== 0) {
     return srcMode;
@@ -373,7 +373,7 @@ function pruneEmptyParents(bundleRoot: string, rel: string): void {
 
 /**
  * Reconcile an owned bundle directory to the desired file set: write files
- * whose bytes or mode differ (atomic, mode per the 0.4 repair rule), delete
+ * whose bytes or mode differ (atomic, preserving executable modes), delete
  * exactly the stale rels the caller's ownership record names, and prune
  * directories those deletions emptied. Files the record never covered are
  * left in place.
@@ -822,7 +822,7 @@ interface TomlTable {
 
 const TOML_BARE_KEY = /^[A-Za-z0-9_-]+$/;
 
-/** Quote a TOML key exactly as 0.4.35 did: bare when it can be, else escaped. */
+/** Quote a TOML key using TOML syntax: bare when it can be, else escaped. */
 export function tomlKey(key: string): string {
   if (TOML_BARE_KEY.test(key)) return key;
   return `"${key.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
@@ -1037,7 +1037,7 @@ export function resolveWritePath(targetPath: string): string {
     return fs.realpathSync(absolute);
   } catch {
     // A dangling symlink is still written through: resolve the link chain by
-    // hand (0.4's writeFileSync followed it and created the backing file);
+    // hand;
     // replacing the link with a plain file would break the user's setup.
     let followed = absolute;
     let endsAtNonLink = false;
@@ -1052,8 +1052,7 @@ export function resolveWritePath(targetPath: string): string {
       followed = path.resolve(path.dirname(followed), link);
     }
     if (!endsAtNonLink) {
-      // 32 hops without reaching a non-link: a cycle. 0.4's writeFileSync
-      // threw ELOOP here; renaming over the link would destroy it.
+      // 32 hops without reaching a non-link: fail without replacing the link.
       throw new Error(`ELOOP: too many symbolic links encountered, '${absolute}'`);
     }
     if (followed !== absolute) return resolveWritePath(followed);

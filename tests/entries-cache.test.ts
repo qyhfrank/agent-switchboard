@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
@@ -25,7 +24,7 @@ import {
 /**
  * Derived cache for external marketplace entries: pinning and ref resolution,
  * credential safety, refresh generation safety, ownership and symlink defense,
- * and retirement of the predecessor cache under ASB_HOME.
+ * cache identity checks.
  */
 
 function homesOf(_scratch: ScratchHomes): Homes {
@@ -73,7 +72,6 @@ test('a git-subdir entry checks out sparsely under the reserved cache subtree', 
     assert.equal(fs.existsSync(path.join(materialized.repoPath, 'unrelated')), false);
     assert.equal(git(['sparse-checkout', 'list'], materialized.repoPath), 'packages/plugin');
     // Nothing derived is written into the synchronized home.
-    assert.equal(fs.existsSync(path.join(scratch.asbHome, 'state', 'marketplace-plugins')), false);
   });
 });
 
@@ -415,114 +413,4 @@ test('a symlinked cache home is rejected without touching its target', async () 
     );
     assert.deepEqual(fs.readdirSync(outside), ['sentinel']);
   });
-});
-
-// ── The predecessor cache under ASB_HOME: read to retire, never written ────
-
-function compatibilityCacheRoot(scratch: ScratchHomes): string {
-  return path.join(scratch.asbHome, 'state', 'marketplace-plugins');
-}
-
-/** Move a materialized entry into the layout a predecessor peer would have left behind. */
-function moveToCompatibilityCache(
-  scratch: ScratchHomes,
-  homes: Homes,
-  request: EntryRequest,
-  entryPath: string
-): string {
-  const ownerIdentity = createHash('sha256')
-    .update(
-      JSON.stringify({
-        sourceName: request.sourceName,
-        marketplacePath: fs.realpathSync.native(request.marketplacePath),
-      })
-    )
-    .digest('hex');
-  const retiredEntry = path.join(
-    compatibilityCacheRoot(scratch),
-    `${request.sourceName}-${ownerIdentity.slice(0, 10)}`,
-    path.basename(entryPath)
-  );
-  fs.mkdirSync(path.dirname(retiredEntry), { recursive: true });
-  fs.renameSync(entryPath, retiredEntry);
-  fs.rmSync(entriesRoot(homes), { recursive: true, force: true });
-  return retiredEntry;
-}
-
-test('a verified predecessor retires only after a successful replacement', async () => {
-  for (const owner of ['unchanged-path', 'migrated-source'] as const) {
-    await withScratchHomes(async (scratch) => {
-      const homes = homesOf(scratch);
-      const remote = createGitFixture(scratch.root, 'retire-remote');
-      writePluginVersion(remote, 'v1');
-      const previousSourceDir = path.join(scratch.asbHome, 'plugins', 'retire-source');
-      const cacheSourceDir = path.join(homes.cacheHome, 'retire-source');
-      const firstOwner =
-        owner === 'unchanged-path' ? path.join(scratch.asbHome, 'catalog') : previousSourceDir;
-      fs.mkdirSync(firstOwner, { recursive: true });
-      const base = requestFor(scratch, remote, { sourceName: 'retire-source' });
-
-      const before = materializeEntry(homes, { ...base, marketplacePath: firstOwner });
-      const retiredEntry = moveToCompatibilityCache(
-        scratch,
-        homes,
-        { ...base, marketplacePath: firstOwner },
-        before.entryPath
-      );
-      const secondOwner = owner === 'unchanged-path' ? firstOwner : cacheSourceDir;
-      if (owner === 'migrated-source') {
-        fs.rmSync(previousSourceDir, { recursive: true, force: true });
-        fs.mkdirSync(secondOwner, { recursive: true });
-      }
-
-      const after = materializeEntry(homes, { ...base, marketplacePath: secondOwner });
-
-      assert.equal(fs.readFileSync(path.join(after.pluginPath, 'VERSION'), 'utf-8').trim(), 'v1');
-      assert.equal(path.relative(homes.cacheHome, after.entryPath).startsWith('..'), false);
-      assert.equal(fs.existsSync(retiredEntry), false);
-    });
-  }
-});
-
-test('the predecessor cache preserves unsafe or unreplaced entries', async () => {
-  for (const guard of ['materialization-failed', 'entry-unverified', 'root-symlink'] as const) {
-    await withScratchHomes(async (scratch) => {
-      const homes = homesOf(scratch);
-      const remote = createGitFixture(scratch.root, 'preserve-remote');
-      writePluginVersion(remote, 'v1');
-      const marketplacePath = path.join(scratch.asbHome, 'catalog');
-      fs.mkdirSync(marketplacePath, { recursive: true });
-      const request = requestFor(scratch, remote, {
-        sourceName: 'preserve-source',
-        marketplacePath,
-      });
-      const before = materializeEntry(homes, request);
-      const retiredEntry = moveToCompatibilityCache(scratch, homes, request, before.entryPath);
-
-      if (guard === 'materialization-failed') {
-        const offline = `${remote.bareRepo}.offline`;
-        fs.renameSync(remote.bareRepo, offline);
-        try {
-          assert.throws(() => materializeEntry(homes, request), /git fetch failed/);
-        } finally {
-          fs.renameSync(offline, remote.bareRepo);
-        }
-      } else if (guard === 'entry-unverified') {
-        fs.writeFileSync(path.join(retiredEntry, 'entry.json'), '{ not json\n');
-        materializeEntry(homes, request);
-      } else {
-        const compatibilityRoot = compatibilityCacheRoot(scratch);
-        const outside = path.join(scratch.root, 'linked-compatibility-cache');
-        fs.renameSync(compatibilityRoot, outside);
-        fs.symlinkSync(outside, compatibilityRoot);
-        materializeEntry(homes, request);
-      }
-
-      assert.equal(fs.existsSync(retiredEntry), true);
-      assert.equal(
-        fs.existsSync(path.join(retiredEntry, 'repo', 'packages', 'plugin', 'VERSION')),
-        true
-      );
-    });
-  }
 });

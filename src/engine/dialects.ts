@@ -10,7 +10,7 @@ import { tomlKey } from './shapes.js';
  * other per-app variation is a column in the apps table.
  */
 
-/** Frozen 0.4.35 mdc frontmatter wrap used by cursor/trae/trae-cn rules targets. */
+/** mdc frontmatter wrap used by cursor/trae/trae-cn rules targets. */
 export function wrapMdcFrontmatter(body: string): string {
   const lines = ['---', 'description: Rules', 'alwaysApply: true', '---', ''];
   if (body.length > 0) lines.push(body);
@@ -92,7 +92,7 @@ export function importPlainEntry(filePath: string, platform: string): string {
   );
 }
 
-/** Gemini TOML → library Markdown, including fields 0.4 used to drop. */
+/** Gemini TOML → library Markdown, including frontmatter fields. */
 export function importGeminiCommand(filePath: string): string {
   const parsed = tomlParse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
   const { prompt, description, ...extras } = parsed;
@@ -232,20 +232,6 @@ export function envMapToKvArray(
   return Object.entries(env).map(([key, value]) => ({ [keyName]: key, [valueName]: value }));
 }
 
-export function kvArrayToEnvMap(
-  entries: readonly Record<string, string>[],
-  keyName = 'key',
-  valueName = 'value'
-): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const entry of entries) {
-    if (typeof entry[keyName] === 'string' && typeof entry[valueName] === 'string') {
-      env[entry[keyName]] = entry[valueName];
-    }
-  }
-  return env;
-}
-
 export function keyedArrayToRecord(
   entries: readonly Record<string, unknown>[],
   keyField: string
@@ -370,7 +356,7 @@ export function renderTraecliCommand(component: Component): string {
 }
 
 /**
- * Frozen 0.4.35 `preferHomeVar`: a distributed command path under the home
+ * `preferHomeVar`: a distributed command path under the home
  * directory is recorded as `$HOME/...`, so machines sharing one dotfile tree
  * read the value they would each have written. The substitution is bound to
  * path-token starts, so for `/home/ada` neither `/home/ada2/x` nor
@@ -427,7 +413,7 @@ function codexSupports(handler: HookHandler): boolean {
 }
 
 /**
- * Frozen 0.4.35 Codex compatibility filter: unsupported events, handler types
+ * Codex compatibility filter: unsupported events, handler types
  * and options are dropped rather than published, and surviving handlers are
  * rebuilt from the allowlist so no unknown key (`_asb*` metadata included)
  * reaches hooks.json. An entry filtered down to nothing distributes nothing.
@@ -468,7 +454,7 @@ export function filterCodexHooks(hooks: HookEventMap): HookEventMap {
 export type McpServerValue = Record<string, unknown>;
 
 /**
- * Frozen 0.4.35 `sanitizeMcpName`: apps that reject anything outside
+ * `sanitizeMcpName`: apps that reject anything outside
  * `[a-zA-Z0-9_-]` get the rewritten key, and that key is the one compared
  * against the render — it is what is on disk.
  */
@@ -477,7 +463,7 @@ export function sanitizeMcpName(name: string): string {
 }
 
 /**
- * Frozen 0.4.35 load-time type inference. Gemini and opencode both branch on
+ * load-time type inference. Gemini and opencode both branch on
  * the type, so it is settled once in the library rather than per dialect, and
  * the inferred value is what verbatim apps write.
  */
@@ -496,7 +482,7 @@ export function verbatimServer(server: McpServerValue): McpServerValue {
 }
 
 /**
- * Frozen 0.4.35 `mapServerForGemini`: http renames `url` to `httpUrl`, sse and
+ * `mapServerForGemini`: http renames `url` to `httpUrl`, sse and
  * untyped url-only servers keep `url`, everything else is stdio. `type` never
  * survives, and stdio always spells out command/args/env.
  */
@@ -514,7 +500,7 @@ export function geminiServer(server: McpServerValue): McpServerValue {
 }
 
 /**
- * Frozen 0.4.35 opencode mapping: remote when typed http/sse or carrying a
+ * opencode mapping: remote when typed http/sse or carrying a
  * url, local otherwise. `command` becomes `[cmd, ...args]`, `env` becomes
  * `environment`, and every asb-written entry carries `enabled: true`.
  */
@@ -538,7 +524,7 @@ export function opencodeServer(server: McpServerValue): McpServerValue {
 }
 
 /**
- * Frozen 0.4.35 `stripMcpType`: Trae infers transport from url vs command and
+ * `stripMcpType`: Trae infers transport from url vs command and
  * rejects an explicit `type`. The value written is the whole server without
  * it, so a stale `type` in the target is replaced away rather than merged
  * around.
@@ -594,7 +580,7 @@ function stringMap(value: unknown): Record<string, string> | undefined {
 }
 
 /**
- * Frozen 0.4.35 `buildNestedToml` semantics as a value: canonical key order,
+ * `buildNestedToml` semantics as a value: canonical key order,
  * `headers` renamed to `http_headers` with an explicit one winning, sorted
  * inline-table headers, `env` sorted and string-coerced, unknown keys last in
  * alphabetical order, and `type`/`enabled` never emitted. Codex reads stdio

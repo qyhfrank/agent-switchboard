@@ -436,36 +436,3 @@ test('the credential redactor also masks bare token userinfo', () => {
   assert.equal(redactCredentials('https://secret-token@host/path'), 'https://***@host/path');
   assert.equal(redactCredentials('no credentials here'), 'no credentials here');
 });
-
-test('a leftover extensions directory yields one non-failing advisory row and is never read', async () => {
-  await withScratchHomes(async (homes) => {
-    const extensions = path.join(homes.asbHome, 'extensions');
-    const loaded = 'throw new Error("must not import");\n';
-    seedTree(extensions, {
-      'first.mjs': loaded,
-      'second.js': loaded,
-      // An extension the retired loader matched case-insensitively still
-      // counts, on its own and not only beside a lowercase sibling.
-      'Tool.MJS': loaded,
-      'notes.txt': 'not executable\n',
-    });
-    const files = fs
-      .readdirSync(extensions)
-      .sort()
-      .map((name) => path.join(extensions, name));
-    const before = files.map((file) => fs.readFileSync(file));
-
-    for (const options of [{ dryRun: true }, { dryRun: true, idGlob: 'does-not-match' }]) {
-      const report = await runSync(options);
-      const warnings = report.entries.filter((entry) => entry.detail === 'extensions-removed');
-
-      assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
-      assert.equal(warnings.length, 1, 'many files earn one row, and a filter never hides it');
-      assert.equal(warnings[0].outcome, 'skipped');
-    }
-    assert.deepEqual(
-      files.map((file) => fs.readFileSync(file)),
-      before
-    );
-  });
-});

@@ -187,14 +187,6 @@ test('an unknown config key aborts with the nearest-key suggestion', async () =>
   });
 });
 
-test('the legacy selection spelling still loads', async () => {
-  await withScratchHomes(async (homes) => {
-    writeUserConfig(homes, '[rules]\nactive = ["alpha"]\n');
-
-    assert.deepEqual(loadConfig().selection.rules, ['alpha']);
-  });
-});
-
 test('a profile stands in for config.toml instead of merging over it', async () => {
   await withScratchHomes(async (homes) => {
     writeUserConfig(

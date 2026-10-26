@@ -169,7 +169,7 @@ export function inferSourceName(location: string): string {
  * A string carrying a git transport scheme is the documented shorthand for a
  * clone source, parsed so a GitHub tree URL keeps its ref and subdirectory.
  * Every other string stays a user-owned local path. `type` defaults to
- * `clone`, the frozen 0.4.35 schema default every clone path guards on.
+ * `clone`, the schema default every clone path guards on.
  */
 function normalizeSourceValue(value: SourceValue): SourceValue {
   if (typeof value === 'string') {
@@ -339,21 +339,6 @@ export function resolveSources(config: ResolvedConfig): SourceResolution {
   }
 
   return { sources: [...merged.values()], failed };
-}
-
-/**
- * Resolve one namespace on its own, so an unrelated namespace asb refuses
- * cannot preempt this one's validation and rollback.
- */
-export function resolveOneSource(config: ResolvedConfig, namespace: string): ResolvedSource {
-  const value = rawSources(config)[namespace];
-  if (value !== undefined) {
-    validateNamespace(namespace);
-    return toResolved(namespace, value, resolveEffectivePath(config.homes, namespace, value));
-  }
-  const discovered = discoverLocalSources(config.homes)[namespace];
-  if (discovered === undefined) throw new Error(`Source "${namespace}" not found.`);
-  return { namespace, path: discovered, configured: false };
 }
 
 // ---------------------------------------------------------------------------

@@ -11,7 +11,7 @@ const LEGACY_MARKER_LINES = [
   '# asb-bundle-sha256=',
 ];
 
-/** v0.4.28 path-token ownership patterns. Keep byte-identical to 0.4.35. */
+/** Path-token patterns recognizing managed hook ownership. */
 const V0428_MANAGED_RE =
   /(?:^|[\s"'`=(:;&|<>])(?:\$HOME|~|\/(?!\/))[^\s"'`;|&<>]*\/hooks\/managed\/[0-9a-f]{64}\//;
 const MANAGED_ID_ANY_HOME_RE =

@@ -588,8 +588,7 @@ function activeManagers(
 }
 
 /**
- * Read each active manager's state once. `validate` runs first, exactly as
- * 0.4.35 does: a catalog the manager refuses is reported instead of installed,
+ * Read each active manager's state once. `validate` runs first: a catalog the manager refuses is reported instead of installed,
  * and the refusal is per marketplace path rather than fatal for the app.
  */
 export function captureNative(
