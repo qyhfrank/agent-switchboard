@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Skills default to shared directories for applications that read them natively. Shared directories hold the active readers' common selection, with each application's remaining skills in its own directory. Set `[applications.<id>.skills] destination = "own"` to use that application's own directory.
+- Cursor project rules use the managed region in the project's `AGENTS.md`.
+- Pi supports rules, skills, prompt templates, and MCP configuration. DeepSeek Harness (`dsh`) supports rules and skills.
+
 ## 0.5.12
 
 - Distribution reconciliation now persists machine-local ownership records for files, bundles, rule regions, hook groups, and structured keys. Sync removes stale output after a component is deleted, deselected, or its application is disabled, and directly overwrites recorded output that drifted from the managed render. Unavailable sources, path escapes, and unrecorded foreign content remain protected.
