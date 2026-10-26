@@ -94,6 +94,24 @@ test('a recorded project rules file retires after its shared region replacement 
       rules.projectPath = current;
     }
     fs.writeFileSync(path.join(path.dirname(previous), 'foreign.mdc'), 'Keep\n');
+    const host = path.join(project, 'AGENTS.md');
+    const malformed = '# Personal instructions\n<!-- rules:start -->\nUnclosed region\n';
+    fs.writeFileSync(host, malformed);
+    const previousBytes = fs.readFileSync(previous, 'utf8');
+    for (const dryRun of [true, false, false]) {
+      const blocked = await runSync({ project, dryRun });
+      assert.ok(
+        blocked.entries.some((entry) => entry.path === host && entry.detail === 'malformed-marker')
+      );
+      assert.ok(
+        blocked.entries.some(
+          (entry) => entry.path === previous && entry.detail === 'replacement-pending'
+        )
+      );
+      assert.equal(fs.readFileSync(previous, 'utf8'), previousBytes);
+      assert.equal(fs.readFileSync(host, 'utf8'), malformed);
+    }
+    fs.writeFileSync(host, '# Personal instructions\n');
     const first = await runSync({ project });
     assert.ok(fs.existsSync(previous));
     assert.ok(

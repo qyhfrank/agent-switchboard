@@ -545,7 +545,16 @@ export function reconcileOwnership(
         candidate.path !== slice.path &&
         (candidate.members ?? [candidate.app]).some((app) => readers.includes(app))
     );
-    if (replacements.some((replacement) => !matches(replacement))) {
+    const blockedReplacement = actions.some(
+      (action) =>
+        action.type === slice.type &&
+        action.id === slice.id &&
+        action.path !== null &&
+        action.path !== slice.path &&
+        ['failed', 'blocked', 'conflict'].includes(action.outcome) &&
+        (action.members ?? (action.app ? [action.app] : [])).some((app) => readers.includes(app))
+    );
+    if (blockedReplacement || replacements.some((replacement) => !matches(replacement))) {
       const waiting =
         existing ??
         result.find(
