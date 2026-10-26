@@ -49,6 +49,61 @@ function exists(...segments: string[]): boolean {
   return fs.existsSync(path.join(...segments));
 }
 
+test('foreign shared bundles survive dry runs and sync while own replacements stay available', async () => {
+  for (const scope of ['user', 'project'] as const) {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'cursor', 'opencode');
+      seedSkill(homes, 'review');
+      const project = scope === 'project' ? path.join(homes.root, 'project') : undefined;
+      if (project) fs.mkdirSync(project);
+      const configure = (shared: boolean) => {
+        const selection = config({ apps: ['cursor', 'opencode'], skills: ['review'], shared });
+        if (project) {
+          writeUserConfig(homes, '[applications]\nenabled = ["cursor", "opencode"]\n');
+          fs.writeFileSync(
+            path.join(project, '.asb.toml'),
+            `${selection}[distribution.project]\ncollision = "takeover"\n`
+          );
+        } else writeUserConfig(homes, selection);
+      };
+      configure(false);
+      assert.equal((await runSync({ project })).exitCode, 0);
+      const own = ['cursor', 'opencode'].map((app) =>
+        path.join(
+          project
+            ? path.join(project, `.${app}`, 'skills')
+            : skillsParentDir(homes, app as 'cursor' | 'opencode'),
+          'review',
+          'SKILL.md'
+        )
+      );
+      const originals = own.map((file) => fs.readFileSync(file, 'utf8'));
+      const foreign = project
+        ? path.join(project, '.agents', 'skills', 'review')
+        : unionBundle(homes, 'review');
+      fs.mkdirSync(foreign, { recursive: true });
+      fs.writeFileSync(path.join(foreign, 'SKILL.md'), 'Personal instructions\n');
+      fs.writeFileSync(path.join(foreign, 'notes.txt'), 'Personal notes\n');
+      configure(true);
+      for (const dryRun of [true, false, false]) {
+        const report = await runSync({ project, dryRun });
+        const row = report.entries.find((entry) => entry.path === foreign);
+        assert.equal(row?.outcome, 'conflict');
+        assert.equal(row?.detail, 'foreign');
+        assert.equal(
+          fs.readFileSync(path.join(foreign, 'SKILL.md'), 'utf8'),
+          'Personal instructions\n'
+        );
+        assert.equal(fs.readFileSync(path.join(foreign, 'notes.txt'), 'utf8'), 'Personal notes\n');
+        assert.deepEqual(
+          own.map((file) => fs.readFileSync(file, 'utf8')),
+          originals
+        );
+      }
+    });
+  }
+});
+
 test('default skills destinations share native readers and keep Claude in its own directory', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor', 'pi', 'dsh');

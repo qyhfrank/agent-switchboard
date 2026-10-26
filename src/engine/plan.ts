@@ -1273,13 +1273,7 @@ export function planSkills(input: PlanInput): Action[] {
         return sliceClean();
       };
 
-      /**
-       * Ownership is decided from the library, not from a record:
-       * `identicalToDesired` asks whether this tree is the current render,
-       * which both means there is nothing to write and is the only claim that
-       * authorizes deleting it. Anything else is the user's: overwritten
-       * while the skill is selected, left alone once it is not.
-       */
+      // Matching the current render proves ownership without a stored record.
       const base = {
         app: row.app,
         type: 'skills',
@@ -1344,8 +1338,7 @@ export function planSkills(input: PlanInput): Action[] {
         } else if (identicalToDesired()) {
           actions.push({ ...base, op: 'none', outcome: 'unchanged' });
         } else if (
-          input.project &&
-          input.project.collision !== 'takeover' &&
+          (row.app === 'agents' || (input.project && input.project.collision !== 'takeover')) &&
           !input.owns?.(bundlePath)
         ) {
           actions.push({
@@ -1354,7 +1347,9 @@ export function planSkills(input: PlanInput): Action[] {
             outcome: 'conflict',
             detail: 'foreign',
             reason:
-              'project bundle does not match the current render and asb cannot prove it is its own; preserved (collision = "takeover" adopts it)',
+              row.app === 'agents'
+                ? 'shared bundle does not match the current render and asb cannot prove ownership; preserved'
+                : 'project bundle does not match the current render and asb cannot prove it is its own; preserved (collision = "takeover" adopts it)',
           });
         } else {
           // A distributed bundle mirrors its library directory: the render is
