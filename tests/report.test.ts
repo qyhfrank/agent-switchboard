@@ -92,7 +92,7 @@ const BUSY_SYNC = buildReport(PROFILE_SCOPE, [
   ...unchangedRows(110, APPS),
 ]);
 
-const CLEAN = buildReport(PROFILE_SCOPE, unchangedRows(120, [...APPS, 'codex', 'gemini']));
+const CLEAN = buildReport(PROFILE_SCOPE, unchangedRows(120, [...APPS, 'codex', 'opencode']));
 
 const PREVIEW = (() => {
   const report = buildReport(PREVIEW_SCOPE, [
@@ -162,7 +162,7 @@ test('a run with nothing to do ends on one line', () => {
 
   const unscoped = buildReport(
     { profile: null, project: null, dryRun: false },
-    unchangedRows(120, [...APPS, 'codex', 'gemini'])
+    unchangedRows(120, [...APPS, 'codex', 'opencode'])
   );
   assert.equal(
     renderReport(unscoped, ui('sync')),

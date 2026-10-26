@@ -203,7 +203,6 @@ test('each skills-carrying app declares its parent directory inside its containm
     const expected = {
       'claude-code': path.join(home, '.claude', 'skills'),
       codex: path.join(home, '.codex', 'skills'),
-      gemini: path.join(home, '.gemini', 'skills'),
       opencode: path.join(home, '.config', 'opencode', 'skills'),
       cursor: path.join(home, '.cursor', 'skills'),
       trae: path.join(home, '.trae', 'skills'),

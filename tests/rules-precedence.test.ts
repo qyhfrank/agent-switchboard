@@ -23,7 +23,7 @@ test('a per-app override resolves against the global selection for that app alon
       homes,
       [
         '[applications]',
-        'enabled = ["claude-code", "codex", "gemini", "opencode", "cursor"]',
+        'enabled = ["claude-code", "codex", "trae", "opencode", "cursor"]',
         '',
         '[rules]',
         'enabled = ["rule-a", "rule-b", "rule-c"]',
@@ -35,7 +35,7 @@ test('a per-app override resolves against the global selection for that app alon
         'remove = ["rule-b"]',
         'add = ["rule-d"]',
         '',
-        '[applications.gemini.rules]',
+        '[applications.trae.rules]',
         'enabled = ["rule-x", "rule-y"]',
         '',
         '[applications.opencode.rules]',
@@ -44,7 +44,7 @@ test('a per-app override resolves against the global selection for that app alon
         '[applications.cursor.rules]',
         'add = ["rule-b", "rule-e"]',
         '',
-        '[applications.codex.commands]',
+        '[applications.opencode.commands]',
         'remove = ["cmd-a"]',
       ].join('\n')
     );
@@ -57,7 +57,7 @@ test('a per-app override resolves against the global selection for that app alon
     );
     assert.deepEqual(effectiveSelection(config, 'codex', 'rules'), ['rule-a', 'rule-c', 'rule-d']);
     assert.deepEqual(
-      effectiveSelection(config, 'gemini', 'rules'),
+      effectiveSelection(config, 'trae', 'rules'),
       ['rule-x', 'rule-y'],
       'enabled replaces rather than merges'
     );
@@ -72,7 +72,7 @@ test('a per-app override resolves against the global selection for that app alon
       'add keeps the first occurrence of an id already selected'
     );
     // The same algebra governs every component type, not rules alone.
-    assert.deepEqual(effectiveSelection(config, 'codex', 'commands'), ['cmd-b']);
+    assert.deepEqual(effectiveSelection(config, 'opencode', 'commands'), ['cmd-b']);
     assert.deepEqual(effectiveSelection(config, 'claude-code', 'commands'), ['cmd-a', 'cmd-b']);
   });
 });

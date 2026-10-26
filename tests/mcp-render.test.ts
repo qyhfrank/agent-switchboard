@@ -1,12 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parse as parseToml } from '@iarna/toml';
-import {
-  codexServer,
-  geminiServer,
-  opencodeServer,
-  renderCodexTable,
-} from '../src/engine/dialects.js';
+import { codexServer, opencodeServer, renderCodexTable } from '../src/engine/dialects.js';
 import {
   applyKeysEdits,
   parseStructured,
@@ -179,21 +174,6 @@ test('codex: a quoted server name round-trips through the table header', () => {
 
   assert.match(content, /\[mcp_servers\."my\.server"\]/);
   assert.deepEqual(parseStructured(content, 'toml').tables, [['mcp_servers', 'my.server']]);
-});
-
-test('gemini: http becomes httpUrl, url-only servers keep url, and type never survives', () => {
-  assert.deepEqual(geminiServer({ type: 'http', url: 'https://example.com', timeout: 10 }), {
-    httpUrl: 'https://example.com',
-    timeout: 10,
-  });
-  assert.deepEqual(geminiServer({ type: 'sse', url: 'https://example.com' }), {
-    url: 'https://example.com',
-  });
-  assert.deepEqual(geminiServer({ url: 'https://example.com' }), { url: 'https://example.com' });
-  assert.deepEqual(
-    geminiServer({ type: 'stdio', command: 'npx', args: ['a'], env: { K: 'v' }, extra: 1 }),
-    { command: 'npx', args: ['a'], env: { K: 'v' }, extra: 1 }
-  );
 });
 
 test('opencode: a local server becomes an argv array and a remote one keeps url and headers', () => {

@@ -2,10 +2,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
-import { parse as parseToml } from '@iarna/toml';
 import { APP_ROWS } from '../src/engine/apps.js';
 import { runImport, runInit, runSync } from '../src/engine/cli.js';
-import { renderGeminiCommand } from '../src/engine/dialects.js';
+import { renderOpencodeCommand } from '../src/engine/dialects.js';
 import { scanLibrary } from '../src/engine/library.js';
 import {
   inCwd,
@@ -25,12 +24,12 @@ const HOOK_DIR = `\${HOOK_DIR}`;
 
 test('an import batch keeps its successes and round-trips unknown dialect fields', async () => {
   await withScratchHomes(async (homes) => {
-    seedTree(path.join(homes.agentsHome, '.gemini', 'commands'), {
-      'good.toml': 'prompt = "Do it"\ndescription = "Useful"\ncustom_field = "kept"\n',
-      'bad.toml': 'prompt = "unterminated\n',
+    seedTree(path.join(homes.agentsHome, '.config', 'opencode', 'commands'), {
+      'good.md': '---\ndescription: Useful\ncustom_field: kept\n---\nDo it',
+      'bad.md': '---\ndescription: [\n---\nBad',
     });
 
-    const result = await runImport('gemini', undefined, {
+    const result = await runImport('opencode', undefined, {
       types: ['commands'],
       recursive: true,
       force: true,
@@ -44,11 +43,7 @@ test('an import batch keeps its successes and round-trips unknown dialect fields
       (entry) => entry.type === 'commands' && entry.id === 'good'
     );
     assert.ok(component);
-    assert.deepEqual(parseToml(renderGeminiCommand(component)), {
-      prompt: 'Do it',
-      description: 'Useful',
-      custom_field: 'kept',
-    });
+    assert.match(renderOpencodeCommand(component), /custom_field: kept/);
   });
 });
 
@@ -115,12 +110,12 @@ test('a typeless import uses every reader and existing files skip unless forced'
 
 test('an import without recursion still reads the default component directory', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'gemini');
-    const row = APP_ROWS.find((candidate) => candidate.id === 'gemini');
+    installApps(homes, 'opencode');
+    const row = APP_ROWS.find((candidate) => candidate.id === 'opencode');
     assert.ok(row?.commands);
-    seedTree(row.commands.dir(homes), { 'review.toml': 'prompt = "Review this"\n' });
+    seedTree(row.commands.dir(homes), { 'review.md': 'Review this\n' });
 
-    const result = await runImport('gemini', undefined, { force: true });
+    const result = await runImport('opencode', undefined, { force: true });
 
     assert.equal(result.exitCode, 0, JSON.stringify(result.entries, null, 2));
     assert.ok(result.entries.some((entry) => entry.type === 'commands' && entry.id === 'review'));

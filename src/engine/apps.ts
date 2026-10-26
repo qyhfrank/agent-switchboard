@@ -8,10 +8,8 @@ import {
   encodeComponentId,
   type FrontmatterTransformSpec,
   filterCodexHooks,
-  geminiServer,
   importCodexAgent,
   importFrontmatterEntry,
-  importGeminiCommand,
   importPlainEntry,
   type McpServerValue,
   opencodeServer,
@@ -25,7 +23,6 @@ import {
   renderCursorAgent,
   renderCursorCommand,
   renderCustomEntry,
-  renderGeminiCommand,
   renderOpencodeAgent,
   renderOpencodeCommand,
   renderTraecliAgent,
@@ -227,13 +224,13 @@ const JSON_MCP_ROW = {
 } as const;
 
 /**
- * With `distribution.use_agents_dir`, codex/gemini/opencode/traecli read
+ * With `distribution.use_agents_dir`, codex/opencode/traecli read
  * skills from the shared open-agent standard directory instead of their own
  * rows; the union row distributes the union of the active members' effective
  * selections.
  */
 export const AGENTS_SKILLS_UNION = {
-  members: ['codex', 'gemini', 'opencode', 'traecli'] as readonly string[],
+  members: ['codex', 'opencode', 'traecli'] as readonly string[],
   root: (homes: Homes, projectRoot?: string): string =>
     path.join(projectRoot ?? homes.agentsHome, '.agents'),
   dir: (homes: Homes, projectRoot?: string): string =>
@@ -398,41 +395,6 @@ export const APP_ROWS: readonly AppRow[] = [
       bin: 'codex',
       target: 'codex',
       settings: (homes) => path.join(homes.agentsHome, '.codex', 'config.toml'),
-    },
-  },
-  {
-    id: 'gemini',
-    detectDir: (homes) => path.join(homes.agentsHome, '.gemini'),
-    rules: {
-      root: (homes) => path.join(homes.agentsHome, '.gemini'),
-      path: (homes) => path.join(homes.agentsHome, '.gemini', 'AGENTS.md'),
-      projectPath: (root) => path.join(root, 'AGENTS.md'),
-      render: rawBody,
-      dedicated: false,
-    },
-    commands: {
-      root: (homes) => path.join(homes.agentsHome, '.gemini'),
-      dir: (homes) => path.join(homes.agentsHome, '.gemini', 'commands'),
-      projectDir: (root) => path.join(path.resolve(root), '.gemini', 'commands'),
-      filename: (id) => `${encodeComponentId(id)}.toml`,
-      render: renderGeminiCommand,
-      importer: { extensions: ['.toml'], read: importGeminiCommand },
-    },
-    skills: {
-      root: (homes) => path.join(homes.agentsHome, '.gemini'),
-      dir: (homes) => path.join(homes.agentsHome, '.gemini', 'skills'),
-      projectDir: (root) => path.join(root, '.gemini', 'skills'),
-      reserved: [],
-    },
-    mcp: {
-      ...JSON_MCP_ROW,
-      root: (homes) => path.join(homes.agentsHome, '.gemini'),
-      // settings.json carries every other Gemini CLI setting; only the
-      // addressed slice is ever rewritten.
-      path: (homes) => path.join(homes.agentsHome, '.gemini', 'settings.json'),
-      projectPath: (root) => path.join(root, '.gemini', 'settings.json'),
-      sanitize: false,
-      dialect: geminiServer,
     },
   },
   {

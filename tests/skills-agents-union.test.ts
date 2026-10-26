@@ -15,7 +15,7 @@ import {
 } from './helpers/scratch.js';
 
 /**
- * use_agents_dir: codex/gemini/opencode/traecli read skills from the shared
+ * use_agents_dir: codex/opencode/traecli read skills from the shared
  * ~/.agents/skills directory. The union row distributes the union of the
  * ACTIVE members' effective selections; the members' own rows deselect, so
  * their stale copies leave through the proof-gated removal path.
@@ -56,16 +56,16 @@ function exists(...segments: string[]): boolean {
 
 test('the agents row writes the union of active member selections to the shared directory', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'codex', 'gemini', 'opencode', 'claude-code');
+    installApps(homes, 'codex', 'opencode', 'claude-code');
     for (const id of ['alpha', 'beta', 'gamma']) seedSkill(homes, id);
     writeUserConfig(
       homes,
       config({
-        apps: ['codex', 'gemini', 'opencode', 'claude-code'],
+        apps: ['codex', 'opencode', 'claude-code'],
         skills: ['alpha'],
         agentsDir: true,
         extra:
-          '[applications.gemini.skills]\nadd = ["beta"]\n\n[applications.opencode.skills]\nadd = ["gamma"]',
+          '[applications.codex.skills]\nadd = ["beta"]\n\n[applications.opencode.skills]\nadd = ["gamma"]',
       })
     );
 
@@ -81,7 +81,7 @@ test('the agents row writes the union of active member selections to the shared 
     }
 
     // The members' own parents get no copies; the non-member keeps its own.
-    for (const member of ['codex', 'gemini', 'opencode'] as const) {
+    for (const member of ['codex', 'opencode'] as const) {
       assert.equal(fs.existsSync(skillsParentDir(homes, member)), false, member);
     }
     assert.equal(skillEntry(report, 'claude-code', 'alpha')?.outcome, 'written');

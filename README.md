@@ -236,7 +236,6 @@ Configuration is strict. Unknown keys, invalid target shapes and type errors fai
 | Claude Code | yes | yes | yes | yes | yes | yes |
 | Claude Desktop |  |  |  |  |  | yes |
 | Codex | yes | yes | yes | yes | yes | yes |
-| Gemini | yes | yes |  | yes |  | yes |
 | OpenCode | yes | yes | yes | yes |  | yes |
 | Cursor | yes | yes | yes | yes |  | yes |
 | Trae | yes |  |  | yes |  | yes |

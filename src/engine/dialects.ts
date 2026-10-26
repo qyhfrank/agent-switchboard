@@ -92,15 +92,6 @@ export function importPlainEntry(filePath: string, platform: string): string {
   );
 }
 
-/** Gemini TOML → library Markdown, including frontmatter fields. */
-export function importGeminiCommand(filePath: string): string {
-  const parsed = tomlParse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
-  const { prompt, description, ...extras } = parsed;
-  const frontmatter: Record<string, unknown> = { extras: { gemini: extras } };
-  if (typeof description === 'string' && description.trim()) frontmatter.description = description;
-  return wrapFrontmatter(frontmatter, typeof prompt === 'string' ? prompt : '');
-}
-
 /** Codex role TOML → library agent Markdown. */
 export function importCodexAgent(filePath: string): string {
   const parsed = tomlParse(fs.readFileSync(filePath, 'utf-8')) as Record<string, unknown>;
@@ -164,13 +155,6 @@ export function renderOpencodeCommand(component: Component): string {
 
 export function renderOpencodeAgent(component: Component): string {
   return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
-}
-
-export function renderGeminiCommand(component: Component): string {
-  const value: Record<string, unknown> = { prompt: component.content.trimStart() };
-  if (component.metadata.description) value.description = component.metadata.description;
-  Object.assign(value, platformExtras(component, 'gemini'));
-  return tomlStringify(value as Parameters<typeof tomlStringify>[0]);
 }
 
 export function renderCodexCommand(component: Component): string {
@@ -463,7 +447,7 @@ export function sanitizeMcpName(name: string): string {
 }
 
 /**
- * load-time type inference. Gemini and opencode both branch on
+ * Load-time type inference. Dialects branch on
  * the type, so it is settled once in the library rather than per dialect, and
  * the inferred value is what verbatim apps write.
  */
@@ -479,24 +463,6 @@ export function inferServerType(server: McpServerValue): McpServerValue {
 /** Verbatim apps (claude-code, claude-desktop, cursor) write the definition as authored. */
 export function verbatimServer(server: McpServerValue): McpServerValue {
   return server;
-}
-
-/**
- * `mapServerForGemini`: http renames `url` to `httpUrl`, sse and
- * untyped url-only servers keep `url`, everything else is stdio. `type` never
- * survives, and stdio always spells out command/args/env.
- */
-export function geminiServer(server: McpServerValue): McpServerValue {
-  const { type, url, command, args, env, ...rest } = server;
-  if (type === 'http' && typeof url === 'string') return { httpUrl: url, ...rest };
-  if ((type === 'sse' || type === undefined) && typeof url === 'string' && !command) {
-    return { url, ...rest };
-  }
-  const stdio: McpServerValue = {};
-  if (command !== undefined) stdio.command = command;
-  if (args !== undefined) stdio.args = args;
-  if (env !== undefined) stdio.env = env;
-  return { ...stdio, ...rest };
 }
 
 /**

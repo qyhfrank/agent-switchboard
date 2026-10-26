@@ -127,11 +127,6 @@ test('one selected server reaches every app in its own dialect', async () => {
         type: 'stdio',
       });
     }
-    assert.deepEqual(readMcpHost(homes, 'gemini')?.alpha, {
-      command: 'npx',
-      args: ['-y', 'alpha'],
-      env: { TOKEN_NAME: 'ALPHA_TOKEN' },
-    });
     assert.deepEqual(readMcpHost(homes, 'opencode')?.alpha, {
       type: 'local',
       command: ['npx', '-y', 'alpha'],
@@ -161,7 +156,7 @@ test('one selected server reaches every app in its own dialect', async () => {
 
 test('a dry run predicts the apply, row for row and byte for byte', async () => {
   await withScratchHomes(async (homes) => {
-    const apps: McpAppId[] = ['cursor', 'codex', 'gemini'];
+    const apps: McpAppId[] = ['cursor', 'codex', 'claude-desktop'];
     installApps(homes, ...apps);
     seedMcpLibrary(homes, { alpha: ALPHA, beta: { url: 'https://example.com/mcp' } });
     selection(homes, apps, ['alpha', 'beta']);
@@ -200,15 +195,15 @@ test('an app that is not installed is skipped and its host is never made', async
   await withScratchHomes(async (homes) => {
     installApps(homes, 'cursor');
     seedMcpLibrary(homes, { alpha: ALPHA });
-    selection(homes, ['cursor', 'gemini'], ['alpha']);
+    selection(homes, ['cursor', 'claude-desktop'], ['alpha']);
 
     const report = await runSync({});
 
     assert.ok(readMcpHost(homes, 'cursor')?.alpha);
-    assert.equal(fs.existsSync(mcpHostPath(homes, 'gemini')), false);
+    assert.equal(fs.existsSync(mcpHostPath(homes, 'claude-desktop')), false);
     assert.equal(
       report.entries
-        .filter((entry) => entry.app === 'gemini')
+        .filter((entry) => entry.app === 'claude-desktop')
         .some((entry) => entry.detail === 'app-not-installed'),
       true
     );
@@ -217,10 +212,10 @@ test('an app that is not installed is skipped and its host is never made', async
 
 test('a shared settings host keeps its other keys, indentation, and comments', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'gemini', 'opencode');
-    const gemini = seedHost(
+    installApps(homes, 'claude-desktop', 'opencode');
+    const desktop = seedHost(
       homes,
-      'gemini',
+      'claude-desktop',
       '{\n    "theme": "dark",\n    "telemetry": {\n        "enabled": false\n    }\n}\n'
     );
     // A comment-aware read that writes back plain JSON loses every comment.
@@ -229,14 +224,14 @@ test('a shared settings host keeps its other keys, indentation, and comments', a
     fs.writeFileSync(opencode, '{\n  // my model\n  "model": "anthropic/claude"\n}\n', 'utf-8');
 
     seedMcpLibrary(homes, { alpha: ALPHA });
-    selection(homes, ['gemini', 'opencode'], ['alpha']);
+    selection(homes, ['claude-desktop', 'opencode'], ['alpha']);
 
     await runSync({});
 
-    const geminiContent = fs.readFileSync(gemini, 'utf-8');
-    assert.match(geminiContent, /^ {4}"theme": "dark",$/m);
-    assert.match(geminiContent, /^ {8}"enabled": false$/m);
-    assert.match(geminiContent, /^ {4}"mcpServers"/m, 'the new slice adopts the file indentation');
+    const desktopContent = fs.readFileSync(desktop, 'utf-8');
+    assert.match(desktopContent, /^ {4}"theme": "dark",$/m);
+    assert.match(desktopContent, /^ {8}"enabled": false$/m);
+    assert.match(desktopContent, /^ {4}"mcpServers"/m, 'the new slice adopts the file indentation');
 
     const opencodeContent = fs.readFileSync(opencode, 'utf-8');
     assert.match(opencodeContent, /\/\/ my model/);
@@ -256,7 +251,7 @@ test('a shared settings host keeps its other keys, indentation, and comments', a
 
 test('a host asb cannot parse is reported and left exactly as it is', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor', 'codex', 'claude-code', 'gemini');
+    installApps(homes, 'cursor', 'codex', 'claude-code', 'claude-desktop');
     const malformed: [McpAppId, string][] = [
       ['cursor', '{ "mcpServers": }\n'],
       ['codex', 'this is not = = toml\n'],
@@ -264,10 +259,10 @@ test('a host asb cannot parse is reported and left exactly as it is', async () =
     ];
     for (const [app, content] of malformed) seedHost(homes, app, content);
     // An empty document is not malformed: there is simply nothing in it yet.
-    seedHost(homes, 'gemini', '');
+    seedHost(homes, 'claude-desktop', '');
 
     seedMcpLibrary(homes, { alpha: ALPHA });
-    selection(homes, ['cursor', 'codex', 'claude-code', 'gemini'], ['alpha']);
+    selection(homes, ['cursor', 'codex', 'claude-code', 'claude-desktop'], ['alpha']);
 
     const report = await runSync({});
 
@@ -282,7 +277,7 @@ test('a host asb cannot parse is reported and left exactly as it is', async () =
       entryFor(report, { app: 'claude-code', type: 'mcp' })?.reason ?? '',
       /root must be an object/
     );
-    assert.ok(readMcpHost(homes, 'gemini')?.alpha, 'the empty document takes the server');
+    assert.ok(readMcpHost(homes, 'claude-desktop')?.alpha, 'the empty document takes the server');
     assert.equal(report.exitCode, 1);
   });
 });
@@ -302,7 +297,7 @@ test('server names are sanitized only for the apps that require it', async () =>
         app
       );
     }
-    for (const app of ['claude-code', 'claude-desktop', 'gemini', 'opencode'] as McpAppId[]) {
+    for (const app of ['claude-code', 'claude-desktop', 'opencode'] as McpAppId[]) {
       assert.deepEqual(
         Object.keys(readMcpHost(homes, app) ?? {}).sort(),
         ['my.server:one/two', 'plain'],
@@ -314,9 +309,9 @@ test('server names are sanitized only for the apps that require it', async () =>
 
 test('an sse server is skipped for codex by name and written everywhere else', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'codex', 'gemini');
+    installApps(homes, 'codex', 'claude-desktop');
     seedMcpLibrary(homes, { streamer: { type: 'sse', url: 'https://example.com/sse' } });
-    selection(homes, ['codex', 'gemini'], ['streamer']);
+    selection(homes, ['codex', 'claude-desktop'], ['streamer']);
 
     const report = await runSync({});
 
@@ -324,19 +319,22 @@ test('an sse server is skipped for codex by name and written everywhere else', a
     const skipped = entryFor(report, { app: 'codex', id: 'streamer' });
     assert.equal(skipped?.outcome, 'skipped');
     assert.equal(skipped?.detail, 'unsupported');
-    assert.deepEqual(readMcpHost(homes, 'gemini')?.streamer, { url: 'https://example.com/sse' });
+    assert.deepEqual(readMcpHost(homes, 'claude-desktop')?.streamer, {
+      type: 'sse',
+      url: 'https://example.com/sse',
+    });
   });
 });
 
 test('a per-app add enables a server the global selection never listed', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor', 'gemini');
+    installApps(homes, 'cursor', 'claude-desktop');
     seedMcpLibrary(homes, { alpha: ALPHA, beta: { command: 'beta' } });
     writeUserConfig(
       homes,
       [
         '[applications]',
-        'enabled = ["cursor", "gemini"]',
+        'enabled = ["cursor", "claude-desktop"]',
         '',
         '[mcp]',
         'enabled = ["alpha"]',
@@ -344,7 +342,7 @@ test('a per-app add enables a server the global selection never listed', async (
         '[applications.cursor.mcp]',
         'add = ["beta"]',
         '',
-        '[applications.gemini.mcp]',
+        '[applications.claude-desktop.mcp]',
         'remove = ["alpha"]',
         '',
       ].join('\n')
@@ -353,15 +351,15 @@ test('a per-app add enables a server the global selection never listed', async (
     await runSync({});
 
     assert.deepEqual(Object.keys(readMcpHost(homes, 'cursor') ?? {}).sort(), ['alpha', 'beta']);
-    assert.equal(fs.existsSync(mcpHostPath(homes, 'gemini')), false);
+    assert.equal(fs.existsSync(mcpHostPath(homes, 'claude-desktop')), false);
   });
 });
 
 test('a selected server the library does not define reports missing once', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor', 'gemini');
+    installApps(homes, 'cursor', 'claude-desktop');
     seedMcpLibrary(homes, { alpha: ALPHA });
-    selection(homes, ['cursor', 'gemini'], ['alpha', 'ghost']);
+    selection(homes, ['cursor', 'claude-desktop'], ['alpha', 'ghost']);
 
     const report = await runSync({});
 
@@ -429,12 +427,12 @@ test('a second run with nothing to change writes nothing and says so', async () 
 test('a server secret never reaches a report line, on any path through the run', async () => {
   await withScratchHomes(async (homes) => {
     const secret = 'invented-placeholder-token-9f3a';
-    installApps(homes, 'cursor', 'codex', 'gemini');
+    installApps(homes, 'cursor', 'codex', 'claude-desktop');
     seedMcpLibrary(homes, {
       owned: { command: 'npx', env: { TOKEN: secret } },
       foreign: { command: 'npx', env: { TOKEN: secret } },
     });
-    selection(homes, ['cursor', 'codex', 'gemini'], ['owned', 'foreign']);
+    selection(homes, ['cursor', 'codex', 'claude-desktop'], ['owned', 'foreign']);
     // A key holding a different secret under a name the library also uses: the
     // write that replaces it may not quote either side.
     seedHost(
@@ -445,13 +443,13 @@ test('a server secret never reaches a report line, on any path through the run',
 
     await runSync({});
     // Then customize one server and drop it, so recorded ownership removes it.
-    const gemini = mcpHostPath(homes, 'gemini');
-    const root = JSON.parse(fs.readFileSync(gemini, 'utf-8')) as {
+    const desktop = mcpHostPath(homes, 'claude-desktop');
+    const root = JSON.parse(fs.readFileSync(desktop, 'utf-8')) as {
       mcpServers: Record<string, Record<string, unknown>>;
     };
     root.mcpServers.owned.env = { TOKEN: 'edited' };
-    fs.writeFileSync(gemini, JSON.stringify(root), 'utf-8');
-    selection(homes, ['cursor', 'codex', 'gemini'], ['foreign']);
+    fs.writeFileSync(desktop, JSON.stringify(root), 'utf-8');
+    selection(homes, ['cursor', 'codex', 'claude-desktop'], ['foreign']);
     const report = await runSync({});
 
     const outcomes = new Set(report.entries.map((entry) => entry.outcome));
@@ -492,9 +490,9 @@ const CONTAINER_CLASSES: readonly [
 test('a container key that is not a table of servers fails that host alone', async () => {
   for (const [label, app, literal, container, typeName] of CONTAINER_CLASSES) {
     await withScratchHomes(async (homes) => {
-      installApps(homes, app, 'gemini');
+      installApps(homes, app, 'claude-desktop');
       seedMcpLibrary(homes, { alpha: ALPHA });
-      selection(homes, [app, 'gemini'], ['alpha']);
+      selection(homes, [app, 'claude-desktop'], ['alpha']);
       const key = app === 'opencode' ? 'mcp' : 'mcpServers';
       const host = `{\n  "${key}": ${literal}\n}\n`;
       const filePath = seedHost(homes, app, host);
@@ -512,7 +510,8 @@ test('a container key that is not a table of servers fails that host alone', asy
       assert.match(failed?.reason ?? '', container, label);
       assert.match(failed?.reason ?? '', typeName, label);
       // The rest of the run is untouched by one poisoned host.
-      assert.deepEqual(readMcpHost(homes, 'gemini')?.alpha, {
+      assert.deepEqual(readMcpHost(homes, 'claude-desktop')?.alpha, {
+        type: 'stdio',
         command: 'npx',
         args: ['-y', 'alpha'],
       });
@@ -795,9 +794,9 @@ test('a deselected recorded slice whose command was changed is removed', async (
 
 test('two ids that sanitize to one key fail that app rather than take turns', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'cursor', 'gemini');
+    installApps(homes, 'cursor', 'claude-desktop');
     seedMcpLibrary(homes, { 'foo:bar': ALPHA, 'foo-bar': { command: 'other' } });
-    selection(homes, ['cursor', 'gemini'], ['foo:bar', 'foo-bar']);
+    selection(homes, ['cursor', 'claude-desktop'], ['foo:bar', 'foo-bar']);
 
     const report = await runSync({});
 
@@ -807,8 +806,8 @@ test('two ids that sanitize to one key fail that app rather than take turns', as
     );
     assert.equal(failed?.detail, 'render-error');
     assert.match(failed?.reason ?? '', /both become "foo-bar"/);
-    // gemini does not sanitize, so the same pair is fine there.
-    assert.deepEqual(Object.keys(readMcpHost(homes, 'gemini') ?? {}).sort(), [
+    // desktop does not sanitize, so the same pair is fine there.
+    assert.deepEqual(Object.keys(readMcpHost(homes, 'claude-desktop') ?? {}).sort(), [
       'foo-bar',
       'foo:bar',
     ]);

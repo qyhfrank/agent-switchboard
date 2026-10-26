@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { test } from 'node:test';
-import { parse as parseToml } from '@iarna/toml';
 import { APP_ROWS } from '../src/engine/apps.js';
 import { runExplain, runImport, runSync } from '../src/engine/cli.js';
 import {
@@ -10,7 +9,6 @@ import {
   renderCodexAgent,
   renderCursorAgent,
   renderCursorCommand,
-  renderGeminiCommand,
   renderOpencodeAgent,
 } from '../src/engine/dialects.js';
 import { type Component, scanLibrary } from '../src/engine/library.js';
@@ -64,7 +62,7 @@ test('commands and agents are first-class library components', async () => {
 test('builtin command dialects preserve their platform contracts', () => {
   const entry = component('commands', 'docs', '\nWrite docs.\n', {
     description: 'Generate docs',
-    extras: { 'claude-code': { model: 'sonnet' }, gemini: { model: 'gemini-pro' } },
+    extras: { 'claude-code': { model: 'sonnet' } },
   });
 
   assert.equal(
@@ -72,11 +70,6 @@ test('builtin command dialects preserve their platform contracts', () => {
     '---\ndescription: Generate docs\nmodel: sonnet\n---\n\nWrite docs.\n'
   );
   assert.equal(renderCursorCommand(entry), '\nWrite docs.\n');
-  assert.deepEqual(parseToml(renderGeminiCommand(entry)), {
-    prompt: 'Write docs.\n',
-    description: 'Generate docs',
-    model: 'gemini-pro',
-  });
 });
 
 test('builtin agent dialects apply passthrough, allowlist, and defaults exactly', () => {
@@ -186,10 +179,6 @@ test('every built-in command and agent importer round-trips through its AppRow d
       ['claude-code', '---\ndescription: Claude command\nmodel: opus\n---\nBODY-claude-code\n'],
       ['codex', 'BODY-codex\n'],
       ['cursor', 'BODY-cursor\n'],
-      [
-        'gemini',
-        'prompt = "BODY-gemini\\n"\ndescription = "Gemini command"\ncustom_field = "kept"\n',
-      ],
       ['opencode', '---\ndescription: OpenCode command\nmodel: test-model\n---\nBODY-opencode\n'],
     ]);
     const agentSources = new Map<string, string>([

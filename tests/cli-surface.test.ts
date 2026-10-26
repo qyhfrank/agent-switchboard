@@ -395,9 +395,9 @@ test('parsed fields carry the frozen semantics', () => {
   assert.equal(explained.command, 'explain');
   if (explained.command === 'explain') assert.equal(explained.target, 'base');
 
-  assert.deepEqual(parseCliArgs(['import', 'gemini', '--type', 'commands', '-r', '-f']), {
+  assert.deepEqual(parseCliArgs(['import', 'opencode', '--type', 'commands', '-r', '-f']), {
     command: 'import',
-    app: 'gemini',
+    app: 'opencode',
     path: undefined,
     options: { types: ['commands'], recursive: true, force: true, json: false },
   });

@@ -117,19 +117,11 @@ export function writeFixtureFile(fixture: GitFixture, relative: string, content:
 
 export const gitFixtureCommand = git;
 
-export type RuleAppId =
-  | 'claude-code'
-  | 'codex'
-  | 'gemini'
-  | 'opencode'
-  | 'cursor'
-  | 'trae'
-  | 'trae-cn';
+export type RuleAppId = 'claude-code' | 'codex' | 'opencode' | 'cursor' | 'trae' | 'trae-cn';
 
 export const RULE_APPS: readonly RuleAppId[] = [
   'claude-code',
   'codex',
-  'gemini',
   'opencode',
   'cursor',
   'trae',
@@ -166,8 +158,6 @@ export function detectDir(homes: ScratchHomes, app: DetectableAppId): string {
       return path.join(home, '.claude');
     case 'codex':
       return path.join(home, '.codex');
-    case 'gemini':
-      return path.join(home, '.gemini');
     case 'cursor':
       return path.join(home, '.cursor');
     case 'opencode':
@@ -196,8 +186,6 @@ export function ruleFilePath(homes: ScratchHomes, app: RuleAppId): string {
       return path.join(home, '.claude', 'CLAUDE.md');
     case 'codex':
       return path.join(home, '.codex', 'AGENTS.md');
-    case 'gemini':
-      return path.join(home, '.gemini', 'AGENTS.md');
     case 'opencode':
       return path.join(opencodeRoot(home), 'AGENTS.md');
     case 'cursor':
@@ -246,8 +234,6 @@ export function skillsParentDir(homes: ScratchHomes, app: RuleAppId | 'agents'):
       return path.join(home, '.claude', 'skills');
     case 'codex':
       return path.join(home, '.codex', 'skills');
-    case 'gemini':
-      return path.join(home, '.gemini', 'skills');
     case 'opencode':
       return path.join(opencodeRoot(home), 'skills');
     case 'cursor':
@@ -268,7 +254,6 @@ export const MCP_APPS: readonly McpAppId[] = [
   'claude-desktop',
   'codex',
   'cursor',
-  'gemini',
   'opencode',
   'trae',
   'trae-cn',
@@ -286,8 +271,6 @@ export function mcpHostPath(homes: ScratchHomes, app: McpAppId): string {
       return path.join(home, '.codex', 'config.toml');
     case 'cursor':
       return path.join(home, '.cursor', 'mcp.json');
-    case 'gemini':
-      return path.join(home, '.gemini', 'settings.json');
     case 'opencode': {
       const root = opencodeRoot(home);
       const jsonc = path.join(root, 'opencode.jsonc');

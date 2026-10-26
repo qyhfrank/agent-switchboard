@@ -221,7 +221,7 @@ test('the project registry exposes only ratified destinations and keeps global-o
       homes,
       [
         '[applications]',
-        'enabled = ["claude-code", "codex", "gemini", "opencode", "cursor", "trae", "trae-cn", "traecli", "custom"]',
+        'enabled = ["claude-code", "codex", "opencode", "cursor", "trae", "trae-cn", "traecli", "custom"]',
         '',
         '[targets.custom.commands]',
         'target_dir = "~/global-commands"',
@@ -245,7 +245,6 @@ test('the project registry exposes only ratified destinations and keeps global-o
     const cells: Array<[string, string | undefined, string | undefined]> = [
       ['claude-code rules', file('claude-code', 'rules'), path.join(projectReal, 'AGENTS.md')],
       ['codex commands', dir('codex', 'commands'), undefined],
-      ['gemini agents', dir('gemini', 'agents'), undefined],
       [
         'opencode mcp',
         file('opencode', 'mcp'),
@@ -409,13 +408,13 @@ test('a shared project AGENTS.md has exactly one marker writer whatever reads it
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
-    installApps(homes, 'codex', 'gemini', 'opencode');
+    installApps(homes, 'codex', 'opencode');
     fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
     seedRule(homes, 'machine.md', '# Machine rule\n');
     seedRule(homes, 'project.md', '# Shared rule\n');
     writeUserConfig(
       homes,
-      '[applications]\nenabled = ["codex", "gemini", "opencode", "traecli"]\n\n[rules]\nenabled = ["machine"]\n'
+      '[applications]\nenabled = ["codex", "opencode", "traecli"]\n\n[rules]\nenabled = ["machine"]\n'
     );
     projectConfig(project, '[rules]\nenabled = ["machine", "project"]\n');
     const agents = path.join(project, 'AGENTS.md');
@@ -446,8 +445,8 @@ test('a shared project AGENTS.md has exactly one marker writer whatever reads it
         .filter((entry) => entry.scope === 'user')
         .map((entry) => entry.app)
         .sort(),
-      ['codex', 'gemini', 'opencode', 'traecli'],
-      'four apps read the one project host'
+      ['codex', 'opencode', 'traecli'],
+      'three apps read the one project host'
     );
     assert.deepEqual(
       rules.filter((entry) => entry.scope === 'project').map((entry) => entry.path),
@@ -706,12 +705,12 @@ test('the project union directory holds the increment, never the machine copies'
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
-    installApps(homes, 'codex', 'gemini');
+    installApps(homes, 'codex', 'opencode');
     seedSkill(homes, 'alpha');
     seedSkill(homes, 'repo');
     writeUserConfig(
       homes,
-      '[applications]\nenabled = ["codex", "gemini"]\n\n[skills]\nenabled = ["alpha"]\n\n[distribution]\nuse_agents_dir = true\n'
+      '[applications]\nenabled = ["codex", "opencode"]\n\n[skills]\nenabled = ["alpha"]\n\n[distribution]\nuse_agents_dir = true\n'
     );
     projectConfig(project, '[skills]\nenabled = ["alpha", "repo"]\n');
 

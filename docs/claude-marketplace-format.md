@@ -328,7 +328,7 @@ ASB reads and adapts the Claude Code plugin format for cross-agent distribution.
 | `.mcp.json` format | `{ "mcpServers": { ... } }` | Wrapped or flat server map |
 | Portable lifecycle | Claude Code plugin enable or disable | Global `[plugins]` plus per-application plugin selection |
 | Native lifecycle | Claude Code plugin manager | Target `native_plugins` selection for Claude Code or Codex |
-| Distribution targets | Claude Code only | All active applications (Cursor, Codex, Gemini, etc.) |
+| Distribution targets | Claude Code only | All active applications (Cursor, Codex, OpenCode, etc.) |
 | Name sanitization | N/A | `sanitizeServerKeys()` replaces `[^a-zA-Z0-9_-]` with `-` for Cursor/Codex |
 | Hook runtime | Full Claude Code hook schema | Claude Code receives full hook config; Codex receives the command-only subset and requires `/hooks` review |
 | `strict` authority | `plugin.json` when `true`; marketplace when `false` | Marketplace entry when `true`; `plugin.json` when `false`, with field-level fallback |
