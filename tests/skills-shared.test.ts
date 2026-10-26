@@ -51,17 +51,17 @@ function exists(...segments: string[]): boolean {
 
 test('default skills destinations share native readers and keep Claude in its own directory', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor');
+    installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor', 'pi', 'dsh');
     seedSkill(homes, 'review');
     writeUserConfig(
       homes,
-      '[applications]\nenabled = ["claude-code", "codex", "opencode", "cursor"]\n[skills]\nenabled = ["review"]\n'
+      '[applications]\nenabled = ["claude-code", "codex", "opencode", "cursor", "pi", "dsh"]\n[skills]\nenabled = ["review"]\n'
     );
     const report = await runSync();
     assert.equal(report.exitCode, 0);
     assert.ok(exists(unionBundle(homes, 'review'), 'SKILL.md'));
     assert.ok(exists(skillsParentDir(homes, 'claude-code'), 'review', 'SKILL.md'));
-    for (const app of ['codex', 'opencode', 'cursor'] as const) {
+    for (const app of ['codex', 'opencode', 'cursor', 'pi', 'dsh'] as const) {
       assert.equal(exists(skillsParentDir(homes, app)), false, app);
     }
     assert.equal(report.entries.filter((entry) => entry.outcome === 'written').length, 2);
@@ -73,23 +73,23 @@ test('default skills destinations share native readers and keep Claude in its ow
     assert.ok(states.every((state) => state.version === 1));
     assert.deepEqual(
       states.flatMap((state) => state.slices).find((slice) => slice.app === 'agents').members,
-      ['codex', 'opencode', 'cursor']
+      ['codex', 'opencode', 'cursor', 'pi', 'dsh']
     );
   });
 });
 
 test('an own destination writes Cursor separately while other readers keep the shared copy', async () => {
   await withScratchHomes(async (homes) => {
-    installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor');
+    installApps(homes, 'claude-code', 'codex', 'opencode', 'cursor', 'pi', 'dsh');
     seedSkill(homes, 'review');
     writeUserConfig(
       homes,
-      '[applications]\nenabled = ["claude-code", "codex", "opencode", "cursor"]\n[skills]\nenabled = ["review"]\n[applications.cursor.skills]\ndestination = "own"\n'
+      '[applications]\nenabled = ["claude-code", "codex", "opencode", "cursor", "pi", "dsh"]\n[skills]\nenabled = ["review"]\n[applications.cursor.skills]\ndestination = "own"\n'
     );
     assert.equal((await runSync()).exitCode, 0);
     for (const app of ['agents', 'claude-code', 'cursor'] as const)
       assert.ok(exists(skillsParentDir(homes, app), 'review', 'SKILL.md'));
-    for (const app of ['codex', 'opencode'] as const)
+    for (const app of ['codex', 'opencode', 'pi', 'dsh'] as const)
       assert.equal(exists(skillsParentDir(homes, app)), false);
   });
 });

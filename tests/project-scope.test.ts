@@ -41,10 +41,13 @@ test('project readers share one rules region and skills directory while Claude k
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
-    installApps(homes, 'claude-code', 'codex', 'cursor');
+    installApps(homes, 'claude-code', 'codex', 'cursor', 'pi', 'dsh');
     seedRule(homes, 'review.md', 'Review carefully.\n');
     seedSkill(homes, 'review');
-    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex", "cursor"]\n');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["claude-code", "codex", "cursor", "pi", "dsh"]\n'
+    );
     projectConfig(project, '[rules]\nenabled = ["review"]\n[skills]\nenabled = ["review"]\n');
     fs.writeFileSync(path.join(project, 'AGENTS.md'), '# User instructions\n');
     const report = await runSync({ project });

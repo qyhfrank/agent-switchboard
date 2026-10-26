@@ -587,6 +587,25 @@ export const APP_ROWS: readonly AppRow[] = [
     },
   },
   {
+    id: 'dsh',
+    detectDir: (homes) => path.join(homes.agentsHome, '.dsh'),
+    rules: {
+      root: (homes) => path.join(homes.agentsHome, '.dsh'),
+      path: (homes) => path.join(homes.agentsHome, '.dsh', 'AGENTS.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
+      render: rawBody,
+      dedicated: false,
+    },
+    skills: {
+      shared: true,
+      root: (homes) => path.join(homes.agentsHome, '.dsh'),
+      dir: (homes) => path.join(homes.agentsHome, '.dsh', 'skills'),
+      projectDir: (root) => path.join(root, '.dsh', 'skills'),
+      reserved: [],
+      importable: true,
+    },
+  },
+  {
     // TRAE CLI 2.0: a codex fork sharing ~/.trae with the Trae IDE rows.
     // ~/.trae/skills stays owned by the trae row; this reader uses shared skills.
     id: 'traecli',
