@@ -128,6 +128,46 @@ test('a recorded project rules file retires after its shared region replacement 
   });
 });
 
+test('obsolete recorded rules retire despite a malformed replacement host', async () => {
+  for (const change of ['deselect', 'delete-source', 'disable'] as const) {
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, 'project');
+      fs.mkdirSync(project);
+      installApps(homes, 'cursor');
+      const source = seedRule(homes, 'review.md', 'Review carefully.\n');
+      writeUserConfig(homes, '[applications]\nenabled = ["cursor"]\n');
+      projectConfig(project, '[rules]\nenabled = ["review"]\n');
+      const rules = APP_ROWS.find((row) => row.id === 'cursor')?.rules;
+      assert.ok(rules);
+      const current = rules.projectPath;
+      const previous = path.join(project, '.cursor', 'rules', 'rules.mdc');
+      try {
+        rules.projectPath = () => previous;
+        assert.equal((await runSync({ project })).exitCode, 0);
+      } finally {
+        rules.projectPath = current;
+      }
+      const host = path.join(project, 'AGENTS.md');
+      const malformed = '<!-- rules:start -->\nUnclosed region\n';
+      fs.writeFileSync(host, malformed);
+      if (change === 'deselect') projectConfig(project, '[rules]\nenabled = []\n');
+      if (change === 'delete-source') fs.unlinkSync(source);
+      if (change === 'disable') writeUserConfig(homes, '[applications]\nenabled = []\n');
+      const preview = await runSync({ project, dryRun: true });
+      assert.ok(
+        preview.entries.some((entry) => entry.path === previous && entry.outcome === 'removed'),
+        change
+      );
+      assert.ok(fs.existsSync(previous));
+      for (let round = 0; round < 2; round++) {
+        await runSync({ project });
+        assert.equal(fs.existsSync(previous), false, change);
+        assert.equal(fs.readFileSync(host, 'utf8'), malformed);
+      }
+    });
+  }
+});
+
 test('project skill divergence keeps Codex remainders out of the shared directory', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');

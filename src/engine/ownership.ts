@@ -552,7 +552,17 @@ export function reconcileOwnership(
         action.path !== null &&
         action.path !== slice.path &&
         ['failed', 'blocked', 'conflict'].includes(action.outcome) &&
-        (action.members ?? (action.app ? [action.app] : [])).some((app) => readers.includes(app))
+        (action.members ?? (action.app ? [action.app] : [])).some(
+          (app) =>
+            readers.includes(app) &&
+            input.config.apps.enabled.includes(app) &&
+            input.inventory.components.some(
+              (component) =>
+                component.type === slice.type &&
+                (slice.id === null || component.id === slice.id) &&
+                input.selection(app, slice.type).includes(component.id)
+            )
+        )
     );
     if (blockedReplacement || replacements.some((replacement) => !matches(replacement))) {
       const waiting =
