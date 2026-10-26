@@ -39,10 +39,6 @@ function codexConfig(homes: ScratchHomes): string {
   return path.join(homes.agentsHome, '.codex', 'config.toml');
 }
 
-function _opencodeRoot(homes: ScratchHomes): string {
-  return path.join(homes.agentsHome, '.config', 'opencode');
-}
-
 test('commands and agents use own-file ownership through write, update, and removal', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'claude-code');
