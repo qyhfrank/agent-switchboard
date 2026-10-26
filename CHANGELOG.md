@@ -2,9 +2,12 @@
 
 ## Unreleased
 
+## 0.5.13
+
 - Skills default to shared directories for applications that read them natively. Shared directories hold the active readers' common selection. Applications with an own skills directory receive their remaining skills there; other applications report those remainders as skipped. Set `[applications.<id>.skills] destination = "own"` to use that application's own directory.
 - Cursor project rules use the managed region in the project's `AGENTS.md`.
 - Pi supports rules, skills, prompt templates, and MCP configuration. DeepSeek Harness (`dsh`) supports rules and skills.
+- Retiring a skill copy also removes the empty directories it carried, so the next sync no longer reports the same removal again.
 
 ## 0.5.12
 
