@@ -1668,12 +1668,15 @@ export async function runExplain(
     const scope: ReportEntry['scope'] = project === undefined ? 'user' : 'project';
     const guard = project ? projectGuard(resolvedBase, userTable, project.root) : undefined;
     const capture = captureFor(config, table, inventory, selection, false, guard);
+    const ownership = new DistributionOwnership({ config, project });
     const planInput = {
       config,
       inventory,
       capture,
       table,
       selection,
+      owns: (targetPath: string, keyPath?: readonly string[]) =>
+        ownership.owns(targetPath, keyPath),
       ...(project ? { project } : {}),
     };
     return [

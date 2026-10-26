@@ -372,6 +372,51 @@ test('explain matches app ids and path basenames to single slices', async () => 
   });
 });
 
+test('explain and sync agree on recorded shared skills after a library edit', async () => {
+  for (const scope of ['user', 'project'] as const) {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'cursor');
+      seedSkill(homes, 'review');
+      const project = scope === 'project' ? path.join(homes.root, 'project') : undefined;
+      const selection = '[skills]\nenabled = ["review"]\n';
+      writeUserConfig(homes, `[applications]\nenabled = ["cursor"]\n${project ? '' : selection}`);
+      if (project) {
+        fs.mkdirSync(project);
+        fs.writeFileSync(path.join(project, '.asb.toml'), selection);
+      }
+      await runSync({ project });
+      const target = path.join(project ?? homes.agentsHome, '.agents', 'skills', 'review');
+      const before = fs.readFileSync(path.join(target, 'SKILL.md'), 'utf8');
+      const stateDir = path.join(homes.stateHome, 'distribution');
+      const readState = () =>
+        fs
+          .readdirSync(stateDir)
+          .sort()
+          .map((name) => [name, fs.readFileSync(path.join(stateDir, name), 'utf8')]);
+      const state = readState();
+      seedSkill(homes, 'review', { body: 'Updated library instructions.' });
+      const opts = { project, types: ['skills'], apps: ['cursor'] };
+      const explanation = (await runExplain('review', opts)).slices.find(
+        (slice) => slice.path === target
+      );
+      const preview = (await runSync({ ...opts, dryRun: true })).entries.find(
+        (entry) => entry.path === target
+      );
+      assert.deepEqual(readState(), state);
+      assert.equal(fs.readFileSync(path.join(target, 'SKILL.md'), 'utf8'), before);
+      const applied = (await runSync(opts)).entries.find((entry) => entry.path === target);
+      for (const result of [explanation, preview, applied]) {
+        assert.equal(result?.outcome, 'written', scope);
+        assert.equal(result?.detail, project ? 'takeover' : 'updated', scope);
+      }
+      assert.match(
+        fs.readFileSync(path.join(target, 'SKILL.md'), 'utf8'),
+        /Updated library instructions/
+      );
+    });
+  }
+});
+
 test('explain includes shared skills for app filters and app-id targets', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex', 'cursor', 'claude-code');
