@@ -110,6 +110,28 @@ test('a recorded project rules file retires after its shared region replacement 
   });
 });
 
+test('project skill divergence keeps Codex remainders out of the shared directory', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    installApps(homes, 'codex', 'cursor');
+    for (const id of ['common', 'extra']) seedSkill(homes, id);
+    writeUserConfig(homes, '[applications]\nenabled = ["codex", "cursor"]\n');
+    projectConfig(project, '[skills]\nenabled = ["common", "extra"]\n');
+    assert.equal((await runSync({ project })).exitCode, 0);
+    projectConfig(
+      project,
+      '[skills]\nenabled = ["common", "extra"]\n[applications.cursor.skills]\nremove = ["extra"]\n'
+    );
+    await runSync({ project });
+    assert.equal((await runSync({ project })).exitCode, 0);
+    assert.ok(fs.existsSync(path.join(project, '.agents', 'skills', 'common', 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(project, '.codex', 'skills', 'extra', 'SKILL.md')));
+    assert.equal(fs.existsSync(path.join(project, '.agents', 'skills', 'extra')), false);
+    assert.equal(fs.existsSync(path.join(project, '.cursor', 'skills', 'extra')), false);
+  });
+});
+
 test('project root canonicalizes once and the increment is the overlay minus the base', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'real-project');

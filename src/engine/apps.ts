@@ -355,7 +355,7 @@ export const APP_ROWS: readonly AppRow[] = [
       shared: true,
       root: (homes) => path.join(homes.agentsHome, '.codex'),
       dir: (homes) => path.join(homes.agentsHome, '.codex', 'skills'),
-      projectDir: (root) => path.join(root, '.agents', 'skills'),
+      projectDir: (root) => path.join(root, '.codex', 'skills'),
       reserved: ['.system'],
       importable: true,
     },
