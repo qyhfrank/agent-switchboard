@@ -46,11 +46,11 @@ const sliceSchema = z.object({
 const stateSchema = z.object({ version: z.literal(1), slices: z.array(sliceSchema) }).strict();
 export type OwnedSlice = z.infer<typeof sliceSchema>;
 
-/** A physical slice can outlive its source, profile, or application selection. */
+/** A file and its managed region are alternative ownership shapes at one address. */
 function slot(slice: OwnedSlice): string {
   return JSON.stringify([
     slice.path,
-    slice.shape,
+    slice.shape === 'region' ? 'file' : slice.shape,
     slice.keyPath,
     slice.event,
     slice.shape === 'hook' ? slice.hash : undefined,

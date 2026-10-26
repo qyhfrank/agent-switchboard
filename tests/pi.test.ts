@@ -117,3 +117,41 @@ test('pi project prompts and MCP stay inside the project while skills can use it
     assert.equal(fs.existsSync(path.join(homes.agentsHome, '.pi', 'agent', 'commands')), false);
   });
 });
+
+test('a builtin region replaces whole-file ownership at the same path without retiring its host', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'pi');
+    seedRule(homes, 'policy.md', 'Check the result.\n');
+    const target = path.join(homes.agentsHome, '.pi', 'agent', 'AGENTS.md');
+    writeUserConfig(
+      homes,
+      '[applications]\nenabled = ["custom-reader"]\n[rules]\nenabled = ["policy"]\n[targets.custom-reader]\ndetect = "~/.pi/agent"\n[targets.custom-reader.rules]\nfile_path = "~/.pi/agent/AGENTS.md"\n'
+    );
+    assert.equal((await runSync()).exitCode, 0);
+    writeUserConfig(homes, '[applications]\nenabled = ["pi"]\n[rules]\nenabled = ["policy"]\n');
+    assert.equal((await runSync()).exitCode, 0);
+    fs.appendFileSync(target, '\n# Personal instructions\n');
+    const expected = fs.readFileSync(target, 'utf8');
+    for (let run = 0; run < 2; run++) {
+      const report = await runSync();
+      assert.equal(report.exitCode, 0);
+      assert.equal(fs.readFileSync(target, 'utf8'), expected);
+      assert.equal(
+        report.entries.some((entry) => entry.outcome === 'removed'),
+        false
+      );
+    }
+    const stateDir = path.join(homes.stateHome, 'distribution');
+    const slices = fs
+      .readdirSync(stateDir)
+      .flatMap((file) => JSON.parse(fs.readFileSync(path.join(stateDir, file), 'utf8')).slices);
+    assert.deepEqual(
+      slices.filter((slice) => slice.path === target).map((slice) => [slice.app, slice.shape]),
+      [['pi', 'region']]
+    );
+    writeUserConfig(homes, '[applications]\nenabled = ["pi"]\n');
+    assert.equal((await runSync()).exitCode, 0);
+    assert.match(fs.readFileSync(target, 'utf8'), /# Personal instructions/);
+    assert.doesNotMatch(fs.readFileSync(target, 'utf8'), /Check the result/);
+  });
+});
