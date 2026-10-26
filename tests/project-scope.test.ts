@@ -785,25 +785,24 @@ test('an increment for a cell with no project destination is named, not dropped'
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     fs.mkdirSync(project);
-    installApps(homes, 'codex');
+    fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
     seedTree(homes.asbHome, { 'commands/build.md': 'desired build\n' });
-    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["traecli"]\n');
     projectConfig(project, '[commands]\nenabled = ["build"]\n');
 
     const report = await runSync({ project });
     const row = report.entries.find((entry) => entry.detail === 'no-project-target');
 
-    // Codex reads prompts from the machine alone, so the repository has
-    // nowhere to put one. The gap is a row: nothing lands silently in the
-    // repository, and nothing lands globally instead.
+    // TRAE CLI commands have only a user destination. Report the project
+    // increment without writing it into the user directory instead.
     assert.equal(report.exitCode, 0, JSON.stringify(report.entries, null, 2));
     assert.equal(row?.outcome, 'skipped', JSON.stringify(report.entries, null, 2));
     assert.equal(row?.scope, 'project');
-    assert.equal(row?.app, 'codex');
+    assert.equal(row?.app, 'traecli');
     assert.equal(row?.type, 'commands');
     assert.match(row?.reason ?? '', /build/);
     assert.equal(
-      fs.existsSync(path.join(homes.agentsHome, '.codex', 'prompts', 'build.md')),
+      fs.existsSync(path.join(homes.agentsHome, '.trae', 'commands', 'build.md')),
       false
     );
     assert.deepEqual(fs.readdirSync(project), ['.asb.toml']);
