@@ -140,9 +140,7 @@ export interface Action {
    * empty document, the form written through a symlinked target.
    */
   content?: string;
-  /** Relative project alias with its captured identity and required host bytes. */
-  symlink?: { target: string; expectedTarget: string | null; hostHash: string };
-  /** Required leaf identity for cleanup that must not follow a new symlink. */
+  /** Required leaf symlink destination at apply time (null = not a symlink). */
   expectedLinkTarget?: string | null;
   /** Backing paths whose identities must hold for a shared-host mutation. */
   expectedPaths?: { path: string; resolvedPath: string | null }[];
@@ -579,22 +577,16 @@ function planSharedProjectRules(
   const claude = members.includes('claude-code');
   const linkPath = path.join(project.root, 'CLAUDE.md');
   const link = capture.targets[linkPath];
-  const keepHost = link?.linkTarget === 'AGENTS.md';
+  // Versions 0.5.10 through 0.5.13 wrote this exact relative link. Claude
+  // Code reads AGENTS.md without it, so a Claude sync removes it; until then
+  // an emptied AGENTS.md stays so the link does not dangle.
+  const legacyLink = link?.linkTarget === 'AGENTS.md';
   const hostIdentity = { path: targetPath, resolvedPath: current.resolvedPath ?? targetPath };
-  const linkIdentity = { path: linkPath, resolvedPath: link?.resolvedPath ?? linkPath };
-  const linkBase = { app: 'claude-code', type: 'rules', id: null, path: linkPath };
   const linkCollision: Action | null =
-    link?.exists && !keepHost
-      ? {
-          ...linkBase,
-          op: 'none',
-          outcome: 'conflict',
-          detail: 'foreign',
-          reason:
-            'CLAUDE.md is occupied by an independent file or link; preserve it and align it with AGENTS.md before syncing',
-        }
+    link?.exists && !legacyLink
+      ? claudeInstructionsConflict(linkPath, 'CLAUDE.md is an independent file or link')
       : null;
-  if (linkCollision && hostIdentity.resolvedPath === linkIdentity.resolvedPath) {
+  if (linkCollision && hostIdentity.resolvedPath === (link?.resolvedPath ?? linkPath)) {
     return [
       {
         ...base,
@@ -608,54 +600,55 @@ function planSharedProjectRules(
     ];
   }
   const actions: Action[] = [];
+  if (claude && link && legacyLink) {
+    actions.push({
+      app: 'claude-code',
+      type: 'rules',
+      id: null,
+      path: linkPath,
+      op: 'remove',
+      outcome: 'removed',
+      detail: 'legacy-link',
+      root: project.root,
+      expectedHash: link.content === null ? null : hashContent(link.content),
+      expectedLinkTarget: 'AGENTS.md',
+    });
+  }
   if (desiredHost === existing) {
     if (desiredSlice !== null) actions.push({ ...base, op: 'none', outcome: 'unchanged' });
   } else {
     actions.push({
       ...base,
-      op: desiredSlice === null && desiredHost.length === 0 && !keepHost ? 'remove' : 'write',
+      op:
+        desiredSlice === null && desiredHost.length === 0 && !(legacyLink && !claude)
+          ? 'remove'
+          : 'write',
       outcome: desiredSlice === null ? 'removed' : 'written',
       detail: current.exists ? 'updated' : 'created',
       content: desiredHost,
       root: project.root,
       expectedHash: current.content === null ? null : hashContent(current.content),
-      expectedPaths: [hostIdentity, linkIdentity],
+      expectedPaths: [hostIdentity],
     });
   }
-  if (!claude || (desiredSlice === null && (!keepHost || !current.exists))) return actions;
-
+  if (!claude || desiredSlice === null) return actions;
   if (linkCollision) {
     actions.push(linkCollision);
     return actions;
   }
-  actions.push({
-    ...linkBase,
-    op: 'write',
-    outcome: link?.exists ? 'unchanged' : 'written',
-    detail: link?.exists ? undefined : 'created',
-    root: project.root,
-    requiresPaths: [targetPath],
-    expectedPaths: [hostIdentity],
-    symlink: {
-      target: 'AGENTS.md',
-      expectedTarget: link?.linkTarget ?? null,
-      hostHash: hashContent(desiredHost),
-    },
-  });
 
+  // The pre-0.5.10 project destination. Claude Code reads it instead of
+  // AGENTS.md, so it is removed only when it holds nothing but the managed
+  // region and is otherwise preserved as a conflict.
   const previousPath = path.join(project.root, '.claude', 'CLAUDE.md');
   const previous = capture.targets[previousPath];
   if (!previous?.exists) return actions;
-  const cleanupBase = {
-    app: 'claude-code',
-    type: 'rules',
-    id: null,
-    path: previousPath,
-    requiresPaths: [targetPath, linkPath],
-  };
   if (previous.resolvedPath === hostIdentity.resolvedPath) {
     actions.push({
-      ...cleanupBase,
+      app: 'claude-code',
+      type: 'rules',
+      id: null,
+      path: previousPath,
       op: 'none',
       outcome: 'unchanged',
       detail: 'shared-host',
@@ -663,44 +656,61 @@ function planSharedProjectRules(
     });
     return actions;
   }
-  if (previous.content === null || previous.linkTarget !== undefined) {
-    actions.push({
-      ...cleanupBase,
-      op: 'none',
-      outcome: 'left-behind',
-      detail: 'unproven',
-      reason: 'previous Claude rules host is unreadable or a symlink; preserved',
-    });
+  const content = previous.linkTarget === undefined ? previous.content : null;
+  if (content === null || !holdsOnlyProjectRegion(content)) {
+    actions.push(
+      claudeInstructionsConflict(
+        previousPath,
+        '.claude/CLAUDE.md is a link, is unreadable, or holds content beyond the managed rules region'
+      )
+    );
     return actions;
   }
-  try {
-    if (projectRegion(previous.content) === null) return actions;
-    const remaining = mergeProjectRegion(previous.content, '');
-    actions.push({
-      ...cleanupBase,
-      op: remaining.length === 0 ? 'remove' : 'write',
-      outcome: 'removed',
-      detail: 'stale-copy',
-      content: remaining,
-      root: project.root,
-      expectedHash: hashContent(previous.content),
-      expectedLinkTarget: null,
-      expectedPaths: [
-        hostIdentity,
-        { path: linkPath, resolvedPath: hostIdentity.resolvedPath },
-        { path: previousPath, resolvedPath: previous.resolvedPath ?? previousPath },
-      ],
-    });
-  } catch (error) {
-    actions.push({
-      ...cleanupBase,
-      op: 'none',
-      outcome: 'left-behind',
-      detail: 'malformed-marker',
-      reason: `${error instanceof Error ? error.message : String(error)}; previous Claude rules host preserved`,
-    });
-  }
+  actions.push({
+    app: 'claude-code',
+    type: 'rules',
+    id: null,
+    path: previousPath,
+    op: 'remove',
+    outcome: 'removed',
+    detail: 'stale-copy',
+    root: project.root,
+    requiresPaths: [targetPath],
+    expectedHash: hashContent(content),
+    expectedLinkTarget: null,
+    expectedPaths: [
+      hostIdentity,
+      { path: previousPath, resolvedPath: previous.resolvedPath ?? previousPath },
+    ],
+  });
   return actions;
+}
+
+function holdsOnlyProjectRegion(content: string): boolean {
+  try {
+    return projectRegion(content) !== null && mergeProjectRegion(content, '').length === 0;
+  } catch {
+    // A malformed marker does not prove a managed region.
+    return false;
+  }
+}
+
+/**
+ * A project Claude instruction file that Claude Code's default
+ * `instructionFiles` setting loads instead of AGENTS.md: the managed rules do
+ * not reach Claude Code while it exists, and it belongs to the repository.
+ */
+function claudeInstructionsConflict(targetPath: string, subject: string): Action {
+  return {
+    app: 'claude-code',
+    type: 'rules',
+    id: null,
+    path: targetPath,
+    op: 'none',
+    outcome: 'conflict',
+    detail: 'foreign',
+    reason: `${subject}; Claude Code reads it instead of AGENTS.md, so the managed project rules do not reach Claude Code. It is preserved: move its content into AGENTS.md and delete it`,
+  };
 }
 
 export function planRules(input: PlanInput): Action[] {

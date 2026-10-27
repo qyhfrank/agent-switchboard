@@ -295,7 +295,7 @@ render prove they are unchanged; edited copies are preserved and reported.
 
 Global rules stay in each application's own file. Project rules for Claude
 Code, Codex, OpenCode, Cursor, TRAE CLI, Pi and dsh share the managed region in
-`AGENTS.md`; Claude Code reads it through `CLAUDE.md -> AGENTS.md`.
+`AGENTS.md`, which Claude Code reads when the project has no `CLAUDE.md`.
 
 ### Custom targets
 
@@ -459,13 +459,17 @@ scope and stay there. The rules region in the repository's `AGENTS.md` composes
 the increment rules, so agent context stops carrying twice what
 `~/.claude/CLAUDE.md` already gives it.
 
-Claude Code reads project rules through the relative root link
-`CLAUDE.md -> AGENTS.md`. Claude Code and other applications that read
-`AGENTS.md` share one managed region and must select the same project rules.
-An independent root `CLAUDE.md` file or a different link is preserved and
-reported as a conflict, including under `collision = "takeover"`.
-Deselection removes the managed region while preserving repository content
-and the canonical link; its `AGENTS.md` target remains present even when empty.
+Claude Code 2.1.277 and later reads the root `AGENTS.md` by default when the
+project has no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`.
+Claude Code and other applications that read `AGENTS.md` share one managed
+region and must select the same project rules.
+A sync with Claude Code selected removes a root `CLAUDE.md` that is exactly the
+relative link `CLAUDE.md -> AGENTS.md`, and a `.claude/CLAUDE.md` that holds
+only the managed rules region.
+Any other root `CLAUDE.md` or `.claude/CLAUDE.md` is preserved and reported as a
+conflict, including under `collision = "takeover"`, because Claude Code reads it
+instead of `AGENTS.md`.
+Deselection removes the managed region while preserving repository content.
 
 ```toml
 [distribution.project]

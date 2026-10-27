@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Claude Code project rules reach Claude Code through the root `AGENTS.md`, which Claude Code 2.1.277 and later reads when the project has no `CLAUDE.md`. Syncs no longer write the root `CLAUDE.md -> AGENTS.md` link, and a sync with Claude Code selected removes the link that 0.5.10 through 0.5.13 wrote; dry runs report the removal. Other root `CLAUDE.md` files and links, and a `.claude/CLAUDE.md` holding more than the managed rules region, are preserved and reported as conflicts because Claude Code reads them instead of `AGENTS.md`. Deselection preserves repository content.
+
 ## 0.5.13
 
 - Skills default to shared directories for applications that read them natively. Shared directories hold the active readers' common selection. Applications with an own skills directory receive their remaining skills there; other applications report those remainders as skipped. Set `[applications.<id>.skills] destination = "own"` to use that application's own directory.

@@ -56,7 +56,7 @@ test('project readers share one rules region and skills directory while Claude k
     assert.equal(rules.match(/<!-- rules:start -->/g)?.length, 1);
     assert.match(rules, /Review carefully/);
     assert.match(rules, /# User instructions/);
-    assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
+    assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
     for (const app of ['.agents', '.claude'])
       assert.ok(fs.existsSync(path.join(project, app, 'skills', 'review', 'SKILL.md')));
     assert.equal(fs.existsSync(path.join(project, '.cursor', 'rules', 'rules.mdc')), false);

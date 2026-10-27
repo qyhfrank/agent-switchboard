@@ -13,7 +13,7 @@ import {
   writeUserConfig,
 } from './helpers/scratch.js';
 
-test('project plugin rules share one host and canonical Claude link across sync and deselection', async () => {
+test('project plugin rules share one AGENTS.md region with Claude Code across sync and deselection', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     const plugin = path.join(homes.root, 'team');
@@ -21,7 +21,7 @@ test('project plugin rules share one host and canonical Claude link across sync 
     seedTree(project, {
       '.asb.toml': '[plugins]\nenabled = ["team"]\n',
       'AGENTS.md': '# Repository instructions\n',
-      '.claude/CLAUDE.md': mergeProjectRegion('Keep this note.\n', 'Previous managed rule'),
+      '.claude/CLAUDE.md': mergeProjectRegion('', 'Previous managed rule'),
     });
     installApps(homes, 'claude-code', 'codex');
     writeUserConfig(
@@ -29,41 +29,96 @@ test('project plugin rules share one host and canonical Claude link across sync 
       `[applications]\nenabled = ["claude-code", "codex"]\n[plugins.sources]\nteam = ${JSON.stringify(plugin)}\n`
     );
     const agents = path.join(project, 'AGENTS.md');
-    const link = path.join(project, 'CLAUDE.md');
     const previous = path.join(project, '.claude', 'CLAUDE.md');
 
     const dry = await runSync({ project, dryRun: true });
     assert.equal(dry.exitCode, 0, JSON.stringify(dry.entries));
-    assert.equal(fs.existsSync(link), false);
+    assert.equal(dry.entries.find((entry) => entry.path === previous)?.outcome, 'removed');
     assert.match(fs.readFileSync(previous, 'utf-8'), /Previous managed rule/);
     const first = await runSync({ project });
     assert.equal(first.exitCode, 0, JSON.stringify(first.entries));
-    assert.equal(fs.readlinkSync(link), 'AGENTS.md');
     const content = fs.readFileSync(agents, 'utf-8');
     assert.equal(content.match(/rules:start/g)?.length, 1);
     assert.match(content, /Team style/);
     assert.match(content, /Repository instructions/);
-    assert.equal(fs.readFileSync(previous, 'utf-8'), 'Keep this note.\n');
+    assert.equal(fs.existsSync(previous), false);
+    assert.equal(
+      fs.lstatSync(path.join(project, 'CLAUDE.md'), { throwIfNoEntry: false }),
+      undefined
+    );
     assert.equal(
       first.entries.filter((entry) => entry.scope === 'project' && entry.path === agents).length,
       1
     );
     assert.equal((await runSync({ project })).exitCode, 0);
     assert.equal(fs.readFileSync(agents, 'utf-8'), content);
-    assert.equal(fs.readlinkSync(link), 'AGENTS.md');
 
     fs.writeFileSync(path.join(project, '.asb.toml'), '[plugins]\nenabled = []\n');
     assert.equal((await runSync({ project })).exitCode, 0);
     assert.equal(fs.readFileSync(agents, 'utf-8'), '# Repository instructions\n');
+    assert.equal(
+      fs.lstatSync(path.join(project, 'CLAUDE.md'), { throwIfNoEntry: false }),
+      undefined
+    );
+  });
+});
+
+test('a Claude sync removes the legacy CLAUDE.md link to AGENTS.md and dry runs report it', async () => {
+  for (const selected of [true, false]) {
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, 'project');
+      seedTree(project, {
+        '.asb.toml': selected ? '[rules]\nenabled = ["base"]\n' : '[rules]\nenabled = []\n',
+        'AGENTS.md': mergeProjectRegion('# Repository instructions\n', 'Old rule'),
+      });
+      const link = path.join(project, 'CLAUDE.md');
+      fs.symlinkSync('AGENTS.md', link);
+      installApps(homes, 'claude-code');
+      seedRule(homes, 'base.md', 'New rule\n');
+      writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+
+      const dry = await runSync({ project, dryRun: true });
+      const row = dry.entries.find((entry) => entry.path === link);
+      assert.equal(row?.outcome, 'removed', JSON.stringify(dry.entries));
+      assert.equal(row?.detail, 'legacy-link');
+      assert.equal(fs.readlinkSync(link), 'AGENTS.md');
+
+      const report = await runSync({ project });
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      assert.equal(report.entries.find((entry) => entry.path === link)?.outcome, 'removed');
+      assert.equal(fs.lstatSync(link, { throwIfNoEntry: false }), undefined);
+      const agents = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8');
+      assert.match(agents, /Repository instructions/);
+      if (selected) assert.match(agents, /New rule/);
+      else assert.doesNotMatch(agents, /rule/);
+    });
+  }
+});
+
+test('emptying AGENTS.md without Claude Code keeps the host behind a legacy CLAUDE.md link', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    seedTree(project, {
+      '.asb.toml': '[rules]\nenabled = []\n',
+      'AGENTS.md': mergeProjectRegion('', 'Old rule'),
+    });
+    const link = path.join(project, 'CLAUDE.md');
+    fs.symlinkSync('AGENTS.md', link);
+    installApps(homes, 'codex');
+    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n');
+
+    const report = await runSync({ project });
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+    assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), '');
     assert.equal(fs.readlinkSync(link), 'AGENTS.md');
   });
 });
 
-test('Claude link collisions preserve files and foreign links under the default takeover policy', async () => {
+test('an independent root CLAUDE.md or foreign link is preserved and reported as a conflict', async () => {
   for (const shape of ['file', 'directory', 'internal', 'external', 'dangling'] as const) {
     await withScratchHomes(async (homes) => {
       const project = path.join(homes.root, 'project');
-      const managed = mergeProjectRegion('Personal note.\n', 'Old rule');
+      const managed = mergeProjectRegion('', 'Old rule');
       seedTree(project, {
         '.asb.toml': '[rules]\nenabled = ["base"]\n',
         '.claude/CLAUDE.md': managed,
@@ -81,13 +136,13 @@ test('Claude link collisions preserve files and foreign links under the default 
       }
       for (const dryRun of [true, false]) {
         const report = await runSync({ project, dryRun });
-        assert.equal(
-          report.entries.find((entry) => entry.path === link)?.outcome,
-          'conflict',
-          shape
-        );
+        const row = report.entries.find((entry) => entry.path === link);
+        assert.equal(row?.outcome, 'conflict', shape);
+        assert.match(row?.reason ?? '', /Claude Code reads it instead of AGENTS\.md/);
+        assert.equal(report.exitCode, 1);
         assert.equal(fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'), managed);
       }
+      assert.match(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), /New rule/);
       if (shape === 'file')
         assert.equal(fs.readFileSync(link, 'utf-8'), 'Independent instructions\n');
       else if (shape === 'directory') assert.ok(fs.statSync(link).isDirectory());
@@ -100,7 +155,7 @@ test('Claude link collisions preserve files and foreign links under the default 
   }
 });
 
-test('shared rule conflicts preserve the previous Claude region and do not create a link', async () => {
+test('shared rule conflicts preserve the previous Claude region', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     const previous = mergeProjectRegion('', 'Old rule');
@@ -116,13 +171,12 @@ test('shared rule conflicts preserve the previous Claude region and do not creat
     const report = await runSync({ project });
     assert.equal(report.exitCode, 1);
     assert.ok(report.entries.some((entry) => entry.detail === 'shared-writer'));
-    assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
     assert.equal(fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'), previous);
   });
 });
 
-test('Claude cleanup preserves unmarked, malformed, linked and escaping previous hosts', async () => {
-  for (const shape of ['unmarked', 'malformed', 'linked', 'escaping'] as const) {
+test('previous Claude hosts that cannot be removed as a managed region are preserved', async () => {
+  for (const shape of ['annotated', 'unmarked', 'malformed', 'linked', 'escaping'] as const) {
     await withScratchHomes(async (homes) => {
       const project = path.join(homes.root, 'project');
       const outside = path.join(homes.root, 'outside');
@@ -131,7 +185,9 @@ test('Claude cleanup preserves unmarked, malformed, linked and escaping previous
           ? 'Personal instructions\n'
           : shape === 'malformed'
             ? '<!-- rules:start -->\nIncomplete\n'
-            : mergeProjectRegion('Personal note.\n', 'Old rule');
+            : shape === 'annotated'
+              ? mergeProjectRegion('Personal note.\n', 'Old rule')
+              : mergeProjectRegion('', 'Old rule');
       seedTree(project, { '.asb.toml': '[rules]\nenabled = ["base"]\n' });
       seedTree(outside, { 'CLAUDE.md': content });
       const previous = path.join(project, '.claude', 'CLAUDE.md');
@@ -144,60 +200,46 @@ test('Claude cleanup preserves unmarked, malformed, linked and escaping previous
       installApps(homes, 'claude-code');
       seedRule(homes, 'base.md', 'New rule\n');
       writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
-      await runSync({ project });
-      assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
+      const report = await runSync({ project });
+      assert.equal(report.exitCode, 1, shape);
+      assert.ok(
+        report.entries.some(
+          (entry) =>
+            entry.path === previous && ['conflict', 'blocked'].includes(entry.outcome ?? '')
+        ),
+        shape
+      );
+      assert.match(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), /New rule/);
       assert.equal(fs.readFileSync(previous, 'utf-8'), content);
       assert.equal(fs.readFileSync(path.join(outside, 'CLAUDE.md'), 'utf-8'), content);
+      assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
     });
   }
 });
 
-test('deselection keeps the canonical link target present and removes only the managed region', async () => {
+test('deselection removes only the managed region', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
-    seedTree(project, {
-      '.asb.toml': '[rules]\nenabled = ["base"]\n',
-      '.claude/CLAUDE.md': mergeProjectRegion('', 'Old rule'),
-    });
+    seedTree(project, { '.asb.toml': '[rules]\nenabled = ["base"]\n' });
     installApps(homes, 'claude-code');
     seedRule(homes, 'base.md', 'New rule\n');
     writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
     assert.equal((await runSync({ project })).exitCode, 0);
-    assert.equal(fs.existsSync(path.join(project, '.claude', 'CLAUDE.md')), false);
+    assert.match(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), /New rule/);
     fs.writeFileSync(path.join(project, '.asb.toml'), '[rules]\nenabled = []\n');
     assert.equal((await runSync({ project })).exitCode, 0);
-    assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
-    assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), '');
+    assert.equal(fs.existsSync(path.join(project, 'AGENTS.md')), false);
+    assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
     assert.equal((await runSync({ project })).exitCode, 0);
   });
 });
 
-test('Claude link apply refuses occupied drift, host drift and cleanup symlink drift', async () => {
+test('legacy link removal and previous-host cleanup refuse leaf identity drift', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
-    seedTree(project, { 'AGENTS.md': 'Rules\n' });
+    seedTree(project, { 'AGENTS.md': 'Rules\n', 'other.md': 'Rules\n' });
     const link = path.join(project, 'CLAUDE.md');
-    const action: Action = {
-      app: 'claude-code',
-      type: 'rules',
-      id: null,
-      path: link,
-      root: project,
-      op: 'write',
-      outcome: 'written',
-      symlink: { target: 'AGENTS.md', expectedTarget: null, hostHash: hashContent('Rules\n') },
-    };
-    fs.symlinkSync('missing.md', link);
-    assert.equal(executeAction(action).outcome, 'conflict');
-    assert.equal(fs.readlinkSync(link), 'missing.md');
-    fs.unlinkSync(link);
-    fs.writeFileSync(path.join(project, 'AGENTS.md'), 'Edited\n');
-    assert.equal(executeAction(action).outcome, 'conflict');
-    assert.equal(fs.existsSync(link), false);
-    fs.writeFileSync(path.join(project, 'AGENTS.md'), 'Rules\n');
-    assert.equal(executeAction(action).outcome, 'written');
-    assert.equal(fs.readlinkSync(link), 'AGENTS.md');
-    const cleanup: Action = {
+    const removal: Action = {
       app: 'claude-code',
       type: 'rules',
       id: null,
@@ -206,17 +248,28 @@ test('Claude link apply refuses occupied drift, host drift and cleanup symlink d
       op: 'remove',
       outcome: 'removed',
       expectedHash: hashContent('Rules\n'),
-      expectedLinkTarget: null,
+      expectedLinkTarget: 'AGENTS.md',
     };
+    fs.symlinkSync('other.md', link);
+    assert.equal(executeAction(removal).outcome, 'conflict');
+    assert.equal(fs.readlinkSync(link), 'other.md');
+    fs.unlinkSync(link);
+    fs.symlinkSync('AGENTS.md', link);
+    assert.equal(executeAction(removal).outcome, 'removed');
+    assert.equal(fs.lstatSync(link, { throwIfNoEntry: false }), undefined);
+    assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), 'Rules\n');
+
+    fs.symlinkSync('AGENTS.md', link);
+    const cleanup: Action = { ...removal, expectedLinkTarget: null };
     assert.equal(executeAction(cleanup).outcome, 'conflict');
     assert.equal(fs.readlinkSync(link), 'AGENTS.md');
   });
 });
 
-test('a failed Claude link apply preserves the previous managed region', async (context) => {
+test('a failed AGENTS.md write preserves the previous Claude region', async (context) => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
-    const previous = mergeProjectRegion('Personal note.\n', 'Old rule');
+    const previous = mergeProjectRegion('', 'Old rule');
     seedTree(project, {
       '.asb.toml': '[rules]\nenabled = ["base"]\n',
       '.claude/CLAUDE.md': previous,
@@ -224,15 +277,17 @@ test('a failed Claude link apply preserves the previous managed region', async (
     installApps(homes, 'claude-code');
     seedRule(homes, 'base.md', 'New rule\n');
     writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
-    const link = path.join(project, 'CLAUDE.md');
-    const symlink = fs.symlinkSync;
-    context.mock.method(fs, 'symlinkSync', (...args: Parameters<typeof fs.symlinkSync>) => {
-      if (args[1] === link) throw new Error('simulated link failure');
-      return symlink(...args);
+    const rename = fs.renameSync;
+    context.mock.method(fs, 'renameSync', (...args: Parameters<typeof fs.renameSync>) => {
+      if (path.basename(String(args[1])) === 'AGENTS.md') throw new Error('simulated failure');
+      return rename(...args);
     });
     const report = await runSync({ project });
     assert.equal(report.exitCode, 1);
-    assert.equal(report.entries.find((entry) => entry.path === link)?.outcome, 'failed');
+    assert.equal(
+      report.entries.find((entry) => entry.path === path.join(project, 'AGENTS.md'))?.outcome,
+      'failed'
+    );
     assert.equal(
       report.entries.find((entry) => entry.path === path.join(project, '.claude', 'CLAUDE.md'))
         ?.detail,
@@ -242,7 +297,7 @@ test('a failed Claude link apply preserves the previous managed region', async (
   });
 });
 
-test('an escaping shared host blocks the Claude link and previous-host cleanup', async () => {
+test('an escaping shared host blocks previous-host cleanup', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     const previous = mergeProjectRegion('', 'Old rule');
@@ -262,7 +317,6 @@ test('an escaping shared host blocks the Claude link and previous-host cleanup',
       assert.ok(
         report.entries.some((entry) => entry.scope === 'project' && entry.detail === 'path-escape')
       );
-      assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
       assert.equal(fs.readFileSync(outside, 'utf-8'), 'Outside instructions\n');
       assert.equal(fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'), previous);
     }
@@ -283,13 +337,11 @@ test('a previous Claude host that backs AGENTS.md retains its active rules', asy
       seedRule(homes, 'base.md', 'Selected rule\n');
       writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
       for (const dryRun of [true, false, false]) {
-        await runSync({ project, dryRun });
+        const report = await runSync({ project, dryRun });
+        assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
         assert.equal(fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'), content);
         assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), content);
-        if (!dryRun) {
-          assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
-          assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), content);
-        }
+        assert.equal(fs.existsSync(path.join(project, 'CLAUDE.md')), false);
       }
     });
   }
@@ -317,24 +369,6 @@ test('a shared host linked to an independent root Claude file preserves that fil
   });
 });
 
-test('deselection retains the canonical link target after Claude leaves enabled applications', async () => {
-  await withScratchHomes(async (homes) => {
-    const project = path.join(homes.root, 'project');
-    seedTree(project, { '.asb.toml': '[rules]\nenabled = ["base"]\n' });
-    installApps(homes, 'claude-code', 'codex');
-    seedRule(homes, 'base.md', 'Selected rule\n');
-    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
-    assert.equal((await runSync({ project })).exitCode, 0);
-    writeUserConfig(homes, '[applications]\nenabled = ["codex"]\n');
-    fs.writeFileSync(path.join(project, '.asb.toml'), '[rules]\nenabled = []\n');
-    assert.equal((await runSync({ project })).exitCode, 0);
-    assert.equal(fs.readlinkSync(path.join(project, 'CLAUDE.md')), 'AGENTS.md');
-    assert.equal(fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'), '');
-    assert.equal((await runSync({ project })).exitCode, 0);
-    assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), '');
-  });
-});
-
 test('shared host apply refuses a same-content alias change into a protected file', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
@@ -352,10 +386,7 @@ test('shared host apply refuses a same-content alias change into a protected fil
       outcome: 'written',
       content: mergeProjectRegion(content, 'New rule'),
       expectedHash: hashContent(content),
-      expectedPaths: [
-        { path: agents, resolvedPath: agents },
-        { path: claude, resolvedPath: claude },
-      ],
+      expectedPaths: [{ path: agents, resolvedPath: agents }],
     };
     fs.unlinkSync(agents);
     fs.symlinkSync('CLAUDE.md', agents);
@@ -366,7 +397,7 @@ test('shared host apply refuses a same-content alias change into a protected fil
   });
 });
 
-test('cleanup refuses a shared host retargeted to the previous host after link creation', async (context) => {
+test('cleanup refuses a shared host retargeted to the previous host after its write', async (context) => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     const content = mergeProjectRegion('', 'Selected rule\n');
@@ -378,20 +409,18 @@ test('cleanup refuses a shared host retargeted to the previous host after link c
     seedRule(homes, 'base.md', 'Selected rule\n');
     writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
     const agents = path.join(project, 'AGENTS.md');
-    const claude = path.join(project, 'CLAUDE.md');
     const previous = path.join(project, '.claude', 'CLAUDE.md');
-    const symlink = fs.symlinkSync;
-    context.mock.method(fs, 'symlinkSync', (...args: Parameters<typeof fs.symlinkSync>) => {
-      symlink(...args);
-      if (args[1] === claude) {
+    const rename = fs.renameSync;
+    context.mock.method(fs, 'renameSync', (...args: Parameters<typeof fs.renameSync>) => {
+      rename(...args);
+      if (path.basename(String(args[1])) === 'AGENTS.md') {
         fs.unlinkSync(agents);
-        symlink('.claude/CLAUDE.md', agents);
+        fs.symlinkSync('.claude/CLAUDE.md', agents);
       }
     });
     const report = await runSync({ project });
     assert.equal(report.exitCode, 1);
     assert.equal(report.entries.find((entry) => entry.path === previous)?.detail, 'path-changed');
     assert.equal(fs.readFileSync(previous, 'utf-8'), content);
-    assert.equal(fs.readFileSync(claude, 'utf-8'), content);
   });
 });

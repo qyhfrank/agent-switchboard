@@ -529,47 +529,6 @@ export function executeAction(action: Action, project?: ProjectGuard): ActionEnt
       );
     }
 
-    if (action.symlink) {
-      try {
-        const stat = fs.lstatSync(action.path, { throwIfNoEntry: false });
-        const current = stat?.isSymbolicLink() ? fs.readlinkSync(action.path) : null;
-        if (
-          action.symlink.expectedTarget === null
-            ? stat !== undefined
-            : current !== action.symlink.expectedTarget
-        ) {
-          return failure(
-            'conflict',
-            'foreign',
-            'link changed between planning and apply; re-run asb sync'
-          );
-        }
-        const host = path.resolve(path.dirname(action.path), action.symlink.target);
-        if (escapesRoot(action.root, host, project)) {
-          return failure(
-            'blocked',
-            'path-escape',
-            'link destination resolves outside the project root'
-          );
-        }
-        if (hashContent(fs.readFileSync(host, 'utf-8')) !== action.symlink.hostHash) {
-          return failure(
-            'conflict',
-            undefined,
-            'rules host changed between planning and apply; re-run asb sync'
-          );
-        }
-        if (!stat) fs.symlinkSync(action.symlink.target, action.path);
-        return toEntry(action);
-      } catch (error) {
-        return failure(
-          'failed',
-          'write-error',
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-    }
-
     // The plan's proof was for the captured state; re-check at action time
     // and refuse on drift rather than overwrite or delete unproven content.
     if (action.bundle) {
