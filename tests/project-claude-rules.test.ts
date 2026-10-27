@@ -114,6 +114,37 @@ test('emptying AGENTS.md without Claude Code keeps the host behind a legacy CLAU
   });
 });
 
+test('deselecting Claude project rules removes a region-only .claude/CLAUDE.md with or without the legacy link', async () => {
+  for (const legacy of [false, true]) {
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, 'project');
+      seedTree(project, {
+        '.asb.toml': '[rules]\nenabled = []\n',
+        'AGENTS.md': '# Repository instructions\n',
+        '.claude/CLAUDE.md': mergeProjectRegion('', 'Old rule'),
+      });
+      if (legacy) fs.symlinkSync('AGENTS.md', path.join(project, 'CLAUDE.md'));
+      installApps(homes, 'claude-code');
+      writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+
+      const report = await runSync({ project });
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      assert.equal(fs.existsSync(path.join(project, '.claude', 'CLAUDE.md')), false);
+      assert.equal(
+        fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'),
+        '# Repository instructions\n'
+      );
+      const again = await runSync({ project });
+      assert.equal(
+        again.entries.filter((entry) => entry.scope === 'project' && entry.outcome !== 'unchanged')
+          .length,
+        0,
+        JSON.stringify(again.entries)
+      );
+    });
+  }
+});
+
 test('an independent root CLAUDE.md or foreign link is preserved and reported as a conflict', async () => {
   for (const shape of ['file', 'directory', 'internal', 'external', 'dangling'] as const) {
     await withScratchHomes(async (homes) => {

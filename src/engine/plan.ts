@@ -631,9 +631,11 @@ function planSharedProjectRules(
       expectedPaths: [hostIdentity],
     });
   }
-  if (!claude || desiredSlice === null) return actions;
+  if (!claude) return actions;
+  // With no project rules selected, nothing has to reach Claude Code, so a
+  // file that hides AGENTS.md is no conflict; a stale copy still goes.
   if (linkCollision) {
-    actions.push(linkCollision);
+    if (desiredSlice !== null) actions.push(linkCollision);
     return actions;
   }
 
@@ -658,12 +660,13 @@ function planSharedProjectRules(
   }
   const content = previous.linkTarget === undefined ? previous.content : null;
   if (content === null || !holdsOnlyProjectRegion(content)) {
-    actions.push(
-      claudeInstructionsConflict(
-        previousPath,
-        '.claude/CLAUDE.md is a link, is unreadable, or holds content beyond the managed rules region'
-      )
-    );
+    if (desiredSlice !== null)
+      actions.push(
+        claudeInstructionsConflict(
+          previousPath,
+          '.claude/CLAUDE.md is a link, is unreadable, or holds content beyond the managed rules region'
+        )
+      );
     return actions;
   }
   actions.push({

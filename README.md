@@ -459,8 +459,8 @@ scope and stay there. The rules region in the repository's `AGENTS.md` composes
 the increment rules, so agent context stops carrying twice what
 `~/.claude/CLAUDE.md` already gives it.
 
-Claude Code 2.1.277 and later reads the root `AGENTS.md` by default when the
-project has no `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`.
+Claude Code's default `instructionFiles` setting (`claude-md-or-agents-md`)
+loads the root `AGENTS.md` when the project has no `CLAUDE.md` of its own.
 Claude Code and other applications that read `AGENTS.md` share one managed
 region and must select the same project rules.
 A sync with Claude Code selected removes a root `CLAUDE.md` that is exactly the
