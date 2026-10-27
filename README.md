@@ -462,7 +462,9 @@ the increment rules, so agent context stops carrying twice what
 Claude Code's default `instructionFiles` setting (`claude-md-or-agents-md`)
 loads the root `AGENTS.md` when the project has no `CLAUDE.md` of its own.
 Claude Code and other applications that read `AGENTS.md` share one managed
-region and must select the same project rules.
+region and must select the same project rules. The region follows the scope's
+`[rules].includeDelimiters`; a per-app `includeDelimiters` applies only to that
+application's own rules file.
 A sync with Claude Code selected removes a root `CLAUDE.md` that is exactly the
 relative link `CLAUDE.md -> AGENTS.md`, and a `.claude/CLAUDE.md` that holds
 only the managed rules region.

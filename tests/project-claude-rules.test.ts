@@ -189,6 +189,29 @@ test('an independent root CLAUDE.md or foreign link is preserved and reported as
   }
 });
 
+test('a per-app delimiter setting does not split the shared AGENTS.md region', async () => {
+  const render = async (apps: string[]) => {
+    let content = '';
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, 'project');
+      seedTree(project, { '.asb.toml': '[rules]\nenabled = ["a"]\n' });
+      installApps(homes, ...apps);
+      seedRule(homes, 'a.md', 'Alpha\n');
+      writeUserConfig(
+        homes,
+        `[applications]\nenabled = ${JSON.stringify(apps)}\n[applications.claude-code.rules]\nincludeDelimiters = true\n`
+      );
+      const report = await runSync({ project });
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      content = fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8');
+    });
+    return content;
+  };
+  const shared = await render(['claude-code', 'codex']);
+  assert.match(shared, /Alpha/);
+  assert.equal(shared, await render(['codex']));
+});
+
 test('shared rule conflicts preserve the previous Claude region', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');

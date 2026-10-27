@@ -517,18 +517,27 @@ function planSharedProjectRules(
       },
     ];
   }
-  const bodies = [...new Set(members.map((appId) => resolveFor(appId).content))];
-  if (bodies.length > 1) {
+  const selections = [
+    ...new Set(
+      members.map((appId) => JSON.stringify(resolveFor(appId).present.map((rule) => rule.id)))
+    ),
+  ];
+  if (selections.length > 1) {
     return [
       {
         ...base,
         op: 'none',
         outcome: 'conflict',
         detail: 'shared-writer',
-        reason: `shared AGENTS.md contributors render different rule sets (${members.join(', ')}); align their project selections`,
+        reason: `shared AGENTS.md contributors select different project rules (${members.join(', ')}); align their project selections`,
       },
     ];
   }
+  // One file serves every member, so a per-app delimiter setting cannot
+  // apply; the scope's [rules] setting decides.
+  const body = composeRules(resolveFor(members[0] ?? '').present, {
+    includeDelimiters: config.rules.includeDelimiters,
+  }).content;
 
   const current = capture.targets[targetPath] ?? { exists: false, content: null };
   if (current.escapes === true) {
@@ -557,11 +566,7 @@ function planSharedProjectRules(
   const existing = current.content ?? '';
   let desiredHost: string;
   try {
-    desiredHost = mergeProjectRegion(
-      existing,
-      bodies[0] ?? '',
-      config.distribution.project.rulesPlacement
-    );
+    desiredHost = mergeProjectRegion(existing, body, config.distribution.project.rulesPlacement);
   } catch (error) {
     return [
       {
