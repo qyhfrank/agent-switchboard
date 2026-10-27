@@ -486,3 +486,30 @@ test('deselecting a bundle whose copy holds empty directories removes it and con
     assert.equal(skillEntry(await runSync(), 'claude-code', 'review-pr'), undefined);
   });
 });
+
+test('generated caches neither travel with a skill nor make its copies drift', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code');
+    const source = seedLibrarySkill(homes);
+    fs.mkdirSync(path.join(source, 'bin', '__pycache__'));
+    fs.writeFileSync(path.join(source, 'bin', '__pycache__', 'run.cpython-314.pyc'), 'source');
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: ['review-pr'] }));
+    assert.equal((await runSync()).exitCode, 0);
+    const bundle = bundlePath(homes, 'claude-code', 'review-pr');
+    assert.equal(fs.existsSync(path.join(bundle, 'bin', '__pycache__')), false);
+
+    // Running the copy's scripts and tests writes caches beside them.
+    fs.mkdirSync(path.join(bundle, 'bin', '__pycache__'));
+    fs.writeFileSync(path.join(bundle, 'bin', '__pycache__', 'run.cpython-314.pyc'), 'target');
+    fs.mkdirSync(path.join(bundle, '.pytest_cache'));
+    fs.writeFileSync(path.join(bundle, '.pytest_cache', 'README.md'), 'cache');
+    fs.writeFileSync(path.join(source, 'bin', '__pycache__', 'run.cpython-314.pyc'), 'rebuilt');
+    assert.equal(skillEntry(await runSync(), 'claude-code', 'review-pr')?.outcome, 'unchanged');
+
+    writeUserConfig(homes, config({ apps: ['claude-code'], skills: [] }));
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+    assert.equal(skillEntry(report, 'claude-code', 'review-pr')?.outcome, 'removed');
+    assert.equal(fs.existsSync(bundle), false);
+  });
+});

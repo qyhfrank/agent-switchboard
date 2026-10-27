@@ -220,6 +220,13 @@ export interface BundleFile {
 }
 
 /**
+ * Caches that interpreters and test runners write beside a bundle's scripts.
+ * They are no part of a render: sources do not distribute them, and targets
+ * neither prove nor fail ownership by them.
+ */
+const GENERATED_DIRS = new Set(['__pycache__', '.pytest_cache']);
+
+/**
  * Desired bundle content from a library source directory. Dot-prefixed
  * entries are skipped at every level (source-side convention), symlinks and
  * non-regular files are skipped, and entries sort per level for determinism.
@@ -231,7 +238,7 @@ export function listBundleFiles(root: string): BundleFile[] {
       .readdirSync(dir, { withFileTypes: true })
       .sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
-      if (entry.name.startsWith('.')) continue;
+      if (entry.name.startsWith('.') || GENERATED_DIRS.has(entry.name)) continue;
       const filePath = path.join(dir, entry.name);
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
@@ -251,7 +258,8 @@ export function listBundleFiles(root: string): BundleFile[] {
 
 /**
  * tree hash over a target bundle: `tree:<sha256>` covering
- * every entry (dot files included), its rel path, and its permission bits.
+ * every entry except generated caches (dot files included), its rel path, and
+ * its permission bits.
  * Any symlink, non-regular entry, or non-directory root makes the tree
  * unprovable → undefined.
  */
@@ -268,6 +276,7 @@ export function bundleFingerprint(dir: string): string | undefined {
     for (const entry of fs
       .readdirSync(current, { withFileTypes: true })
       .sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.isDirectory() && GENERATED_DIRS.has(entry.name)) continue;
       const relativePath = prefix ? `${prefix}/${entry.name}` : entry.name;
       const filePath = path.join(current, entry.name);
       const stat = fs.lstatSync(filePath);
@@ -318,8 +327,8 @@ export interface TargetFile {
 }
 
 /**
- * Target-side bundle inventory: every file including dot files, hashed, with
- * permission bits. Null when any entry is a symlink or non-regular file —
+ * Target-side bundle inventory: every file except generated caches, dot files
+ * included, hashed, with permission bits. Null when any entry is a symlink or non-regular file —
  * such a tree is unprovable and gets neither byte comparison nor authority.
  */
 export function listTargetFiles(dir: string): TargetFile[] | null {
@@ -339,6 +348,7 @@ export function listTargetFiles(dir: string): TargetFile[] | null {
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      if (entry.isDirectory() && GENERATED_DIRS.has(entry.name)) continue;
       const filePath = path.join(current, entry.name);
       const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
       const stat = fs.lstatSync(filePath);
@@ -440,14 +450,17 @@ export function removeBundleSlice(bundleRoot: string, slice: readonly string[]):
     }
     pruneEmptyParents(root, rel);
   }
-  // A copied library tree can carry empty directories no rel names; left in
-  // place they keep the bundle directory alive and every later sync retires
-  // it again.
+  // A copied library tree can carry empty directories no rel names, and its
+  // scripts leave generated caches; left in place either keeps the bundle
+  // directory alive and every later sync retires it again.
   if (leftBehind.length === 0) removeEmptyDirs(root);
   return leftBehind;
 }
 
-/** Remove a directory tree bottom-up wherever it holds nothing but empty directories. */
+/**
+ * Remove a directory tree bottom-up wherever it holds nothing but empty
+ * directories and generated caches.
+ */
 function removeEmptyDirs(dirPath: string): void {
   let entries: fs.Dirent[];
   try {
@@ -456,7 +469,10 @@ function removeEmptyDirs(dirPath: string): void {
     return;
   }
   for (const entry of entries) {
-    if (entry.isDirectory()) removeEmptyDirs(path.join(dirPath, entry.name));
+    if (!entry.isDirectory()) continue;
+    const child = path.join(dirPath, entry.name);
+    if (GENERATED_DIRS.has(entry.name)) fs.rmSync(child, { recursive: true, force: true });
+    else removeEmptyDirs(child);
   }
   try {
     if (fs.readdirSync(dirPath).length === 0) fs.rmdirSync(dirPath);

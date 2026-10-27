@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Python bytecode caches (`__pycache__`) and pytest caches (`.pytest_cache`) are no part of a skill or hook bundle. Library caches are not distributed, caches that running a copy's scripts writes no longer make the next sync rewrite it, and retiring a bundle removes them with it.
+
 ## 0.5.15
 
 - The shared project `AGENTS.md` region follows the scope's `[rules].includeDelimiters`. A per-app `includeDelimiters`, such as one set for Claude Code's own `CLAUDE.md`, no longer makes the region's contributors conflict when they select the same rules.
