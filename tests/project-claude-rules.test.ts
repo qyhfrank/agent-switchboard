@@ -114,8 +114,8 @@ test('emptying AGENTS.md without Claude Code keeps the host behind a legacy CLAU
   });
 });
 
-test('deselecting Claude project rules removes a region-only .claude/CLAUDE.md with or without the legacy link', async () => {
-  for (const legacy of [false, true]) {
+test('deselecting Claude project rules removes a region-only .claude/CLAUDE.md whatever the root CLAUDE.md is', async () => {
+  for (const root of ['none', 'legacy-link', 'independent'] as const) {
     await withScratchHomes(async (homes) => {
       const project = path.join(homes.root, 'project');
       seedTree(project, {
@@ -123,7 +123,9 @@ test('deselecting Claude project rules removes a region-only .claude/CLAUDE.md w
         'AGENTS.md': '# Repository instructions\n',
         '.claude/CLAUDE.md': mergeProjectRegion('', 'Old rule'),
       });
-      if (legacy) fs.symlinkSync('AGENTS.md', path.join(project, 'CLAUDE.md'));
+      const rootFile = path.join(project, 'CLAUDE.md');
+      if (root === 'legacy-link') fs.symlinkSync('AGENTS.md', rootFile);
+      if (root === 'independent') fs.writeFileSync(rootFile, 'Mine\n');
       installApps(homes, 'claude-code');
       writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
 
@@ -134,6 +136,7 @@ test('deselecting Claude project rules removes a region-only .claude/CLAUDE.md w
         fs.readFileSync(path.join(project, 'AGENTS.md'), 'utf-8'),
         '# Repository instructions\n'
       );
+      if (root === 'independent') assert.equal(fs.readFileSync(rootFile, 'utf-8'), 'Mine\n');
       const again = await runSync({ project });
       assert.equal(
         again.entries.filter((entry) => entry.scope === 'project' && entry.outcome !== 'unchanged')

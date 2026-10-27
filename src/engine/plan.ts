@@ -634,8 +634,8 @@ function planSharedProjectRules(
   if (!claude) return actions;
   // With no project rules selected, nothing has to reach Claude Code, so a
   // file that hides AGENTS.md is no conflict; a stale copy still goes.
-  if (linkCollision) {
-    if (desiredSlice !== null) actions.push(linkCollision);
+  if (linkCollision && desiredSlice !== null) {
+    actions.push(linkCollision);
     return actions;
   }
 
