@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.15
+
 - The shared project `AGENTS.md` region follows the scope's `[rules].includeDelimiters`. A per-app `includeDelimiters`, such as one set for Claude Code's own `CLAUDE.md`, no longer makes the region's contributors conflict when they select the same rules.
 
 ## 0.5.14
