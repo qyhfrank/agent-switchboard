@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.17
+
 - Custom skills targets can declare `shared` and `project_shared` independently, with optional own directories. Shared readership now includes custom targets in capture, app filters, project containment checks and ownership cleanup.
 - Skills directories pointing at `.agents/skills` participate in the shared selection instead of combining incompatible application selections. Applications sharing another destination also report conflicting selections. A reader without an own fallback reports an error for an unsatisfied selection, preserving any existing shared bundle.
 - Missing project destinations identify the ASB configuration gap and suggest the custom target fields to configure, without implying the application lacks project skills.
