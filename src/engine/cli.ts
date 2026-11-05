@@ -286,7 +286,7 @@ function captureFor(
       reserved: skills.reserved,
     });
   }
-  if (AGENTS_SKILLS_UNION.participates(config.apps.enabled)) {
+  if (AGENTS_SKILLS_UNION.participates(config.apps.enabled, table)) {
     skillRows.push({
       app: 'agents',
       dir: AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined),
@@ -310,7 +310,9 @@ function captureFor(
     const selected = row.app === 'agents' ? [] : selection(row.app, 'skills');
     const unionSelected =
       row.app === 'agents'
-        ? AGENTS_SKILLS_UNION.members
+        ? table
+            .filter((app) => app.skills?.shared)
+            .map((app) => app.id)
             .filter((member) => config.apps.enabled.includes(member))
             .flatMap((member) => selection(member, 'skills'))
         : [];
@@ -873,7 +875,7 @@ function unhostedIncrements(
         op: 'none',
         outcome: 'skipped',
         detail: 'no-project-target',
-        reason: `${appId} has no project destination for ${type}; ${ids.join(', ')} reached no repository target`,
+        reason: `ASB has no project ${type} destination configured for ${appId}; ${ids.join(', ')} reached no repository target${type === 'skills' && config.targets[appId] ? `; configure [targets.${appId}.skills] project_parent_dir or project_shared` : ''}`,
       });
     }
   }
@@ -1031,13 +1033,12 @@ function userLeafOnProjectCell(
       const dir = row[type]?.projectDir?.(root);
       if (dir) cells.push(dir);
     }
-    const skills = ownSkills(row);
-    if (skills?.projectDir) cells.push(skills.projectDir(root));
+    if (row.skills?.projectDir) cells.push(row.skills.projectDir(root));
     if (row.hooks?.projectPath) cells.push(row.hooks.projectPath(root));
     if (row.hooks?.projectBundleDir) cells.push(row.hooks.projectBundleDir(root));
     if (row.mcp?.projectPath) cells.push(row.mcp.projectPath(root));
   }
-  if (AGENTS_SKILLS_UNION.participates(overlay.apps.enabled)) {
+  if (AGENTS_SKILLS_UNION.participates(overlay.apps.enabled, projectAppRows(overlayTable, root))) {
     cells.push(AGENTS_SKILLS_UNION.dir(base.homes, root));
   }
   // A cell resolving out of the repository is the outward alias the project
@@ -1052,7 +1053,7 @@ function userLeafOnProjectCell(
     userSurfaces(
       base,
       enabledRows,
-      AGENTS_SKILLS_UNION.participates(base.apps.enabled)
+      AGENTS_SKILLS_UNION.participates(base.apps.enabled, userTable)
     ).leaves.find(({ dir }) => {
       const real = locateWrite(dir);
       return real !== null && resolvedCells.some((cell) => pathInside(cell, real));
@@ -1125,7 +1126,7 @@ function resolveScopes(
     const held = [
       { what: 'the agents home', dir: base.homes.agentsHome },
       // The union row writes under a root no single app row declares.
-      ...(AGENTS_SKILLS_UNION.participates(base.apps.enabled)
+      ...(AGENTS_SKILLS_UNION.participates(base.apps.enabled, userTable)
         ? [{ what: 'the shared agents directory', dir: AGENTS_SKILLS_UNION.root(base.homes) }]
         : []),
       ...userTable

@@ -317,7 +317,14 @@ export class DistributionOwnership {
 /** An unavailable provider or a parse failure is not evidence of deletion. */
 export function unavailable(slice: OwnedSlice, input: PlanInput, catalog: SourceCatalog): boolean {
   const members =
-    slice.app === 'agents' ? AGENTS_SKILLS_UNION.members : (slice.members ?? [slice.app]);
+    slice.app === 'agents'
+      ? [
+          ...new Set([
+            ...(slice.members ?? AGENTS_SKILLS_UNION.members),
+            ...input.table.filter((row) => row.skills?.shared).map((row) => row.id),
+          ]),
+        ]
+      : (slice.members ?? [slice.app]);
   if (
     members.some(
       (app) =>

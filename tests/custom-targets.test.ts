@@ -7,7 +7,14 @@ import { runSync } from '../src/engine/cli.js';
 import { loadConfig } from '../src/engine/config.js';
 import { keyedArrayToRecord } from '../src/engine/dialects.js';
 import type { Component } from '../src/engine/library.js';
-import { seedMcpLibrary, seedTree, withScratchHomes, writeUserConfig } from './helpers/scratch.js';
+import {
+  installApps,
+  seedMcpLibrary,
+  seedSkill,
+  seedTree,
+  withScratchHomes,
+  writeUserConfig,
+} from './helpers/scratch.js';
 
 /**
  * A target the user declares in `[targets.<id>]` is compiled into the same
@@ -24,6 +31,226 @@ const CUSTOM_MCP = [
   'structure = "keyed-array"',
   'key_field = "name"',
 ] as const;
+
+test('custom shared-only readers sync, update, filter, and retire their bundles without builtin readers', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, '.asb.toml'), '[skills]\nenabled = ["local"]\n');
+    seedSkill(homes, 'global', { files: { 'references/info.txt': 'original' } });
+    seedSkill(homes, 'local');
+    const configure = (enabled: boolean) =>
+      writeUserConfig(
+        homes,
+        `[applications]\nenabled = ${enabled ? '["mine"]' : '[]'}\n[skills]\nenabled = ["global"]\n[targets.mine.skills]\nshared = true\nproject_shared = true\n`
+      );
+    configure(true);
+    const run = () => runSync({ project, apps: ['mine'], types: ['skills'] });
+    assert.equal((await run()).exitCode, 0);
+    const global = path.join(homes.agentsHome, '.agents/skills/global');
+    const local = path.join(project, '.agents/skills/local');
+    assert.ok(fs.existsSync(path.join(global, 'SKILL.md')));
+    assert.ok(fs.existsSync(path.join(local, 'SKILL.md')));
+    seedSkill(homes, 'global', { files: { 'references/info.txt': 'updated' } });
+    assert.equal((await run()).exitCode, 0);
+    assert.equal(fs.readFileSync(path.join(global, 'references/info.txt'), 'utf8'), 'updated');
+    assert.ok((await run()).entries.every((entry) => entry.outcome === 'unchanged'));
+    configure(false);
+    assert.equal((await run()).exitCode, 0);
+    assert.equal(fs.existsSync(global), false);
+    assert.equal(fs.existsSync(local), false);
+  });
+});
+
+test('custom readers use independent global and project sharing with own fallbacks', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    const project = path.join(homes.root, 'project');
+    fs.mkdirSync(project);
+    for (const id of ['global', 'local', 'extra']) seedSkill(homes, id);
+    writeUserConfig(
+      homes,
+      `[applications]
+enabled = ["codex", "grok", "agy"]
+[skills]
+enabled = ["global"]
+[targets.grok.skills]
+parent_dir = "~/.grok/skills"
+project_parent_dir = ".grok/skills"
+shared = true
+project_shared = true
+[targets.agy.skills]
+parent_dir = "~/.gemini/config/skills"
+project_shared = true
+`
+    );
+    fs.writeFileSync(
+      path.join(project, '.asb.toml'),
+      `[skills]
+enabled = ["local"]
+[applications.grok.skills]
+add = ["extra"]
+`
+    );
+    const report = await runSync({ project });
+    assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+    for (const file of [
+      path.join(homes.agentsHome, '.agents/skills/global/SKILL.md'),
+      path.join(homes.agentsHome, '.gemini/config/skills/global/SKILL.md'),
+      path.join(project, '.agents/skills/local/SKILL.md'),
+      path.join(project, '.grok/skills/extra/SKILL.md'),
+    ])
+      assert.ok(fs.existsSync(file), file);
+    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.grok/skills/global')), false);
+    assert.equal(fs.existsSync(path.join(project, '.agents/skills/extra')), false);
+    assert.equal(fs.existsSync(path.join(project, '.gemini')), false);
+    assert.ok((await runSync({ project })).entries.every((entry) => entry.outcome === 'unchanged'));
+  });
+});
+
+test('custom shared-only project selections conflict without exposing excluded skills and recover', async () => {
+  for (const target of ['project_shared = true', 'project_parent_dir = ".agents/skills"']) {
+    await withScratchHomes(async (homes) => {
+      installApps(homes, 'codex');
+      seedSkill(homes, 'local');
+      const project = path.join(homes.root, 'project');
+      fs.mkdirSync(project);
+      writeUserConfig(
+        homes,
+        `[applications]\nenabled = ["codex", "agy"]\n[targets.agy.skills]\nparent_dir = "~/.gemini/config/skills"\n${target}\n`
+      );
+      const projectFile = path.join(project, '.asb.toml');
+      const common = '[skills]\nenabled = ["local"]\n';
+      fs.writeFileSync(projectFile, `${common}[applications.codex.skills]\nremove = ["local"]\n`);
+      const local = path.join(project, '.agents/skills/local/SKILL.md');
+      for (const dryRun of [true, false]) {
+        const report = await runSync({ project, dryRun });
+        assert.equal(report.exitCode, 1);
+        assert.ok(
+          report.entries.some(
+            (entry) =>
+              entry.app === 'agy' &&
+              entry.detail === 'no-own-destination' &&
+              entry.outcome === 'conflict'
+          )
+        );
+        assert.equal(fs.existsSync(local), false);
+      }
+      fs.writeFileSync(projectFile, common);
+      assert.equal((await runSync({ project })).exitCode, 0);
+      const original = fs.readFileSync(local, 'utf8');
+      fs.writeFileSync(projectFile, `${common}[applications.codex.skills]\nremove = ["local"]\n`);
+      assert.equal((await runSync({ project })).exitCode, 1);
+      assert.equal(
+        fs.readFileSync(local, 'utf8'),
+        original,
+        'conflict preserves an existing bundle'
+      );
+      assert.equal((await runSync({ project, apps: ['codex'] })).exitCode, 1);
+      fs.writeFileSync(projectFile, common);
+      assert.equal((await runSync({ project })).exitCode, 0);
+    });
+  }
+});
+
+test('a custom target at the global shared path participates as a reader', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    seedSkill(homes, 'extra');
+    writeUserConfig(
+      homes,
+      `[applications]
+enabled = ["codex", "mine"]
+[applications.mine.skills]
+add = ["extra"]
+[targets.mine.skills]
+parent_dir = "~/.agents/skills"
+`
+    );
+    const report = await runSync();
+    assert.equal(report.exitCode, 1);
+    assert.ok(
+      report.entries.some((entry) => entry.app === 'mine' && entry.detail === 'no-own-destination')
+    );
+    assert.equal(fs.existsSync(path.join(homes.agentsHome, '.agents/skills/extra')), false);
+  });
+});
+
+test('applications sharing an own skills directory must agree on its selection', async () => {
+  await withScratchHomes(async (homes) => {
+    seedSkill(homes, 'extra');
+    const config = `[applications]
+enabled = ["first", "second"]
+[skills]
+enabled = ["extra"]
+[targets.first.skills]
+parent_dir = "~/.common/skills"
+[targets.second.skills]
+parent_dir = "~/.common/skills"
+`;
+    writeUserConfig(homes, config);
+    assert.equal((await runSync()).exitCode, 0);
+    const file = path.join(homes.agentsHome, '.common/skills/extra/SKILL.md');
+    const original = fs.readFileSync(file, 'utf8');
+    writeUserConfig(homes, `${config}[applications.second.skills]\nremove = ["extra"]\n`);
+    const report = await runSync();
+    assert.equal(report.exitCode, 1);
+    assert.ok(report.entries.some((entry) => entry.detail === 'skills-selection-conflict'));
+    assert.equal(fs.readFileSync(file, 'utf8'), original);
+  });
+});
+
+test('an undetected custom shared reader retains its recorded bundles', async () => {
+  await withScratchHomes(async (homes) => {
+    seedSkill(homes, 'global');
+    const detect = path.join(homes.agentsHome, '.mine');
+    fs.mkdirSync(detect);
+    writeUserConfig(
+      homes,
+      `[applications]\nenabled = ["mine"]\n[skills]\nenabled = ["global"]\n[targets.mine]\ndetect = "~/.mine"\n[targets.mine.skills]\nshared = true\n`
+    );
+    assert.equal((await runSync()).exitCode, 0);
+    fs.rmdirSync(detect);
+    const report = await runSync();
+    assert.equal(report.exitCode, 0);
+    assert.ok(fs.existsSync(path.join(homes.agentsHome, '.agents/skills/global/SKILL.md')));
+  });
+});
+
+test('a custom reader migrates from an own directory only after its shared replacement lands', async () => {
+  await withScratchHomes(async (homes) => {
+    seedSkill(homes, 'global');
+    const config = `[applications]\nenabled = ["mine"]\n[skills]\nenabled = ["global"]\n[targets.mine.skills]\nparent_dir = "~/.mine/skills"\n`;
+    writeUserConfig(homes, config);
+    assert.equal((await runSync()).exitCode, 0);
+    const own = path.join(homes.agentsHome, '.mine/skills/global/SKILL.md');
+    const shared = path.join(homes.agentsHome, '.agents/skills/global/SKILL.md');
+    const original = fs.readFileSync(own, 'utf8');
+    writeUserConfig(homes, `${config}shared = true\n`);
+    assert.equal((await runSync({ dryRun: true })).exitCode, 0);
+    assert.equal(fs.existsSync(shared), false);
+    assert.equal(fs.readFileSync(own, 'utf8'), original);
+    assert.equal((await runSync()).exitCode, 0);
+    assert.equal(fs.readFileSync(shared, 'utf8'), original);
+    assert.equal((await runSync()).exitCode, 0);
+    assert.equal(fs.existsSync(own), false);
+    assert.ok((await runSync()).entries.every((entry) => entry.outcome === 'unchanged'));
+  });
+});
+
+test('custom sharing validates flags and requires a global skills destination', async () => {
+  await withScratchHomes(async (homes) => {
+    for (const body of [
+      'shared = "yes"',
+      'project_shared = 1',
+      'project_shared = true',
+      'shared = false',
+    ]) {
+      writeUserConfig(homes, `[targets.mine.skills]\n${body}\n`);
+      assert.throws(loadConfig, /targets.mine.skills/);
+    }
+  });
+});
 
 function command(metadata: Record<string, unknown>): Component {
   return {

@@ -79,8 +79,10 @@ export interface RulesTargetRow {
 }
 
 export interface SkillsTargetRow {
-  /** Reads the vendor-neutral skills directory in user and project scope. */
+  /** Reads the vendor-neutral skills directory in this scope. */
   shared?: true;
+  /** Project readership override; builtin rows inherit shared when omitted. */
+  projectShared?: boolean;
   /** Directory whose resolved tree contains the skills parent; the containment root. */
   root(homes: Homes): string;
   /** Managed parent directory: each distributed skill is a child bundle of this. */
@@ -204,7 +206,9 @@ export interface AppRow {
   rules?: RulesTargetRow;
   commands?: EntryTargetRow;
   agents?: EntryTargetRow;
-  skills?: SkillsTargetRow | { shared: true };
+  skills?:
+    | SkillsTargetRow
+    | { shared: true; projectShared?: boolean; projectDir?(projectRoot: string): string };
   hooks?: HooksTargetRow;
   mcp?: McpTargetRow;
   native?: NativeManagerRow;
@@ -243,8 +247,8 @@ export const AGENTS_SKILLS_UNION = {
   // Capture scans on this predicate (an enabled-member superset); the
   // planner additionally requires detection, so an enabled but uninstalled
   // member leaves its state protected. Recorded outputs reconcile separately.
-  participates: (enabled: readonly string[]): boolean =>
-    AGENTS_SKILLS_UNION.members.some((member) => enabled.includes(member)),
+  participates: (enabled: readonly string[], table: readonly AppRow[]): boolean =>
+    table.some((row) => row.skills?.shared && enabled.includes(row.id)),
 };
 
 export const APP_ROWS: readonly AppRow[] = [
@@ -678,7 +682,7 @@ function customEntryRow(
   };
 }
 
-function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
+function compileCustomRow(id: string, spec: CustomTargetSpec, homes: Homes): AppRow {
   const detect = spec.detect ?? (spec.mcp ? path.dirname(spec.mcp.config_path) : null);
   const row: AppRow = {
     id,
@@ -702,15 +706,23 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
   if (spec.agents) row.agents = customEntryRow(id, spec.agents);
   if (spec.skills) {
     const skills = spec.skills;
+    const parent = skills.parent_dir ? customPath(skills.parent_dir, homes) : undefined;
+    const sharedPath = parent === AGENTS_SKILLS_UNION.dir(homes);
     row.skills = {
-      root: (homes) => customPath(skills.parent_dir, homes),
-      dir: (homes) => customPath(skills.parent_dir, homes),
+      ...(parent && !sharedPath
+        ? {
+            root: () => parent,
+            dir: () => parent,
+            reserved: [],
+            ...(skills.shared ? { shared: true as const } : {}),
+          }
+        : { shared: true as const }),
+      projectShared: skills.project_shared ?? false,
       ...(skills.project_parent_dir
         ? {
             projectDir: (root: string) => path.resolve(root, skills.project_parent_dir as string),
           }
         : {}),
-      reserved: [],
     };
   }
   if (spec.mcp) {
@@ -745,7 +757,9 @@ function compileCustomRow(id: string, spec: CustomTargetSpec): AppRow {
 }
 
 /** Builtins plus strict config-defined rows; a custom row never overrides data. */
-export function appRows(config: Pick<ResolvedConfig, 'targets' | 'apps'>): readonly AppRow[] {
+export function appRows(
+  config: Pick<ResolvedConfig, 'targets' | 'apps' | 'homes' | 'project'>
+): readonly AppRow[] {
   const builtin = new Set(APP_ROWS.map((row) => row.id));
   const custom: AppRow[] = [];
   for (const [id, spec] of Object.entries(config.targets)) {
@@ -754,13 +768,15 @@ export function appRows(config: Pick<ResolvedConfig, 'targets' | 'apps'>): reado
         `Invalid configuration: target id "${id}" collides with builtin "${id}"; choose another id.`
       );
     }
-    custom.push(compileCustomRow(id, spec));
+    custom.push(compileCustomRow(id, spec, config.homes));
   }
   const rows = [...APP_ROWS, ...custom];
   for (const [id, override] of Object.entries(config.apps.overrides)) {
     const destination = override.skills?.destination;
     if (destination === undefined) continue;
-    const row = rows.find((candidate) => candidate.id === id);
+    const row = (config.project ? projectAppRows(rows, config.project) : rows).find(
+      (candidate) => candidate.id === id
+    );
     if (!row?.skills?.shared || (destination === 'own' && !ownSkills(row))) {
       throw new ConfigError(
         `Invalid configuration: ${id} skills do not support destination = "${destination}"`
@@ -799,13 +815,16 @@ export function projectAppRows(table: readonly AppRow[], projectRoot: string): r
         config: undefined,
       };
     }
-    if (row.skills?.shared) project.skills = { shared: true };
-    const skills = ownSkills(row);
-    if (skills?.projectDir) {
+    const skills = row.skills;
+    const shared = skills?.projectShared ?? skills?.shared ?? false;
+    const dir = skills?.projectDir?.(root);
+    if (shared || dir === path.join(root, '.agents', 'skills')) project.skills = { shared: true };
+    if (dir && dir !== path.join(root, '.agents', 'skills')) {
       project.skills = {
-        ...skills,
+        ...(shared ? { shared: true } : {}),
         root: () => root,
-        dir: () => skills.projectDir?.(root) as string,
+        dir: () => dir,
+        reserved: ownSkills(row)?.reserved ?? [],
       };
     }
     if (row.hooks?.projectPath && row.hooks.projectBundleDir) {

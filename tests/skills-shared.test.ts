@@ -168,7 +168,7 @@ test('a per-app remove moves a shared skill only to the readers still selecting 
   });
 });
 
-test('a reader without an own directory warns about its remainder and continues', async () => {
+test('a reader without an own directory reports an unsatisfied selection as a conflict', async () => {
   await withScratchHomes(async (homes) => {
     installApps(homes, 'codex');
     fs.mkdirSync(path.join(homes.agentsHome, '.trae', 'cli'), { recursive: true });
@@ -178,9 +178,9 @@ test('a reader without an own directory warns about its remainder and continues'
       '[applications]\nenabled = ["codex", "traecli"]\n[skills]\nenabled = ["common"]\n[applications.traecli.skills]\nadd = ["extra"]\n'
     );
     const report = await runSync();
-    assert.equal(report.exitCode, 0);
+    assert.equal(report.exitCode, 1);
     const warning = skillEntry(report, 'traecli', 'extra');
-    assert.equal(warning?.outcome, 'skipped');
+    assert.equal(warning?.outcome, 'conflict');
     assert.equal(warning?.detail, 'no-own-destination');
     assert.match(warning?.reason ?? '', /traecli.*extra.*no own skills directory/);
     assert.ok(exists(unionBundle(homes, 'common'), 'SKILL.md'));

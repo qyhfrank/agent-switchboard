@@ -353,8 +353,16 @@ const customEntryTarget = z
   })
   .strict();
 const customSkillsTarget = z
-  .object({ parent_dir: targetPath, project_parent_dir: targetPath.optional() })
-  .strict();
+  .object({
+    parent_dir: targetPath.optional(),
+    project_parent_dir: targetPath.optional(),
+    shared: z.boolean().optional(),
+    project_shared: z.boolean().optional(),
+  })
+  .strict()
+  .refine((skills) => skills.parent_dir !== undefined || skills.shared === true, {
+    message: 'skills require parent_dir or shared = true',
+  });
 const targetSpec = z
   .object({
     detect: targetPath.optional(),
@@ -508,7 +516,7 @@ function knownKeysFor(pathParts: readonly (string | number)[]): readonly string[
               'frontmatter',
             ];
           case 'skills':
-            return ['parent_dir', 'project_parent_dir'];
+            return ['parent_dir', 'project_parent_dir', 'shared', 'project_shared'];
         }
       }
       if (pathParts.length === 4 && pathParts[3] === 'frontmatter') {

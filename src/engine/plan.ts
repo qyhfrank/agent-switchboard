@@ -1105,6 +1105,7 @@ interface SkillRowPlan {
   root: string;
   reserved: readonly string[];
   selected: string[];
+  conflicts?: string[];
 }
 
 /** One destination calculation shared by planning and ownership recording. */
@@ -1155,6 +1156,13 @@ export function skillDestinations(input: PlanInput): SkillRowPlan[] {
     if (!existing) physical.push(row);
     else {
       existing.members = [...new Set([...existing.members, ...row.members])];
+      existing.conflicts = [
+        ...new Set([
+          ...(existing.conflicts ?? []),
+          ...existing.selected.filter((id) => !row.selected.includes(id)),
+          ...row.selected.filter((id) => !existing.selected.includes(id)),
+        ]),
+      ];
       existing.selected = [...new Set([...existing.selected, ...row.selected])];
       existing.reserved = [...new Set([...existing.reserved, ...row.reserved])];
     }
@@ -1192,6 +1200,7 @@ export function planSkills(input: PlanInput): Action[] {
   const missingUnion = new Set<string>();
 
   const rows = skillDestinations(input);
+  const unplaced = new Set<string>();
   for (const app of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === app);
     if (!row?.skills || !detected(app)) continue;
@@ -1203,15 +1212,17 @@ export function planSkills(input: PlanInput): Action[] {
           (destination) => destination.members.includes(app) && destination.selected.includes(id)
         )
       ) {
+        unplaced.add(id);
         actions.push({
           app,
           type: 'skills',
           id,
-          path: null,
+          path: path.join(AGENTS_SKILLS_UNION.dir(config.homes, config.project ?? undefined), id),
+          members: rows.find((destination) => destination.app === 'agents')?.members,
           op: 'none',
-          outcome: 'skipped',
+          outcome: 'conflict',
           detail: 'no-own-destination',
-          reason: `${app}: skill "${id}" is outside the shared selection and this app has no own skills directory`,
+          reason: `${app}: skill "${id}" is outside the shared selection and this app has no own skills directory; align the readers' selections or configure an app-specific skills directory`,
         });
       }
     }
@@ -1256,6 +1267,21 @@ export function planSkills(input: PlanInput): Action[] {
 
     for (const id of candidates) {
       const bundlePath = path.join(row.dir, id);
+      if (row.app === 'agents' && unplaced.has(id)) continue;
+      if (row.conflicts?.includes(id)) {
+        actions.push({
+          app: row.app,
+          type: 'skills',
+          id,
+          path: bundlePath,
+          members: row.members,
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'skills-selection-conflict',
+          reason: `${row.members.join(', ')} select different skills for the same directory; align their selections or configure separate destinations`,
+        });
+        continue;
+      }
       const captured: CapturedBundle = capture.bundles[bundlePath] ?? {
         exists: false,
         files: null,

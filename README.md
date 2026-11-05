@@ -267,8 +267,9 @@ by default. In each scope, the shared directory holds the intersection of
 selections from enabled, detected readers using the shared destination. Each
 reader receives its remaining selected skills in its own directory. An `add`
 therefore reaches that app, and a `remove` withholds the skill from that app.
-TRAE CLI has no own skills directory: any remainder is reported as skipped
-with a warning naming the app and skill, while the rest of the run continues.
+TRAE CLI has no own skills directory: any remainder is a conflict naming the
+app and skill. Align the readers' selections to resolve it. A conflicting
+shared bundle is preserved, and the sync exits with an error.
 Claude Code and the Trae IDE applications keep their own skills directories.
 
 Choose an app's own directory explicitly with:
@@ -317,6 +318,47 @@ A path you write into `[targets.<id>]` is your choice, not a name ASB claims,
 so nothing at it is ever removed for sitting there. A `rules.file_path` whose
 component selection is empty is reported and left, and no sibling of it is
 touched.
+
+Custom skills targets declare shared readership separately for each scope.
+`shared` reads user-level `~/.agents/skills`; `project_shared` reads project
+`.agents/skills`. Both default to false. `parent_dir` and
+`project_parent_dir` name optional own directories for skills outside the
+shared selection. Set `parent_dir` or `shared = true` for user scope.
+
+For example, Grok reads both shared directories and has own directories,
+while Antigravity CLI uses its own global directory and the shared project
+directory:
+
+```toml
+[targets.grok]
+detect = "~/.grok"
+
+[targets.grok.skills]
+parent_dir = "~/.grok/skills"
+shared = true
+project_parent_dir = ".grok/skills"
+project_shared = true
+
+[targets.agy]
+detect = "~/.gemini/antigravity-cli"
+
+[targets.agy.skills]
+parent_dir = "~/.gemini/config/skills"
+project_shared = true
+```
+
+These readers participate in the scope's shared selection, capture, filtering
+and ownership cleanup. A directory set directly to the scope's `.agents/skills`
+is also recognized as shared, and cannot serve as an own fallback. A reader
+without an own fallback reports a conflict when the shared selection cannot
+satisfy it. Other applications pointing at the same own directory must agree
+on its selection; conflicting bundles are preserved instead of combining
+selections that would expose excluded skills.
+
+The paths follow the [Grok skill documentation](https://docs.x.ai/build/features/skills-plugins-marketplaces)
+and [Antigravity skill documentation](https://antigravity.google/docs/skills).
+Grok must trust a project before its project skills become available. ASB
+distributes files; it does not change application trust settings.
 
 ## Sources and plugins
 
