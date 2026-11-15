@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.19
+
 - Applications that write one rules file, the project `AGENTS.md` or global rules files linked to the same file, now share its managed region with the union of the rules they select instead of reporting a shared-writer conflict. Each rule keeps its place from the first application in `[applications].enabled` that selects it, an application that selects no rules contributes nothing, and deselection removes a rule once no sharing application selects it. The region follows the scope's `[rules].includeDelimiters`. A dedicated rules file that is the same file as another application's managed region remains a conflict.
 
 ## 0.5.18
