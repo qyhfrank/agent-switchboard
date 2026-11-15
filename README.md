@@ -510,9 +510,13 @@ application's own rules file.
 A sync with Claude Code selected removes a root `CLAUDE.md` that is exactly the
 relative link `CLAUDE.md -> AGENTS.md`, and a `.claude/CLAUDE.md` that holds
 only the managed rules region.
+A root `CLAUDE.md` that is the same file as `AGENTS.md`, through a link in
+either direction such as `AGENTS.md -> CLAUDE.md`, needs nothing: ASB writes the
+region through the link, keeps the link, and Claude Code reads the region from
+`CLAUDE.md`.
 Any other root `CLAUDE.md` or `.claude/CLAUDE.md` is preserved and reported as a
-conflict, including under `collision = "takeover"`, because Claude Code reads it
-instead of `AGENTS.md`.
+conflict when the project selects rules, including under
+`collision = "takeover"`, because Claude Code reads it instead of `AGENTS.md`.
 Deselection removes the managed region while preserving repository content.
 
 ```toml

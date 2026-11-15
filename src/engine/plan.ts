@@ -523,13 +523,16 @@ function planSharedProjectRules(
     ),
   ];
   if (selections.length > 1) {
+    const resolved = capture.targets[targetPath]?.resolvedPath;
+    const host =
+      resolved && resolved !== targetPath ? `AGENTS.md (resolves to ${resolved})` : 'AGENTS.md';
     return [
       {
         ...base,
         op: 'none',
         outcome: 'conflict',
         detail: 'shared-writer',
-        reason: `shared AGENTS.md contributors select different project rules (${members.join(', ')}); align their project selections`,
+        reason: `shared ${host} contributors select different project rules (${members.join(', ')}); align their project selections`,
       },
     ];
   }
@@ -587,23 +590,14 @@ function planSharedProjectRules(
   // an emptied AGENTS.md stays so the link does not dangle.
   const legacyLink = link?.linkTarget === 'AGENTS.md';
   const hostIdentity = { path: targetPath, resolvedPath: current.resolvedPath ?? targetPath };
+  // A CLAUDE.md that is the same file as AGENTS.md, through a link in either
+  // direction, hands Claude Code the managed region it would otherwise miss.
+  const linkIdentity = { path: linkPath, resolvedPath: link?.resolvedPath ?? linkPath };
+  const sameFile = link?.exists === true && linkIdentity.resolvedPath === hostIdentity.resolvedPath;
   const linkCollision: Action | null =
-    link?.exists && !legacyLink
+    link?.exists && !legacyLink && !sameFile
       ? claudeInstructionsConflict(linkPath, 'CLAUDE.md is an independent file or link')
       : null;
-  if (linkCollision && hostIdentity.resolvedPath === (link?.resolvedPath ?? linkPath)) {
-    return [
-      {
-        ...base,
-        op: 'none',
-        outcome: 'conflict',
-        detail: 'foreign',
-        reason:
-          'AGENTS.md resolves to the independent CLAUDE.md destination; both paths are preserved',
-      },
-      linkCollision,
-    ];
-  }
   const actions: Action[] = [];
   if (claude && link && legacyLink) {
     actions.push({
@@ -633,7 +627,7 @@ function planSharedProjectRules(
       content: desiredHost,
       root: project.root,
       expectedHash: current.content === null ? null : hashContent(current.content),
-      expectedPaths: [hostIdentity],
+      expectedPaths: sameFile && !legacyLink ? [hostIdentity, linkIdentity] : [hostIdentity],
     });
   }
   if (!claude) return actions;

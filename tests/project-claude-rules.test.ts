@@ -404,23 +404,92 @@ test('a previous Claude host that backs AGENTS.md retains its active rules', asy
   }
 });
 
-test('a shared host linked to an independent root Claude file preserves that file', async () => {
+test('a project that selects no rules syncs beside an AGENTS.md linked to CLAUDE.md', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
-    const independent = 'Independent instructions\n';
+    const instructions = 'Repository instructions\n';
     seedTree(project, {
-      '.asb.toml': '[rules]\nenabled = ["base"]\n',
-      'CLAUDE.md': independent,
+      '.asb.toml': '[applications]\nenabled = ["claude-code", "codex"]\n',
+      'CLAUDE.md': instructions,
     });
     fs.symlinkSync('CLAUDE.md', path.join(project, 'AGENTS.md'));
-    installApps(homes, 'claude-code');
-    seedRule(homes, 'base.md', 'Selected rule\n');
-    writeUserConfig(homes, '[applications]\nenabled = ["claude-code"]\n');
+    installApps(homes, 'claude-code', 'codex');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
+    for (const dryRun of [true, false]) {
+      const report = await runSync({ project, dryRun });
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      assert.ok(!report.entries.some((entry) => entry.outcome === 'conflict'));
+      assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), instructions);
+      assert.equal(fs.readlinkSync(path.join(project, 'AGENTS.md')), 'CLAUDE.md');
+    }
+  });
+});
+
+test('project rules reach a root CLAUDE.md that is the same file as AGENTS.md', async () => {
+  for (const shape of ['agents-links-claude', 'claude-links-agents'] as const) {
+    await withScratchHomes(async (homes) => {
+      const project = path.join(homes.root, 'project');
+      const instructions = 'Repository instructions\n';
+      const agents = path.join(project, 'AGENTS.md');
+      const claude = path.join(project, 'CLAUDE.md');
+      seedTree(project, {
+        '.asb.toml': '[rules]\nenabled = ["base"]\n',
+        [shape === 'agents-links-claude' ? 'CLAUDE.md' : 'AGENTS.md']: instructions,
+      });
+      if (shape === 'agents-links-claude') fs.symlinkSync('CLAUDE.md', agents);
+      // `./AGENTS.md` is not the exact link earlier versions wrote, so it stays.
+      else fs.symlinkSync('./AGENTS.md', claude);
+      installApps(homes, 'claude-code', 'codex');
+      seedRule(homes, 'base.md', 'Selected rule\n');
+      writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
+      for (const dryRun of [true, false, false]) {
+        const report = await runSync({ project, dryRun });
+        assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+        assert.ok(!report.entries.some((entry) => entry.outcome === 'conflict'));
+      }
+      const content = fs.readFileSync(claude, 'utf-8');
+      assert.equal(content.match(/rules:start/g)?.length, 1);
+      assert.match(content, /Repository instructions/);
+      assert.match(content, /Selected rule/);
+      if (shape === 'agents-links-claude') {
+        assert.equal(fs.readlinkSync(agents), 'CLAUDE.md');
+        assert.ok(!fs.lstatSync(claude).isSymbolicLink());
+      } else {
+        assert.equal(fs.readlinkSync(claude), './AGENTS.md');
+        assert.ok(!fs.lstatSync(agents).isSymbolicLink());
+      }
+
+      fs.writeFileSync(path.join(project, '.asb.toml'), '[rules]\nenabled = []\n');
+      const cleared = await runSync({ project });
+      assert.equal(cleared.exitCode, 0, JSON.stringify(cleared.entries));
+      assert.equal(fs.readFileSync(claude, 'utf-8'), instructions);
+      if (shape === 'agents-links-claude') assert.equal(fs.readlinkSync(agents), 'CLAUDE.md');
+      else assert.equal(fs.readlinkSync(claude), './AGENTS.md');
+    });
+  }
+});
+
+test('apps sharing an AGENTS.md linked to CLAUDE.md must select the same project rules', async () => {
+  await withScratchHomes(async (homes) => {
+    const project = path.join(homes.root, 'project');
+    const instructions = 'Repository instructions\n';
+    seedTree(project, {
+      '.asb.toml':
+        '[applications.claude-code.rules]\nenabled = ["a"]\n[applications.codex.rules]\nenabled = ["b"]\n',
+      'CLAUDE.md': instructions,
+    });
+    fs.symlinkSync('CLAUDE.md', path.join(project, 'AGENTS.md'));
+    installApps(homes, 'claude-code', 'codex');
+    seedRule(homes, 'a.md', 'Alpha\n');
+    seedRule(homes, 'b.md', 'Beta\n');
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
     for (const dryRun of [true, false]) {
       const report = await runSync({ project, dryRun });
       assert.equal(report.exitCode, 1);
-      assert.ok(report.entries.some((entry) => entry.outcome === 'conflict'));
-      assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), independent);
+      const row = report.entries.find((entry) => entry.detail === 'shared-writer');
+      assert.match(row?.reason ?? '', /AGENTS\.md \(resolves to .*CLAUDE\.md\)/);
+      assert.match(row?.reason ?? '', /claude-code, codex/);
+      assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), instructions);
       assert.equal(fs.readlinkSync(path.join(project, 'AGENTS.md')), 'CLAUDE.md');
     }
   });
