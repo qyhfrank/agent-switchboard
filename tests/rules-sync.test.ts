@@ -260,3 +260,77 @@ test('an atomic rewrite keeps the private mode the target already carried', asyn
     assert.equal(fs.statSync(target).mode & 0o777, 0o600);
   });
 });
+
+test('user rules files linked to one file hold the union of their apps rules', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'claude-code', 'codex');
+    seedRule(homes, 'a.md', 'Alpha\n');
+    seedRule(homes, 'b.md', 'Bravo\n');
+    seedRule(homes, 'c.md', 'Charlie\n');
+    const claude = ruleFilePath(homes, 'claude-code');
+    const codex = ruleFilePath(homes, 'codex');
+    fs.writeFileSync(claude, '# Personal\n');
+    fs.symlinkSync(claude, codex);
+    const configure = (codexRules: string) =>
+      writeUserConfig(
+        homes,
+        `[applications]\nenabled = ["claude-code", "codex"]\n[rules]\nenabled = ["a"]\n[applications.claude-code.rules]\nadd = ["b"]\n[applications.codex.rules]\n${codexRules}\n`
+      );
+
+    configure('add = ["c"]');
+    for (const dryRun of [true, false, false]) {
+      const report = await runSync({ dryRun });
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+    }
+    const union = fs.readFileSync(claude, 'utf-8');
+    assert.match(union, /# Personal/);
+    assert.equal(union.match(/rules:start/g)?.length, 1);
+    assert.match(union, /Alpha\n\nBravo\n\nCharlie/);
+    assert.equal(fs.readlinkSync(codex), claude);
+
+    configure('enabled = []');
+    for (let run = 0; run < 2; run += 1) {
+      const report = await runSync();
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      // The file stays the claude-code row's; codex's own path is not retired.
+      assert.ok(
+        !report.entries.some((entry) => entry.path === codex),
+        JSON.stringify(report.entries)
+      );
+      const narrowed = fs.readFileSync(claude, 'utf-8');
+      assert.match(narrowed, /Alpha\n\nBravo/);
+      assert.doesNotMatch(narrowed, /Charlie/);
+    }
+    assert.equal(fs.readlinkSync(codex), claude);
+  });
+});
+
+test('a dedicated rules file and a managed region on one file are a conflict', async () => {
+  await withScratchHomes(async (homes) => {
+    installApps(homes, 'codex');
+    fs.mkdirSync(path.join(homes.agentsHome, '.mine'), { recursive: true });
+    seedRule(homes, 'a.md', 'Alpha\n');
+    const codex = ruleFilePath(homes, 'codex');
+    fs.writeFileSync(codex, '# Personal\n');
+    fs.symlinkSync(codex, path.join(homes.agentsHome, '.mine', 'rules.md'));
+    writeUserConfig(
+      homes,
+      [
+        '[applications]',
+        'enabled = ["codex", "mine"]',
+        '[rules]',
+        'enabled = ["a"]',
+        '[targets.mine]',
+        'detect = "~/.mine"',
+        '[targets.mine.rules]',
+        'file_path = "~/.mine/rules.md"',
+        '',
+      ].join('\n')
+    );
+    const report = await runSync();
+    assert.equal(report.exitCode, 1);
+    const rows = report.entries.filter((entry) => entry.detail === 'shared-writer');
+    assert.deepEqual(rows.map((row) => row.app).sort(), ['codex', 'mine']);
+    assert.equal(fs.readFileSync(codex, 'utf-8'), '# Personal\n');
+  });
+});

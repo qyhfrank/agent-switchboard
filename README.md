@@ -298,6 +298,18 @@ Global rules stay in each application's own file. Project rules for Claude
 Code, Codex, OpenCode, Cursor, TRAE CLI, Pi and dsh share the managed region in
 `AGENTS.md`, which Claude Code reads when the project has no `CLAUDE.md`.
 
+Applications that write one rules file, the project `AGENTS.md` or global rules
+files linked to the same file, share its managed region, which holds the union
+of the rules they select. A selection limits what ASB distributes, not what an
+application may read. Each rule keeps its place from the first application in
+`[applications].enabled` that selects it, so applications that select the same
+rules render exactly as each would alone. An application that selects no rules
+contributes nothing, and deselection removes a rule once no sharing application
+selects it. The region follows the scope's `[rules].includeDelimiters`. A
+dedicated rules file, such as Cursor's `.mdc` or a custom target, that is the
+same file as another application's rules file is a conflict, because one file
+cannot hold both formats.
+
 ### Custom targets
 
 Configuration-defined targets can add other applications without runtime
@@ -504,9 +516,8 @@ the increment rules, so agent context stops carrying twice what
 Claude Code's default `instructionFiles` setting (`claude-md-or-agents-md`)
 loads the root `AGENTS.md` when the project has no `CLAUDE.md` of its own.
 Claude Code and other applications that read `AGENTS.md` share one managed
-region and must select the same project rules. The region follows the scope's
-`[rules].includeDelimiters`; a per-app `includeDelimiters` applies only to that
-application's own rules file.
+region holding the union of their project rules, as described under
+Shared destinations.
 A sync with Claude Code selected removes a root `CLAUDE.md` that is exactly the
 relative link `CLAUDE.md -> AGENTS.md`, and a `.claude/CLAUDE.md` that holds
 only the managed rules region.

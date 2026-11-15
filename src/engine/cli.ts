@@ -242,6 +242,8 @@ function captureFor(
     const targetPath = row.rules.path(config.homes);
     capture.rulePaths[appId] = targetPath;
     captureFile(row.rules.root(config.homes, targetPath), targetPath);
+    // Rules files that resolve to one file are written together.
+    capture.targets[targetPath].resolvedPath ??= locateWrite(targetPath);
     if (project && appId === 'claude-code') {
       captureFile(project.root, path.join(project.root, '.claude', 'CLAUDE.md'), true);
     }

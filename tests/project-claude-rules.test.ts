@@ -212,23 +212,41 @@ test('a per-app delimiter setting does not split the shared AGENTS.md region', a
   assert.equal(shared, await render(['codex']));
 });
 
-test('shared rule conflicts preserve the previous Claude region', async () => {
+test('apps sharing AGENTS.md write the union of their project rules until none selects a rule', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
-    const previous = mergeProjectRegion('', 'Old rule');
-    seedTree(project, {
-      '.asb.toml':
-        '[applications.claude-code.rules]\nenabled = ["a"]\n[applications.codex.rules]\nenabled = ["b"]\n',
-      '.claude/CLAUDE.md': previous,
-    });
-    installApps(homes, 'claude-code', 'codex');
+    const agents = path.join(project, 'AGENTS.md');
+    const selectRules = (claude: string[], codex: string[]) =>
+      fs.writeFileSync(
+        path.join(project, '.asb.toml'),
+        `[applications.claude-code.rules]\nenabled = ${JSON.stringify(claude)}\n[applications.codex.rules]\nenabled = ${JSON.stringify(codex)}\n[applications.dsh.rules]\nenabled = []\n`
+      );
+    seedTree(project, { 'AGENTS.md': '# Repository instructions\n' });
+    selectRules(['a'], ['b', 'a']);
+    installApps(homes, 'claude-code', 'codex', 'dsh');
     seedRule(homes, 'a.md', 'Alpha\n');
     seedRule(homes, 'b.md', 'Beta\n');
-    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
-    const report = await runSync({ project });
-    assert.equal(report.exitCode, 1);
-    assert.ok(report.entries.some((entry) => entry.detail === 'shared-writer'));
-    assert.equal(fs.readFileSync(path.join(project, '.claude', 'CLAUDE.md'), 'utf-8'), previous);
+    writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex", "dsh"]\n');
+
+    for (const dryRun of [true, false, false]) {
+      const report = await runSync({ project, dryRun });
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
+      assert.ok(!report.entries.some((entry) => entry.outcome === 'conflict'));
+    }
+    const union = fs.readFileSync(agents, 'utf-8');
+    assert.match(union, /# Repository instructions/);
+    assert.equal(union.match(/rules:start/g)?.length, 1);
+    assert.match(union, /Alpha\n\nBeta/);
+
+    selectRules(['a'], []);
+    assert.equal((await runSync({ project })).exitCode, 0);
+    const narrowed = fs.readFileSync(agents, 'utf-8');
+    assert.match(narrowed, /Alpha/);
+    assert.doesNotMatch(narrowed, /Beta/);
+
+    selectRules([], []);
+    assert.equal((await runSync({ project })).exitCode, 0);
+    assert.equal(fs.readFileSync(agents, 'utf-8'), '# Repository instructions\n');
   });
 });
 
@@ -469,7 +487,7 @@ test('project rules reach a root CLAUDE.md that is the same file as AGENTS.md', 
   }
 });
 
-test('apps sharing an AGENTS.md linked to CLAUDE.md must select the same project rules', async () => {
+test('apps sharing an AGENTS.md linked to CLAUDE.md write the union through the link', async () => {
   await withScratchHomes(async (homes) => {
     const project = path.join(homes.root, 'project');
     const instructions = 'Repository instructions\n';
@@ -485,13 +503,12 @@ test('apps sharing an AGENTS.md linked to CLAUDE.md must select the same project
     writeUserConfig(homes, '[applications]\nenabled = ["claude-code", "codex"]\n');
     for (const dryRun of [true, false]) {
       const report = await runSync({ project, dryRun });
-      assert.equal(report.exitCode, 1);
-      const row = report.entries.find((entry) => entry.detail === 'shared-writer');
-      assert.match(row?.reason ?? '', /AGENTS\.md \(resolves to .*CLAUDE\.md\)/);
-      assert.match(row?.reason ?? '', /claude-code, codex/);
-      assert.equal(fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8'), instructions);
+      assert.equal(report.exitCode, 0, JSON.stringify(report.entries));
       assert.equal(fs.readlinkSync(path.join(project, 'AGENTS.md')), 'CLAUDE.md');
     }
+    const content = fs.readFileSync(path.join(project, 'CLAUDE.md'), 'utf-8');
+    assert.match(content, /Repository instructions/);
+    assert.match(content, /Alpha\n\nBeta/);
   });
 });
 

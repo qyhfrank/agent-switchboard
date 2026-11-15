@@ -425,6 +425,27 @@ function rulesResolver(input: PlanInput): (appId: string) => ResolvedRuleSet {
 }
 
 /**
+ * The rules for one file several applications write: the union of their
+ * selections. A rule takes its place from the first member that selects it,
+ * members in `[applications].enabled` order and each in its own selection
+ * order, so a file whose writers agree renders exactly as each would alone.
+ * A member that selects nothing contributes nothing.
+ */
+function unionRuleSet(
+  members: readonly string[],
+  resolveFor: (appId: string) => ResolvedRuleSet
+): { present: Component[]; missing: string[] } {
+  const present = new Map<string, Component>();
+  const missing = new Set<string>();
+  for (const appId of members) {
+    const resolved = resolveFor(appId);
+    for (const rule of resolved.present) if (!present.has(rule.id)) present.set(rule.id, rule);
+    for (const id of resolved.missing) missing.add(id);
+  }
+  return { present: [...present.values()], missing: [...missing] };
+}
+
+/**
  * Every library rule rendered as the block a composition would carry it as.
  * A host file assembled from these is a render, whatever was selected when it
  * was written.
@@ -497,7 +518,7 @@ function planSharedProjectRules(
   });
   if (members.length === 0) return [];
 
-  const missing = [...new Set(members.flatMap((appId) => resolveFor(appId).missing))];
+  const { present, missing } = unionRuleSet(members, resolveFor);
   const base = {
     app: 'project',
     type: 'rules',
@@ -517,28 +538,9 @@ function planSharedProjectRules(
       },
     ];
   }
-  const selections = [
-    ...new Set(
-      members.map((appId) => JSON.stringify(resolveFor(appId).present.map((rule) => rule.id)))
-    ),
-  ];
-  if (selections.length > 1) {
-    const resolved = capture.targets[targetPath]?.resolvedPath;
-    const host =
-      resolved && resolved !== targetPath ? `AGENTS.md (resolves to ${resolved})` : 'AGENTS.md';
-    return [
-      {
-        ...base,
-        op: 'none',
-        outcome: 'conflict',
-        detail: 'shared-writer',
-        reason: `shared ${host} contributors select different project rules (${members.join(', ')}); align their project selections`,
-      },
-    ];
-  }
   // One file serves every member, so a per-app delimiter setting cannot
   // apply; the scope's [rules] setting decides.
-  const body = composeRules(resolveFor(members[0] ?? '').present, {
+  const body = composeRules(present, {
     includeDelimiters: config.rules.includeDelimiters,
   }).content;
 
@@ -781,6 +783,24 @@ export function planRules(input: PlanInput): Action[] {
   }
 
   const assumeInstalled = new Set(config.apps.assumeInstalled);
+  const projectHost = input.project ? path.join(input.project.root, 'AGENTS.md') : null;
+  const ruleTarget = (appId: string, rules: RulesTargetRow): string =>
+    capture.rulePaths[appId] ?? rules.path(config.homes);
+  const fileIdentity = (targetPath: string): string =>
+    capture.targets[targetPath]?.resolvedPath ?? targetPath;
+
+  // Applications whose rules files are one file, by path or through links,
+  // write it together: the first member plans it from the union of their
+  // selections and every member's own path keeps its record.
+  const writers = new Map<string, { appId: string; rules: RulesTargetRow }[]>();
+  for (const appId of config.apps.enabled) {
+    const rules = table.find((candidate) => candidate.id === appId)?.rules;
+    if (!rules || !(capture.installed[appId] === true || assumeInstalled.has(appId))) continue;
+    const targetPath = ruleTarget(appId, rules);
+    if (targetPath === projectHost) continue;
+    const identity = fileIdentity(targetPath);
+    writers.set(identity, [...(writers.get(identity) ?? []), { appId, rules }]);
+  }
 
   for (const appId of config.apps.enabled) {
     const row = table.find((candidate) => candidate.id === appId);
@@ -803,12 +823,54 @@ export function planRules(input: PlanInput): Action[] {
 
     if (!row.rules) continue;
 
-    const targetPath = capture.rulePaths[appId] ?? row.rules.path(config.homes);
-    if (input.project && targetPath === path.join(input.project.root, 'AGENTS.md')) continue;
-    const root = row.rules.root(config.homes, targetPath);
+    const rulesRow = row.rules;
+    const targetPath = ruleTarget(appId, rulesRow);
+    if (targetPath === projectHost) continue;
+    const root = rulesRow.root(config.homes, targetPath);
     const current = capture.targets[targetPath] ?? { exists: false, content: null };
 
-    const { present, missing, content } = resolveFor(appId);
+    const sharing = writers.get(fileIdentity(targetPath)) ?? [{ appId, rules: rulesRow }];
+    const members = sharing.map((writer) => writer.appId);
+    const shared = members.length > 1;
+    const leader = sharing[0];
+    // A second writer of the very same path repeats the first one's sweeps.
+    const repeatsLeader =
+      leader.appId !== appId && targetPath === ruleTarget(leader.appId, leader.rules);
+
+    // A dedicated file and a managed region, or two file formats, cannot be
+    // one file's content; every member reports it so none of their records
+    // retires the file.
+    if (
+      sharing.some(
+        (writer) =>
+          writer.rules.dedicated !== rulesRow.dedicated || writer.rules.render !== rulesRow.render
+      )
+    ) {
+      actions.push({
+        app: appId,
+        type: 'rules',
+        id: null,
+        path: targetPath,
+        members,
+        op: 'none',
+        outcome: 'conflict',
+        detail: 'shared-writer',
+        reason: `${members.join(', ')} write the same file (${fileIdentity(targetPath)}) in different formats; give them separate rules files`,
+      });
+      continue;
+    }
+
+    const { present, missing, content } = shared
+      ? (() => {
+          const union = unionRuleSet(members, resolveFor);
+          // One file serves every member, so a per-app delimiter setting
+          // cannot apply; the scope's [rules] setting decides.
+          const body = composeRules(union.present, {
+            includeDelimiters: config.rules.includeDelimiters,
+          }).content;
+          return { ...union, content: body };
+        })()
+      : resolveFor(appId);
 
     // The filename an earlier version gave this same slice. It holds no
     // library id, so location plus the retired prefix is the whole claim, and
@@ -816,7 +878,8 @@ export function planRules(input: PlanInput): Action[] {
     // table names had that predecessor spelling; at a path configuration
     // chose, an `asb-` sibling is a file someone else wrote. The name sweep
     // also stays out of a project tree, which the repository shares.
-    const legacyPath = row.rules.ownsName ? legacyDedicatedRulesPath(targetPath) : null;
+    const legacyPath =
+      rulesRow.ownsName && !repeatsLeader ? legacyDedicatedRulesPath(targetPath) : null;
     const legacy = legacyPath ? capture.targets[legacyPath] : undefined;
     if (legacyPath && legacy?.exists && legacy.content !== null && !input.project) {
       staleActions.push({
@@ -836,22 +899,40 @@ export function planRules(input: PlanInput): Action[] {
     // A missing member blocks that app's aggregate slice: rendering without
     // it would silently drop content the user selected for this app.
     if (missing.length > 0) {
-      actions.push({
-        app: appId,
-        type: 'rules',
-        id: null,
-        path: targetPath,
-        op: 'none',
-        outcome: 'failed',
-        detail: 'aggregate-blocked',
-        reason: `missing rule(s): ${missing.join(', ')}; the previous content is left in place`,
-      });
+      if (!repeatsLeader) {
+        actions.push({
+          app: appId,
+          type: 'rules',
+          id: null,
+          path: targetPath,
+          ...(shared ? { members } : {}),
+          op: 'none',
+          outcome: 'failed',
+          detail: 'aggregate-blocked',
+          reason: `missing rule(s): ${missing.join(', ')}; the previous content is left in place`,
+        });
+      }
       continue;
     }
 
-    const desired = content.length > 0 ? row.rules.render(content, targetPath) : '';
+    const desired = content.length > 0 ? rulesRow.render(content, targetPath) : '';
     const currentHash = current.content !== null ? hashContent(current.content) : null;
-    const base = { app: appId, type: 'rules' as const, id: null, path: targetPath };
+    // Linked members are written through the first one's path, so the apply
+    // step checks that every member path still resolves to that file.
+    const memberPaths = sharing.map((writer) => {
+      const memberPath = ruleTarget(writer.appId, writer.rules);
+      return { path: memberPath, resolvedPath: capture.targets[memberPath]?.resolvedPath ?? null };
+    });
+    const base = {
+      app: appId,
+      type: 'rules' as const,
+      id: null,
+      path: targetPath,
+      ...(shared ? { members } : {}),
+      ...(shared && memberPaths.some((member) => member.path !== targetPath)
+        ? { expectedPaths: memberPaths }
+        : {}),
+    };
 
     if (legacyPath && legacy?.exists && input.project) {
       if (desired.length > 0 && legacy.content === desired) {
@@ -883,6 +964,8 @@ export function planRules(input: PlanInput): Action[] {
         });
       }
     }
+
+    if (leader.appId !== appId) continue;
 
     // A shared host belongs to the user; asb owns only the marked region
     // inside it. The markers both locate the slice and prove it, so bytes

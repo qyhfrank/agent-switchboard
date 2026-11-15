@@ -120,9 +120,11 @@ export function desiredSlices(input: PlanInput, actions: readonly Action[]): Own
     const rules = components(app, 'rules');
     if (row.rules && rules.length) {
       const target = capture.rulePaths[app] ?? row.rules.path(config.homes);
+      // A member of a shared rules file is recorded at its own path from the
+      // action that writes the file for every member.
       const action = actions.find(
         (candidate) =>
-          candidate.path === target &&
+          (candidate.path === target || candidate.members?.includes(app) === true) &&
           candidate.type === 'rules' &&
           (candidate.op === 'write' || candidate.outcome === 'unchanged')
       );
@@ -508,6 +510,18 @@ export function reconcileOwnership(
         )
     )
       continue;
+    // A member path of a shared rules file belongs to the action that plans
+    // the file for every member, even after this member stops selecting rules.
+    if (
+      result.some(
+        (action) =>
+          action.type === slice.type &&
+          action.members !== undefined &&
+          action.expectedPaths?.some((member) => member.path === slice.path) === true &&
+          (action.op !== 'none' || action.outcome === 'unchanged')
+      )
+    )
+      continue;
     // A current writer of this physical slice supersedes its older generation.
     const existing = result.find(
       (action) => action.path === slice.path && action.type === slice.type && action.op !== 'none'
@@ -777,7 +791,10 @@ export function applyWithOwnership(
   const eligible = desired.filter((slice) =>
     actions.some(
       (action) =>
-        action.path === slice.path &&
+        (action.path === slice.path ||
+          (action.type === 'rules' &&
+            action.members !== undefined &&
+            action.expectedPaths?.some((member) => member.path === slice.path) === true)) &&
         (action.type === slice.type || (action.type === null && action.keyEdits)) &&
         ((action.op === 'write' &&
           (slice.shape === 'bundle'
