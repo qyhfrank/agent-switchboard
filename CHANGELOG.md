@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.18
+
 - A project whose root `CLAUDE.md` and `AGENTS.md` are the same file, through a link in either direction such as `AGENTS.md -> CLAUDE.md`, no longer reports a rules conflict. ASB writes the managed region through the link and keeps the link, and Claude Code reads the region from `CLAUDE.md`. A project that selects no rules never reports a conflict for its root `CLAUDE.md`. A shared-writer conflict on a linked `AGENTS.md` names the file it resolves to.
 
 ## 0.5.17
