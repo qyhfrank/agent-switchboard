@@ -353,6 +353,22 @@ export const APP_ROWS: readonly AppRow[] = [
     },
   },
   {
+    id: 'workbuddy',
+    detectDir: (homes) => path.join(homes.agentsHome, '.workbuddy'),
+    skills: {
+      root: (homes) => path.join(homes.agentsHome, '.workbuddy'),
+      dir: (homes) => path.join(homes.agentsHome, '.workbuddy', 'skills'),
+      reserved: [],
+      importable: true,
+    },
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => path.join(homes.agentsHome, '.workbuddy'),
+      path: (homes) => path.join(homes.agentsHome, '.workbuddy', 'mcp.json'),
+      sanitize: false,
+    },
+  },
+  {
     id: 'codex',
     detectDir: (homes) => path.join(homes.agentsHome, '.codex'),
     rules: {
@@ -840,21 +856,26 @@ function compileCustomRow(id: string, spec: CustomTargetSpec, homes: Homes): App
   return row;
 }
 
-/** Builtins plus strict config-defined rows; a custom row never overrides data. */
+/** Builtins plus strict config-defined rows, preserving existing WorkBuddy targets. */
 export function appRows(
   config: Pick<ResolvedConfig, 'targets' | 'apps' | 'homes' | 'project'>
 ): readonly AppRow[] {
   const builtin = new Set(APP_ROWS.map((row) => row.id));
   const custom: AppRow[] = [];
   for (const [id, spec] of Object.entries(config.targets)) {
-    if (builtin.has(id)) {
+    if (builtin.has(id) && id !== 'workbuddy') {
       throw new ConfigError(
         `Invalid configuration: target id "${id}" collides with builtin "${id}"; choose another id.`
       );
     }
     custom.push(compileCustomRow(id, spec, config.homes));
   }
-  const rows = [...APP_ROWS, ...custom];
+  // Read pre-builtin WorkBuddy configurations without changing their destinations.
+  // The explicit target remains authoritative until its owner removes it.
+  const rows = [
+    ...APP_ROWS.filter((row) => row.id !== 'workbuddy' || !config.targets.workbuddy),
+    ...custom,
+  ];
   for (const [id, override] of Object.entries(config.apps.overrides)) {
     const destination = override.skills?.destination;
     if (destination === undefined) continue;

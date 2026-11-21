@@ -235,6 +235,7 @@ Configuration is strict. Unknown keys, invalid target shapes and type errors fai
 |---|---:|---:|---:|---:|---:|---:|
 | Claude Code (`claude-code`) | yes | yes | yes | yes | yes | yes |
 | Claude Desktop (`claude-desktop`) |  |  |  |  |  | yes |
+| WorkBuddy (`workbuddy`) |  |  |  | yes |  | yes |
 | Codex (`codex`) | yes |  | yes | yes | yes | yes |
 | OpenCode (`opencode`) | yes | yes | yes | yes |  | yes |
 | Cursor (`cursor`) | yes | yes | yes | yes |  | yes |
@@ -248,6 +249,22 @@ Configuration is strict. Unknown keys, invalid target shapes and type errors fai
 The table shows user-scope support. Claude Desktop, Codex agents, and TRAE CLI
 commands, agents and MCP have no project destination. `asb status --all`
 reports unsupported cells as `app-lacks-type`.
+
+WorkBuddy reads user skills from `~/.workbuddy/skills` and MCP servers from
+`~/.workbuddy/mcp.json`. Enable `workbuddy` under `[applications]` and select
+skills and MCP servers normally. ASB preserves unrelated MCP entries; WorkBuddy
+may still ask you to trust a newly added connector. Reopen WorkBuddy if its
+connector list does not refresh. This target has no supported ASB destinations
+for rules, commands, agents, hooks, or project configuration. WorkBuddy's
+personalization setting accepts a short custom prompt (up to 1,500 UTF-16 code
+units); it is not a destination for distributing full rule files.
+
+An existing `[targets.workbuddy]` definition takes precedence over the built-in
+target, including its paths and supported types. Keep it to retain custom
+destinations. To use the built-in defaults, remove only the `[targets.workbuddy]`
+tables, keep your `[applications.workbuddy]` selections, and inspect
+`asb sync --dry-run --app workbuddy` before syncing. Removing a target with
+different paths can retire its previously managed output.
 
 Pi uses `~/.pi/agent/AGENTS.md` for global rules and
 `~/.pi/agent/prompts/<id>.md` for commands. Project commands go to `.pi/prompts/`.

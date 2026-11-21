@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- WorkBuddy (`workbuddy`) is a builtin application for user skills in `~/.workbuddy/skills` and MCP servers in `~/.workbuddy/mcp.json`; unrelated MCP entries are preserved. An existing `[targets.workbuddy]` definition keeps its paths instead of failing as a collision with the builtin.
+
 ## 0.5.20
 
 - Devin (`devin`) is a builtin application for Devin CLI and Devin Desktop: global and project rules, agents, shared or own skills, hooks and MCP servers. Agent models and tools come from `extras.devin`, hook matchers are translated to Devin's tool names, and remote MCP servers carry Devin's `transport`. While Devin is active, ASB sets `read_config_from.claude = false` in `~/.config/devin/config.json` so Devin no longer loads Claude Code's copies of the same rules, skills, MCP servers and hooks; a value the user set is preserved and reported.
