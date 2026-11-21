@@ -5,9 +5,11 @@ import { ConfigError, type CustomTargetSpec, type Homes, type ResolvedConfig } f
 import {
   codexAgentConfigValue,
   codexServer,
+  devinServer,
   encodeComponentId,
   type FrontmatterTransformSpec,
   filterCodexHooks,
+  filterDevinHooks,
   importCodexAgent,
   importFrontmatterEntry,
   importPlainEntry,
@@ -23,6 +25,7 @@ import {
   renderCursorAgent,
   renderCursorCommand,
   renderCustomEntry,
+  renderDevinAgent,
   renderOpencodeAgent,
   renderOpencodeCommand,
   renderPiCommand,
@@ -47,6 +50,12 @@ function opencodeRoot(agentsHome: string): string {
   return process.platform === 'win32'
     ? path.join(agentsHome, 'AppData', 'Roaming', 'opencode')
     : path.join(agentsHome, '.config', 'opencode');
+}
+
+function devinRoot(agentsHome: string): string {
+  return process.platform === 'win32'
+    ? path.join(agentsHome, 'AppData', 'Roaming', 'devin')
+    : path.join(agentsHome, '.config', 'devin');
 }
 
 function vendorDataDir(agentsHome: string, appName: string): string {
@@ -200,6 +209,21 @@ export interface McpTargetRow {
   create: boolean;
 }
 
+/**
+ * Scalar settings an active app needs for asb's distribution to be the one it
+ * loads. Written at user scope while the app is active and never removed: the
+ * value is what a user configuring the app by hand writes too, so nothing in
+ * it tells the two apart.
+ */
+export interface AppSettingsRow {
+  root(homes: Homes): string;
+  /** JSON document the app also owns; comments survive the edit. */
+  path(homes: Homes): string;
+  values: readonly { keyPath: readonly string[]; value: string | number | boolean }[];
+  /** Why the values are set, for the report line when one is already different. */
+  purpose: string;
+}
+
 export interface AppRow {
   id: string;
   detectDir(homes: Homes): string;
@@ -212,6 +236,7 @@ export interface AppRow {
   hooks?: HooksTargetRow;
   mcp?: McpTargetRow;
   native?: NativeManagerRow;
+  settings?: AppSettingsRow;
 }
 
 export function ownSkills(row: AppRow | undefined): SkillsTargetRow | undefined {
@@ -646,6 +671,65 @@ export const APP_ROWS: readonly AppRow[] = [
       credentialKeys: MCP_CREDENTIAL_KEYS,
       render: renderCodexTable,
       create: true,
+    },
+  },
+  {
+    // Devin CLI and Devin Desktop share one harness and these paths. Devin
+    // imports Claude Code's rules, skills, MCP servers and hooks by default;
+    // the settings row turns that import off so asb's Devin cells are the
+    // only copy it loads.
+    id: 'devin',
+    detectDir: (homes) => devinRoot(homes.agentsHome),
+    rules: {
+      root: (homes) => devinRoot(homes.agentsHome),
+      path: (homes) => path.join(devinRoot(homes.agentsHome), 'AGENTS.md'),
+      projectPath: (root) => path.join(root, 'AGENTS.md'),
+      render: rawBody,
+      dedicated: false,
+    },
+    agents: {
+      root: (homes) => devinRoot(homes.agentsHome),
+      dir: (homes) => path.join(devinRoot(homes.agentsHome), 'agents'),
+      projectDir: (root) => path.join(path.resolve(root), '.devin', 'agents'),
+      filename: (id) => `${encodeComponentId(id)}.md`,
+      render: renderDevinAgent,
+      importer: {
+        extensions: ['.md', '.markdown'],
+        read: (filePath) => importFrontmatterEntry(filePath, 'devin'),
+      },
+    },
+    skills: {
+      shared: true,
+      root: (homes) => devinRoot(homes.agentsHome),
+      dir: (homes) => path.join(devinRoot(homes.agentsHome), 'skills'),
+      projectDir: (root) => path.join(root, '.devin', 'skills'),
+      reserved: [],
+      importable: true,
+    },
+    hooks: {
+      root: (homes) => devinRoot(homes.agentsHome),
+      path: (homes) => path.join(devinRoot(homes.agentsHome), 'config.json'),
+      bundleDir: (homes) => path.join(devinRoot(homes.agentsHome), 'hooks', 'managed'),
+      // Devin gitignores `.local.` files itself, as Claude does settings.local.json.
+      projectPath: (root) => path.join(root, '.devin', 'config.local.json'),
+      projectBundleDir: (root) => path.join(root, '.devin', 'hooks', 'managed'),
+      deleteWhenEmpty: false,
+      filter: filterDevinHooks,
+    },
+    mcp: {
+      ...JSON_MCP_ROW,
+      root: (homes) => devinRoot(homes.agentsHome),
+      path: (homes) => path.join(devinRoot(homes.agentsHome), 'mcp_config.json'),
+      projectPath: (root) => path.join(root, '.devin', 'mcp_config.json'),
+      // Devin loads names with colons and dots.
+      sanitize: false,
+      dialect: devinServer,
+    },
+    settings: {
+      root: (homes) => devinRoot(homes.agentsHome),
+      path: (homes) => path.join(devinRoot(homes.agentsHome), 'config.json'),
+      values: [{ keyPath: ['read_config_from', 'claude'], value: false }],
+      purpose: 'Devin also loads Claude Code rules, skills, MCP servers and hooks',
     },
   },
 ];

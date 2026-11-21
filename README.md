@@ -243,6 +243,7 @@ Configuration is strict. Unknown keys, invalid target shapes and type errors fai
 | TRAE CLI (`traecli`) | yes | yes | yes | yes |  | yes |
 | Pi (`pi`) | yes | yes |  | yes |  | yes |
 | DeepSeek Harness (`dsh`) | yes |  |  | yes |  |  |
+| Devin (`devin`) | yes |  | yes | yes | yes | yes |
 
 The table shows user-scope support. Claude Desktop, Codex agents, and TRAE CLI
 commands, agents and MCP have no project destination. `asb status --all`
@@ -259,9 +260,26 @@ DeepSeek Harness uses `~/.dsh/AGENTS.md` for global rules. Skills are copied
 unchanged: for dsh, use a kebab-case `name`, a `description`, and hyphenated
 invocation fields such as `disable-model-invocation` and `user-invocable`.
 
+Devin (`devin`) covers Devin CLI and Devin Desktop, which share
+`~/.config/devin` (`%APPDATA%\devin` on Windows). Global rules go to
+`AGENTS.md`, agents to `agents/<id>.md`, hooks to the `hooks` key of
+`config.json`, and MCP servers to `mcp_config.json` there. Project agents, MCP
+and hooks go to `.devin/agents/`, `.devin/mcp_config.json` and
+`.devin/config.local.json`. Agent `model` and tool lists come only from
+`extras.devin`, because Claude Code's model aliases and tool names are not
+Devin's. Hooks keep Devin's events and `command` or `prompt` handlers, and
+matchers name Devin's tools: `Bash` becomes `exec`, `Edit` and `MultiEdit`
+become `edit|apply_patch`. A remote server's `type` is also written as
+Devin's `transport`.
+
+Devin imports Claude Code's rules, skills, MCP servers and hooks by default,
+which would load each distributed item twice. While Devin is active, ASB sets
+`read_config_from.claude = false` in `~/.config/devin/config.json` and never
+removes it. A value you set yourself is preserved and reported as a conflict.
+
 ### Shared destinations
 
-Codex, OpenCode, Cursor, TRAE CLI, Pi and dsh read skills from
+Codex, OpenCode, Cursor, TRAE CLI, Pi, dsh and Devin read skills from
 `~/.agents/skills` and project `.agents/skills`. ASB uses these shared locations
 by default. In each scope, the shared directory holds the intersection of
 selections from enabled, detected readers using the shared destination. Each
@@ -287,15 +305,16 @@ app's selection from the shared directory. Cursor and OpenCode can also read
 Claude's skills through their native compatibility paths.
 
 Own skill destinations include `.codex/skills`, `.cursor/skills`,
-`.config/opencode/skills`, `.pi/agent/skills` and `.dsh/skills` under the user
+`.config/opencode/skills`, `.pi/agent/skills`, `.dsh/skills` and
+`.config/devin/skills` under the user
 home; OpenCode uses its platform configuration directory on Windows. Their
 project destinations are `.codex/skills`, `.cursor/skills`, `.opencode/skills`,
-`.pi/skills` and `.dsh/skills`. When a destination changes, ASB writes the new
+`.pi/skills`, `.dsh/skills` and `.devin/skills`. When a destination changes, ASB writes the new
 copy first. A later sync removes copies whose recorded contents or current
 render prove they are unchanged; edited copies are preserved and reported.
 
 Global rules stay in each application's own file. Project rules for Claude
-Code, Codex, OpenCode, Cursor, TRAE CLI, Pi and dsh share the managed region in
+Code, Codex, OpenCode, Cursor, TRAE CLI, Pi, dsh and Devin share the managed region in
 `AGENTS.md`, which Claude Code reads when the project has no `CLAUDE.md`.
 
 Applications that write one rules file, the project `AGENTS.md` or global rules

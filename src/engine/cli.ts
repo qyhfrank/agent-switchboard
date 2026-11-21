@@ -59,6 +59,7 @@ import {
   type ProjectPlanPolicy,
   pathInside,
   planAgents,
+  planAppSettings,
   planCatalogStatus,
   planCodexProjectTrust,
   planCommands,
@@ -177,6 +178,25 @@ function escapesRoot(root: string, targetPath: string, project?: ProjectGuard): 
   );
 }
 
+/**
+ * Strict JSON keeps a user event named `__proto__` as an own key. A document
+ * with comments, such as Devin's config.json, is read as JSONC instead; the
+ * writer preserves the comments either way.
+ */
+function parseHookConfig(content: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch (error) {
+    const document = parseStructured(content, 'json');
+    if (document.error !== undefined) throw error;
+    return document.root;
+  }
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : null;
+}
+
 function captureFor(
   config: ResolvedConfig,
   table: readonly AppRow[],
@@ -193,6 +213,7 @@ function captureFor(
     bundleDirs: {},
     hooks: {},
     mcp: {},
+    settings: {},
   };
 
   const captureFile = (root: string, targetPath: string, leafIdentity = false): void => {
@@ -354,11 +375,7 @@ function captureFor(
     if (captured.exists) {
       try {
         captured.content = fs.readFileSync(configPath, 'utf-8');
-        const parsed = JSON.parse(captured.content) as unknown;
-        captured.config =
-          parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-            ? (parsed as Record<string, unknown>)
-            : null;
+        captured.config = parseHookConfig(captured.content);
       } catch (error) {
         captured.config = null;
         captured.error = error instanceof Error ? error.message : String(error);
@@ -425,6 +442,32 @@ function captureFor(
       }
     }
     capture.mcp[appId] = captured;
+  }
+  // App settings: user scope only, so a project run leaves them alone.
+  for (const appId of config.project ? [] : config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === appId)?.settings;
+    if (!row) continue;
+    const hostPath = row.path(config.homes);
+    const captured: CapturedMcpHost = {
+      path: hostPath,
+      exists: fs.existsSync(hostPath),
+      content: null,
+      root: {},
+      tables: [],
+      escapes: escapesRoot(row.root(config.homes), hostPath, project),
+    };
+    if (captured.exists) {
+      try {
+        captured.content = fs.readFileSync(hostPath, 'utf-8');
+        const document = parseStructured(captured.content, 'json');
+        captured.root = document.root;
+        if (document.error !== undefined) captured.error = document.error;
+      } catch (error) {
+        captured.root = null;
+        captured.error = error instanceof Error ? error.message : String(error);
+      }
+    }
+    capture.settings[appId] = captured;
   }
   if (config.project && config.apps.enabled.includes('codex')) {
     const root = path.join(config.homes.agentsHome, '.codex');
@@ -1380,6 +1423,7 @@ export async function runSync(opts: SyncOptions = {}, heldLock?: RunLock): Promi
         ...planAgents(planInput),
         ...planSkills(planInput),
         ...planHooks(planInput),
+        ...(userPhase ? planAppSettings(planInput) : []),
         ...mcpActions,
         // Project trust is written for a repository, from an explicit root:
         // the user phase has no project to trust.

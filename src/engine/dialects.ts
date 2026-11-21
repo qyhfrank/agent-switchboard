@@ -163,6 +163,32 @@ export function renderPiCommand(component: Component): string {
   );
 }
 
+const DEVIN_AGENT_FIELDS: ReadonlySet<string> = new Set([
+  'name',
+  'description',
+  'model',
+  'allowed-tools',
+  'tools',
+  'max-nesting',
+]);
+
+/**
+ * Devin subagent profile. `model` and the tool list come only from
+ * `extras.devin`: the library's own `model` and Claude's tool names are not
+ * values Devin accepts.
+ */
+export function renderDevinAgent(component: Component): string {
+  const candidate = platformFrontmatter(component, 'devin');
+  const frontmatter: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(candidate)) {
+    if (DEVIN_AGENT_FIELDS.has(key)) frontmatter[key] = value;
+  }
+  if (typeof frontmatter.name !== 'string' || frontmatter.name.trim().length === 0) {
+    frontmatter.name = component.id;
+  }
+  return wrapFrontmatter(frontmatter, component.content);
+}
+
 export function renderOpencodeAgent(component: Component): string {
   return wrapFrontmatter(platformFrontmatter(component, 'opencode'), component.content);
 }
@@ -431,6 +457,97 @@ export function filterCodexHooks(hooks: HookEventMap): HookEventMap {
   return filtered;
 }
 
+const DEVIN_EVENTS: ReadonlySet<string> = new Set([
+  'PreToolUse',
+  'PostToolUse',
+  'PermissionRequest',
+  'UserPromptSubmit',
+  'Stop',
+  'PostCompaction',
+  'SessionStart',
+  'SessionEnd',
+]);
+
+/** Claude Code tool names and the Devin tools that do the same work. */
+const DEVIN_TOOL_NAMES: Readonly<Record<string, readonly string[]>> = {
+  Bash: ['exec'],
+  Read: ['read'],
+  Write: ['write'],
+  Edit: ['edit', 'apply_patch'],
+  MultiEdit: ['edit', 'apply_patch'],
+  Grep: ['grep'],
+  Glob: ['glob'],
+  WebFetch: ['webfetch'],
+};
+
+const CLAUDE_TOOL_TOKEN = new RegExp(
+  `(?<![A-Za-z0-9_])(${Object.keys(DEVIN_TOOL_NAMES).join('|')})(?![A-Za-z0-9_])`,
+  'g'
+);
+
+/**
+ * A matcher is a regex over tool names, and library hooks are written against
+ * Claude Code's. Each Claude name becomes its Devin alternation; a plain
+ * `a|b|c` list is flattened and deduplicated. Names inside a longer token,
+ * such as `mcp__cc__Bash`, are another tool's and stay as written.
+ */
+export function devinMatcher(matcher: string): string {
+  const parts = matcher.split('|');
+  if (parts.every((part) => /^[A-Za-z0-9_]+$/.test(part))) {
+    return [...new Set(parts.flatMap((part) => DEVIN_TOOL_NAMES[part] ?? [part]))].join('|');
+  }
+  return matcher.replace(CLAUDE_TOOL_TOKEN, (name) => {
+    const names = DEVIN_TOOL_NAMES[name] as readonly string[];
+    return names.length === 1 ? names[0] : `(?:${names.join('|')})`;
+  });
+}
+
+function devinHandler(handler: HookHandler): Record<string, unknown> | null {
+  if (
+    handler.timeout !== undefined &&
+    !(
+      typeof handler.timeout === 'number' &&
+      Number.isSafeInteger(handler.timeout) &&
+      handler.timeout >= 0
+    )
+  ) {
+    return null;
+  }
+  const timeout = handler.timeout !== undefined ? { timeout: handler.timeout } : {};
+  if (handler.type === 'command' && typeof handler.command === 'string') {
+    return { type: 'command', command: handler.command, ...timeout };
+  }
+  if (handler.type === 'prompt' && typeof handler.prompt === 'string') {
+    return { type: 'prompt', prompt: handler.prompt, ...timeout };
+  }
+  return null;
+}
+
+/**
+ * Devin compatibility filter: events Devin does not fire and handler types it
+ * does not run are dropped, surviving handlers keep only the fields Devin
+ * reads, and matchers are translated to Devin's tool names.
+ */
+export function filterDevinHooks(hooks: HookEventMap): HookEventMap {
+  const filtered: HookEventMap = {};
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!DEVIN_EVENTS.has(event)) continue;
+    const kept: HookGroup[] = [];
+    for (const group of groups) {
+      const handlers = group.hooks
+        .map(devinHandler)
+        .filter((handler): handler is Record<string, unknown> => handler !== null);
+      if (handlers.length === 0) continue;
+      kept.push({
+        ...(typeof group.matcher === 'string' ? { matcher: devinMatcher(group.matcher) } : {}),
+        hooks: handlers as HookGroup['hooks'],
+      });
+    }
+    if (kept.length > 0) filtered[event] = kept;
+  }
+  return filtered;
+}
+
 // ---------------------------------------------------------------------------
 // MCP: the per-app server-value transforms, keyed from the table
 // ---------------------------------------------------------------------------
@@ -462,6 +579,12 @@ export function inferServerType(server: McpServerValue): McpServerValue {
 
 /** Verbatim apps (claude-code, claude-desktop, cursor) write the definition as authored. */
 export function verbatimServer(server: McpServerValue): McpServerValue {
+  return server;
+}
+
+/** Devin names the remote transport `transport`; the rest is read as authored. */
+export function devinServer(server: McpServerValue): McpServerValue {
+  if (server.type === 'http' || server.type === 'sse') return { ...server, transport: server.type };
   return server;
 }
 

@@ -209,6 +209,10 @@ test('each skills-carrying app declares its parent directory inside its containm
       'trae-cn': path.join(home, '.trae-cn', 'skills'),
       pi: path.join(home, '.pi', 'agent', 'skills'),
       dsh: path.join(home, '.dsh', 'skills'),
+      devin:
+        process.platform === 'win32'
+          ? path.join(home, 'AppData', 'Roaming', 'devin', 'skills')
+          : path.join(home, '.config', 'devin', 'skills'),
     } as const;
 
     for (const [id, dir] of Object.entries(expected)) {

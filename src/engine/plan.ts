@@ -122,6 +122,8 @@ export interface SyncCapture {
   mcp: Record<string, CapturedMcpHost>;
   /** Global Codex TOML captured separately from the project MCP host. */
   projectTrust?: CapturedMcpHost;
+  /** User-scope settings document per app id with a settings row. */
+  settings: Record<string, CapturedMcpHost>;
 }
 
 export interface Action {
@@ -3259,6 +3261,90 @@ export function planCodexProjectTrust(input: PlanInput, mcpActions: readonly Act
       },
     ];
   }
+}
+
+/**
+ * Add-only app settings at user scope, for every enabled and active app with a
+ * settings row. A key already holding another value is the user's choice: it
+ * is preserved and reported, never overwritten.
+ */
+export function planAppSettings(input: PlanInput): Action[] {
+  const { config, capture, table } = input;
+  const assumeInstalled = new Set(config.apps.assumeInstalled);
+  const actions: Action[] = [];
+  for (const app of config.apps.enabled) {
+    const row = table.find((candidate) => candidate.id === app)?.settings;
+    if (!row) continue;
+    if (capture.installed[app] !== true && !assumeInstalled.has(app)) continue;
+    const captured = capture.settings[app];
+    const base = { app, type: null, id: null, path: row.path(config.homes) };
+    if (!captured) continue;
+    if (captured.escapes === true) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'blocked',
+        detail: 'path-escape',
+        reason: `parent directory of ${captured.path} resolves outside the app root; not touching it`,
+      });
+      continue;
+    }
+    if (captured.root === null) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: `cannot read ${path.basename(captured.path)}, settings not merged: ${captured.error ?? 'document root must be an object'}`,
+      });
+      continue;
+    }
+    const edits: KeysEdit[] = [];
+    for (const { keyPath, value } of row.values) {
+      const current = valueAtKeyPath(captured.root, [...keyPath]);
+      if (current === value) continue;
+      const parent = valueAtKeyPath(captured.root, keyPath.slice(0, -1));
+      if (current !== undefined || (parent !== undefined && !isPlainObject(parent))) {
+        actions.push({
+          ...base,
+          op: 'none',
+          outcome: 'conflict',
+          detail: 'foreign',
+          reason: `${keyPath.join('.')} is not ${JSON.stringify(value)} in ${captured.path}; preserving it. ${row.purpose} while it is`,
+        });
+        continue;
+      }
+      edits.push({ keyPath: [...keyPath], value, scalar: true });
+    }
+    if (edits.length === 0) {
+      if (!actions.some((action) => action.app === app)) {
+        actions.push({ ...base, op: 'none', outcome: 'unchanged' });
+      }
+      continue;
+    }
+    try {
+      const baseContent = captured.content ?? '';
+      actions.push({
+        ...base,
+        op: 'write',
+        outcome: 'written',
+        detail: captured.exists ? 'merged' : 'created',
+        content: applyKeysEdits(baseContent, 'json', edits),
+        root: row.root(config.homes),
+        expectedHash: captured.content === null ? null : hashContent(captured.content),
+        keyEdits: { format: 'json', edits, baseContent },
+      });
+    } catch (error) {
+      actions.push({
+        ...base,
+        op: 'none',
+        outcome: 'failed',
+        detail: 'parse-error',
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return actions;
 }
 
 /** Merge cells editing the same structured host after CLI action filters. */

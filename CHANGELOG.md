@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Devin (`devin`) is a builtin application for Devin CLI and Devin Desktop: global and project rules, agents, shared or own skills, hooks and MCP servers. Agent models and tools come from `extras.devin`, hook matchers are translated to Devin's tool names, and remote MCP servers carry Devin's `transport`. While Devin is active, ASB sets `read_config_from.claude = false` in `~/.config/devin/config.json` so Devin no longer loads Claude Code's copies of the same rules, skills, MCP servers and hooks; a value the user set is preserved and reported.
+
 ## 0.5.19
 
 - Applications that write one rules file, the project `AGENTS.md` or global rules files linked to the same file, now share its managed region with the union of the rules they select instead of reporting a shared-writer conflict. Each rule keeps its place from the first application in `[applications].enabled` that selects it, an application that selects no rules contributes nothing, and deselection removes a rule once no sharing application selects it. The region follows the scope's `[rules].includeDelimiters`. A dedicated rules file that is the same file as another application's managed region remains a conflict.
