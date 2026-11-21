@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.5.21
+
 - WorkBuddy (`workbuddy`) is a builtin application for user skills in `~/.workbuddy/skills` and MCP servers in `~/.workbuddy/mcp.json`; unrelated MCP entries are preserved. An existing `[targets.workbuddy]` definition keeps its paths instead of failing as a collision with the builtin.
 
 ## 0.5.20
